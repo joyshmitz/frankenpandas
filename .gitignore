@@ -1,7 +1,9 @@
 # Rust build output
 /target
 /.target
+/.target-opt
 **/*.rs.bk
+perf.data
 
 # Temporary/local runtime state
 /.tmp/
@@ -34,3 +36,5 @@ artifacts/perf/golden_outputs/
 artifacts/perf/golden_checksums.txt
 artifacts/perf/round*_packet_hyperfine.json
 artifacts/perf/round*_packet_strace.txt
+artifacts/perf/round*_*.json
+artifacts/perf/round*_*.txt

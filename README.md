@@ -43,6 +43,12 @@ This project uses four pervasive disciplines:
   - CI workflow executes phase2c gate check and required cargo validations
 - drift trend ledger landed:
   - packet run summaries append to `artifacts/phase2c/drift_history.jsonl`
+- Round-2 optimization evidence landed:
+  - `fp-index::align_union` borrowed-key optimization (no semantic drift)
+  - `artifacts/perf/ROUND2_BASELINE.md`
+  - `artifacts/perf/ROUND2_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND2_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND2_RECOMMENDATION_CONTRACT.md`
 
 ## V1 Scope
 
@@ -73,7 +79,7 @@ Maintain deterministic null propagation, NaN handling, dtype promotion, and outp
 ## Next Steps
 
 1. Expand packet families beyond current alignment/join/groupby slices into filter and IO error parity.
-2. Add core-kernel p50/p95/p99 baselines for join/groupby/filter workloads (not only harness overhead).
+2. Extend kernel-level p50/p95/p99 baselines from current groupby slice to join/filter workloads.
 3. Add adversarial + fuzz suites for high-risk parse and coercion paths in strict/hardened split.
 4. Increase live-oracle coverage and environment reproducibility for deterministic replay.
 5. Expand drift-history analysis tooling (alerts/threshold trend summaries).

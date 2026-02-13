@@ -1,0 +1,20 @@
+{
+  "packet_id": "FP-P2C-003",
+  "fixtures": [
+    {
+      "id": "series_add_utf8_union_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_003_series_add_utf8_union_strict.json",
+      "class": "utf8_union_null_propagation"
+    },
+    {
+      "id": "series_add_full_overlap_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_003_series_add_full_overlap_strict.json",
+      "class": "full_overlap_arithmetic"
+    },
+    {
+      "id": "series_add_duplicate_labels_hardened_utf8",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_003_series_add_duplicate_hardened.json",
+      "class": "hardened_duplicate_label_repair"
+    }
+  ]
+}

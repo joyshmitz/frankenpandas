@@ -1,0 +1,11 @@
+[package]
+name = "fp-join"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fp-columnar = { path = "../fp-columnar" }
+fp-frame = { path = "../fp-frame" }
+fp-index = { path = "../fp-index" }
+fp-types = { path = "../fp-types" }
+thiserror = { workspace = true }

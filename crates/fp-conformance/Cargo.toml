@@ -1,0 +1,18 @@
+[package]
+name = "fp-conformance"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fp-frame = { path = "../fp-frame" }
+fp-groupby = { path = "../fp-groupby" }
+fp-index = { path = "../fp-index" }
+fp-join = { path = "../fp-join" }
+fp-runtime = { path = "../fp-runtime" }
+fp-types = { path = "../fp-types" }
+raptorq = { version = "2.0.0", features = ["serde_support"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+thiserror = { workspace = true }

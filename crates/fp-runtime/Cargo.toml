@@ -1,0 +1,14 @@
+[package]
+name = "fp-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+asupersync = ["dep:asupersync"]
+
+[dependencies]
+asupersync = { version = "0.1.1", optional = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

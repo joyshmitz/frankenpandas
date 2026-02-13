@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target
+      TMPDIR: ${{ github.workspace }}/.tmp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly + fmt/clippy)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Create temp dirs
+        run: mkdir -p .tmp .target
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Workspace tests
+        run: cargo test --workspace
+
+      - name: Conformance tests
+        run: cargo test -p fp-conformance -- --nocapture
+
+      - name: Bench harness smoke
+        run: cargo bench
+
+      - name: Phase2C gate check
+        run: ./scripts/phase2c_gate_check.sh

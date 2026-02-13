@@ -1,0 +1,9 @@
+[package]
+name = "fp-columnar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fp-types = { path = "../fp-types" }
+serde = { workspace = true }
+thiserror = { workspace = true }

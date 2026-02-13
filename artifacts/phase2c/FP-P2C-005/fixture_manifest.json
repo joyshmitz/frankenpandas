@@ -1,0 +1,20 @@
+{
+  "packet_id": "FP-P2C-005",
+  "fixtures": [
+    {
+      "id": "groupby_sum_order_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_005_groupby_sum_order_strict.json",
+      "class": "groupby_first_seen_order"
+    },
+    {
+      "id": "groupby_sum_alignment_dropna_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_005_groupby_sum_alignment_dropna_strict.json",
+      "class": "alignment_dropna_missing_key_skip"
+    },
+    {
+      "id": "groupby_sum_int_keys_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_005_groupby_sum_int_keys_hardened.json",
+      "class": "hardened_int_key_aggregation"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "packet_id": "FP-P2C-004",
+  "fixtures": [
+    {
+      "id": "series_join_inner_duplicates_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_004_series_join_inner_duplicates_strict.json",
+      "class": "inner_join_duplicate_cross_product"
+    },
+    {
+      "id": "series_join_left_missing_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_004_series_join_left_missing_strict.json",
+      "class": "left_join_missing_right_values"
+    },
+    {
+      "id": "series_join_left_duplicate_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_004_series_join_left_duplicate_hardened.json",
+      "class": "hardened_duplicate_left_join"
+    }
+  ]
+}

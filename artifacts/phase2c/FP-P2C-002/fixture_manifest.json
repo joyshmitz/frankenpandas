@@ -1,0 +1,30 @@
+{
+  "packet_id": "FP-P2C-002",
+  "fixtures": [
+    {
+      "id": "index_align_union_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_002_index_align_union_strict.json",
+      "class": "alignment_happy_path"
+    },
+    {
+      "id": "index_align_union_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_002_index_align_union_hardened.json",
+      "class": "alignment_mode_split"
+    },
+    {
+      "id": "index_has_duplicates_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_002_index_has_duplicates_strict.json",
+      "class": "duplicate_detection_true"
+    },
+    {
+      "id": "index_has_duplicates_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_002_index_has_duplicates_hardened.json",
+      "class": "duplicate_detection_false"
+    },
+    {
+      "id": "index_first_positions_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_002_index_first_positions_strict.json",
+      "class": "first_occurrence_position_map"
+    }
+  ]
+}

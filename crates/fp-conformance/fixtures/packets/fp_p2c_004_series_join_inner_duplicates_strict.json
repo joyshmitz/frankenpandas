@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2C-004",
+  "case_id": "series_join_inner_duplicates_strict",
+  "mode": "strict",
+  "operation": "series_join",
+  "join_type": "inner",
+  "left": {
+    "name": "left",
+    "index": [
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "x" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  },
+  "right": {
+    "name": "right",
+    "index": [
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 }
+    ]
+  },
+  "expected_join": {
+    "index": [
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" }
+    ],
+    "left_values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "right_values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 }
+    ]
+  }
+}

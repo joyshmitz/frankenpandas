@@ -1,0 +1,36 @@
+# Rust build output
+/target
+/.target
+**/*.rs.bk
+
+# Temporary/local runtime state
+/.tmp/
+*.log
+.DS_Store
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Local issue-tracker state
+.beads/
+.bv/
+
+# Legacy oracle checkout (upstream source mirror, not project code)
+legacy_pandas_code/
+
+# Generated conformance artifacts
+artifacts/phase2c/drift_history.jsonl
+artifacts/phase2c/**/parity_report.json
+artifacts/phase2c/**/parity_gate_result.json
+artifacts/phase2c/**/parity_mismatch_corpus.json
+artifacts/phase2c/**/parity_report.raptorq.json
+artifacts/phase2c/**/parity_report.decode_proof.json
+
+# Generated performance artifacts
+artifacts/perf/golden_outputs/
+artifacts/perf/golden_checksums.txt
+artifacts/perf/round*_packet_hyperfine.json
+artifacts/perf/round*_packet_strace.txt

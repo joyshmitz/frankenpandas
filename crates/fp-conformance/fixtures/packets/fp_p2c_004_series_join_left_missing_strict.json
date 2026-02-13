@@ -1,0 +1,41 @@
+{
+  "packet_id": "FP-P2C-004",
+  "case_id": "series_join_left_missing_strict",
+  "mode": "strict",
+  "operation": "series_join",
+  "join_type": "left",
+  "left": {
+    "name": "left",
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ]
+  },
+  "right": {
+    "name": "right",
+    "index": [
+      { "kind": "utf8", "value": "a" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 }
+    ]
+  },
+  "expected_join": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "left_values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "right_values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "null", "value": "null" }
+    ]
+  }
+}

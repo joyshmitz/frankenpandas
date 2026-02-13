@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use fp_types::{DType, NullKind, Scalar, TypeError, cast_scalar, common_dtype, infer_dtype};
+use fp_types::{DType, NullKind, Scalar, TypeError, cast_scalar_owned, common_dtype, infer_dtype};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -47,11 +47,26 @@ pub enum ColumnError {
 }
 
 impl Column {
+    /// Construct a column, coercing values to the target dtype.
+    /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
+    /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
-        let coerced = values
-            .iter()
-            .map(|value| cast_scalar(value, dtype))
-            .collect::<Result<Vec<_>, _>>()?;
+        let needs_coercion = values.iter().any(|v| {
+            let d = v.dtype();
+            d != dtype && d != DType::Null
+        });
+
+        let coerced = if needs_coercion {
+            values
+                .into_iter()
+                .map(|value| cast_scalar_owned(value, dtype))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            values
+                .into_iter()
+                .map(|value| cast_scalar_owned(value, dtype))
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         let validity = ValidityMask::from_values(&coerced);
 

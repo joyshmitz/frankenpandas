@@ -33,9 +33,10 @@ pub fn join_series(
     right: &Series,
     join_type: JoinType,
 ) -> Result<JoinedSeries, JoinError> {
-    let mut right_map = HashMap::<IndexLabel, Vec<usize>>::new();
+    // AG-02: borrowed-key HashMap eliminates right-index label clones during build phase.
+    let mut right_map = HashMap::<&IndexLabel, Vec<usize>>::new();
     for (pos, label) in right.index().labels().iter().enumerate() {
-        right_map.entry(label.clone()).or_default().push(pos);
+        right_map.entry(label).or_default().push(pos);
     }
 
     let mut out_labels = Vec::new();

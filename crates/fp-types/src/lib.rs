@@ -132,18 +132,20 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     Ok(current)
 }
 
-pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
+/// Cast a scalar to a target dtype, taking ownership to avoid redundant clones
+/// when the value already has the correct type (AG-03: identity-cast skip).
+pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeError> {
     let from = value.dtype();
-    if from == target || matches!(value, Scalar::Null(_)) {
-        return Ok(match value {
-            Scalar::Null(_) => Scalar::missing_for_dtype(target),
-            _ => value.clone(),
-        });
+    if matches!(value, Scalar::Null(_)) {
+        return Ok(Scalar::missing_for_dtype(target));
+    }
+    if from == target {
+        return Ok(value);
     }
 
     match target {
         DType::Null => Ok(Scalar::Null(NullKind::Null)),
-        DType::Bool => match value {
+        DType::Bool => match &value {
             Scalar::Bool(v) => Ok(Scalar::Bool(*v)),
             Scalar::Int64(v) => match *v {
                 0 => Ok(Scalar::Bool(false)),
@@ -161,7 +163,7 @@ pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
             }
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Int64 => match value {
+        DType::Int64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Int64(i64::from(*v))),
             Scalar::Int64(v) => Ok(Scalar::Int64(*v)),
             Scalar::Float64(v) => {
@@ -175,17 +177,22 @@ pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
             }
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Float64 => match value {
+        DType::Float64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Float64(if *v { 1.0 } else { 0.0 })),
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
             Scalar::Float64(v) => Ok(Scalar::Float64(*v)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Utf8 => match value {
-            Scalar::Utf8(v) => Ok(Scalar::Utf8(v.clone())),
+            Scalar::Utf8(v) => Ok(Scalar::Utf8(v)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
     }
+}
+
+/// Cast a scalar reference to a target dtype (clones only when conversion is needed).
+pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
+    cast_scalar_owned(value.clone(), target)
 }
 
 #[cfg(test)]

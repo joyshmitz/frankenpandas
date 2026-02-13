@@ -143,29 +143,32 @@ impl DataFrame {
         Ok(Self { index, columns })
     }
 
+    /// AG-05: Pre-compute N-way union index across all series first, then
+    /// reindex each column exactly once. Eliminates O(N²) iterative
+    /// realignment where N = number of series.
     pub fn from_series(series_list: Vec<Series>) -> Result<Self, FrameError> {
         if series_list.is_empty() {
             return Self::new(Index::new(Vec::new()), BTreeMap::new());
         }
 
-        let mut series_iter = series_list.into_iter();
-        let first = series_iter.next().expect("non-empty checked");
-        let mut union_index = first.index.clone();
-
-        let mut columns = BTreeMap::new();
-        columns.insert(first.name, first.column);
-
-        for series in series_iter {
+        // Phase 1: Compute global union index across all series.
+        let mut union_index = series_list[0].index.clone();
+        for series in &series_list[1..] {
             let plan = align_union(&union_index, &series.index);
             validate_alignment_plan(&plan)?;
+            union_index = plan.union_index;
+        }
 
-            for column in columns.values_mut() {
-                *column = column.reindex_by_positions(&plan.left_positions)?;
-            }
-
+        // Phase 2: Reindex each series column exactly once against the final union index.
+        let mut columns = BTreeMap::new();
+        for series in series_list {
+            let plan = align_union(&union_index, &series.index);
+            // The right_positions map from the union to this series's positions.
+            // Since union_index already contains all labels, the union_index in
+            // this plan equals our pre-computed union. We use right_positions to
+            // locate each series's values within the union.
             let aligned_column = series.column.reindex_by_positions(&plan.right_positions)?;
             columns.insert(series.name, aligned_column);
-            union_index = plan.union_index;
         }
 
         Self::new(union_index, columns)

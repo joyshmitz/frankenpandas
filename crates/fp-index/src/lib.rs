@@ -555,6 +555,184 @@ pub fn validate_alignment_plan(plan: &AlignmentPlan) -> Result<(), IndexError> {
     Ok(())
 }
 
+// ── AG-11: Leapfrog Triejoin for Multi-Way Index Alignment ─────────────
+
+/// Result of multi-way alignment: a union index plus per-input position vectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiAlignmentPlan {
+    pub union_index: Index,
+    pub positions: Vec<Vec<Option<usize>>>,
+}
+
+/// K-way merge union of multiple sorted iterators.
+///
+/// Produces a sorted, deduplicated index containing all labels from all inputs.
+/// Each input is sorted internally before merging. Uses a min-heap for O(N log K)
+/// performance where N = total labels and K = number of indexes.
+pub fn leapfrog_union(indexes: &[&Index]) -> Index {
+    if indexes.is_empty() {
+        return Index::new(Vec::new());
+    }
+    if indexes.len() == 1 {
+        return indexes[0].unique().sort_values();
+    }
+
+    // Sort and dedup each input
+    let sorted: Vec<Vec<&IndexLabel>> = indexes
+        .iter()
+        .map(|idx| {
+            let mut labels: Vec<&IndexLabel> = idx.labels().iter().collect();
+            labels.sort();
+            labels.dedup();
+            labels
+        })
+        .collect();
+
+    // Initialize min-heap: (label, iter_index, position_in_iter)
+    let mut heap = std::collections::BinaryHeap::new();
+    for (i, iter) in sorted.iter().enumerate() {
+        if !iter.is_empty() {
+            heap.push(std::cmp::Reverse((iter[0].clone(), i, 0_usize)));
+        }
+    }
+
+    let total: usize = sorted.iter().map(|s| s.len()).sum();
+    let mut result = Vec::with_capacity(total);
+
+    while let Some(std::cmp::Reverse((label, iter_idx, pos))) = heap.pop() {
+        // Deduplicate: only push if different from last
+        if result.last() != Some(&label) {
+            result.push(label);
+        }
+
+        let next_pos = pos + 1;
+        if next_pos < sorted[iter_idx].len() {
+            heap.push(std::cmp::Reverse((
+                sorted[iter_idx][next_pos].clone(),
+                iter_idx,
+                next_pos,
+            )));
+        }
+    }
+
+    Index::new(result)
+}
+
+/// Leapfrog intersection: labels present in ALL input indexes.
+///
+/// Classic leapfrog algorithm on sorted iterators. For each position,
+/// advance the smallest iterator to seek the maximum. When all iterators
+/// agree, emit the label.
+pub fn leapfrog_intersection(indexes: &[&Index]) -> Index {
+    if indexes.is_empty() {
+        return Index::new(Vec::new());
+    }
+    if indexes.len() == 1 {
+        return indexes[0].unique().sort_values();
+    }
+
+    // Sort and dedup each input
+    let sorted: Vec<Vec<&IndexLabel>> = indexes
+        .iter()
+        .map(|idx| {
+            let mut labels: Vec<&IndexLabel> = idx.labels().iter().collect();
+            labels.sort();
+            labels.dedup();
+            labels
+        })
+        .collect();
+
+    // Cursors into each sorted iterator
+    let k = sorted.len();
+    let mut cursors: Vec<usize> = vec![0; k];
+    let mut result = Vec::new();
+
+    'outer: loop {
+        // Check if any iterator is exhausted
+        for i in 0..k {
+            if cursors[i] >= sorted[i].len() {
+                break 'outer;
+            }
+        }
+
+        // Find the max label across all cursors
+        let mut max_label = sorted[0][cursors[0]];
+        for i in 1..k {
+            if sorted[i][cursors[i]] > max_label {
+                max_label = sorted[i][cursors[i]];
+            }
+        }
+
+        // Advance all cursors to at least max_label
+        let mut all_equal = true;
+        for i in 0..k {
+            // Binary search for max_label in sorted[i] starting from cursors[i]
+            let remaining = &sorted[i][cursors[i]..];
+            match remaining.binary_search(&max_label) {
+                Ok(offset) => {
+                    cursors[i] += offset;
+                }
+                Err(offset) => {
+                    cursors[i] += offset;
+                    all_equal = false;
+                }
+            }
+            if cursors[i] >= sorted[i].len() {
+                break 'outer;
+            }
+        }
+
+        if all_equal {
+            // All iterators point to the same label
+            result.push(max_label.clone());
+            for cursor in &mut cursors {
+                *cursor += 1;
+            }
+        }
+        // If not all equal, the loop continues with updated cursors
+    }
+
+    Index::new(result)
+}
+
+/// Multi-way alignment: union all indexes, then compute position vectors.
+///
+/// This is the AGM-bound-optimal replacement for iterative pairwise `align_union`.
+/// For N indexes, produces a single sorted union index and N position vectors
+/// mapping each union label to its original position in each input.
+pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
+    if indexes.is_empty() {
+        return MultiAlignmentPlan {
+            union_index: Index::new(Vec::new()),
+            positions: Vec::new(),
+        };
+    }
+
+    let union = leapfrog_union(indexes);
+
+    // Build position maps for each input
+    let maps: Vec<HashMap<&IndexLabel, usize>> = indexes
+        .iter()
+        .map(|idx| idx.position_map_first_ref())
+        .collect();
+
+    let positions: Vec<Vec<Option<usize>>> = maps
+        .iter()
+        .map(|map| {
+            union
+                .labels
+                .iter()
+                .map(|label| map.get(label).copied())
+                .collect()
+        })
+        .collect();
+
+    MultiAlignmentPlan {
+        union_index: union,
+        positions,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Index, IndexLabel, align_union, validate_alignment_plan};
@@ -1075,5 +1253,212 @@ mod tests {
         assert_eq!(empty.union_with(&non_empty), non_empty);
         assert!(empty.difference(&non_empty).is_empty());
         assert_eq!(empty.symmetric_difference(&non_empty), non_empty);
+    }
+
+    // === AG-11: Leapfrog Triejoin Tests ===
+
+    use super::{leapfrog_intersection, leapfrog_union, multi_way_align};
+
+    #[test]
+    fn leapfrog_union_three_indexes() {
+        let a = Index::from_i64(vec![1, 3, 5]);
+        let b = Index::from_i64(vec![2, 3, 6]);
+        let c = Index::from_i64(vec![4, 5, 6]);
+        let result = leapfrog_union(&[&a, &b, &c]);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(6),
+            ]
+        );
+    }
+
+    #[test]
+    fn leapfrog_union_deduplicates() {
+        let a = Index::from_i64(vec![1, 1, 2]);
+        let b = Index::from_i64(vec![2, 2, 3]);
+        let result = leapfrog_union(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn leapfrog_union_single_index() {
+        let a = Index::from_i64(vec![3, 1, 2]);
+        let result = leapfrog_union(&[&a]);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn leapfrog_union_empty() {
+        let result = leapfrog_union(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn leapfrog_union_with_empty_input() {
+        let a = Index::from_i64(vec![1, 2]);
+        let b = Index::new(Vec::new());
+        let result = leapfrog_union(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn leapfrog_intersection_three_indexes() {
+        let a = Index::from_i64(vec![1, 2, 3, 4, 5]);
+        let b = Index::from_i64(vec![2, 3, 5, 7]);
+        let c = Index::from_i64(vec![3, 5, 8]);
+        let result = leapfrog_intersection(&[&a, &b, &c]);
+        assert_eq!(
+            result.labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(5)]
+        );
+    }
+
+    #[test]
+    fn leapfrog_intersection_disjoint() {
+        let a = Index::from_i64(vec![1, 2]);
+        let b = Index::from_i64(vec![3, 4]);
+        let result = leapfrog_intersection(&[&a, &b]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn leapfrog_intersection_identical() {
+        let a = Index::from_i64(vec![1, 2, 3]);
+        let b = Index::from_i64(vec![1, 2, 3]);
+        let result = leapfrog_intersection(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn leapfrog_intersection_with_unsorted_input() {
+        let a = Index::from_i64(vec![5, 3, 1, 4, 2]);
+        let b = Index::from_i64(vec![4, 2, 6, 1]);
+        let result = leapfrog_intersection(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn leapfrog_intersection_empty_input() {
+        let a = Index::from_i64(vec![1, 2, 3]);
+        let b = Index::new(Vec::new());
+        let result = leapfrog_intersection(&[&a, &b]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn multi_way_align_three_indexes() {
+        let a = Index::from_i64(vec![1, 3]);
+        let b = Index::from_i64(vec![2, 3]);
+        let c = Index::from_i64(vec![1, 2]);
+        let plan = multi_way_align(&[&a, &b, &c]);
+        assert_eq!(
+            plan.union_index.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+        assert_eq!(plan.positions.len(), 3);
+        // a has 1 at pos 0, no 2, 3 at pos 1
+        assert_eq!(plan.positions[0], vec![Some(0), None, Some(1)]);
+        // b has no 1, 2 at pos 0, 3 at pos 1
+        assert_eq!(plan.positions[1], vec![None, Some(0), Some(1)]);
+        // c has 1 at pos 0, 2 at pos 1, no 3
+        assert_eq!(plan.positions[2], vec![Some(0), Some(1), None]);
+    }
+
+    #[test]
+    fn multi_way_align_empty() {
+        let plan = multi_way_align(&[]);
+        assert!(plan.union_index.is_empty());
+        assert!(plan.positions.is_empty());
+    }
+
+    #[test]
+    fn multi_way_align_isomorphic_with_pairwise() {
+        // AG-11 contract: multi-way union produces same label set as
+        // iterative pairwise union (associativity + commutativity).
+        let a = Index::from_i64(vec![1, 4, 7]);
+        let b = Index::from_i64(vec![2, 4, 8]);
+        let c = Index::from_i64(vec![3, 7, 8]);
+
+        let multi = leapfrog_union(&[&a, &b, &c]);
+
+        // Iterative pairwise
+        let ab = a.union_with(&b);
+        let abc = ab.union_with(&c);
+        let pairwise = abc.sort_values();
+
+        assert_eq!(multi.labels(), pairwise.labels());
+    }
+
+    #[test]
+    fn leapfrog_union_utf8_labels() {
+        let a = Index::new(vec!["c".into(), "a".into()]);
+        let b = Index::new(vec!["b".into(), "d".into()]);
+        let result = leapfrog_union(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into()]
+        );
+    }
+
+    #[test]
+    fn leapfrog_large_multi_way() {
+        // 5 indexes, each 1000 labels, overlapping ranges
+        let indexes: Vec<Index> = (0..5)
+            .map(|i| {
+                let start = i * 200;
+                let end = start + 1000;
+                Index::from_i64((start..end).collect())
+            })
+            .collect();
+        let refs: Vec<&Index> = indexes.iter().collect();
+
+        let union = leapfrog_union(&refs);
+        // Range is 0..1800 (0-999, 200-1199, 400-1399, 600-1599, 800-1799)
+        assert_eq!(union.len(), 1800);
+
+        let intersection = leapfrog_intersection(&refs);
+        // Intersection is 800..999 (all 5 overlap)
+        assert_eq!(intersection.len(), 200);
     }
 }

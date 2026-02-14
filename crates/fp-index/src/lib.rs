@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -40,15 +41,38 @@ impl fmt::Display for IndexLabel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     labels: Vec<IndexLabel>,
+    #[serde(skip)]
+    duplicate_cache: OnceCell<bool>,
+}
+
+impl PartialEq for Index {
+    fn eq(&self, other: &Self) -> bool {
+        self.labels == other.labels
+    }
+}
+
+impl Eq for Index {}
+
+fn detect_duplicates(labels: &[IndexLabel]) -> bool {
+    let mut seen = HashMap::<&IndexLabel, ()>::new();
+    for label in labels {
+        if seen.insert(label, ()).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
 impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
-        Self { labels }
+        Self {
+            labels,
+            duplicate_cache: OnceCell::new(),
+        }
     }
 
     #[must_use]
@@ -78,13 +102,9 @@ impl Index {
 
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
-        for label in &self.labels {
-            if seen.insert(label, ()).is_some() {
-                return true;
-            }
-        }
-        false
+        *self
+            .duplicate_cache
+            .get_or_init(|| detect_duplicates(&self.labels))
     }
 
     #[must_use]
@@ -190,5 +210,14 @@ mod tests {
     fn duplicate_detection_matches_index_surface() {
         let index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert!(index.has_duplicates());
+    }
+
+    #[test]
+    fn index_equality_ignores_duplicate_cache_state() {
+        let index_with_cache = Index::new(vec!["a".into(), "a".into(), "b".into()]);
+        assert!(index_with_cache.has_duplicates());
+
+        let fresh_index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
+        assert_eq!(index_with_cache, fresh_index);
     }
 }

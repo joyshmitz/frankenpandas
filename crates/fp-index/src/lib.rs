@@ -253,6 +253,81 @@ pub enum IndexError {
     InvalidAlignmentVectors,
 }
 
+/// Alignment mode for index-level join semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    /// Only labels present in both indexes.
+    Inner,
+    /// All left labels; right fills with None for missing.
+    Left,
+    /// All right labels; left fills with None for missing.
+    Right,
+    /// All labels from both indexes (union). Default for arithmetic.
+    Outer,
+}
+
+/// Align two indexes using the specified join mode.
+///
+/// Returns an `AlignmentPlan` whose `union_index` contains the output index
+/// (which may be an intersection, left-only, right-only, or union depending on mode).
+pub fn align(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPlan {
+    match mode {
+        AlignMode::Inner => align_inner(left, right),
+        AlignMode::Left => align_left(left, right),
+        AlignMode::Right => {
+            let plan = align_left(right, left);
+            AlignmentPlan {
+                union_index: plan.union_index,
+                left_positions: plan.right_positions,
+                right_positions: plan.left_positions,
+            }
+        }
+        AlignMode::Outer => align_union(left, right),
+    }
+}
+
+/// Inner alignment: only labels present in both indexes (first-match semantics).
+pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
+    let right_map = right.position_map_first_ref();
+
+    let mut output_labels = Vec::new();
+    let mut left_positions = Vec::new();
+    let mut right_positions = Vec::new();
+
+    for (left_pos, label) in left.labels.iter().enumerate() {
+        if let Some(&right_pos) = right_map.get(label) {
+            output_labels.push(label.clone());
+            left_positions.push(Some(left_pos));
+            right_positions.push(Some(right_pos));
+        }
+    }
+
+    AlignmentPlan {
+        union_index: Index::new(output_labels),
+        left_positions,
+        right_positions,
+    }
+}
+
+/// Left alignment: all left labels preserved, right fills with None for missing.
+pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
+    let right_map = right.position_map_first_ref();
+
+    let mut left_positions = Vec::with_capacity(left.len());
+    let mut right_positions = Vec::with_capacity(left.len());
+
+    for (left_pos, label) in left.labels.iter().enumerate() {
+        left_positions.push(Some(left_pos));
+        right_positions.push(right_map.get(label).copied());
+    }
+
+    AlignmentPlan {
+        union_index: left.clone(),
+        left_positions,
+        right_positions,
+    }
+}
+
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
     let left_positions_map = left.position_map_first_ref();
     let right_positions_map = right.position_map_first_ref();
@@ -462,5 +537,115 @@ mod tests {
                 "mismatch for target={target}"
             );
         }
+    }
+
+    // === bd-2gi.15: Alignment mode tests ===
+
+    use super::{AlignMode, align, align_inner, align_left};
+
+    #[test]
+    fn align_inner_keeps_only_overlapping_labels() {
+        let left = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        let right = Index::new(vec![2_i64.into(), 3_i64.into(), 4_i64.into()]);
+
+        let plan = align_inner(&left, &right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &[IndexLabel::Int64(2), IndexLabel::Int64(3)]
+        );
+        assert_eq!(plan.left_positions, vec![Some(1), Some(2)]);
+        assert_eq!(plan.right_positions, vec![Some(0), Some(1)]);
+        validate_alignment_plan(&plan).expect("valid");
+    }
+
+    #[test]
+    fn align_inner_disjoint_yields_empty() {
+        let left = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let right = Index::new(vec![3_i64.into(), 4_i64.into()]);
+
+        let plan = align_inner(&left, &right);
+        assert!(plan.union_index.is_empty());
+        assert!(plan.left_positions.is_empty());
+        assert!(plan.right_positions.is_empty());
+    }
+
+    #[test]
+    fn align_left_preserves_all_left_labels() {
+        let left = Index::new(vec!["a".into(), "b".into(), "c".into()]);
+        let right = Index::new(vec!["b".into(), "d".into()]);
+
+        let plan = align_left(&left, &right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(plan.right_positions, vec![None, Some(0), None]);
+        validate_alignment_plan(&plan).expect("valid");
+    }
+
+    #[test]
+    fn align_right_preserves_all_right_labels() {
+        let left = Index::new(vec!["a".into(), "b".into()]);
+        let right = Index::new(vec!["b".into(), "c".into(), "d".into()]);
+
+        let plan = align(&left, &right, AlignMode::Right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &["b".into(), "c".into(), "d".into()]
+        );
+        // Left has "b" at position 1.
+        assert_eq!(plan.left_positions, vec![Some(1), None, None]);
+        assert_eq!(plan.right_positions, vec![Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn align_mode_outer_matches_union() {
+        let left = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let right = Index::new(vec![2_i64.into(), 3_i64.into()]);
+
+        let plan_outer = align(&left, &right, AlignMode::Outer);
+        let plan_union = align_union(&left, &right);
+        assert_eq!(plan_outer, plan_union);
+    }
+
+    #[test]
+    fn align_inner_identical_indexes() {
+        let left = Index::new(vec!["x".into(), "y".into()]);
+        let right = Index::new(vec!["x".into(), "y".into()]);
+
+        let plan = align_inner(&left, &right);
+        assert_eq!(plan.union_index.labels(), &["x".into(), "y".into()]);
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1)]);
+        assert_eq!(plan.right_positions, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn align_left_identical_indexes() {
+        let left = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let right = Index::new(vec![1_i64.into(), 2_i64.into()]);
+
+        let plan = align_left(&left, &right);
+        assert_eq!(plan.union_index.labels(), left.labels());
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1)]);
+        assert_eq!(plan.right_positions, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn align_inner_empty_input() {
+        let left = Index::new(Vec::new());
+        let right = Index::new(vec![1_i64.into()]);
+
+        let plan = align_inner(&left, &right);
+        assert!(plan.union_index.is_empty());
+    }
+
+    #[test]
+    fn align_left_empty_left() {
+        let left = Index::new(Vec::new());
+        let right = Index::new(vec![1_i64.into()]);
+
+        let plan = align_left(&left, &right);
+        assert!(plan.union_index.is_empty());
     }
 }

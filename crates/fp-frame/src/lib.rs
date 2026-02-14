@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use fp_columnar::{ArithmeticOp, Column, ColumnError};
-use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
+use fp_index::{
+    AlignMode, Index, IndexError, IndexLabel, align, align_union, validate_alignment_plan,
+};
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimeMode, RuntimePolicy};
 use fp_types::Scalar;
 use serde::{Deserialize, Serialize};
@@ -217,6 +219,62 @@ impl Series {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+
+    /// Align two Series by their indexes, returning a pair aligned to a common index.
+    ///
+    /// Matches `pd.Series.align(other, join='inner'|'left'|'right'|'outer')`.
+    /// Uses first-match semantics for duplicate labels (same as arithmetic ops).
+    pub fn align(&self, other: &Self, mode: AlignMode) -> Result<(Self, Self), FrameError> {
+        let plan = align(&self.index, &other.index, mode);
+        validate_alignment_plan(&plan)?;
+
+        let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right_col = other.column.reindex_by_positions(&plan.right_positions)?;
+
+        let left_out = Self::new(self.name.clone(), plan.union_index.clone(), left_col)?;
+        let right_out = Self::new(other.name.clone(), plan.union_index, right_col)?;
+
+        Ok((left_out, right_out))
+    }
+
+    /// Fill missing values from `other`.
+    ///
+    /// Matches `pd.Series.combine_first(other)`: uses outer alignment,
+    /// then for each position takes self's value if non-null, else other's.
+    pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
+        let plan = align_union(&self.index, &other.index);
+        validate_alignment_plan(&plan)?;
+
+        let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right_col = other.column.reindex_by_positions(&plan.right_positions)?;
+
+        let combined_values: Vec<Scalar> = left_col
+            .values()
+            .iter()
+            .zip(right_col.values())
+            .map(|(l, r)| if l.is_missing() { r.clone() } else { l.clone() })
+            .collect();
+
+        let combined_col = Column::from_values(combined_values)?;
+        Self::new(self.name.clone(), plan.union_index, combined_col)
+    }
+
+    /// Reindex to a new set of labels, filling missing positions with null.
+    ///
+    /// Matches `pd.Series.reindex(new_index)`.
+    pub fn reindex(&self, new_labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        let new_index = Index::new(new_labels);
+        let current_map = self.index.position_map_first();
+
+        let positions: Vec<Option<usize>> = new_index
+            .labels()
+            .iter()
+            .map(|label| current_map.get(label).copied())
+            .collect();
+
+        let col = self.column.reindex_by_positions(&positions)?;
+        Self::new(self.name.clone(), new_index, col)
     }
 }
 
@@ -1214,5 +1272,293 @@ mod tests {
             result.column("col").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
         );
+    }
+
+    // ---- Series.align() tests (bd-2gi.15) ----
+
+    use fp_index::AlignMode;
+
+    #[test]
+    fn series_align_inner_keeps_overlapping_labels() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Inner).unwrap();
+        assert_eq!(la.len(), 2);
+        assert_eq!(la.index().labels(), &[2_i64.into(), 3_i64.into()]);
+        assert_eq!(la.values(), &[Scalar::Int64(20), Scalar::Int64(30)]);
+        assert_eq!(ra.values(), &[Scalar::Int64(200), Scalar::Int64(300)]);
+        assert_eq!(la.name(), "x");
+        assert_eq!(ra.name(), "y");
+    }
+
+    #[test]
+    fn series_align_inner_disjoint_yields_empty() {
+        let left = Series::from_values("a", vec![1_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let right = Series::from_values("b", vec![2_i64.into()], vec![Scalar::Int64(2)]).unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Inner).unwrap();
+        assert!(la.is_empty());
+        assert!(ra.is_empty());
+    }
+
+    #[test]
+    fn series_align_left_preserves_all_left() {
+        let left = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec!["b".into(), "d".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(40)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Left).unwrap();
+        assert_eq!(la.len(), 3);
+        assert_eq!(la.index().labels(), &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            la.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        // "a" and "c" not in right -> null
+        assert!(ra.values()[0].is_missing());
+        assert_eq!(ra.values()[1], Scalar::Int64(20));
+        assert!(ra.values()[2].is_missing());
+    }
+
+    #[test]
+    fn series_align_right_preserves_all_right() {
+        let left = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec!["b".into(), "c".into(), "d".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Right).unwrap();
+        assert_eq!(ra.len(), 3);
+        assert_eq!(ra.index().labels(), &["b".into(), "c".into(), "d".into()]);
+        assert_eq!(
+            ra.values(),
+            &[Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]
+        );
+        // Only "b" matched in left.
+        assert_eq!(la.values()[0], Scalar::Int64(2));
+        assert!(la.values()[1].is_missing());
+        assert!(la.values()[2].is_missing());
+    }
+
+    #[test]
+    fn series_align_outer_matches_arithmetic_union() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(200), Scalar::Int64(300)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Outer).unwrap();
+        assert_eq!(la.len(), 3);
+        assert_eq!(
+            la.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(la.values()[1], Scalar::Int64(20));
+        assert!(la.values()[2].is_missing());
+        assert!(ra.values()[0].is_missing());
+        assert_eq!(ra.values()[1], Scalar::Int64(200));
+        assert_eq!(ra.values()[2], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn series_align_identical_indexes() {
+        let left = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "b",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200)],
+        )
+        .unwrap();
+
+        for mode in [
+            AlignMode::Inner,
+            AlignMode::Left,
+            AlignMode::Right,
+            AlignMode::Outer,
+        ] {
+            let (la, ra) = left.align(&right, mode).unwrap();
+            assert_eq!(la.len(), 2);
+            assert_eq!(la.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+            assert_eq!(ra.values(), &[Scalar::Int64(100), Scalar::Int64(200)]);
+        }
+    }
+
+    #[test]
+    fn series_align_empty_series() {
+        let left =
+            Series::from_values("a", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        let right = Series::from_values("b", vec![1_i64.into()], vec![Scalar::Int64(10)]).unwrap();
+
+        let (la, _) = left.align(&right, AlignMode::Inner).unwrap();
+        assert!(la.is_empty());
+
+        let (la, ra) = left.align(&right, AlignMode::Left).unwrap();
+        assert!(la.is_empty());
+        assert!(ra.is_empty());
+
+        let (la, ra) = left.align(&right, AlignMode::Right).unwrap();
+        assert_eq!(ra.len(), 1);
+        assert!(la.values()[0].is_missing());
+    }
+
+    // ---- Series.combine_first() tests (bd-2gi.15) ----
+
+    #[test]
+    fn combine_first_fills_nulls_from_other() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+        )
+        .unwrap();
+
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(result.name(), "x");
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(10), Scalar::Int64(200), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn combine_first_adds_labels_from_other() {
+        let left = Series::from_values("x", vec![1_i64.into()], vec![Scalar::Int64(10)]).unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200)],
+        )
+        .unwrap();
+
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(10)); // self wins
+        assert_eq!(result.values()[1], Scalar::Int64(200)); // from other
+    }
+
+    #[test]
+    fn combine_first_self_has_all_values() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200)],
+        )
+        .unwrap();
+
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(result.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+    }
+
+    // ---- Series.reindex() tests (bd-2gi.15) ----
+
+    #[test]
+    fn reindex_to_superset_fills_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let result = s
+            .reindex(vec![1_i64.into(), 2_i64.into(), 3_i64.into()])
+            .unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.values()[0], Scalar::Int64(10));
+        assert_eq!(result.values()[1], Scalar::Int64(20));
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn reindex_to_subset_drops_labels() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let result = s.reindex(vec![2_i64.into()]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.values(), &[Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn reindex_reorders_labels() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.reindex(vec!["c".into(), "a".into()]).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values(), &[Scalar::Int64(3), Scalar::Int64(1)]);
+    }
+
+    #[test]
+    fn reindex_empty_new_index() {
+        let s = Series::from_values("x", vec![1_i64.into()], vec![Scalar::Int64(10)]).unwrap();
+
+        let result = s.reindex(Vec::new()).unwrap();
+        assert!(result.is_empty());
     }
 }

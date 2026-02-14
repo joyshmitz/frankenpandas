@@ -62,10 +62,15 @@ impl Column {
                 .map(|value| cast_scalar_owned(value, dtype))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
+            // No coercion needed: values already match dtype.
+            // Only remap Null variants to the dtype-specific missing marker.
             values
                 .into_iter()
-                .map(|value| cast_scalar_owned(value, dtype))
-                .collect::<Result<Vec<_>, _>>()?
+                .map(|value| match value {
+                    Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
+                    other => other,
+                })
+                .collect()
         };
 
         let validity = ValidityMask::from_values(&coerced);

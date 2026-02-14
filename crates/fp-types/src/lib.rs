@@ -143,10 +143,11 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         return Ok(value);
     }
 
+    // Note: identity casts (from == target) are handled above, so same-type
+    // arms are omitted from the match below.
     match target {
         DType::Null => Ok(Scalar::Null(NullKind::Null)),
         DType::Bool => match &value {
-            Scalar::Bool(v) => Ok(Scalar::Bool(*v)),
             Scalar::Int64(v) => match *v {
                 0 => Ok(Scalar::Bool(false)),
                 1 => Ok(Scalar::Bool(true)),
@@ -165,7 +166,6 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         },
         DType::Int64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Int64(i64::from(*v))),
-            Scalar::Int64(v) => Ok(Scalar::Int64(*v)),
             Scalar::Float64(v) => {
                 if !v.is_finite() || *v != v.trunc() {
                     return Err(TypeError::LossyFloatToInt { value: *v });
@@ -180,13 +180,9 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         DType::Float64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Float64(if *v { 1.0 } else { 0.0 })),
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
-            Scalar::Float64(v) => Ok(Scalar::Float64(*v)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Utf8 => match value {
-            Scalar::Utf8(v) => Ok(Scalar::Utf8(v)),
-            _ => Err(TypeError::InvalidCast { from, to: target }),
-        },
+        DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
 

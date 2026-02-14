@@ -1543,7 +1543,7 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
                             false,
                             format!(
                                 "{}/{} fixtures failed",
-                                report.failed_count, report.fixture_count
+                                report.failed, report.fixture_count
                             ),
                             errs,
                         )
@@ -3273,7 +3273,7 @@ mod tests {
         DriftRecord, E2eConfig, FailureDigest, FailureForensicsReport, ForensicEventKind,
         ForensicLog, FixtureExpectedAlignment, FixtureOracleSource, FixtureOperation,
         HarnessConfig, LifecycleHooks, NoopHooks, OracleMode, PacketParityReport,
-        CiGate, CiPipelineConfig, CiPipelineResult, DecodeProofArtifact, DecodeProofStatus,
+        CiGate, CiGateResult, CiPipelineConfig, CiPipelineResult, DecodeProofArtifact, DecodeProofStatus,
         RaptorQSidecarArtifact, SuiteOptions, append_phase2c_drift_history,
         build_differential_report, build_failure_forensics, enforce_packet_gates,
         evaluate_ci_gate, evaluate_parity_gate, generate_raptorq_sidecar, run_ci_pipeline,

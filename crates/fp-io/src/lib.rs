@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use csv::{ReaderBuilder, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
@@ -13,8 +14,12 @@ use thiserror::Error;
 pub enum IoError {
     #[error("csv input has no headers")]
     MissingHeaders,
+    #[error("json format error: {0}")]
+    JsonFormat(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -23,6 +28,32 @@ pub enum IoError {
     Column(#[from] ColumnError),
     #[error(transparent)]
     Frame(#[from] FrameError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonOrient {
+    Records,
+    Columns,
+    Split,
+}
+
+#[derive(Debug, Clone)]
+pub struct CsvReadOptions {
+    pub delimiter: u8,
+    pub has_headers: bool,
+    pub na_values: Vec<String>,
+    pub index_col: Option<String>,
+}
+
+impl Default for CsvReadOptions {
+    fn default() -> Self {
+        Self {
+            delimiter: b',',
+            has_headers: true,
+            na_values: Vec::new(),
+            index_col: None,
+        }
+    }
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
@@ -120,6 +151,334 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
         }
         Scalar::Utf8(v) => v.clone(),
     }
+}
+
+fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
+    let trimmed = field.trim();
+    if trimmed.is_empty() || na_values.iter().any(|na| na == trimmed) {
+        return Scalar::Null(NullKind::Null);
+    }
+    if let Ok(value) = trimmed.parse::<i64>() {
+        return Scalar::Int64(value);
+    }
+    if let Ok(value) = trimmed.parse::<f64>() {
+        return Scalar::Float64(value);
+    }
+    if let Ok(value) = trimmed.parse::<bool>() {
+        return Scalar::Bool(value);
+    }
+    Scalar::Utf8(trimmed.to_owned())
+}
+
+// ── CSV with options ───────────────────────────────────────────────────
+
+pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
+    let mut reader = ReaderBuilder::new()
+        .has_headers(options.has_headers)
+        .delimiter(options.delimiter)
+        .from_reader(input.as_bytes());
+
+    let headers = reader.headers().cloned().map_err(IoError::from)?;
+    if headers.is_empty() {
+        return Err(IoError::MissingHeaders);
+    }
+
+    let header_count = headers.len();
+    let row_hint = input.len() / (header_count * 8).max(1);
+    let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+        .map(|_| Vec::with_capacity(row_hint))
+        .collect();
+
+    let mut row_count: i64 = 0;
+    for row in reader.records() {
+        let record = row?;
+        for (idx, col) in columns.iter_mut().enumerate() {
+            let field = record.get(idx).unwrap_or_default();
+            col.push(parse_scalar_with_na(field, &options.na_values));
+        }
+        row_count += 1;
+    }
+
+    // If index_col is set, extract that column as the index
+    if let Some(ref idx_col_name) = options.index_col {
+        let idx_pos = headers
+            .iter()
+            .position(|h| h == idx_col_name)
+            .ok_or_else(|| IoError::JsonFormat(format!("index_col '{idx_col_name}' not found")))?;
+
+        let index_values = columns.remove(idx_pos);
+        let index_labels: Vec<fp_index::IndexLabel> = index_values
+            .into_iter()
+            .map(|s| match s {
+                Scalar::Int64(v) => fp_index::IndexLabel::Int64(v),
+                Scalar::Utf8(v) => fp_index::IndexLabel::Utf8(v),
+                other => fp_index::IndexLabel::Utf8(format!("{other:?}")),
+            })
+            .collect();
+        let index = Index::new(index_labels);
+
+        let mut out_columns = BTreeMap::new();
+        let mut col_idx = 0;
+        for (orig_idx, _) in headers.iter().enumerate() {
+            if orig_idx == idx_pos {
+                continue;
+            }
+            let name = headers.get(orig_idx).unwrap_or_default().to_owned();
+            out_columns.insert(name, Column::from_values(columns[col_idx].clone())?);
+            col_idx += 1;
+        }
+        Ok(DataFrame::new(index, out_columns)?)
+    } else {
+        let mut out_columns = BTreeMap::new();
+        for (idx, values) in columns.into_iter().enumerate() {
+            let name = headers.get(idx).unwrap_or_default().to_owned();
+            out_columns.insert(name, Column::from_values(values)?);
+        }
+        let index = Index::from_i64((0..row_count).collect());
+        Ok(DataFrame::new(index, out_columns)?)
+    }
+}
+
+// ── File-based CSV ─────────────────────────────────────────────────────
+
+pub fn read_csv(path: &Path) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_csv_str(&content)
+}
+
+pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let content = write_csv_string(frame)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+// ── JSON IO ────────────────────────────────────────────────────────────
+
+fn json_value_to_scalar(val: &serde_json::Value) -> Scalar {
+    match val {
+        serde_json::Value::Null => Scalar::Null(NullKind::Null),
+        serde_json::Value::Bool(b) => Scalar::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Scalar::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                Scalar::Float64(f)
+            } else {
+                Scalar::Utf8(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => Scalar::Utf8(s.clone()),
+        other => Scalar::Utf8(other.to_string()),
+    }
+}
+
+fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
+    match scalar {
+        Scalar::Null(_) => serde_json::Value::Null,
+        Scalar::Bool(b) => serde_json::Value::Bool(*b),
+        Scalar::Int64(i) => serde_json::json!(*i),
+        Scalar::Float64(f) => {
+            if f.is_nan() || f.is_infinite() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(*f)
+            }
+        }
+        Scalar::Utf8(s) => serde_json::Value::String(s.clone()),
+    }
+}
+
+pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
+    let parsed: serde_json::Value = serde_json::from_str(input)?;
+
+    match orient {
+        JsonOrient::Records => {
+            let arr = parsed
+                .as_array()
+                .ok_or_else(|| IoError::JsonFormat("expected array for records orient".into()))?;
+            if arr.is_empty() {
+                return Ok(DataFrame::new(Index::new(Vec::new()), BTreeMap::new())?);
+            }
+
+            // Collect column names from first record
+            let first = arr[0]
+                .as_object()
+                .ok_or_else(|| IoError::JsonFormat("records must be objects".into()))?;
+            let col_names: Vec<String> = first.keys().cloned().collect();
+
+            let mut columns: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+            for name in &col_names {
+                columns.insert(name.clone(), Vec::with_capacity(arr.len()));
+            }
+
+            for record in arr {
+                let obj = record
+                    .as_object()
+                    .ok_or_else(|| IoError::JsonFormat("each record must be an object".into()))?;
+                for name in &col_names {
+                    let val = obj
+                        .get(name)
+                        .unwrap_or(&serde_json::Value::Null);
+                    columns.get_mut(name).unwrap().push(json_value_to_scalar(val));
+                }
+            }
+
+            let row_count = arr.len() as i64;
+            let mut out = BTreeMap::new();
+            for (name, vals) in columns {
+                out.insert(name, Column::from_values(vals)?);
+            }
+            let index = Index::from_i64((0..row_count).collect());
+            Ok(DataFrame::new(index, out)?)
+        }
+        JsonOrient::Columns => {
+            let obj = parsed
+                .as_object()
+                .ok_or_else(|| IoError::JsonFormat("expected object for columns orient".into()))?;
+
+            let mut out = BTreeMap::new();
+            let mut row_count = 0_i64;
+
+            for (col_name, col_data) in obj {
+                let col_obj = col_data
+                    .as_object()
+                    .ok_or_else(|| IoError::JsonFormat("column data must be {idx: val}".into()))?;
+                let mut values: Vec<(i64, Scalar)> = Vec::with_capacity(col_obj.len());
+                for (idx_str, val) in col_obj {
+                    let idx: i64 = idx_str
+                        .parse()
+                        .map_err(|_| IoError::JsonFormat(format!("non-integer index: {idx_str}")))?;
+                    values.push((idx, json_value_to_scalar(val)));
+                }
+                values.sort_by_key(|(idx, _)| *idx);
+                let scalars: Vec<Scalar> = values.into_iter().map(|(_, v)| v).collect();
+                if scalars.len() as i64 > row_count {
+                    row_count = scalars.len() as i64;
+                }
+                out.insert(col_name.clone(), Column::from_values(scalars)?);
+            }
+
+            let index = Index::from_i64((0..row_count).collect());
+            Ok(DataFrame::new(index, out)?)
+        }
+        JsonOrient::Split => {
+            let obj = parsed
+                .as_object()
+                .ok_or_else(|| IoError::JsonFormat("expected object for split orient".into()))?;
+
+            let col_names: Vec<String> = obj
+                .get("columns")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| IoError::JsonFormat("split orient needs 'columns' array".into()))?
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .collect();
+
+            let data = obj
+                .get("data")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| IoError::JsonFormat("split orient needs 'data' array".into()))?;
+
+            let mut columns: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+            for name in &col_names {
+                columns.insert(name.clone(), Vec::with_capacity(data.len()));
+            }
+
+            for row in data {
+                let arr = row
+                    .as_array()
+                    .ok_or_else(|| IoError::JsonFormat("each data row must be an array".into()))?;
+                for (i, name) in col_names.iter().enumerate() {
+                    let val = arr.get(i).unwrap_or(&serde_json::Value::Null);
+                    columns.get_mut(name).unwrap().push(json_value_to_scalar(val));
+                }
+            }
+
+            let row_count = data.len() as i64;
+            let mut out = BTreeMap::new();
+            for (name, vals) in columns {
+                out.insert(name, Column::from_values(vals)?);
+            }
+            let index = Index::from_i64((0..row_count).collect());
+            Ok(DataFrame::new(index, out)?)
+        }
+    }
+}
+
+pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
+    let headers: Vec<String> = frame.columns().keys().cloned().collect();
+    let row_count = frame.index().len();
+
+    match orient {
+        JsonOrient::Records => {
+            let mut records = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let mut obj = serde_json::Map::new();
+                for name in &headers {
+                    let val = frame
+                        .column(name)
+                        .and_then(|c| c.value(row_idx))
+                        .map(scalar_to_json)
+                        .unwrap_or(serde_json::Value::Null);
+                    obj.insert(name.clone(), val);
+                }
+                records.push(serde_json::Value::Object(obj));
+            }
+            Ok(serde_json::to_string(&records)?)
+        }
+        JsonOrient::Columns => {
+            let mut outer = serde_json::Map::new();
+            for name in &headers {
+                let mut col_obj = serde_json::Map::new();
+                if let Some(col) = frame.column(name) {
+                    for (i, val) in col.values().iter().enumerate() {
+                        col_obj.insert(i.to_string(), scalar_to_json(val));
+                    }
+                }
+                outer.insert(name.clone(), serde_json::Value::Object(col_obj));
+            }
+            Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
+        }
+        JsonOrient::Split => {
+            let col_array: Vec<serde_json::Value> = headers
+                .iter()
+                .map(|h| serde_json::Value::String(h.clone()))
+                .collect();
+
+            let mut data = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name)
+                            .and_then(|c| c.value(row_idx))
+                            .map(scalar_to_json)
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("columns".into(), serde_json::Value::Array(col_array));
+            obj.insert("data".into(), serde_json::Value::Array(data));
+            Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
+        }
+    }
+}
+
+// ── File-based JSON ────────────────────────────────────────────────────
+
+pub fn read_json(path: &Path, orient: JsonOrient) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_json_str(&content, orient)
+}
+
+pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
+    let content = write_json_string(frame, orient)?;
+    std::fs::write(path, content)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -396,5 +755,149 @@ mod tests {
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"
         );
         eprintln!("[TEST] test_csv_golden_output | golden_match=true | PASS");
+    }
+
+    // === bd-2gi.19: IO Complete Contract Tests ===
+
+    use super::{CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str, write_json_string};
+
+    #[test]
+    fn csv_with_custom_delimiter() {
+        let input = "a\tb\tc\n1\t2\t3\n4\t5\t6\n";
+        let opts = CsvReadOptions {
+            delimiter: b'\t',
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse tsv");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_with_na_values() {
+        let input = "a,b\n1,NA\n2,n/a\n3,valid\n";
+        let opts = CsvReadOptions {
+            na_values: vec!["NA".into(), "n/a".into()],
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let b = frame.column("b").unwrap();
+        assert!(b.values()[0].is_missing());
+        assert!(b.values()[1].is_missing());
+        assert_eq!(b.values()[2], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_with_index_col() {
+        let input = "id,val\na,10\nb,20\nc,30\n";
+        let opts = CsvReadOptions {
+            index_col: Some("id".into()),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(
+            frame.index().labels()[0],
+            fp_index::IndexLabel::Utf8("a".into())
+        );
+        assert!(frame.column("id").is_none());
+        assert_eq!(frame.column("val").unwrap().values()[0], Scalar::Int64(10));
+    }
+
+    #[test]
+    fn json_records_read_write_roundtrip() {
+        let input = r#"[{"name":"Alice","age":30},{"name":"Bob","age":25}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("read json records");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("Alice".into())
+        );
+        assert_eq!(frame.column("age").unwrap().values()[1], Scalar::Int64(25));
+
+        let output = write_json_string(&frame, JsonOrient::Records).expect("write");
+        let frame2 = read_json_str(&output, JsonOrient::Records).expect("re-read");
+        assert_eq!(frame2.index().len(), 2);
+    }
+
+    #[test]
+    fn json_columns_read_write_roundtrip() {
+        let input = r#"{"name":{"0":"Alice","1":"Bob"},"age":{"0":30,"1":25}}"#;
+        let frame = read_json_str(input, JsonOrient::Columns).expect("read json columns");
+        assert_eq!(frame.index().len(), 2);
+
+        let output = write_json_string(&frame, JsonOrient::Columns).expect("write");
+        let frame2 = read_json_str(&output, JsonOrient::Columns).expect("re-read");
+        assert_eq!(frame2.index().len(), 2);
+    }
+
+    #[test]
+    fn json_split_read_write_roundtrip() {
+        let input = r#"{"columns":["x","y"],"data":[[1,4],[2,5],[3,6]]}"#;
+        let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("y").unwrap().values()[2], Scalar::Int64(6));
+
+        let output = write_json_string(&frame, JsonOrient::Split).expect("write");
+        let frame2 = read_json_str(&output, JsonOrient::Split).expect("re-read");
+        assert_eq!(frame2.index().len(), 3);
+    }
+
+    #[test]
+    fn json_records_with_nulls() {
+        let input = r#"[{"a":1,"b":null},{"a":null,"b":"hello"}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("parse");
+        assert!(frame.column("a").unwrap().values()[1].is_missing());
+        assert!(frame.column("b").unwrap().values()[0].is_missing());
+    }
+
+    #[test]
+    fn json_records_empty_array() {
+        let input = r#"[]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("parse");
+        assert_eq!(frame.index().len(), 0);
+    }
+
+    #[test]
+    fn json_records_mixed_numeric_coerces() {
+        let input = r#"[{"v":1},{"v":2.5},{"v":true}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("parse");
+        // Int64 + Float64 + Bool all coerce to Float64
+        assert_eq!(frame.column("v").unwrap().values()[0], Scalar::Float64(1.0));
+        assert_eq!(frame.column("v").unwrap().values()[1], Scalar::Float64(2.5));
+        assert_eq!(frame.column("v").unwrap().values()[2], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn json_records_incompatible_types_errors() {
+        let input = r#"[{"v":1},{"v":"text"}]"#;
+        assert!(read_json_str(input, JsonOrient::Records).is_err());
+    }
+
+    #[test]
+    fn file_csv_roundtrip() {
+        let input = "a,b\n1,2\n3,4\n";
+        let frame = read_csv_str(input).expect("parse");
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_roundtrip.csv");
+        super::write_csv(&frame, &path).expect("write file");
+        let frame2 = super::read_csv(&path).expect("read file");
+        assert_eq!(frame2.index().len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn file_json_roundtrip() {
+        let input = r#"[{"x":1},{"x":2}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("parse");
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_roundtrip.json");
+        super::write_json(&frame, &path, JsonOrient::Records).expect("write file");
+        let frame2 = super::read_json(&path, JsonOrient::Records).expect("read file");
+        assert_eq!(frame2.index().len(), 2);
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -9,4 +9,5 @@ fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

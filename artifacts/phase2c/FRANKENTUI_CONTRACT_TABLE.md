@@ -11,16 +11,16 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | Field | Contract |
 |---|---|
 | packet_id | `FRANKENTUI-B` |
-| input_contract | Artifact JSON files (parity reports, gate results, mismatch corpora, RaptorQ sidecars, decode proofs); `drift_history.jsonl` (JSONL line-stream); `EvidenceLedger` (in-memory `Vec<DecisionRecord>`); `ForensicLog` (in-memory event vec); `CiPipelineResult` (gate pipeline); `ConformalGuard` (calibration state); `RuntimePolicy` (mode configuration) |
+| input_contract | Artifact JSON files (parity reports, gate results, mismatch corpora, RaptorQ sidecars, decode proofs, governance gate report); `drift_history.jsonl` (JSONL line-stream); forensic JSONL streams; `EvidenceLedger` (in-memory `Vec<DecisionRecord>`); `ForensicLog` (in-memory event vec); `CiPipelineResult` (gate pipeline); `ConformalGuard` (calibration state); `RuntimePolicy` (mode configuration) |
 | output_contract | Rendered TUI views only (no file mutations); optional clipboard export of replay commands; optional screenshot/text export of dashboard state; all output is ephemeral terminal rendering |
 | error_contract | Missing artifact files degrade individual panels (not global crash); malformed JSON/JSONL lines are skipped with warning count; terminal too small triggers minimum-size gate; clock-skew timestamps displayed as "unknown"; IO errors on artifact directory degrade entire conformance dashboard while other dashboards remain functional |
 | null_contract | `ts_unix_ms = 0` displayed as "unknown" (not "1970-01-01"); uncalibrated conformal guard shows "Uncalibrated (N/2 scores)"; placeholder RaptorQ envelopes (`source_hash = "blake3:placeholder"`) render as "placeholder" status; `hardened_join_row_cap = None` displays as "unlimited"; empty evidence ledger shows "No decisions recorded" |
 | strict_mode_policy | Conformance dashboard highlights strict-mode failures with distinct color; gate evaluation surfaces `strict_failed` counts prominently; policy provenance panel shows `fail_closed_unknown_features = true`; decision cards carry `mode: Strict` badge; all strict-only gate budget violations flagged |
 | hardened_mode_policy | Conformance dashboard surfaces hardened-mode divergence budgets; gate evaluation shows `hardened_failed` counts alongside allowlisted categories; policy provenance panel shows `hardened_join_row_cap` value; decision cards carry `mode: Hardened` badge with repair-permitted indicator |
 | excluded_scope | Artifact file writes (read-only consumer); live conformance run execution; policy modification; async runtime; multi-user or remote access; authentication/authorization |
-| oracle_tests | Planned: FTUI rendering integration tests validating panel content against known artifact fixtures; feature-flag isolation tests (asupersync enabled/disabled); terminal size boundary tests |
+| oracle_tests | Implemented foundation tests in `fp-frankentui` (artifact ingestion, malformed JSONL tolerance, dashboard aggregation, app-state transitions, governance report parsing); planned: full terminal rendering integration tests, feature-flag isolation tests, terminal size boundary tests |
 | performance_sentinels | Render budget: 16ms per frame (60 FPS target); artifact parse: <100ms per file; drift history: line-streaming with <500ms initial load for 10K lines; forensic log: virtual scrolling at >1000 events; mismatch corpus: paginated at >100 entries; evidence terms: capped display at 50 with "and N more" |
-| compatibility_risks | `frankentui` crate does not exist yet (unwritten dependency); feature-flag interaction with `asupersync` requires conditional compilation; version coupling to `fp-conformance` and `fp-runtime` Serialize/Deserialize contracts; terminal backend choice (crossterm/termion/termwiz) unspecified |
+| compatibility_risks | `fp-frankentui` foundation crate exists but interactive terminal backend choice (crossterm/termion/termwiz/ratatui) is still unresolved; feature-flag interaction with `asupersync` requires conditional compilation; version coupling to `fp-conformance` and `fp-runtime` Serialize/Deserialize contracts remains sensitive |
 | raptorq_artifacts | Read-only display of `RaptorQSidecarArtifact` metadata, `DecodeProofArtifact` status, and `RaptorQEnvelope` provenance; no encode/decode operations |
 
 ---
@@ -37,6 +37,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | `artifacts/phase2c/{packet_id}/parity_report.raptorq.json` | `RaptorQSidecarArtifact` | JSON; `serde_json::from_str` | Lazy on-demand |
 | `artifacts/phase2c/{packet_id}/parity_report.decode_proof.json` | `DecodeProofArtifact` | JSON; `serde_json::from_str` | Lazy on-demand |
 | `artifacts/phase2c/drift_history.jsonl` | `Vec<PacketDriftHistoryEntry>` | JSONL; one `serde_json::from_str` per line | Line-streaming; malformed lines skipped |
+| `artifacts/ci/governance_gate_report.json` | governance gate summary (`all_passed`, `violation_count`, timestamp) | JSON; `serde_json::from_str` | Optional read; absent file is non-fatal |
 | `artifacts/schemas/*.schema.json` | JSON Schema | Not parsed by FTUI | Reference only; not consumed at runtime |
 
 **Preconditions:**
@@ -94,7 +95,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | Output | Trigger | Content | Guarantee |
 |---|---|---|---|
 | Clipboard copy | User selects replay command | Verbatim `FailureDigest::replay_command` string | Exact string, no modification |
-| Text export (planned) | User requests dashboard snapshot | Plain-text rendering of current view | Matches `render_plain()` canonical format where applicable |
+| Text export (implemented foundation) | User requests dashboard snapshot | Plain-text rendering of current view | `render_plain()` available for conformance dashboard and galaxy-brain cards |
 | Screenshot (planned) | User requests terminal capture | Terminal buffer contents | Platform-dependent; not guaranteed on all terminals |
 
 **Post-conditions:**

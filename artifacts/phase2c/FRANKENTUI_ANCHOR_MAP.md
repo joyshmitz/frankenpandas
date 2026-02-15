@@ -23,6 +23,9 @@ Subsystem: FRANKENTUI -- terminal user interface for the FrankenPandas operator 
 - `crates/fp-runtime/src/lib.rs` lines 89-121 -- `GalaxyBrainCard` struct and `decision_to_card()` function (the only implemented FTUI-facing surface)
 - `crates/fp-runtime/src/lib.rs` lines 97-105 -- `GalaxyBrainCard::render_plain()` produces a 4-line text rendering
 - `crates/fp-runtime/src/lib.rs` line 601 -- test: `decision_card_is_renderable_for_ftui_consumers()`
+- `crates/fp-frankentui/src/lib.rs` -- new FRANKENTUI foundation crate with read-only artifact ingestion and dashboard/app-state skeleton types
+- `crates/fp-frankentui/src/lib.rs` -- `FtuiDataSource` + `FsFtuiDataSource` for deterministic packet discovery and artifact loading
+- `crates/fp-frankentui/src/lib.rs` -- `ConformanceDashboardSnapshot`, `ForensicLogSnapshot`, `GovernanceGateSnapshot`, and `FtuiAppState` for panel-layer scaffolding
 
 ### Data Sources FTUI Must Consume
 
@@ -77,21 +80,21 @@ Subsystem: FRANKENTUI -- terminal user interface for the FrankenPandas operator 
 
 ### Normal Conditions
 
-1. **Galaxy-brain card rendering (implemented):** `decision_to_card(&DecisionRecord) -> GalaxyBrainCard` produces a 4-field card with: title (`{subject}::{action:?}`), equation (`argmin_a ...`), substitution (posterior + expected losses), intuition (static text). `render_plain()` concatenates these as `[{title}]\n{equation}\n{substitution}\n{intuition}`. This is the sole currently-implemented FTUI surface.
+1. **Galaxy-brain card rendering (implemented):** `decision_to_card(&DecisionRecord) -> GalaxyBrainCard` produces a 4-field card with: title (`{subject}::{action:?}`), equation (`argmin_a ...`), substitution (posterior + expected losses), intuition (static text). `render_plain()` concatenates these as `[{title}]\n{equation}\n{substitution}\n{intuition}`. This remains the canonical runtime decision-card primitive consumed by FTUI.
 
-2. **Packet dashboard cards (planned, N3):** FTUI must render per-packet summary cards showing: gate state (pass/fail with strict/hardened counts), drift trend (from `drift_history.jsonl` entries for the packet), and decode-proof status (Recovered/Failed/NotAttempted from `DecodeProofArtifact`).
+2. **Packet dashboard cards (foundation implemented, N3 rendering pending):** `fp-frankentui` now loads packet parity/gate/decode/mismatch artifacts into `PacketSnapshot` and aggregates packet-level summaries in `ConformanceDashboardSnapshot`. Full interactive TUI cards remain planned.
 
 3. **Drilldown views (planned, N4):** FTUI must provide drill-into views for: mismatch corpus replay (listing `FailureDigest` entries with their replay commands and artifact paths), and evidence ledger traces (listing `DecisionRecord` entries with full Bayesian metrics and evidence terms).
 
-4. **Mode toggle telemetry surfaces (planned, N5):** FTUI must surface strict/hardened mode state with explicit policy provenance: which `RuntimePolicy` is active, whether `fail_closed_unknown_features` is set, what `hardened_join_row_cap` is configured, and how many evidence records exist per mode.
+4. **Mode toggle telemetry surfaces (foundation implemented, N5 rendering pending):** `summarize_decision_dashboard()` now emits strict/hardened record counts plus `RuntimePolicy` provenance (`mode`, `fail_closed_unknown_features`, `hardened_join_row_cap`). Interactive mode toggles remain planned.
 
 5. **CI gate pipeline visualization (planned):** FTUI must render the 9-gate CI pipeline (G1Compile through G8E2e) as an ordered pass/fail status bar with per-gate elapsed time and failure summaries, consuming `CiPipelineResult`.
 
 6. **Conformal guard dashboard (planned):** FTUI must surface `ConformalGuard` status: calibration count, empirical coverage rate, coverage alert state, and recent `ConformalPredictionSet` entries showing quantile threshold vs. current score.
 
-7. **Forensic log event stream (planned):** FTUI must render `ForensicLog` entries as a timestamped event stream, filterable by `ForensicEventKind` variant. The 10 event kinds must be visually distinguished (color-coded or icon-prefixed).
+7. **Forensic log event stream (foundation implemented, rendering planned):** `load_forensic_log()` now parses forensic JSONL with malformed-line tolerance into `ForensicLogSnapshot`. Full event-stream widgets and filtering UX remain planned.
 
-8. **Drift history trend visualization (planned):** FTUI must parse `drift_history.jsonl` and render per-packet pass/fail trend lines over time, with gate state overlay. The `PacketDriftHistoryEntry` fields (fixture_count, passed, failed, strict_failed, hardened_failed, gate_pass, report_hash) define the data model.
+8. **Drift history trend visualization (foundation implemented, rendering planned):** `load_drift_history()` plus `PacketTrendSnapshot` provide drift-history ingestion and packet-level latest-trend extraction. Sparkline/timeline rendering remains planned.
 
 ### Edge Conditions
 
@@ -129,15 +132,10 @@ Subsystem: FRANKENTUI -- terminal user interface for the FrankenPandas operator 
 
 ## Type Inventory
 
-### FTUI Framework Types (to be defined in FRANKENTUI crate)
+### FTUI Framework Types (implemented foundation + planned interactive layer)
 
-- `FtuiApp` -- top-level application state, event loop, and terminal management
-- `FtuiDashboard` -- enum of dashboard views: Conformance, Performance, Forensics, Decision
-- `FtuiWidget` -- trait for renderable dashboard components
-- `FtuiTheme` -- color palette and styling configuration
-- `FtuiEvent` -- enum of user input events (key press, mouse, resize, tick)
-- `FtuiDataSource` -- trait abstracting artifact file reads and live data feeds
-- `FtuiPaginator` -- generic pagination state for large lists (forensic logs, mismatch corpora)
+- Implemented: `FtuiDataSource`, `FsFtuiDataSource`, `ConformanceDashboardSnapshot`, `PacketTrendSnapshot`, `ForensicLogSnapshot`, `GovernanceGateSnapshot`, `DashboardView`, `FtuiAppState`
+- Planned next layer: `FtuiApp` event loop/terminal lifecycle, render widgets, theme primitives, input-event abstractions, paginator/virtual-scroller widgets
 
 ### Consumed Types from fp-runtime
 
@@ -307,9 +305,9 @@ Subsystem: FRANKENTUI -- terminal user interface for the FrankenPandas operator 
 
 ## Hidden Assumptions
 
-1. **The frankentui crate exists and provides a TUI framework.** No code for frankentui has been written or published. The dependency is referenced only in the FrankenSQLite spec as an external crate at `/dp/frankentui`. The FrankenPandas codebase has zero frankentui source code. All FTUI references in FrankenPandas are to planned integration, not implemented functionality.
+1. **`fp-frankentui` now exists but remains a foundation crate, not a full interactive TUI.** FrankenPandas now includes read-only FTUI data loaders and dashboard snapshots in `crates/fp-frankentui`, but terminal backend integration (ratatui/crossterm/termion/termwiz), interactive rendering, and event loop behavior are still open.
 
-2. **GalaxyBrainCard is the only implemented FTUI surface.** The `render_plain()` method produces plain text, not TUI widget markup. The test `decision_card_is_renderable_for_ftui_consumers` validates text content only. No TUI rendering, layout, styling, or interactivity exists.
+2. **Implemented FTUI surfaces are data/snapshot primitives plus plain rendering helpers, not widget-level UI.** `GalaxyBrainCard::render_plain()` and `ConformanceDashboardSnapshot::render_plain()` are text-level interfaces; no full panel layout/styling engine is implemented yet.
 
 3. **All conformance types implement Serialize/Deserialize.** FTUI assumes it can read all artifact files as JSON and deserialize them into the corresponding Rust types. This is true for all types listed in the Type Inventory (verified via `#[derive(Serialize, Deserialize)]` annotations throughout fp-conformance and fp-runtime).
 
@@ -368,3 +366,4 @@ Subsystem: FRANKENTUI -- terminal user interface for the FrankenPandas operator 
 ## Changelog
 
 - **bd-2gi.28.1** (2026-02-14): Initial FRANKENTUI anchor map. Documents the planned TUI operator cockpit for FrankenPandas conformance, performance, and forensics dashboards. Covers legacy anchors (frankentui crate, FrankenSQLite reference, fp-runtime GalaxyBrainCard), behavioral contract (22 conditions across normal/edge/adversarial), type inventory (7 planned FTUI types, 10 consumed fp-runtime types, 24 consumed fp-conformance types), rule ledger (10 numbered rules with sub-items), error ledger (10 error scenarios), hidden assumptions (12 items), and undefined-behavior edges (14 open questions).
+- **bd-2gi.28** (2026-02-15): Anchor-map refresh after landing `fp-frankentui` foundation crate. Updated integration points, behavioral contract status, type inventory, and hidden assumptions to reflect implemented data-source/dashboard/app-state scaffolding while keeping interactive rendering scope explicitly planned.

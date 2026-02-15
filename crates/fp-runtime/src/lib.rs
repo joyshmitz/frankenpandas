@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "asupersync")]
+pub mod asupersync;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeMode {
@@ -552,11 +555,11 @@ impl ConformalGuard {
 
 #[cfg(feature = "asupersync")]
 #[must_use]
-pub fn outcome_to_action<T, E>(outcome: &asupersync::Outcome<T, E>) -> DecisionAction {
+pub fn outcome_to_action<T, E>(outcome: &::asupersync::Outcome<T, E>) -> DecisionAction {
     match outcome {
-        asupersync::Outcome::Ok(_) => DecisionAction::Allow,
-        asupersync::Outcome::Err(_) => DecisionAction::Repair,
-        asupersync::Outcome::Cancelled(_) | asupersync::Outcome::Panicked(_) => {
+        ::asupersync::Outcome::Ok(_) => DecisionAction::Allow,
+        ::asupersync::Outcome::Err(_) => DecisionAction::Repair,
+        ::asupersync::Outcome::Cancelled(_) | ::asupersync::Outcome::Panicked(_) => {
             DecisionAction::Reject
         }
     }
@@ -568,6 +571,226 @@ mod tests {
         ConformalGuard, DecisionAction, EvidenceLedger, RaptorQEnvelope, RuntimeMode,
         RuntimePolicy, decision_to_card,
     };
+    use serde::Serialize;
+
+    const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
+    const REPLAY_PREFIX: &str = "cargo test -p fp-runtime --";
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    struct StructuredTestLog {
+        packet_id: String,
+        case_id: String,
+        mode: RuntimeMode,
+        seed: u64,
+        trace_id: String,
+        assertion_path: String,
+        result: String,
+        replay_cmd: String,
+    }
+
+    fn make_structured_log(
+        case_id: &str,
+        mode: RuntimeMode,
+        seed: u64,
+        assertion_path: &str,
+        result: &str,
+    ) -> StructuredTestLog {
+        StructuredTestLog {
+            packet_id: ASUPERSYNC_PACKET_ID.to_owned(),
+            case_id: case_id.to_owned(),
+            mode,
+            seed,
+            trace_id: format!("{ASUPERSYNC_PACKET_ID}:{case_id}:{seed:016x}"),
+            assertion_path: assertion_path.to_owned(),
+            result: result.to_owned(),
+            replay_cmd: format!("{REPLAY_PREFIX} {case_id} --nocapture"),
+        }
+    }
+
+    fn assert_required_log_fields(log: &serde_json::Value) {
+        for field in [
+            "packet_id",
+            "case_id",
+            "mode",
+            "seed",
+            "trace_id",
+            "assertion_path",
+            "result",
+            "replay_cmd",
+        ] {
+            assert!(
+                log.get(field).is_some(),
+                "structured log missing field: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn asupersync_structured_log_contains_required_fields() {
+        let log = make_structured_log(
+            "asupersync_structured_log_contains_required_fields",
+            RuntimeMode::Strict,
+            42,
+            "ASUPERSYNC-E/log_schema",
+            "pass",
+        );
+        let value = serde_json::to_value(log).expect("serialize log");
+        assert_required_log_fields(&value);
+    }
+
+    #[test]
+    fn asupersync_structured_log_is_deterministic_for_same_inputs() {
+        let left = make_structured_log(
+            "asupersync_structured_log_is_deterministic_for_same_inputs",
+            RuntimeMode::Hardened,
+            1337,
+            "ASUPERSYNC-E/log_determinism",
+            "pass",
+        );
+        let right = make_structured_log(
+            "asupersync_structured_log_is_deterministic_for_same_inputs",
+            RuntimeMode::Hardened,
+            1337,
+            "ASUPERSYNC-E/log_determinism",
+            "pass",
+        );
+        assert_eq!(left, right);
+        let left_json = serde_json::to_string(&left).expect("left json");
+        let right_json = serde_json::to_string(&right).expect("right json");
+        assert_eq!(left_json, right_json);
+    }
+
+    #[test]
+    fn asupersync_property_strict_unknown_feature_always_rejects() {
+        let policy = RuntimePolicy::strict();
+        let mut ledger = EvidenceLedger::new();
+        let case_id = "asupersync_property_strict_unknown_feature_always_rejects";
+
+        for seed in 0_u64..128 {
+            let action = policy.decide_unknown_feature(
+                format!("unknown_subject_{seed}"),
+                format!("unknown_detail_{:08x}", seed.wrapping_mul(37)),
+                &mut ledger,
+            );
+            let log = make_structured_log(
+                case_id,
+                RuntimeMode::Strict,
+                seed,
+                "ASUPERSYNC-E/strict_unknown_feature_reject",
+                if action == DecisionAction::Reject {
+                    "pass"
+                } else {
+                    "fail"
+                },
+            );
+            let log_json = serde_json::to_value(log).expect("serialize log");
+            assert_required_log_fields(&log_json);
+            assert_eq!(
+                action,
+                DecisionAction::Reject,
+                "strict mode must reject unknown feature; log={}",
+                serde_json::to_string(&log_json).expect("json")
+            );
+        }
+
+        assert_eq!(ledger.records().len(), 128);
+    }
+
+    #[test]
+    fn asupersync_property_hardened_over_cap_forces_repair() {
+        let cap = 1024_usize;
+        let policy = RuntimePolicy::hardened(Some(cap));
+        let mut ledger = EvidenceLedger::new();
+        let case_id = "asupersync_property_hardened_over_cap_forces_repair";
+
+        for seed in 0_u64..256 {
+            let rows = if seed % 2 == 0 {
+                cap + 1 + (seed as usize % 10_000)
+            } else {
+                cap.saturating_sub(seed as usize % cap)
+            };
+            let action = policy.decide_join_admission(rows, &mut ledger);
+            let log = make_structured_log(
+                case_id,
+                RuntimeMode::Hardened,
+                seed,
+                "ASUPERSYNC-E/hardened_join_cap_boundary",
+                if rows > cap && action == DecisionAction::Repair {
+                    "pass"
+                } else {
+                    "check"
+                },
+            );
+            let log_json = serde_json::to_value(log).expect("serialize log");
+            assert_required_log_fields(&log_json);
+            if rows > cap {
+                assert_eq!(
+                    action,
+                    DecisionAction::Repair,
+                    "rows over cap must force repair; rows={rows}; log={}",
+                    serde_json::to_string(&log_json).expect("json")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn asupersync_property_decision_metrics_are_finite_and_bounded() {
+        let policy = RuntimePolicy::hardened(Some(2048));
+        let mut ledger = EvidenceLedger::new();
+        let case_id = "asupersync_property_decision_metrics_are_finite_and_bounded";
+
+        for seed in 0_u64..128 {
+            let rows = 1 + (seed as usize * 97 % 500_000);
+            policy.decide_join_admission(rows, &mut ledger);
+            let record = ledger.records().last().expect("record");
+            let metrics = &record.metrics;
+            let posterior = metrics.posterior_compatible;
+            let bounded = (0.0..=1.0).contains(&posterior);
+            let finite = metrics
+                .bayes_factor_compatible_over_incompatible
+                .is_finite()
+                && metrics.expected_loss_allow.is_finite()
+                && metrics.expected_loss_reject.is_finite()
+                && metrics.expected_loss_repair.is_finite();
+
+            let log = make_structured_log(
+                case_id,
+                RuntimeMode::Hardened,
+                seed,
+                "ASUPERSYNC-E/decision_metrics_finite",
+                if bounded && finite { "pass" } else { "fail" },
+            );
+            let log_json = serde_json::to_value(log).expect("serialize log");
+            assert_required_log_fields(&log_json);
+            assert!(bounded, "posterior out of range; log={log_json}");
+            assert!(finite, "non-finite metrics; log={log_json}");
+        }
+    }
+
+    #[test]
+    fn asupersync_adversarial_extreme_join_estimate_remains_repair_and_loggable() {
+        let policy = RuntimePolicy::hardened(Some(8));
+        let mut ledger = EvidenceLedger::new();
+        let action = policy.decide_join_admission(usize::MAX, &mut ledger);
+        assert_eq!(action, DecisionAction::Repair);
+        let record = ledger.records().last().expect("record");
+        assert_eq!(record.mode, RuntimeMode::Hardened);
+        assert!(
+            record.issue.detail.contains("estimated_rows="),
+            "issue detail should include estimated_rows"
+        );
+
+        let log = make_structured_log(
+            "asupersync_adversarial_extreme_join_estimate_remains_repair_and_loggable",
+            RuntimeMode::Hardened,
+            u64::MAX,
+            "ASUPERSYNC-E/adversarial_extreme_rows",
+            "pass",
+        );
+        let log_json = serde_json::to_value(log).expect("serialize log");
+        assert_required_log_fields(&log_json);
+    }
 
     #[test]
     fn strict_mode_fails_closed_for_unknown_features() {

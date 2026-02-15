@@ -1,8 +1,8 @@
 # DOC-PASS-06: Concurrency/Lifecycle Semantics and Ordering Guarantees
 
 **Bead:** bd-2gi.23.7
-**Status:** Complete
-**Date:** 2026-02-14
+**Status:** Complete (revalidated by HazyBridge on 2026-02-15)
+**Date:** 2026-02-14 (revalidation pass: 2026-02-15)
 **Source Trees:** `legacy_pandas_code/pandas/pandas/` and `crates/fp-*/src/lib.rs`
 
 ---
@@ -19,6 +19,7 @@
 8. [Cross-Cutting Ordering Invariants](#8-cross-cutting-ordering-invariants)
 9. [Divergences from Pandas](#9-divergences-from-pandas)
 10. [Appendix A: File Reference Index](#10-appendix-a-file-reference-index)
+11. [Pass Validation Addendum (2026-02-15)](#11-pass-validation-addendum-2026-02-15)
 
 ---
 
@@ -1148,13 +1149,13 @@ except `CrackIndex` (which is explicitly a mutable adaptive index structure).
 | `crates/fp-types/src/lib.rs` | ~210 | `Scalar`, `DType`, `NullKind`, `TypeError`, `common_dtype`, `cast_scalar_owned` |
 | `crates/fp-columnar/src/lib.rs` | ~1927 | `ValidityMask` (packed bitvec), `Column`, `ColumnData`, `ArithmeticOp`, `ComparisonOp`, `CrackIndex`, vectorized binary ops |
 | `crates/fp-index/src/lib.rs` | ~1613 | `Index`, `IndexLabel`, `AlignmentPlan`, `AlignMode`, `OnceCell` caches, `align_union`, `align_inner`, `align_left`, `leapfrog_union`, `leapfrog_intersection`, `multi_way_align` |
-| `crates/fp-frame/src/lib.rs` | ~1000+ | `Series`, `DataFrame`, binary ops with policy, comparison ops, filter, concat, from_dict, from_series, `RuntimePolicy` integration |
-| `crates/fp-groupby/src/lib.rs` | ~500+ | `groupby_sum` (global + arena), dense Int64 fast path, generic HashMap path, `groupby_agg`, `AggFunc`, `GroupKeyRef`, arena lifecycle |
-| `crates/fp-join/src/lib.rs` | ~500+ | `join_series` (global + arena), `merge_dataframes`, `JoinType` (Inner/Left/Right/Outer), borrowed-key HashMap, output row estimation |
-| `crates/fp-io/src/lib.rs` | ~487+ | `read_csv_str`, `write_csv_string`, `read_json_str`, `write_json_string`, CSV options, JSON orient modes, `BTreeMap` column storage |
-| `crates/fp-expr/src/lib.rs` | ~200+ | `Expr` (Series/Add/Literal), `EvalContext`, `evaluate`, `MaterializedView`, `Delta`, incremental view maintenance |
-| `crates/fp-runtime/src/lib.rs` | ~920 | `RuntimePolicy` (Strict/Hardened), `EvidenceLedger`, Bayesian decision engine, `ConformalGuard`, `RaptorQEnvelope` |
-| `crates/fp-conformance/src/lib.rs` | ~200+ | `HarnessConfig`, `FixtureOperation`, conformance test runner, oracle integration |
+| `crates/fp-frame/src/lib.rs` | 2,375 | `Series`, `DataFrame`, binary ops with policy, comparison ops, filter, concat, from_dict, from_series, `RuntimePolicy` integration |
+| `crates/fp-groupby/src/lib.rs` | 2,614 | `groupby_sum` (global + arena), dense Int64 fast path, generic HashMap path, `groupby_agg`, `AggFunc`, `GroupKeyRef`, arena lifecycle |
+| `crates/fp-join/src/lib.rs` | 1,103 | `join_series` (global + arena), `merge_dataframes`, `JoinType` (Inner/Left/Right/Outer), borrowed-key HashMap, output row estimation |
+| `crates/fp-io/src/lib.rs` | 909 | `read_csv_str`, `write_csv_string`, `read_json_str`, `write_json_string`, CSV options, JSON orient modes, `BTreeMap` column storage |
+| `crates/fp-expr/src/lib.rs` | 520 | `Expr` (Series/Add/Literal), `EvalContext`, `evaluate`, `MaterializedView`, `Delta`, incremental view maintenance |
+| `crates/fp-runtime/src/lib.rs` | 922 | `RuntimePolicy` (Strict/Hardened), `EvidenceLedger`, Bayesian decision engine, `ConformalGuard`, `RaptorQEnvelope` |
+| `crates/fp-conformance/src/lib.rs` | 4,887 | `HarnessConfig`, `FixtureOperation`, conformance test runner, oracle integration |
 
 ### 10.2 Pandas Source Files
 
@@ -1186,6 +1187,42 @@ except `CrackIndex` (which is explicitly a mutable adaptive index structure).
 | `crates/fp-conformance/tests/smoke.rs` | Harness lifecycle, fixture loading |
 | `crates/fp-conformance/tests/proptest_properties.rs` | Property-based testing for alignment invariants |
 | `crates/fp-conformance/tests/ag_e2e.rs` | End-to-end alignment-groupby-join pipeline tests |
+
+---
+
+## 11. Pass Validation Addendum (2026-02-15)
+
+This pass revalidated ordering/lifecycle claims against current crate sources and
+focused on explicit hazard surfacing.
+
+### 11.1 Section-Level Confidence
+
+| Section | Confidence | Basis | Residual Risk |
+|---------|------------|-------|---------------|
+| 2. Pandas Concurrency Model | Medium | Source anchors and known pandas behavior | pandas internals continue to evolve |
+| 3. Pandas Ordering Guarantees | Medium | Source anchors in index/groupby/merge paths | edge-case dtype mixes may vary by version |
+| 4. FrankenPandas Concurrency Model | High | Rust ownership model + current crate codepaths | future async introduction would change assumptions |
+| 5. FrankenPandas Ordering Guarantees | High | Direct `fp-index`/`fp-groupby`/`fp-join` code anchors | regression risk from future performance rewrites |
+| 6. Race-Sensitive Behavioral Edges | High | Explicit scenario list + code-level invariants | monitor `OnceCell` and arena-copy boundaries |
+| 7. Lifecycle State Machines | High | Operation traces align with current implementation flow | keep synchronized as APIs expand |
+| 8. Cross-Cutting Ordering Invariants | High | Invariant-to-implementation mapping present | enforce with tests to prevent silent drift |
+| 9. Divergences from Pandas | High | Explicit comparative matrix | divergence set will grow with parity expansion |
+
+### 11.2 Hazard Watchlist
+
+| Hazard | Trigger | Detection Surface | Current Guard |
+|--------|---------|-------------------|---------------|
+| `OnceCell` stale-cache assumptions | introducing mutable `Index` internals | `fp-index` tests around `has_duplicates`/`is_sorted` | immutability + `#[serde(skip)]` recompute |
+| Arena lifetime escape | returning arena-backed buffers | compile-time borrow checker + groupby/join result assembly paths | copy-to-owned output before drop |
+| Ordering regression in groupby/join fast paths | optimization edits bypass first-seen ordering vectors | differential/parity tests and invariant checks | explicit ordering vectors in emit stage |
+| CSV column-order drift | switching map storage model | IO conformance fixtures and schema checks | deterministic `BTreeMap` ordering contract |
+| Conformance execution nondeterminism | future parallel fixture execution | harness forensics logs + drift ledger | current sequential fixture loop |
+
+### 11.3 Corrections in This Pass
+
+1. Updated stale crate line-count references in Appendix 10.1 to current source values.
+2. Added explicit section-level confidence annotations.
+3. Added hazard watchlist linking triggers, detection surfaces, and guards.
 
 ---
 

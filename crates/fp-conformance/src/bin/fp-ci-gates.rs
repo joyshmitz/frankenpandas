@@ -97,7 +97,12 @@ fn write_json_report(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_string_pretty(report)?)?;
+    let artifact = serde_json::json!({
+        "bead_id": "bd-2gi.10",
+        "artifact_path": path.display().to_string(),
+        "report": report,
+    });
+    fs::write(path, serde_json::to_string_pretty(&artifact)?)?;
     println!("wrote ci_gate_forensics={}", path.display());
     Ok(())
 }

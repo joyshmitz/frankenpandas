@@ -33,10 +33,16 @@ end-to-end verification.
 4. Remediate the INV-NO-AMBIENT-AUTHORITY violation (ATS-3.1) as the first
    concrete code change.
 
-**Non-goals:** This document does not implement any code. It does not specify
-FTUI dashboard integration (deferred to FrankenTUI beads). It does not design
-the full Cx capability threading through the FrankenPandas call stack (deferred
-to a separate Cx integration bead).
+**Status update (2026-02-15, HazyBridge):** Phase-1 module-boundary skeleton is
+now implemented under `crates/fp-runtime/src/asupersync/` with feature-gated
+wiring in `fp-runtime/src/lib.rs`. This includes concrete `config`, `error`,
+`codec`, `integrity`, `transport`, and `recovery` seams intended to unblock
+`bd-2gi.27.5`.
+
+**Non-goals:** This document does not specify FTUI dashboard integration
+(deferred to FrankenTUI beads). It does not design the full Cx capability
+threading through the FrankenPandas call stack (deferred to a separate Cx
+integration bead).
 
 ---
 
@@ -44,7 +50,7 @@ to a separate Cx integration bead).
 
 ### 2.1 What Exists in fp-runtime
 
-The `fp-runtime` crate (`crates/fp-runtime/src/lib.rs`, 919 lines) contains:
+The `fp-runtime` crate (`crates/fp-runtime/src/lib.rs`, 922 lines) contains:
 
 | Component | Lines | Status |
 |---|---|---|

@@ -65,3 +65,15 @@ jobs:
           name: ci-gate-forensics
           path: artifacts/ci/gate_forensics.json
           if-no-files-found: warn
+
+      - name: Total-parity governance gate
+        if: always()
+        run: ./scripts/governance_gate_check.sh
+
+      - name: Upload governance gate artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-gate-report
+          path: artifacts/ci/governance_gate_report.json
+          if-no-files-found: warn

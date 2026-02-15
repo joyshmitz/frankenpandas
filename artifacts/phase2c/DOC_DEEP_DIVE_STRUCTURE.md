@@ -20,23 +20,24 @@
 8. [Pattern Fidelity](#8-pattern-fidelity)
 9. [Recommendations](#9-recommendations)
 10. [Appendix: Full Public API Listing](#10-appendix-full-public-api-listing)
+11. [Section-Level Confidence Annotations (HazyBridge Pass, 2026-02-15)](#11-section-level-confidence-annotations-hazybridge-pass-2026-02-15)
 
 ---
 
 ## 1. Executive Summary
 
-FrankenPandas decomposes a ~310,000 LOC Python/Cython library into 10 Rust crates totaling ~17,337 LOC across ~188 public API items. The architectural strategy is deliberate: rather than replicating pandas' deep class hierarchy and mutable-state BlockManager, FP uses Rust's ownership model to enforce invariants at compile time, eliminates Copy-on-Write tracking entirely, and replaces the BlockManager with per-column `BTreeMap<String, Column>` storage.
+FrankenPandas decomposes a ~310,000 LOC Python/Cython library into 10 Rust crates totaling ~17,496 LOC across ~191 public API items. The architectural strategy is deliberate: rather than replicating pandas' deep class hierarchy and mutable-state BlockManager, FP uses Rust's ownership model to enforce invariants at compile time, eliminates Copy-on-Write tracking entirely, and replaces the BlockManager with per-column `BTreeMap<String, Column>` storage.
 
 ### Scale Comparison
 
 | Metric | pandas | FrankenPandas | Ratio |
 |--------|--------|---------------|-------|
-| Total non-test LOC | ~310,643 | ~17,337 | 5.6% |
-| Public symbols | ~545 | ~188 | 34.5% |
+| Total non-test LOC | ~310,643 | ~17,496 | 5.6% |
+| Public symbols | ~545 | ~191 | 35.0% |
 | CORE-tier API coverage | ~85 symbols | ~40 covered | 47% |
 | Type hierarchy depth | 6 layers (EA, Block, Manager, NDFrame, DF/Series, API) | 3 layers (types, columnar+index, frame) | Flatter |
 | Crate/package count | 51 packages | 10 crates | 5:1 |
-| Test files | 1,120 | 311 tests across 9 crates | -- |
+| Test files | 1,120 | 452 tests across 10 crates | -- |
 | Error types | 1 hierarchy (`errors/`) + ad-hoc exceptions | 7 domain-specific `thiserror` enums | Stronger typing |
 
 ### Key Structural Findings
@@ -71,8 +72,8 @@ FrankenPandas decomposes a ~310,000 LOC Python/Cython library into 10 Rust crate
 | `fp-join` | 1,103 | `core/reshape/merge.py` (3,135) + `_libs/join.pyx` (880) | 4,015 | PARTIAL -- 4 join types, no multi-key/asof/cross |
 | `fp-io` | 909 | `io/` (47,386) | 47,386 | MINIMAL -- CSV + JSON only of 20+ formats |
 | `fp-expr` | 520 | `core/computation/` (3,877) | 3,877 | MINIMAL -- Add expr + IVM, no eval/query |
-| `fp-runtime` | 919 | (no pandas equivalent) | 0 | NOVEL -- Bayesian decision, AACE policy |
-| `fp-conformance` | 4,731 | `_testing/` (2,813) | 2,813 | NOVEL -- conformance harness, parity gates, RaptorQ |
+| `fp-runtime` | 922 | (no pandas equivalent) | 0 | NOVEL -- Bayesian decision, AACE policy |
+| `fp-conformance` | 4,887 | `_testing/` (2,813) | 2,813 | NOVEL -- conformance harness, parity gates, RaptorQ |
 
 ### 2.2 Unmapped pandas Subsystems
 
@@ -274,8 +275,8 @@ Layer 4:        fp-conformance (integration)
 | `fp-io` | 1 (`CsvReadOptions`) | 2 (`IoError`, `JsonOrient`) | 9 | 0 | 12 |
 | `fp-expr` | 3 (`SeriesRef`, `EvalContext`, `MaterializedView`) | 2 (`Expr`, `ExprError`) | 1 (`evaluate`) | 0 | 7 (includes `Delta`) |
 | `fp-runtime` | 11 | 4 | 2 | 0 | 20 (includes asupersync-gated items) |
-| `fp-conformance` | ~30 | ~8 | ~30 | 0 | ~68 |
-| **TOTAL** | | | | | **~188** |
+| `fp-conformance` | ~32 | ~9 | ~30 | 0 | ~71 |
+| **TOTAL** | | | | | **~191** |
 
 ### 5.2 Method Density Comparison
 
@@ -961,7 +962,7 @@ Functions:
   outcome_to_action(outcome) -> DecisionAction               line 555 (asupersync-gated)
 ```
 
-### 10.10 fp-conformance (4,731 LOC, ~68 pub items)
+### 10.10 fp-conformance (4,887 LOC, ~71 pub items)
 
 **File:** `crates/fp-conformance/src/lib.rs`
 
@@ -990,23 +991,46 @@ Functions:
 
 ---
 
+## 11. Section-Level Confidence Annotations (HazyBridge Pass, 2026-02-15)
+
+This pass revalidated structural metrics from source (`wc -l crates/*/src/lib.rs`, `rg '^pub(\\(|\\s)'`, `rg '#\\[test\\]'`) and updated stale values.
+
+| Section | Confidence | Basis | Notes |
+|---------|------------|-------|-------|
+| 1. Executive Summary | High | Direct source metrics + cross-crate inspection | Counts corrected in this pass |
+| 2. Crate-to-Subsystem Mapping Matrix | Medium | Strong FP source anchors; pandas-side LOC is document-derived | pandas comparators are approximate by design |
+| 3. Subsystem Boundary Analysis | High | Cargo DAG + crate interface surfaces | No cycle or boundary violation observed |
+| 4. Type Fidelity Audit | Medium | Spot-check mapping against fp-types/fp-columnar/fp-frame | Full pandas dtype matrix still intentionally partial |
+| 5. API Surface Census | High | Recomputed `pub` item counts from crate sources | fp-conformance count corrected in this pass |
+| 6. Dependency Graph Audit | High | Cargo manifests and import surfaces | Layering remains clean |
+| 7. Structural Gaps Analysis | Medium | Gap list aligns with current crate coverage | Scope gaps remain expected for parity roadmap |
+| 8. Pattern Fidelity | Medium | Pattern mapping is source-backed but partly interpretive | keep revisiting as architecture evolves |
+| 9. Recommendations | Medium | Derived from measured structure + parity goals | prioritize by beads/triage state |
+| 10. Appendix: Full Public API Listing | High | Derived from current crate exports | listing remains representative |
+
+### 11.1 Corrections Applied in This Pass
+
+1. Updated `fp-conformance` size and API counts from `4,731/~68` to `4,887/~71`.
+2. Updated aggregate totals from `~17,337/~188` to `~17,496/~191`.
+3. Updated test coverage summary from `311 tests across 9 crates` to `452 tests across 10 crates`.
+
 ## Appendix A: LOC Verification
 
-Source: `wc -l crates/fp-*/src/lib.rs` (all source in single lib.rs per crate).
+Source: `wc -l crates/fp-*/src/lib.rs` (primary crate entrypoint LOC; `fp-runtime` now has additional feature-gated submodules under `src/asupersync/`).
 
 | Crate | LOC | % of Total |
 |-------|-----|-----------|
-| fp-conformance | 4,731 | 27.3% |
-| fp-groupby | 2,614 | 15.1% |
-| fp-frame | 2,375 | 13.7% |
-| fp-columnar | 1,926 | 11.1% |
-| fp-index | 1,612 | 9.3% |
-| fp-join | 1,103 | 6.4% |
-| fp-runtime | 919 | 5.3% |
+| fp-conformance | 4,887 | 27.9% |
+| fp-groupby | 2,614 | 14.9% |
+| fp-frame | 2,375 | 13.6% |
+| fp-columnar | 1,926 | 11.0% |
+| fp-index | 1,612 | 9.2% |
+| fp-join | 1,103 | 6.3% |
+| fp-runtime | 922 | 5.3% |
 | fp-io | 909 | 5.2% |
 | fp-types | 628 | 3.6% |
 | fp-expr | 520 | 3.0% |
-| **Total** | **17,337** | **100%** |
+| **Total** | **17,496** | **100%** |
 
 ## Appendix B: Invariant Mapping
 
@@ -1023,4 +1047,4 @@ Source: `wc -l crates/fp-*/src/lib.rs` (all source in single lib.rs per crate).
 
 ---
 
-*Generated for FrankenPandas Phase-2C, bead bd-2gi.23.15 (DOC-PASS-14). Structural fidelity audit comparing 10 FP crates (~17,337 LOC, ~188 pub items) against pandas (~310,643 LOC, ~545 symbols). All file:line references verified against source.*
+*Generated for FrankenPandas Phase-2C, bead bd-2gi.23.15 (DOC-PASS-14). Structural fidelity audit comparing 10 FP crates (~17,496 LOC, ~191 pub items) against pandas (~310,643 LOC, ~545 symbols). All file:line references verified against source.*

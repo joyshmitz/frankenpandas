@@ -3,6 +3,10 @@ name = "fp-conformance"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+asupersync = ["fp-runtime/asupersync"]
+
 [dependencies]
 fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }

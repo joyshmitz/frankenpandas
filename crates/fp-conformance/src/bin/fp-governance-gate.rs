@@ -38,7 +38,7 @@ const NARROWING_PHRASES: [&str; 7] = [
     "narrow scope",
 ];
 
-const NEGATION_HINTS: [&str; 11] = [
+const NEGATION_HINTS: [&str; 12] = [
     "no ",
     "not ",
     "never ",

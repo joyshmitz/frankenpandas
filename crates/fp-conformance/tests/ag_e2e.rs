@@ -7,6 +7,10 @@
 //! across the full FrankenPandas pipeline.
 
 use fp_columnar::Column;
+use fp_conformance::{
+    E2eConfig, ForensicEventKind, HarnessConfig, NoopHooks, OracleMode, SuiteOptions,
+    build_failure_forensics, run_e2e_suite,
+};
 use fp_frame::{DataFrame, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
@@ -606,4 +610,67 @@ fn e2e_cross_optimization_no_interference() {
     let csv = fp_io::write_csv_string(&df).expect("csv");
     let df2 = fp_io::read_csv_str(&csv).expect("re-read");
     assert_eq!(df2.index().len(), n);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6: ASUPERSYNC-style replay/forensics bundle integrity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_scenario6_asupersync_replay_bundle_integrity() {
+    let config = E2eConfig {
+        harness: HarnessConfig::default_paths(),
+        options: SuiteOptions {
+            packet_filter: Some("FP-P2C-001".to_owned()),
+            oracle_mode: OracleMode::FixtureExpected,
+        },
+        write_artifacts: false,
+        enforce_gates: false,
+        append_drift_history: false,
+        forensic_log_path: None,
+    };
+
+    let mut hooks = NoopHooks;
+    let report = run_e2e_suite(&config, &mut hooks).expect("e2e");
+
+    let mut saw_start = false;
+    let mut saw_end = false;
+    for event in &report.forensic_log.events {
+        match &event.event {
+            ForensicEventKind::CaseStart {
+                seed,
+                assertion_path,
+                replay_cmd,
+                ..
+            } => {
+                saw_start = true;
+                assert!(*seed > 0);
+                assert!(assertion_path.starts_with("ASUPERSYNC-G/"));
+                assert!(replay_cmd.contains("cargo test -p fp-conformance --"));
+            }
+            ForensicEventKind::CaseEnd {
+                seed,
+                assertion_path,
+                result,
+                replay_cmd,
+                ..
+            } => {
+                saw_end = true;
+                assert!(*seed > 0);
+                assert!(assertion_path.starts_with("ASUPERSYNC-G/"));
+                assert!(result == "pass" || result == "fail");
+                assert!(replay_cmd.contains("cargo test -p fp-conformance --"));
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_start, "expected case_start forensic events");
+    assert!(saw_end, "expected case_end forensic events");
+
+    let forensics = build_failure_forensics(&report);
+    assert!(
+        forensics.is_clean(),
+        "ASUPERSYNC scenario should be clean in fixture-expected path"
+    );
 }

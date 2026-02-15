@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ pub struct CompatibilityIssue {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceTerm {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub log_likelihood_if_compatible: f64,
     pub log_likelihood_if_incompatible: f64,
 }
@@ -68,6 +69,57 @@ impl Default for LossMatrix {
         }
     }
 }
+
+const UNKNOWN_FEATURE_PRIOR: f64 = 0.25;
+const JOIN_ADMISSION_PRIOR: f64 = 0.6;
+
+const UNKNOWN_FEATURE_EVIDENCE: [EvidenceTerm; 2] = [
+    EvidenceTerm {
+        name: Cow::Borrowed("compatibility_allowlist_miss"),
+        log_likelihood_if_compatible: -3.5,
+        log_likelihood_if_incompatible: -0.2,
+    },
+    EvidenceTerm {
+        name: Cow::Borrowed("unknown_protocol_field"),
+        log_likelihood_if_compatible: -2.0,
+        log_likelihood_if_incompatible: -0.1,
+    },
+];
+
+const JOIN_ADMISSION_EVIDENCE_WITHIN_CAP: [EvidenceTerm; 2] = [
+    EvidenceTerm {
+        name: Cow::Borrowed("estimator_overflow_risk"),
+        log_likelihood_if_compatible: -0.3,
+        log_likelihood_if_incompatible: -1.2,
+    },
+    EvidenceTerm {
+        name: Cow::Borrowed("memory_budget_signal"),
+        log_likelihood_if_compatible: -0.4,
+        log_likelihood_if_incompatible: -1.5,
+    },
+];
+
+const JOIN_ADMISSION_EVIDENCE_OVER_CAP: [EvidenceTerm; 2] = [
+    EvidenceTerm {
+        name: Cow::Borrowed("estimator_overflow_risk"),
+        log_likelihood_if_compatible: -2.8,
+        log_likelihood_if_incompatible: -0.1,
+    },
+    EvidenceTerm {
+        name: Cow::Borrowed("memory_budget_signal"),
+        log_likelihood_if_compatible: -2.2,
+        log_likelihood_if_incompatible: -0.2,
+    },
+];
+
+const JOIN_ADMISSION_LOSS: LossMatrix = LossMatrix {
+    allow_if_compatible: 0.0,
+    allow_if_incompatible: 130.0,
+    reject_if_compatible: 5.0,
+    reject_if_incompatible: 0.5,
+    repair_if_compatible: 1.5,
+    repair_if_incompatible: 3.0,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionMetrics {
@@ -184,20 +236,13 @@ impl RuntimePolicy {
             detail: detail.into(),
         };
 
-        let evidence = vec![
-            EvidenceTerm {
-                name: "compatibility_allowlist_miss".to_owned(),
-                log_likelihood_if_compatible: -3.5,
-                log_likelihood_if_incompatible: -0.2,
-            },
-            EvidenceTerm {
-                name: "unknown_protocol_field".to_owned(),
-                log_likelihood_if_compatible: -2.0,
-                log_likelihood_if_incompatible: -0.1,
-            },
-        ];
-
-        let mut record = decide(self.mode, issue, 0.25, LossMatrix::default(), evidence);
+        let mut record = decide(
+            self.mode,
+            issue,
+            UNKNOWN_FEATURE_PRIOR,
+            LossMatrix::default(),
+            UNKNOWN_FEATURE_EVIDENCE.to_vec(),
+        );
         if self.fail_closed_unknown_features {
             record.action = DecisionAction::Reject;
         }
@@ -218,29 +263,18 @@ impl RuntimePolicy {
         };
 
         let cap = self.hardened_join_row_cap.unwrap_or(usize::MAX);
-        let evidence = vec![
-            EvidenceTerm {
-                name: "estimator_overflow_risk".to_owned(),
-                log_likelihood_if_compatible: if estimated_rows <= cap { -0.3 } else { -2.8 },
-                log_likelihood_if_incompatible: if estimated_rows <= cap { -1.2 } else { -0.1 },
-            },
-            EvidenceTerm {
-                name: "memory_budget_signal".to_owned(),
-                log_likelihood_if_compatible: if estimated_rows <= cap { -0.4 } else { -2.2 },
-                log_likelihood_if_incompatible: if estimated_rows <= cap { -1.5 } else { -0.2 },
-            },
-        ];
-
-        let loss = LossMatrix {
-            allow_if_compatible: 0.0,
-            allow_if_incompatible: 130.0,
-            reject_if_compatible: 5.0,
-            reject_if_incompatible: 0.5,
-            repair_if_compatible: 1.5,
-            repair_if_incompatible: 3.0,
+        let evidence = if estimated_rows <= cap {
+            JOIN_ADMISSION_EVIDENCE_WITHIN_CAP.to_vec()
+        } else {
+            JOIN_ADMISSION_EVIDENCE_OVER_CAP.to_vec()
         };
-
-        let mut record = decide(self.mode, issue, 0.6, loss, evidence);
+        let mut record = decide(
+            self.mode,
+            issue,
+            JOIN_ADMISSION_PRIOR,
+            JOIN_ADMISSION_LOSS,
+            evidence,
+        );
 
         if matches!(self.mode, RuntimeMode::Hardened) && estimated_rows > cap {
             record.action = DecisionAction::Repair;
@@ -572,6 +606,9 @@ mod tests {
         RuntimePolicy, decision_to_card,
     };
     use serde::Serialize;
+    use std::borrow::Cow;
+    use std::hint::black_box;
+    use std::time::Instant;
 
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
     const REPLAY_PREFIX: &str = "cargo test -p fp-runtime --";
@@ -623,6 +660,156 @@ mod tests {
                 "structured log missing field: {field}"
             );
         }
+    }
+
+    fn decide_join_admission_baseline(
+        policy: &RuntimePolicy,
+        estimated_rows: usize,
+        ledger: &mut EvidenceLedger,
+    ) -> DecisionAction {
+        let issue = super::CompatibilityIssue {
+            kind: super::IssueKind::JoinCardinality,
+            subject: "join_estimator".to_owned(),
+            detail: format!("estimated_rows={estimated_rows}"),
+        };
+        let cap = policy.hardened_join_row_cap.unwrap_or(usize::MAX);
+        let evidence = vec![
+            super::EvidenceTerm {
+                name: Cow::Owned("estimator_overflow_risk".to_owned()),
+                log_likelihood_if_compatible: if estimated_rows <= cap { -0.3 } else { -2.8 },
+                log_likelihood_if_incompatible: if estimated_rows <= cap { -1.2 } else { -0.1 },
+            },
+            super::EvidenceTerm {
+                name: Cow::Owned("memory_budget_signal".to_owned()),
+                log_likelihood_if_compatible: if estimated_rows <= cap { -0.4 } else { -2.2 },
+                log_likelihood_if_incompatible: if estimated_rows <= cap { -1.5 } else { -0.2 },
+            },
+        ];
+        let loss = super::LossMatrix {
+            allow_if_compatible: 0.0,
+            allow_if_incompatible: 130.0,
+            reject_if_compatible: 5.0,
+            reject_if_incompatible: 0.5,
+            repair_if_compatible: 1.5,
+            repair_if_incompatible: 3.0,
+        };
+        let mut record = super::decide(policy.mode, issue, 0.6, loss, evidence);
+        if matches!(policy.mode, RuntimeMode::Hardened) && estimated_rows > cap {
+            record.action = DecisionAction::Repair;
+        }
+        let action = record.action;
+        ledger.push(record);
+        action
+    }
+
+    fn assert_join_record_equivalent(
+        optimized: &super::DecisionRecord,
+        baseline: &super::DecisionRecord,
+    ) {
+        assert_eq!(optimized.mode, baseline.mode);
+        assert_eq!(optimized.action, baseline.action);
+        assert_eq!(optimized.issue.kind, baseline.issue.kind);
+        assert_eq!(optimized.issue.subject, baseline.issue.subject);
+        assert_eq!(optimized.issue.detail, baseline.issue.detail);
+        assert_eq!(optimized.prior_compatible, baseline.prior_compatible);
+        assert_eq!(optimized.metrics, baseline.metrics);
+        assert_eq!(optimized.evidence.len(), baseline.evidence.len());
+        for (left, right) in optimized.evidence.iter().zip(&baseline.evidence) {
+            assert_eq!(left.name.as_ref(), right.name.as_ref());
+            assert_eq!(
+                left.log_likelihood_if_compatible,
+                right.log_likelihood_if_compatible
+            );
+            assert_eq!(
+                left.log_likelihood_if_incompatible,
+                right.log_likelihood_if_incompatible
+            );
+        }
+    }
+
+    fn quantile_from_sorted(samples: &[u128], pct: usize) -> u128 {
+        let len = samples.len();
+        assert!(len > 0);
+        let idx = (len.saturating_sub(1) * pct) / 100;
+        samples[idx]
+    }
+
+    fn latency_quantiles(mut samples_ns: Vec<u128>) -> (u128, u128, u128) {
+        samples_ns.sort_unstable();
+        (
+            quantile_from_sorted(&samples_ns, 50),
+            quantile_from_sorted(&samples_ns, 95),
+            quantile_from_sorted(&samples_ns, 99),
+        )
+    }
+
+    #[test]
+    fn asupersync_join_admission_optimized_path_is_isomorphic_to_baseline() {
+        let policy = RuntimePolicy::hardened(Some(1024));
+        let mut optimized = EvidenceLedger::new();
+        let mut baseline = EvidenceLedger::new();
+
+        for seed in 0_usize..256 {
+            let rows = if seed % 2 == 0 {
+                512 + seed
+            } else {
+                4096 + seed
+            };
+            let optimized_action = policy.decide_join_admission(rows, &mut optimized);
+            let baseline_action = decide_join_admission_baseline(&policy, rows, &mut baseline);
+            assert_eq!(optimized_action, baseline_action);
+
+            let optimized_record = optimized.records().last().expect("optimized record");
+            let baseline_record = baseline.records().last().expect("baseline record");
+            assert_join_record_equivalent(optimized_record, baseline_record);
+        }
+    }
+
+    #[test]
+    fn asupersync_join_admission_profile_snapshot_reports_allocation_delta() {
+        const ITERATIONS: usize = 256;
+        let policy = RuntimePolicy::hardened(Some(2048));
+        let mut optimized = EvidenceLedger::new();
+        let mut baseline = EvidenceLedger::new();
+        let mut optimized_ns = Vec::with_capacity(ITERATIONS);
+        let mut baseline_ns = Vec::with_capacity(ITERATIONS);
+
+        for seed in 0_usize..ITERATIONS {
+            let rows = if seed % 3 == 0 {
+                1024 + seed
+            } else {
+                8192 + seed
+            };
+
+            let baseline_start = Instant::now();
+            let baseline_action = decide_join_admission_baseline(&policy, rows, &mut baseline);
+            baseline_ns.push(baseline_start.elapsed().as_nanos());
+            black_box(baseline_action);
+
+            let optimized_start = Instant::now();
+            let optimized_action = policy.decide_join_admission(rows, &mut optimized);
+            optimized_ns.push(optimized_start.elapsed().as_nanos());
+            black_box(optimized_action);
+        }
+
+        for (optimized_record, baseline_record) in
+            optimized.records().iter().zip(baseline.records())
+        {
+            assert_join_record_equivalent(optimized_record, baseline_record);
+        }
+
+        let (baseline_p50_ns, baseline_p95_ns, baseline_p99_ns) = latency_quantiles(baseline_ns);
+        let (optimized_p50_ns, optimized_p95_ns, optimized_p99_ns) =
+            latency_quantiles(optimized_ns);
+        let baseline_name_bytes_per_call =
+            "estimator_overflow_risk".len() + "memory_budget_signal".len();
+        let baseline_name_bytes_total = baseline_name_bytes_per_call * ITERATIONS;
+        let optimized_name_bytes_total = 0_usize;
+        assert!(baseline_name_bytes_total > optimized_name_bytes_total);
+
+        println!(
+            "asupersync_join_admission_profile_snapshot baseline_ns[p50={baseline_p50_ns},p95={baseline_p95_ns},p99={baseline_p99_ns}] optimized_ns[p50={optimized_p50_ns},p95={optimized_p95_ns},p99={optimized_p99_ns}] name_alloc_bytes_baseline={baseline_name_bytes_total} name_alloc_bytes_optimized={optimized_name_bytes_total}"
+        );
     }
 
     #[test]

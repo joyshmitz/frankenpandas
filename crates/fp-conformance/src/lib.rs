@@ -1,17 +1,22 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fp_frame::{FrameError, Series, concat_series};
 use fp_groupby::{GroupByOptions, groupby_count, groupby_mean, groupby_sum};
 use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_io::{read_csv_str, write_csv_string};
 use fp_join::{JoinType, join_series};
+#[cfg(feature = "asupersync")]
+use fp_runtime::asupersync::{
+    ArtifactCodec, ArtifactPayload, Fnv1aVerifier, IntegrityVerifier, PassthroughCodec,
+    RuntimeAsupersyncConfig,
+};
 use fp_runtime::{
     DecodeProof, EvidenceLedger, RaptorQEnvelope, RaptorQMetadata, RuntimeMode, RuntimePolicy,
     ScrubStatus,
@@ -254,6 +259,14 @@ pub struct CaseResult {
     pub operation: FixtureOperation,
     pub status: CaseStatus,
     pub mismatch: Option<String>,
+    #[serde(default)]
+    pub mismatch_class: Option<String>,
+    #[serde(default)]
+    pub replay_key: String,
+    #[serde(default)]
+    pub trace_id: String,
+    #[serde(default)]
+    pub elapsed_us: u64,
     pub evidence_records: usize,
 }
 
@@ -292,6 +305,8 @@ pub enum ComparisonCategory {
 pub struct DriftRecord {
     pub category: ComparisonCategory,
     pub level: DriftLevel,
+    #[serde(default)]
+    pub mismatch_class: String,
     pub location: String,
     pub message: String,
 }
@@ -303,10 +318,110 @@ pub struct DifferentialResult {
     pub packet_id: String,
     pub operation: FixtureOperation,
     pub mode: RuntimeMode,
+    #[serde(default)]
+    pub replay_key: String,
+    #[serde(default)]
+    pub trace_id: String,
     pub oracle_source: FixtureOracleSource,
     pub status: CaseStatus,
     pub drift_records: Vec<DriftRecord>,
     pub evidence_records: usize,
+}
+
+fn runtime_mode_slug(mode: RuntimeMode) -> &'static str {
+    match mode {
+        RuntimeMode::Strict => "strict",
+        RuntimeMode::Hardened => "hardened",
+    }
+}
+
+fn comparison_category_slug(category: ComparisonCategory) -> &'static str {
+    match category {
+        ComparisonCategory::Value => "value",
+        ComparisonCategory::Type => "type",
+        ComparisonCategory::Shape => "shape",
+        ComparisonCategory::Index => "index",
+        ComparisonCategory::Nullness => "nullness",
+    }
+}
+
+fn drift_level_slug(level: DriftLevel) -> &'static str {
+    match level {
+        DriftLevel::Critical => "critical",
+        DriftLevel::NonCritical => "non_critical",
+        DriftLevel::Informational => "informational",
+    }
+}
+
+fn mismatch_class_for(category: ComparisonCategory, level: DriftLevel) -> String {
+    format!(
+        "{}_{}",
+        comparison_category_slug(category),
+        drift_level_slug(level)
+    )
+}
+
+fn deterministic_trace_id(packet_id: &str, case_id: &str, mode: RuntimeMode) -> String {
+    format!("{packet_id}:{case_id}:{}", runtime_mode_slug(mode))
+}
+
+fn deterministic_replay_key(packet_id: &str, case_id: &str, mode: RuntimeMode) -> String {
+    format!("{packet_id}/{case_id}/{}", runtime_mode_slug(mode))
+}
+
+fn deterministic_scenario_id(suite: &str, packet_id: &str) -> String {
+    format!("{suite}:{packet_id}")
+}
+
+fn deterministic_step_id(case_id: &str) -> String {
+    format!("case:{case_id}")
+}
+
+fn deterministic_seed(packet_id: &str, case_id: &str, mode: RuntimeMode) -> u64 {
+    let key = format!("{packet_id}:{case_id}:{}", runtime_mode_slug(mode));
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn assertion_path_for_case(packet_id: &str, case_id: &str) -> String {
+    format!("ASUPERSYNC-G/{packet_id}/{case_id}")
+}
+
+fn replay_cmd_for_case(case_id: &str) -> String {
+    format!("cargo test -p fp-conformance -- {case_id} --nocapture")
+}
+
+fn result_label_for_status(status: &CaseStatus) -> &'static str {
+    match status {
+        CaseStatus::Pass => "pass",
+        CaseStatus::Fail => "fail",
+    }
+}
+
+fn decision_action_for(status: &CaseStatus) -> &'static str {
+    match status {
+        CaseStatus::Pass => "allow",
+        CaseStatus::Fail => "repair",
+    }
+}
+
+fn make_drift_record(
+    category: ComparisonCategory,
+    level: DriftLevel,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> DriftRecord {
+    DriftRecord {
+        category,
+        level,
+        mismatch_class: mismatch_class_for(category, level),
+        location: location.into(),
+        message: message.into(),
+    }
 }
 
 impl DifferentialResult {
@@ -336,6 +451,15 @@ impl DifferentialResult {
             operation: self.operation,
             status: self.status.clone(),
             mismatch,
+            mismatch_class: self
+                .drift_records
+                .iter()
+                .find(|drift| matches!(drift.level, DriftLevel::Critical))
+                .or_else(|| self.drift_records.first())
+                .map(|drift| drift.mismatch_class.clone()),
+            replay_key: self.replay_key.clone(),
+            trace_id: self.trace_id.clone(),
+            elapsed_us: 0,
             evidence_records: self.evidence_records,
         }
     }
@@ -424,6 +548,17 @@ pub struct RaptorQSidecarArtifact {
     pub repair_packets_per_block: u32,
     pub packet_records: Vec<RaptorQPacketRecord>,
     pub scrub_report: RaptorQScrubReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asupersync_codec: Option<AsupersyncCodecEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsupersyncCodecEvidence {
+    pub codec: String,
+    pub verifier: String,
+    pub encoded_bytes: usize,
+    pub repair_symbols: u32,
+    pub integrity_verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -994,6 +1129,7 @@ pub fn generate_raptorq_sidecar(
     } else {
         "failed".to_owned()
     };
+    let asupersync_codec = generate_asupersync_codec_evidence(artifact_id, report_bytes)?;
 
     let envelope = RaptorQEnvelope {
         artifact_id: artifact_id.to_owned(),
@@ -1024,6 +1160,7 @@ pub fn generate_raptorq_sidecar(
         repair_packets_per_block,
         packet_records,
         scrub_report,
+        asupersync_codec,
     })
 }
 
@@ -1100,6 +1237,7 @@ pub fn verify_raptorq_sidecar(
     sidecar: &RaptorQSidecarArtifact,
     report_bytes: &[u8],
 ) -> Result<RaptorQScrubReport, HarnessError> {
+    verify_asupersync_codec_evidence(sidecar, report_bytes)?;
     let expected = sidecar
         .envelope
         .source_hash
@@ -1142,6 +1280,97 @@ fn verify_raptorq_sidecar_internal(
         invalid_packets,
         source_hash_verified,
     })
+}
+
+#[cfg(feature = "asupersync")]
+fn generate_asupersync_codec_evidence(
+    artifact_id: &str,
+    report_bytes: &[u8],
+) -> Result<Option<AsupersyncCodecEvidence>, HarnessError> {
+    let config = RuntimeAsupersyncConfig::default();
+    let codec = PassthroughCodec;
+    let verifier = Fnv1aVerifier;
+    let expected_digest = fnv1a_hex(report_bytes);
+    let payload = ArtifactPayload {
+        artifact_id: artifact_id.to_owned(),
+        bytes: report_bytes.to_vec(),
+        expected_digest: Some(expected_digest.clone()),
+    };
+
+    let encoded = codec
+        .encode(&payload, &config)
+        .map_err(|err| HarnessError::RaptorQ(format!("asupersync encode failed: {err}")))?;
+    let decoded = codec
+        .decode(&encoded, &config)
+        .map_err(|err| HarnessError::RaptorQ(format!("asupersync decode failed: {err}")))?;
+    if decoded.bytes != report_bytes {
+        return Err(HarnessError::RaptorQ(
+            "asupersync codec round-trip diverged from source payload".to_owned(),
+        ));
+    }
+    verifier
+        .verify(artifact_id, &decoded.bytes, &expected_digest)
+        .map_err(|err| HarnessError::RaptorQ(format!("asupersync verify failed: {err}")))?;
+
+    Ok(Some(AsupersyncCodecEvidence {
+        codec: "passthrough".to_owned(),
+        verifier: "fnv1a64".to_owned(),
+        encoded_bytes: encoded.encoded_bytes.len(),
+        repair_symbols: encoded.repair_symbols,
+        integrity_verified: true,
+    }))
+}
+
+#[cfg(not(feature = "asupersync"))]
+fn generate_asupersync_codec_evidence(
+    _artifact_id: &str,
+    _report_bytes: &[u8],
+) -> Result<Option<AsupersyncCodecEvidence>, HarnessError> {
+    Ok(None)
+}
+
+#[cfg(feature = "asupersync")]
+fn verify_asupersync_codec_evidence(
+    sidecar: &RaptorQSidecarArtifact,
+    report_bytes: &[u8],
+) -> Result<(), HarnessError> {
+    let Some(evidence) = &sidecar.asupersync_codec else {
+        return Ok(());
+    };
+    if !evidence.integrity_verified {
+        return Err(HarnessError::RaptorQ(
+            "asupersync integrity evidence was not marked verified".to_owned(),
+        ));
+    }
+
+    let verifier = Fnv1aVerifier;
+    let expected_digest = fnv1a_hex(report_bytes);
+    verifier
+        .verify(
+            &sidecar.envelope.artifact_id,
+            report_bytes,
+            &expected_digest,
+        )
+        .map_err(|err| HarnessError::RaptorQ(format!("asupersync verify failed: {err}")))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "asupersync"))]
+fn verify_asupersync_codec_evidence(
+    _sidecar: &RaptorQSidecarArtifact,
+    _report_bytes: &[u8],
+) -> Result<(), HarnessError> {
+    Ok(())
+}
+
+#[cfg(feature = "asupersync")]
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn packet_record(packet: EncodingPacket, is_source: bool) -> RaptorQPacketRecord {
@@ -1325,6 +1554,46 @@ pub fn verify_packet_sidecar_integrity(
             "{packet_id}: decode proof invalid (status={}, proofs={})",
             proof.status,
             proof.decode_proofs.len()
+        ));
+        return result;
+    }
+
+    let sidecar_hashes: BTreeSet<&str> = sidecar
+        .envelope
+        .decode_proofs
+        .iter()
+        .map(|entry| entry.proof_hash.as_str())
+        .collect();
+    let artifact_hashes: BTreeSet<&str> = proof
+        .decode_proofs
+        .iter()
+        .map(|entry| entry.proof_hash.as_str())
+        .collect();
+
+    if sidecar_hashes.is_empty() {
+        result.decode_proof_valid = false;
+        result.errors.push(format!(
+            "{packet_id}: sidecar envelope has no decode proofs to pair against artifact (Rule T5)"
+        ));
+    }
+
+    if artifact_hashes
+        .iter()
+        .any(|hash| !hash.starts_with("sha256:"))
+    {
+        result.decode_proof_valid = false;
+        result.errors.push(format!(
+            "{packet_id}: decode proof hash missing sha256: prefix"
+        ));
+    }
+
+    if !artifact_hashes
+        .iter()
+        .all(|hash| sidecar_hashes.contains(hash))
+    {
+        result.decode_proof_valid = false;
+        result.errors.push(format!(
+            "{packet_id}: decode proof hash mismatch between sidecar envelope and decode proof artifact"
         ));
     }
 
@@ -1928,8 +2197,13 @@ fn run_fixture(
     };
 
     let mut ledger = EvidenceLedger::new();
+    let started = Instant::now();
     let mismatch =
         run_fixture_operation(config, fixture, &policy, &mut ledger, options.oracle_mode).err();
+    let elapsed_us = (started.elapsed().as_micros() as u64).max(1);
+    let replay_key = deterministic_replay_key(&fixture.packet_id, &fixture.case_id, fixture.mode);
+    let trace_id = deterministic_trace_id(&fixture.packet_id, &fixture.case_id, fixture.mode);
+    let mismatch_class = mismatch.as_ref().map(|_| "execution_critical".to_owned());
 
     Ok(CaseResult {
         packet_id: fixture.packet_id.clone(),
@@ -1942,6 +2216,10 @@ fn run_fixture(
             CaseStatus::Fail
         },
         mismatch,
+        mismatch_class,
+        replay_key,
+        trace_id,
+        elapsed_us,
         evidence_records: ledger.records().len(),
     })
 }
@@ -2699,12 +2977,12 @@ fn run_differential_fixture(
         options.oracle_mode,
     ) {
         Ok(drifts) => drifts,
-        Err(err) => vec![DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: "execution".to_owned(),
-            message: err,
-        }],
+        Err(err) => vec![make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            "execution",
+            err,
+        )],
     };
 
     let has_critical = drift_records
@@ -2716,6 +2994,8 @@ fn run_differential_fixture(
         packet_id: fixture.packet_id.clone(),
         operation: fixture.operation,
         mode: fixture.mode,
+        replay_key: deterministic_replay_key(&fixture.packet_id, &fixture.case_id, fixture.mode),
+        trace_id: deterministic_trace_id(&fixture.packet_id, &fixture.case_id, fixture.mode),
         oracle_source,
         status: if has_critical {
             CaseStatus::Fail
@@ -2961,38 +3241,38 @@ fn diff_scalar(actual: &Scalar, expected: &Scalar, name: &str) -> Vec<DriftRecor
     if actual.semantic_eq(expected) {
         Vec::new()
     } else {
-        vec![DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: format!("{name}.scalar"),
-            message: format!("scalar mismatch: actual={actual:?}, expected={expected:?}"),
-        }]
+        vec![make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            format!("{name}.scalar"),
+            format!("scalar mismatch: actual={actual:?}, expected={expected:?}"),
+        )]
     }
 }
 
 fn diff_values(actual: &[Scalar], expected: &[Scalar], name: &str) -> Vec<DriftRecord> {
     let mut drifts = Vec::new();
     if actual.len() != expected.len() {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Shape,
-            level: DriftLevel::Critical,
-            location: format!("{name}.len"),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Shape,
+            DriftLevel::Critical,
+            format!("{name}.len"),
+            format!(
                 "length mismatch: actual={}, expected={}",
                 actual.len(),
                 expected.len()
             ),
-        });
+        ));
         return drifts;
     }
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
         if !a.semantic_eq(e) {
-            drifts.push(DriftRecord {
-                category: ComparisonCategory::Value,
-                level: DriftLevel::Critical,
-                location: format!("{name}[{i}]"),
-                message: format!("value mismatch: actual={a:?}, expected={e:?}"),
-            });
+            drifts.push(make_drift_record(
+                ComparisonCategory::Value,
+                DriftLevel::Critical,
+                format!("{name}[{i}]"),
+                format!("value mismatch: actual={a:?}, expected={e:?}"),
+            ));
         }
     }
     drifts
@@ -3002,12 +3282,12 @@ fn diff_string(actual: &str, expected: &str, name: &str) -> Vec<DriftRecord> {
     if actual == expected {
         Vec::new()
     } else {
-        vec![DriftRecord {
-            category: ComparisonCategory::Type,
-            level: DriftLevel::Critical,
-            location: format!("{name}.value"),
-            message: format!("string mismatch: actual={actual:?}, expected={expected:?}"),
-        }]
+        vec![make_drift_record(
+            ComparisonCategory::Type,
+            DriftLevel::Critical,
+            format!("{name}.value"),
+            format!("string mismatch: actual={actual:?}, expected={expected:?}"),
+        )]
     }
 }
 
@@ -3015,29 +3295,29 @@ fn diff_series(actual: &Series, expected: &FixtureExpectedSeries) -> Vec<DriftRe
     let mut drifts = Vec::new();
 
     if actual.index().labels() != expected.index {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Index,
-            level: DriftLevel::Critical,
-            location: "series.index".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Index,
+            DriftLevel::Critical,
+            "series.index",
+            format!(
                 "index mismatch: actual={:?}, expected={:?}",
                 actual.index().labels(),
                 expected.index
             ),
-        });
+        ));
     }
 
     if actual.values().len() != expected.values.len() {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Shape,
-            level: DriftLevel::Critical,
-            location: "series.values.len".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Shape,
+            DriftLevel::Critical,
+            "series.values.len",
+            format!(
                 "length mismatch: actual={}, expected={}",
                 actual.values().len(),
                 expected.values.len()
             ),
-        });
+        ));
         return drifts;
     }
 
@@ -3054,29 +3334,29 @@ fn diff_join(actual: &fp_join::JoinedSeries, expected: &FixtureExpectedJoin) -> 
     let mut drifts = Vec::new();
 
     if actual.index.labels() != expected.index {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Index,
-            level: DriftLevel::Critical,
-            location: "join.index".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Index,
+            DriftLevel::Critical,
+            "join.index",
+            format!(
                 "index mismatch: actual={:?}, expected={:?}",
                 actual.index.labels(),
                 expected.index
             ),
-        });
+        ));
     }
 
     if actual.left_values.values().len() != expected.left_values.len() {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Shape,
-            level: DriftLevel::Critical,
-            location: "join.left_values.len".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Shape,
+            DriftLevel::Critical,
+            "join.left_values.len",
+            format!(
                 "left length mismatch: actual={}, expected={}",
                 actual.left_values.values().len(),
                 expected.left_values.len()
             ),
-        });
+        ));
     } else {
         diff_value_vectors(
             actual.left_values.values(),
@@ -3087,16 +3367,16 @@ fn diff_join(actual: &fp_join::JoinedSeries, expected: &FixtureExpectedJoin) -> 
     }
 
     if actual.right_values.values().len() != expected.right_values.len() {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Shape,
-            level: DriftLevel::Critical,
-            location: "join.right_values.len".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Shape,
+            DriftLevel::Critical,
+            "join.right_values.len",
+            format!(
                 "right length mismatch: actual={}, expected={}",
                 actual.right_values.values().len(),
                 expected.right_values.len()
             ),
-        });
+        ));
     } else {
         diff_value_vectors(
             actual.right_values.values(),
@@ -3113,40 +3393,40 @@ fn diff_alignment(actual: &AlignmentPlan, expected: &FixtureExpectedAlignment) -
     let mut drifts = Vec::new();
 
     if actual.union_index.labels() != expected.union_index {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Index,
-            level: DriftLevel::Critical,
-            location: "alignment.union_index".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Index,
+            DriftLevel::Critical,
+            "alignment.union_index",
+            format!(
                 "union_index mismatch: actual={:?}, expected={:?}",
                 actual.union_index.labels(),
                 expected.union_index
             ),
-        });
+        ));
     }
 
     if actual.left_positions != expected.left_positions {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: "alignment.left_positions".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            "alignment.left_positions",
+            format!(
                 "left_positions mismatch: actual={:?}, expected={:?}",
                 actual.left_positions, expected.left_positions
             ),
-        });
+        ));
     }
 
     if actual.right_positions != expected.right_positions {
-        drifts.push(DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: "alignment.right_positions".to_owned(),
-            message: format!(
+        drifts.push(make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            "alignment.right_positions",
+            format!(
                 "right_positions mismatch: actual={:?}, expected={:?}",
                 actual.right_positions, expected.right_positions
             ),
-        });
+        ));
     }
 
     drifts
@@ -3156,12 +3436,12 @@ fn diff_bool(actual: bool, expected: bool, name: &str) -> Vec<DriftRecord> {
     if actual == expected {
         Vec::new()
     } else {
-        vec![DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: name.to_owned(),
-            message: format!("boolean mismatch: actual={actual}, expected={expected}"),
-        }]
+        vec![make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            name,
+            format!("boolean mismatch: actual={actual}, expected={expected}"),
+        )]
     }
 }
 
@@ -3169,12 +3449,12 @@ fn diff_positions(actual: &[Option<usize>], expected: &[Option<usize>]) -> Vec<D
     if actual == expected {
         Vec::new()
     } else {
-        vec![DriftRecord {
-            category: ComparisonCategory::Value,
-            level: DriftLevel::Critical,
-            location: "first_positions".to_owned(),
-            message: format!("positions mismatch: actual={actual:?}, expected={expected:?}"),
-        }]
+        vec![make_drift_record(
+            ComparisonCategory::Value,
+            DriftLevel::Critical,
+            "first_positions",
+            format!("positions mismatch: actual={actual:?}, expected={expected:?}"),
+        )]
     }
 }
 
@@ -3189,20 +3469,20 @@ fn diff_value_vectors(
         if !equal {
             let location = format!("{prefix}[{idx}]");
             if a.is_missing() != e.is_missing() {
-                drifts.push(DriftRecord {
-                    category: ComparisonCategory::Nullness,
-                    level: DriftLevel::Critical,
+                drifts.push(make_drift_record(
+                    ComparisonCategory::Nullness,
+                    DriftLevel::Critical,
                     location,
-                    message: format!("nullness mismatch: actual={a:?}, expected={e:?}"),
-                });
+                    format!("nullness mismatch: actual={a:?}, expected={e:?}"),
+                ));
             } else {
                 let level = classify_value_drift(a, e);
-                drifts.push(DriftRecord {
-                    category: ComparisonCategory::Value,
+                drifts.push(make_drift_record(
+                    ComparisonCategory::Value,
                     level,
                     location,
-                    message: format!("value mismatch: actual={a:?}, expected={e:?}"),
-                });
+                    format!("value mismatch: actual={a:?}, expected={e:?}"),
+                ));
             }
         }
     }
@@ -3348,14 +3628,30 @@ pub enum ForensicEventKind {
         gate_pass: bool,
     },
     CaseStart {
+        scenario_id: String,
         packet_id: String,
         case_id: String,
+        trace_id: String,
+        step_id: String,
+        seed: u64,
+        assertion_path: String,
+        replay_cmd: String,
         operation: FixtureOperation,
         mode: RuntimeMode,
     },
     CaseEnd {
+        scenario_id: String,
         packet_id: String,
         case_id: String,
+        trace_id: String,
+        step_id: String,
+        seed: u64,
+        assertion_path: String,
+        result: String,
+        replay_cmd: String,
+        decision_action: String,
+        replay_key: String,
+        mismatch_class: Option<String>,
         status: CaseStatus,
         evidence_records: usize,
         elapsed_us: u64,
@@ -3524,6 +3820,7 @@ pub fn run_e2e_suite(
             .packet_id
             .clone()
             .unwrap_or_else(|| "unknown".to_owned());
+        let scenario_id = deterministic_scenario_id(&suite_name, &packet_id);
 
         forensic.record(ForensicEventKind::PacketStart {
             packet_id: packet_id.clone(),
@@ -3532,12 +3829,61 @@ pub fn run_e2e_suite(
 
         // Emit per-case events from the report results
         for case_result in &report.results {
-            forensic.record(ForensicEventKind::CaseEnd {
+            let trace_id = if case_result.trace_id.is_empty() {
+                deterministic_trace_id(
+                    &case_result.packet_id,
+                    &case_result.case_id,
+                    case_result.mode,
+                )
+            } else {
+                case_result.trace_id.clone()
+            };
+            let replay_key = if case_result.replay_key.is_empty() {
+                deterministic_replay_key(
+                    &case_result.packet_id,
+                    &case_result.case_id,
+                    case_result.mode,
+                )
+            } else {
+                case_result.replay_key.clone()
+            };
+            let step_id = deterministic_step_id(&case_result.case_id);
+            let seed = deterministic_seed(
+                &case_result.packet_id,
+                &case_result.case_id,
+                case_result.mode,
+            );
+            let assertion_path =
+                assertion_path_for_case(&case_result.packet_id, &case_result.case_id);
+            let replay_cmd = replay_cmd_for_case(&case_result.case_id);
+            forensic.record(ForensicEventKind::CaseStart {
+                scenario_id: scenario_id.clone(),
                 packet_id: case_result.packet_id.clone(),
                 case_id: case_result.case_id.clone(),
+                trace_id: trace_id.clone(),
+                step_id: step_id.clone(),
+                seed,
+                assertion_path: assertion_path.clone(),
+                replay_cmd: replay_cmd.clone(),
+                operation: case_result.operation,
+                mode: case_result.mode,
+            });
+            forensic.record(ForensicEventKind::CaseEnd {
+                scenario_id: scenario_id.clone(),
+                packet_id: case_result.packet_id.clone(),
+                case_id: case_result.case_id.clone(),
+                trace_id,
+                step_id,
+                seed,
+                assertion_path,
+                result: result_label_for_status(&case_result.status).to_owned(),
+                replay_cmd,
+                decision_action: decision_action_for(&case_result.status).to_owned(),
+                replay_key,
+                mismatch_class: case_result.mismatch_class.clone(),
                 status: case_result.status.clone(),
                 evidence_records: case_result.evidence_records,
-                elapsed_us: 0, // not available in retrospective mode
+                elapsed_us: case_result.elapsed_us.max(1),
             });
             hooks.after_case(case_result);
         }
@@ -3700,7 +4046,10 @@ pub struct FailureDigest {
     pub case_id: String,
     pub operation: FixtureOperation,
     pub mode: RuntimeMode,
+    pub mismatch_class: Option<String>,
     pub mismatch_summary: String,
+    pub replay_key: String,
+    pub trace_id: String,
     pub replay_command: String,
     pub artifact_path: Option<String>,
 }
@@ -3715,6 +4064,11 @@ impl std::fmt::Display for FailureDigest {
             op = self.operation,
             mode = self.mode,
         )?;
+        if let Some(ref mismatch_class) = self.mismatch_class {
+            writeln!(f, "  Class:    {mismatch_class}")?;
+        }
+        writeln!(f, "  ReplayKey: {}", self.replay_key)?;
+        writeln!(f, "  Trace:    {}", self.trace_id)?;
         writeln!(f, "  Mismatch: {}", self.mismatch_summary)?;
         writeln!(f, "  Replay:   {}", self.replay_command)?;
         if let Some(ref path) = self.artifact_path {
@@ -3798,10 +4152,7 @@ pub fn build_failure_forensics(e2e: &E2eReport) -> FailureForensicsReport {
                     .take(200)
                     .collect();
 
-                let replay_command = format!(
-                    "cargo test -p fp-conformance -- {} --nocapture",
-                    result.case_id
-                );
+                let replay_command = replay_cmd_for_case(&result.case_id);
 
                 let artifact_path = e2e
                     .artifacts_written
@@ -3814,7 +4165,18 @@ pub fn build_failure_forensics(e2e: &E2eReport) -> FailureForensicsReport {
                     case_id: result.case_id.clone(),
                     operation: result.operation,
                     mode: result.mode,
+                    mismatch_class: result.mismatch_class.clone(),
                     mismatch_summary,
+                    replay_key: if result.replay_key.is_empty() {
+                        deterministic_replay_key(&result.packet_id, &result.case_id, result.mode)
+                    } else {
+                        result.replay_key.clone()
+                    },
+                    trace_id: if result.trace_id.is_empty() {
+                        deterministic_trace_id(&result.packet_id, &result.case_id, result.mode)
+                    } else {
+                        result.trace_id.clone()
+                    },
                     replay_command,
                     artifact_path,
                 });
@@ -4100,6 +4462,8 @@ mod tests {
             packet_id: "FP-P2C-001".to_owned(),
             operation: FixtureOperation::SeriesAdd,
             mode: RuntimeMode::Strict,
+            replay_key: "FP-P2C-001/test/strict".to_owned(),
+            trace_id: "FP-P2C-001:test:strict".to_owned(),
             oracle_source: FixtureOracleSource::Fixture,
             status: CaseStatus::Pass,
             drift_records: Vec::new(),
@@ -4108,6 +4472,8 @@ mod tests {
         let case = diff.to_case_result();
         assert_eq!(case.status, CaseStatus::Pass);
         assert!(case.mismatch.is_none());
+        assert_eq!(case.replay_key, "FP-P2C-001/test/strict");
+        assert_eq!(case.trace_id, "FP-P2C-001:test:strict");
     }
 
     #[test]
@@ -4117,18 +4483,22 @@ mod tests {
             packet_id: "FP-P2C-001".to_owned(),
             operation: FixtureOperation::SeriesAdd,
             mode: RuntimeMode::Strict,
+            replay_key: "FP-P2C-001/test/strict".to_owned(),
+            trace_id: "FP-P2C-001:test:strict".to_owned(),
             oracle_source: FixtureOracleSource::Fixture,
             status: CaseStatus::Fail,
             drift_records: vec![
                 DriftRecord {
                     category: ComparisonCategory::Value,
                     level: DriftLevel::Critical,
+                    mismatch_class: "value_critical".to_owned(),
                     location: "series.values[0]".to_owned(),
                     message: "value mismatch".to_owned(),
                 },
                 DriftRecord {
                     category: ComparisonCategory::Index,
                     level: DriftLevel::NonCritical,
+                    mismatch_class: "index_non_critical".to_owned(),
                     location: "series.index".to_owned(),
                     message: "order divergence".to_owned(),
                 },
@@ -4151,24 +4521,29 @@ mod tests {
             packet_id: "FP-P2C-001".to_owned(),
             operation: FixtureOperation::SeriesAdd,
             mode: RuntimeMode::Strict,
+            replay_key: "FP-P2C-001/test/strict".to_owned(),
+            trace_id: "FP-P2C-001:test:strict".to_owned(),
             oracle_source: FixtureOracleSource::Fixture,
             status: CaseStatus::Fail,
             drift_records: vec![
                 DriftRecord {
                     category: ComparisonCategory::Value,
                     level: DriftLevel::Critical,
+                    mismatch_class: "value_critical".to_owned(),
                     location: "test[0]".to_owned(),
                     message: "mismatch".to_owned(),
                 },
                 DriftRecord {
                     category: ComparisonCategory::Index,
                     level: DriftLevel::NonCritical,
+                    mismatch_class: "index_non_critical".to_owned(),
                     location: "test.index".to_owned(),
                     message: "order".to_owned(),
                 },
                 DriftRecord {
                     category: ComparisonCategory::Nullness,
                     level: DriftLevel::Informational,
+                    mismatch_class: "nullness_informational".to_owned(),
                     location: "test[1]".to_owned(),
                     message: "nan handling".to_owned(),
                 },
@@ -4191,6 +4566,8 @@ mod tests {
                 packet_id: "FP-P2C-001".to_owned(),
                 operation: FixtureOperation::SeriesAdd,
                 mode: RuntimeMode::Strict,
+                replay_key: "FP-P2C-001/pass_case/strict".to_owned(),
+                trace_id: "FP-P2C-001:pass_case:strict".to_owned(),
                 oracle_source: FixtureOracleSource::Fixture,
                 status: CaseStatus::Pass,
                 drift_records: Vec::new(),
@@ -4201,11 +4578,14 @@ mod tests {
                 packet_id: "FP-P2C-001".to_owned(),
                 operation: FixtureOperation::SeriesAdd,
                 mode: RuntimeMode::Strict,
+                replay_key: "FP-P2C-001/fail_case/strict".to_owned(),
+                trace_id: "FP-P2C-001:fail_case:strict".to_owned(),
                 oracle_source: FixtureOracleSource::Fixture,
                 status: CaseStatus::Fail,
                 drift_records: vec![DriftRecord {
                     category: ComparisonCategory::Value,
                     level: DriftLevel::Critical,
+                    mismatch_class: "value_critical".to_owned(),
                     location: "v[0]".to_owned(),
                     message: "bad".to_owned(),
                 }],
@@ -4286,8 +4666,18 @@ mod tests {
             packet_id: "FP-P2C-001".to_owned(),
         });
         log.record(ForensicEventKind::CaseEnd {
+            scenario_id: "test:FP-P2C-001".to_owned(),
             packet_id: "FP-P2C-001".to_owned(),
             case_id: "test_case".to_owned(),
+            trace_id: "FP-P2C-001:test_case:strict".to_owned(),
+            step_id: "case:test_case".to_owned(),
+            seed: 42,
+            assertion_path: "ASUPERSYNC-G/FP-P2C-001/test_case".to_owned(),
+            result: "pass".to_owned(),
+            replay_cmd: "cargo test -p fp-conformance -- test_case --nocapture".to_owned(),
+            decision_action: "allow".to_owned(),
+            replay_key: "FP-P2C-001/test_case/strict".to_owned(),
+            mismatch_class: None,
             status: CaseStatus::Pass,
             evidence_records: 2,
             elapsed_us: 1234,
@@ -4308,6 +4698,8 @@ mod tests {
         assert!(lines[0].contains("packet_start"));
         assert!(lines[1].contains("case_end"));
         assert!(lines[1].contains("test_case"));
+        assert!(lines[1].contains("assertion_path"));
+        assert!(lines[1].contains("replay_cmd"));
     }
 
     #[test]
@@ -4501,6 +4893,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn e2e_case_events_include_replay_bundle_fields() {
+        let config = E2eConfig {
+            harness: HarnessConfig::default_paths(),
+            options: SuiteOptions {
+                packet_filter: Some("FP-P2C-001".to_owned()),
+                oracle_mode: OracleMode::FixtureExpected,
+            },
+            write_artifacts: false,
+            enforce_gates: false,
+            append_drift_history: false,
+            forensic_log_path: None,
+        };
+
+        let mut hooks = NoopHooks;
+        let report = run_e2e_suite(&config, &mut hooks).expect("e2e");
+
+        let mut saw_case_start = false;
+        let mut saw_case_end = false;
+
+        for event in report.forensic_log.events {
+            match event.event {
+                ForensicEventKind::CaseStart {
+                    seed,
+                    assertion_path,
+                    replay_cmd,
+                    ..
+                } => {
+                    saw_case_start = true;
+                    assert!(seed > 0, "seed should be deterministic non-zero");
+                    assert!(
+                        assertion_path.starts_with("ASUPERSYNC-G/"),
+                        "assertion_path should be namespaced"
+                    );
+                    assert!(
+                        replay_cmd.contains("cargo test -p fp-conformance --"),
+                        "replay command should target fp-conformance test replay"
+                    );
+                }
+                ForensicEventKind::CaseEnd {
+                    seed,
+                    assertion_path,
+                    result,
+                    replay_cmd,
+                    ..
+                } => {
+                    saw_case_end = true;
+                    assert!(seed > 0, "seed should be deterministic non-zero");
+                    assert!(
+                        assertion_path.starts_with("ASUPERSYNC-G/"),
+                        "assertion_path should be namespaced"
+                    );
+                    assert!(result == "pass" || result == "fail");
+                    assert!(
+                        replay_cmd.contains("cargo test -p fp-conformance --"),
+                        "replay command should target fp-conformance test replay"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_case_start, "expected at least one case_start event");
+        assert!(saw_case_end, "expected at least one case_end event");
+    }
+
     // === Failure Forensics UX Tests (bd-2gi.21) ===
 
     #[test]
@@ -4526,7 +4984,10 @@ mod tests {
             case_id: "series_add_strict".to_owned(),
             operation: FixtureOperation::SeriesAdd,
             mode: RuntimeMode::Strict,
+            mismatch_class: Some("value_critical".to_owned()),
             mismatch_summary: "expected Int64(10), got Float64(10.0)".to_owned(),
+            replay_key: "FP-P2C-001/series_add_strict/strict".to_owned(),
+            trace_id: "FP-P2C-001:series_add_strict:strict".to_owned(),
             replay_command: "cargo test -p fp-conformance -- series_add_strict --nocapture"
                 .to_owned(),
             artifact_path: Some("artifacts/phase2c/FP-P2C-001/mismatch.json".to_owned()),
@@ -4571,7 +5032,10 @@ mod tests {
                     case_id: "case_a".to_owned(),
                     operation: FixtureOperation::SeriesAdd,
                     mode: RuntimeMode::Strict,
+                    mismatch_class: Some("value_critical".to_owned()),
                     mismatch_summary: "value drift".to_owned(),
+                    replay_key: "FP-P2C-001/case_a/strict".to_owned(),
+                    trace_id: "FP-P2C-001:case_a:strict".to_owned(),
                     replay_command: "cargo test -- case_a".to_owned(),
                     artifact_path: None,
                 },
@@ -4580,7 +5044,10 @@ mod tests {
                     case_id: "case_b".to_owned(),
                     operation: FixtureOperation::IndexAlignUnion,
                     mode: RuntimeMode::Hardened,
+                    mismatch_class: Some("shape_critical".to_owned()),
                     mismatch_summary: "shape mismatch".to_owned(),
+                    replay_key: "FP-P2C-002/case_b/hardened".to_owned(),
+                    trace_id: "FP-P2C-002:case_b:hardened".to_owned(),
                     replay_command: "cargo test -- case_b".to_owned(),
                     artifact_path: Some("path/to/corpus.json".to_owned()),
                 },
@@ -4701,6 +5168,53 @@ mod tests {
         assert!(result.parity_report_exists);
         assert!(!result.sidecar_exists);
         assert!(result.errors.iter().any(|e| e.contains("Rule T5")));
+    }
+
+    #[test]
+    fn sidecar_integrity_fails_when_decode_proof_hash_mismatches_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packet_id = "FP-P2C-099";
+
+        let report_bytes = br#"{"suite":"test","passed":1,"failed":0}"#;
+        fs::write(dir.path().join("parity_report.json"), report_bytes).expect("write report");
+
+        let mut sidecar =
+            generate_raptorq_sidecar("FP-P2C-099/parity_report", "conformance", report_bytes, 8)
+                .expect("sidecar");
+        let proof =
+            run_raptorq_decode_recovery_drill(&sidecar, report_bytes).expect("decode drill");
+        sidecar.envelope.decode_proofs = vec![proof.clone()];
+        sidecar.envelope.scrub.status = "ok".to_owned();
+        fs::write(
+            dir.path().join("parity_report.raptorq.json"),
+            serde_json::to_string_pretty(&sidecar).expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+
+        let mut mismatched_proof = proof;
+        mismatched_proof.proof_hash = "sha256:deadbeef".to_owned();
+        let decode_artifact = DecodeProofArtifact {
+            packet_id: packet_id.to_owned(),
+            decode_proofs: vec![mismatched_proof],
+            status: DecodeProofStatus::Recovered,
+        };
+        fs::write(
+            dir.path().join("parity_report.decode_proof.json"),
+            serde_json::to_string_pretty(&decode_artifact).expect("serialize decode artifact"),
+        )
+        .expect("write decode artifact");
+
+        let result = verify_packet_sidecar_integrity(dir.path(), packet_id);
+        assert!(!result.is_ok());
+        assert!(!result.decode_proof_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|entry| entry.contains("proof hash mismatch")),
+            "expected proof hash mismatch error, got {:?}",
+            result.errors
+        );
     }
 
     #[test]

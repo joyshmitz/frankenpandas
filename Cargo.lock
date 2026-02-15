@@ -280,6 +280,7 @@ version = "0.1.0"
 dependencies = [
  "fp-conformance",
  "fp-runtime",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

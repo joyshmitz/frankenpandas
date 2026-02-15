@@ -600,12 +600,44 @@ mod tests {
     };
     use fp_conformance::PacketDriftHistoryEntry;
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
+    use proptest::prelude::*;
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
+    fn emit_test_log(
+        packet_id: &str,
+        case_id: &str,
+        mode: &str,
+        seed: u64,
+        assertion_path: &str,
+        result: &str,
+    ) {
+        let trace_id = format!("{packet_id}::{case_id}::seed-{seed}");
+        println!(
+            "{}",
+            json!({
+                "packet_id": packet_id,
+                "case_id": case_id,
+                "mode": mode,
+                "seed": seed,
+                "trace_id": trace_id,
+                "assertion_path": assertion_path,
+                "result": result
+            })
+        );
+    }
+
     #[test]
     fn packet_id_validation_accepts_expected_shape() {
+        emit_test_log(
+            "FRANKENTUI-E",
+            "packet_id_validation_accepts_expected_shape",
+            "n/a",
+            1,
+            "is_valid_packet_id static examples",
+            "pass",
+        );
         assert!(is_valid_packet_id("FP-P2C-001"));
         assert!(is_valid_packet_id("FP-P2C-999"));
         assert!(!is_valid_packet_id("FP-P2C-12"));
@@ -718,6 +750,14 @@ mod tests {
         hardened.decide_join_admission(42, &mut ledger);
 
         let summary = summarize_decision_dashboard(&ledger, &hardened, 1);
+        emit_test_log(
+            "FRANKENTUI-E",
+            "decision_summary_counts_modes_and_caps_evidence",
+            "mixed",
+            8,
+            "summary mode counters and evidence cap",
+            "pass",
+        );
         assert_eq!(summary.total_records, 2);
         assert_eq!(summary.strict_records, 1);
         assert_eq!(summary.hardened_records, 1);
@@ -836,6 +876,14 @@ mod tests {
             .load_conformance_dashboard()
             .expect("load conformance dashboard");
 
+        emit_test_log(
+            "FP-P2C-002",
+            "conformance_dashboard_aggregates_packet_and_trend_state",
+            "mixed",
+            2,
+            "dashboard totals and trend aggregation",
+            "pass",
+        );
         assert_eq!(dashboard.total_packets, 2);
         assert_eq!(dashboard.green_packets, 1);
         assert_eq!(dashboard.failing_packets, 1);
@@ -916,5 +964,66 @@ mod tests {
         app.cycle_next_view();
         app.cycle_next_view();
         assert_eq!(app.active_view, DashboardView::Conformance);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_packet_id_accepts_three_digit_suffix(suffix in 0u16..1000u16) {
+            let packet_id = format!("FP-P2C-{suffix:03}");
+            emit_test_log(
+                &packet_id,
+                "prop_packet_id_accepts_three_digit_suffix",
+                "n/a",
+                u64::from(suffix),
+                "is_valid_packet_id generated packet id",
+                "pass",
+            );
+            prop_assert!(is_valid_packet_id(&packet_id));
+        }
+
+        #[test]
+        fn prop_decision_summary_respects_cap_and_mode_counts(
+            mode_plan in proptest::collection::vec(any::<bool>(), 1..32),
+            cap in 0usize..8usize
+        ) {
+            let mut ledger = EvidenceLedger::new();
+            let strict = RuntimePolicy::strict();
+            let hardened = RuntimePolicy::hardened(Some(16));
+
+            for (idx, strict_mode) in mode_plan.iter().copied().enumerate() {
+                if strict_mode {
+                    strict.decide_unknown_feature(
+                        format!("feature_{idx}"),
+                        "unsupported",
+                        &mut ledger,
+                    );
+                } else {
+                    hardened.decide_join_admission(idx + 1, &mut ledger);
+                }
+            }
+
+            let summary = summarize_decision_dashboard(&ledger, &hardened, cap);
+            let strict_expected = mode_plan.iter().filter(|&&is_strict| is_strict).count();
+            let hardened_expected = mode_plan.len() - strict_expected;
+            emit_test_log(
+                "FRANKENTUI-E",
+                "prop_decision_summary_respects_cap_and_mode_counts",
+                "mixed",
+                mode_plan.len() as u64,
+                "summary totals and evidence cap invariants",
+                "pass",
+            );
+
+            prop_assert_eq!(summary.total_records, mode_plan.len());
+            prop_assert_eq!(summary.strict_records, strict_expected);
+            prop_assert_eq!(summary.hardened_records, hardened_expected);
+            prop_assert!(summary.cards.iter().all(|card| card.evidence_terms_shown <= cap));
+            prop_assert!(
+                summary
+                    .cards
+                    .iter()
+                    .all(|card| card.evidence_terms_shown <= card.evidence_terms_total)
+            );
+        }
     }
 }

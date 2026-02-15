@@ -12,7 +12,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 |---|---|
 | packet_id | `FRANKENTUI-B` |
 | input_contract | Artifact JSON files (parity reports, gate results, mismatch corpora, RaptorQ sidecars, decode proofs, governance gate report); `drift_history.jsonl` (JSONL line-stream); forensic JSONL streams; `EvidenceLedger` (in-memory `Vec<DecisionRecord>`); `ForensicLog` (in-memory event vec); `CiPipelineResult` (gate pipeline); `ConformalGuard` (calibration state); `RuntimePolicy` (mode configuration) |
-| output_contract | Rendered TUI views only (no file mutations); optional clipboard export of replay commands; optional screenshot/text export of dashboard state; all output is ephemeral terminal rendering |
+| output_contract | Rendered TUI views only (no file mutations); optional clipboard export of replay commands; optional screenshot/text export of dashboard state; optional final-evidence plain summary (`load_final_evidence_pack()` / `--show-final-evidence`); all output is ephemeral terminal rendering |
 | error_contract | Missing artifact files degrade individual panels (not global crash); malformed JSON/JSONL lines are skipped with warning count; terminal too small triggers minimum-size gate; clock-skew timestamps displayed as "unknown"; IO errors on artifact directory degrade entire conformance dashboard while other dashboards remain functional |
 | null_contract | `ts_unix_ms = 0` displayed as "unknown" (not "1970-01-01"); uncalibrated conformal guard shows "Uncalibrated (N/2 scores)"; placeholder RaptorQ envelopes (`source_hash = "blake3:placeholder"`) render as "placeholder" status; `hardened_join_row_cap = None` displays as "unlimited"; empty evidence ledger shows "No decisions recorded" |
 | strict_mode_policy | Conformance dashboard highlights strict-mode failures with distinct color; gate evaluation surfaces `strict_failed` counts prominently; policy provenance panel shows `fail_closed_unknown_features = true`; decision cards carry `mode: Strict` badge; all strict-only gate budget violations flagged |
@@ -73,6 +73,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | `E2eReport` | In-memory | `is_green()`, `total_fixtures`, `total_passed`, `total_failed`, `forensic_log`, `gate_results` | Top-level E2E summary |
 | `DriftRecord` | Embedded in `DifferentialResult` | `category`, `level`, `location`, `message` | Drift detail drilldown |
 | `DriftSummary` | Embedded in `DifferentialReport` | `total_drift_records`, `critical_count`, `non_critical_count`, `informational_count`, `categories` | Drift distribution display |
+| `SidecarIntegrityResult` | `verify_packet_sidecar_integrity()` | `parity_report_exists`, `sidecar_exists`, `decode_proof_exists`, `source_hash_matches`, `scrub_ok`, `decode_proof_valid`, `errors` | Final evidence pack integrity + risk-note projection |
 
 ---
 
@@ -96,6 +97,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 |---|---|---|---|
 | Clipboard copy | User selects replay command | Verbatim `FailureDigest::replay_command` string | Exact string, no modification |
 | Text export (implemented foundation) | User requests dashboard snapshot | Plain-text rendering of current view | `render_plain()` available for conformance dashboard and galaxy-brain cards |
+| Final evidence summary (implemented) | User requests final closure snapshot (`--show-final-evidence`) | Aggregate parity/gate/decode/sidecar status + packet risk notes | Deterministic plain-text output from `FinalEvidencePackSnapshot::render_plain()` |
 | Screenshot (planned) | User requests terminal capture | Terminal buffer contents | Platform-dependent; not guaranteed on all terminals |
 
 **Post-conditions:**
@@ -355,6 +357,8 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | INV-FTUI-CLOCK-SKEW-DISPLAY | `ts_unix_ms = 0` renders as "unknown", not "1970-01-01" | Unit test: render record with `ts_unix_ms = 0` | Planned |
 | INV-FTUI-UNCALIBRATED-DISPLAY | Uncalibrated conformal guard displays "Uncalibrated (N/2 scores)" | Unit test: `is_calibrated() = false` path | Planned |
 | INV-FTUI-PLACEHOLDER-DISPLAY | RaptorQ placeholder envelopes render as "placeholder" status | Unit test: render `RaptorQEnvelope::placeholder()` | Planned |
+| INV-FTUI-FINAL-EVIDENCE-SIDECAR | Final evidence snapshots include per-packet sidecar/decode integrity status and aggregate counters | Unit tests: `final_evidence_pack_reports_green_packet_and_render_summary` | Implemented |
+| INV-FTUI-FINAL-EVIDENCE-RISK-NOTES | Decode-proof pairing/hash integrity failures surface deterministic packet risk notes | Unit test: `final_evidence_pack_flags_decode_proof_hash_mismatch_risk` | Implemented |
 | INV-FTUI-STRICT-BADGE | All strict-mode decision records display "STRICT" mode indicator | Integration test: ledger with strict records | Planned |
 | INV-FTUI-HARDENED-BADGE | All hardened-mode decision records display "HARDENED" mode indicator | Integration test: ledger with hardened records | Planned |
 | INV-FTUI-FAIL-CLOSED-ANNOTATION | Strict fail-closed override annotated on decision cards | Integration test: `decide_unknown_feature()` in strict mode | Planned |
@@ -432,4 +436,8 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 
 ## Changelog
 
+- **bd-2gi.28.9** (2026-02-15): Added final-evidence contract surface for
+  FRANKENTUI (`load_final_evidence_pack()` / `--show-final-evidence`), including
+  sidecar/decode-proof integrity projection, deterministic risk-note rules, and
+  implemented invariant hooks for decode-proof mismatch detection.
 - **bd-2gi.28.2** (2026-02-14): Initial FRANKENTUI contract table. Defines input/output/error/null contracts, strict and hardened policy matrices with per-surface breakdown, strict-vs-hardened comparison, performance sentinels (render budgets, data volume limits, virtual scrolling thresholds, artifact parse budgets), compatibility risks (frankentui crate dependency, feature flag interactions, serialization coupling, version coupling, data model assumptions), and 29 machine-checkable invariants. Appendices cover ForensicEventKind display mapping, CiGate display mapping, and dashboard navigation taxonomy.

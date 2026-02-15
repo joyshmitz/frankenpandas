@@ -43,6 +43,24 @@ Snapshot metrics from
 - Fallback mode-lookup steps (64 iterations, amplified workload):
   `33718464 -> 65664`
 
+**Status update (2026-02-15, SwiftTiger):** `bd-2gi.28.9` now adds a
+deterministic FRANKENTUI final-evidence path backed by sidecar/decode-proof
+integrity validation:
+- New snapshots in `crates/fp-frankentui/src/lib.rs`:
+  - `FinalEvidencePacketSnapshot`
+  - `FinalEvidencePackSnapshot`
+- New datasource API:
+  - `FtuiDataSource::load_final_evidence_pack()`
+  - `FsFtuiDataSource::load_final_evidence_pack()` now runs
+    `verify_packet_sidecar_integrity()` for each packet and emits aggregate
+    parity/decode/integrity counters plus packet risk notes.
+- New CLI output switch:
+  - `fp-frankentui-cli --show-final-evidence`
+    (`crates/fp-frankentui/src/bin/fp-frankentui-cli.rs`)
+- Regression proofs:
+  - `final_evidence_pack_reports_green_packet_and_render_summary`
+  - `final_evidence_pack_flags_decode_proof_hash_mismatch_risk`
+
 ---
 
 ## 2. Current State (Implemented)
@@ -277,3 +295,6 @@ Using program formula `EV = (Impact * Confidence * Reuse) / (Effort * AdoptionFr
 - **bd-2gi.28.4 (2026-02-15):** Added FRANKENTUI Rust integration plan with
   source-anchored current-state inventory, target module boundary skeleton,
   trait seams, risk-minimizing phased execution, and EV-gated architecture decision.
+- **bd-2gi.28.9 (2026-02-15):** Added final evidence-pack snapshot surface and
+  CLI hook, including per-packet RaptorQ sidecar/decode-proof integrity checks,
+  aggregate parity/decode counters, and risk-note reporting with regression tests.

@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use fp_conformance::{
-    DecodeProofArtifact, DecodeProofStatus, PacketDriftHistoryEntry, PacketGateResult,
-    PacketParityReport,
+    DecodeProofArtifact, DecodeProofStatus, ForensicEvent, PacketDriftHistoryEntry,
+    PacketGateResult, PacketParityReport,
 };
 use fp_runtime::{ConformalGuard, EvidenceLedger, RuntimeMode, RuntimePolicy, decision_to_card};
 use serde::Deserialize;
@@ -15,6 +15,8 @@ use thiserror::Error;
 
 const PHASE2C_DIR: &str = "artifacts/phase2c";
 const DRIFT_HISTORY_FILE: &str = "drift_history.jsonl";
+const CI_DIR: &str = "ci";
+const GOVERNANCE_GATE_REPORT_FILE: &str = "governance_gate_report.json";
 
 #[derive(Debug, Error)]
 pub enum FtuiError {
@@ -104,10 +106,129 @@ pub struct DecisionDashboardSnapshot {
     pub evidence_term_cap: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketTrendSnapshot {
+    pub packet_id: String,
+    pub samples: usize,
+    pub latest_gate_pass: Option<bool>,
+    pub latest_failed_cases: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConformanceDashboardSnapshot {
+    pub packets: Vec<PacketSnapshot>,
+    pub drift_history: DriftHistorySnapshot,
+    pub packet_trends: Vec<PacketTrendSnapshot>,
+    pub total_packets: usize,
+    pub green_packets: usize,
+    pub failing_packets: usize,
+}
+
+impl ConformanceDashboardSnapshot {
+    #[must_use]
+    pub fn is_green(&self) -> bool {
+        self.total_packets > 0 && self.failing_packets == 0
+    }
+
+    #[must_use]
+    pub fn render_plain(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Conformance packets={} green={} failing={} drift_entries={} malformed_drift_lines={}\n",
+            self.total_packets,
+            self.green_packets,
+            self.failing_packets,
+            self.drift_history.entries.len(),
+            self.drift_history.malformed_lines
+        ));
+        for packet in &self.packets {
+            out.push_str(&format!(
+                "- {} gate={} parity={} mismatches={} issues={}\n",
+                packet.packet_id,
+                packet.gate_result.as_ref().map(|g| g.pass).unwrap_or(false),
+                packet
+                    .parity_report
+                    .as_ref()
+                    .is_some_and(PacketParityReport::is_green),
+                packet.mismatch_count.unwrap_or(0),
+                packet.issues.len()
+            ));
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForensicLogSnapshot {
+    pub events: Vec<ForensicEvent>,
+    pub malformed_lines: usize,
+    pub missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GovernanceGateSnapshot {
+    pub path: PathBuf,
+    pub all_passed: bool,
+    pub violation_count: usize,
+    pub generated_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardView {
+    Conformance,
+    Decision,
+    Forensics,
+    Policy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtuiAppState {
+    pub active_view: DashboardView,
+    pub packet_cursor: usize,
+    pub packet_ids: Vec<String>,
+}
+
+impl FtuiAppState {
+    #[must_use]
+    pub fn new(mut packet_ids: Vec<String>) -> Self {
+        packet_ids.sort();
+        Self {
+            active_view: DashboardView::Conformance,
+            packet_cursor: 0,
+            packet_ids,
+        }
+    }
+
+    pub fn cycle_next_view(&mut self) {
+        self.active_view = match self.active_view {
+            DashboardView::Conformance => DashboardView::Decision,
+            DashboardView::Decision => DashboardView::Forensics,
+            DashboardView::Forensics => DashboardView::Policy,
+            DashboardView::Policy => DashboardView::Conformance,
+        };
+    }
+
+    pub fn select_next_packet(&mut self) {
+        if self.packet_ids.is_empty() {
+            self.packet_cursor = 0;
+            return;
+        }
+        self.packet_cursor = (self.packet_cursor + 1) % self.packet_ids.len();
+    }
+
+    #[must_use]
+    pub fn selected_packet(&self) -> Option<&str> {
+        self.packet_ids.get(self.packet_cursor).map(String::as_str)
+    }
+}
+
 pub trait FtuiDataSource {
     fn discover_packet_ids(&self) -> Result<Vec<String>, FtuiError>;
     fn load_packet_snapshot(&self, packet_id: &str) -> Result<PacketSnapshot, FtuiError>;
     fn load_drift_history(&self) -> Result<DriftHistorySnapshot, FtuiError>;
+    fn load_conformance_dashboard(&self) -> Result<ConformanceDashboardSnapshot, FtuiError>;
+    fn load_forensic_log(&self, path: &Path) -> Result<ForensicLogSnapshot, FtuiError>;
+    fn load_governance_gate_snapshot(&self) -> Result<Option<GovernanceGateSnapshot>, FtuiError>;
 }
 
 #[derive(Debug, Clone)]
@@ -253,11 +374,130 @@ impl FtuiDataSource for FsFtuiDataSource {
             missing: false,
         })
     }
+
+    fn load_conformance_dashboard(&self) -> Result<ConformanceDashboardSnapshot, FtuiError> {
+        let packet_ids = self.discover_packet_ids()?;
+        let packets = packet_ids
+            .iter()
+            .map(|packet_id| self.load_packet_snapshot(packet_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let drift_history = self.load_drift_history()?;
+
+        let green_packets = packets.iter().filter(|packet| packet.is_green()).count();
+        let total_packets = packets.len();
+        let failing_packets = total_packets.saturating_sub(green_packets);
+
+        let packet_trends = packets
+            .iter()
+            .map(|packet| {
+                let mut samples = 0_usize;
+                let mut latest: Option<&PacketDriftHistoryEntry> = None;
+                for entry in &drift_history.entries {
+                    if entry.packet_id == packet.packet_id {
+                        samples += 1;
+                        if latest.is_none_or(|current| entry.ts_unix_ms >= current.ts_unix_ms) {
+                            latest = Some(entry);
+                        }
+                    }
+                }
+                PacketTrendSnapshot {
+                    packet_id: packet.packet_id.clone(),
+                    samples,
+                    latest_gate_pass: latest.map(|entry| entry.gate_pass),
+                    latest_failed_cases: latest.map(|entry| entry.failed),
+                }
+            })
+            .collect();
+
+        Ok(ConformanceDashboardSnapshot {
+            packets,
+            drift_history,
+            packet_trends,
+            total_packets,
+            green_packets,
+            failing_packets,
+        })
+    }
+
+    fn load_forensic_log(&self, path: &Path) -> Result<ForensicLogSnapshot, FtuiError> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ForensicLogSnapshot {
+                    events: Vec::new(),
+                    malformed_lines: 0,
+                    missing: true,
+                });
+            }
+            Err(source) => {
+                return Err(FtuiError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+
+        let mut events = Vec::new();
+        let mut malformed_lines = 0;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|source| FtuiError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<ForensicEvent>(&line) {
+                Ok(event) => events.push(event),
+                Err(_) => malformed_lines += 1,
+            }
+        }
+
+        Ok(ForensicLogSnapshot {
+            events,
+            malformed_lines,
+            missing: false,
+        })
+    }
+
+    fn load_governance_gate_snapshot(&self) -> Result<Option<GovernanceGateSnapshot>, FtuiError> {
+        let Some(artifacts_root) = self.phase2c_root.parent() else {
+            return Ok(None);
+        };
+        let path = artifacts_root
+            .join(CI_DIR)
+            .join(GOVERNANCE_GATE_REPORT_FILE);
+        let payload = match fs::read_to_string(&path) {
+            Ok(payload) => payload,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(FtuiError::Io { path, source }),
+        };
+
+        let report: GovernanceGateReport =
+            serde_json::from_str(&payload).map_err(|source| FtuiError::Io {
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            })?;
+
+        Ok(Some(GovernanceGateSnapshot {
+            path,
+            all_passed: report.all_passed,
+            violation_count: report.violation_count,
+            generated_unix_ms: report.generated_unix_ms,
+        }))
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct MismatchCorpus {
     mismatch_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GovernanceGateReport {
+    generated_unix_ms: u128,
+    all_passed: bool,
+    violation_count: usize,
 }
 
 fn read_json_optional<T: DeserializeOwned>(
@@ -355,11 +595,12 @@ pub fn summarize_decision_dashboard(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactIssueKind, FsFtuiDataSource, FtuiDataSource, is_valid_packet_id,
-        summarize_decision_dashboard,
+        ArtifactIssueKind, DashboardView, FsFtuiDataSource, FtuiAppState, FtuiDataSource,
+        is_valid_packet_id, summarize_decision_dashboard,
     };
     use fp_conformance::PacketDriftHistoryEntry;
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
+    use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
@@ -487,5 +728,193 @@ mod tests {
                 .all(|card| card.evidence_terms_shown == 1)
         );
         assert_eq!(summary.policy.hardened_join_row_cap, Some(8));
+    }
+
+    #[test]
+    fn conformance_dashboard_aggregates_packet_and_trend_state() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("artifacts/phase2c");
+        let packet_a = root.join("FP-P2C-001");
+        let packet_b = root.join("FP-P2C-002");
+        fs::create_dir_all(&packet_a).expect("packet a");
+        fs::create_dir_all(&packet_b).expect("packet b");
+
+        fs::write(
+            packet_a.join("parity_report.json"),
+            json!({
+                "suite": "phase2c_packets",
+                "packet_id": "FP-P2C-001",
+                "oracle_present": true,
+                "fixture_count": 2,
+                "passed": 2,
+                "failed": 0,
+                "results": []
+            })
+            .to_string(),
+        )
+        .expect("parity a");
+        fs::write(
+            packet_a.join("parity_gate_result.json"),
+            json!({
+                "packet_id": "FP-P2C-001",
+                "pass": true,
+                "fixture_count": 2,
+                "strict_total": 2,
+                "strict_failed": 0,
+                "hardened_total": 0,
+                "hardened_failed": 0,
+                "reasons": []
+            })
+            .to_string(),
+        )
+        .expect("gate a");
+
+        fs::write(
+            packet_b.join("parity_report.json"),
+            json!({
+                "suite": "phase2c_packets",
+                "packet_id": "FP-P2C-002",
+                "oracle_present": true,
+                "fixture_count": 3,
+                "passed": 2,
+                "failed": 1,
+                "results": []
+            })
+            .to_string(),
+        )
+        .expect("parity b");
+        fs::write(
+            packet_b.join("parity_gate_result.json"),
+            json!({
+                "packet_id": "FP-P2C-002",
+                "pass": false,
+                "fixture_count": 3,
+                "strict_total": 2,
+                "strict_failed": 1,
+                "hardened_total": 1,
+                "hardened_failed": 0,
+                "reasons": ["synthetic gate failure"]
+            })
+            .to_string(),
+        )
+        .expect("gate b");
+
+        fs::write(
+            root.join("drift_history.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "ts_unix_ms": 1,
+                    "packet_id": "FP-P2C-001",
+                    "suite": "phase2c_packets",
+                    "fixture_count": 2,
+                    "passed": 2,
+                    "failed": 0,
+                    "strict_failed": 0,
+                    "hardened_failed": 0,
+                    "gate_pass": true,
+                    "report_hash": "sha256:a"
+                }),
+                json!({
+                    "ts_unix_ms": 2,
+                    "packet_id": "FP-P2C-002",
+                    "suite": "phase2c_packets",
+                    "fixture_count": 3,
+                    "passed": 2,
+                    "failed": 1,
+                    "strict_failed": 1,
+                    "hardened_failed": 0,
+                    "gate_pass": false,
+                    "report_hash": "sha256:b"
+                })
+            ),
+        )
+        .expect("drift history");
+
+        let source = FsFtuiDataSource::from_repo_root(dir.path());
+        let dashboard = source
+            .load_conformance_dashboard()
+            .expect("load conformance dashboard");
+
+        assert_eq!(dashboard.total_packets, 2);
+        assert_eq!(dashboard.green_packets, 1);
+        assert_eq!(dashboard.failing_packets, 1);
+        assert_eq!(dashboard.packet_trends.len(), 2);
+        assert!(dashboard.render_plain().contains("Conformance packets=2"));
+    }
+
+    #[test]
+    fn forensic_log_loader_skips_malformed_lines() {
+        let dir = tempdir().expect("tempdir");
+        let forensic_path = dir.path().join("forensic.jsonl");
+        fs::write(
+            &forensic_path,
+            format!(
+                "{}\nnot-json\n",
+                json!({
+                    "ts_unix_ms": 10,
+                    "event": {
+                        "kind": "suite_start",
+                        "suite": "phase2c_packets",
+                        "packet_filter": null
+                    }
+                })
+            ),
+        )
+        .expect("write forensic log");
+
+        let source = FsFtuiDataSource::from_repo_root(dir.path());
+        let forensic = source
+            .load_forensic_log(&forensic_path)
+            .expect("load forensic log");
+
+        assert!(!forensic.missing);
+        assert_eq!(forensic.events.len(), 1);
+        assert_eq!(forensic.malformed_lines, 1);
+    }
+
+    #[test]
+    fn governance_gate_snapshot_reads_known_report() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("artifacts/phase2c");
+        fs::create_dir_all(&root).expect("phase2c root");
+        let ci = dir.path().join("artifacts/ci");
+        fs::create_dir_all(&ci).expect("ci root");
+        fs::write(
+            ci.join("governance_gate_report.json"),
+            json!({
+                "generated_unix_ms": 123,
+                "all_passed": false,
+                "violation_count": 3
+            })
+            .to_string(),
+        )
+        .expect("governance report");
+
+        let source = FsFtuiDataSource::from_repo_root(dir.path());
+        let report = source
+            .load_governance_gate_snapshot()
+            .expect("load report")
+            .expect("report present");
+        assert!(!report.all_passed);
+        assert_eq!(report.violation_count, 3);
+        assert_eq!(report.generated_unix_ms, 123);
+    }
+
+    #[test]
+    fn app_state_cycles_views_and_packet_selection() {
+        let mut app = FtuiAppState::new(vec![
+            "FP-P2C-002".to_owned(),
+            "FP-P2C-001".to_owned(),
+            "FP-P2C-003".to_owned(),
+        ]);
+        assert_eq!(app.selected_packet(), Some("FP-P2C-001"));
+        app.select_next_packet();
+        assert_eq!(app.selected_packet(), Some("FP-P2C-002"));
+        app.cycle_next_view();
+        app.cycle_next_view();
+        app.cycle_next_view();
+        app.cycle_next_view();
+        assert_eq!(app.active_view, DashboardView::Conformance);
     }
 }

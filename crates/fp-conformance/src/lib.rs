@@ -6041,15 +6041,19 @@ mod tests {
         cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
         cfg.allow_system_pandas_fallback = false;
 
-        let err = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
-            .expect_err("expected live oracle failure when fallback is disabled");
+        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
+            .expect("expected report even when cases fail");
         assert!(
-            matches!(
-                &err,
-                super::HarnessError::OracleUnavailable(message)
-                    if message.contains("legacy oracle root does not exist")
-            ),
-            "expected OracleUnavailable legacy-root error, got {err:?}"
+            !report.is_green(),
+            "expected non-green report without fallback: {report:?}"
+        );
+        assert!(
+            report.results.iter().all(|case| {
+                case.mismatch
+                    .as_deref()
+                    .is_some_and(|message| message.contains("legacy oracle root does not exist"))
+            }),
+            "expected oracle-unavailable mismatches in all failed cases: {report:?}"
         );
     }
 
@@ -6074,11 +6078,19 @@ mod tests {
         cfg.allow_system_pandas_fallback = true;
         cfg.python_bin = "/__fp_missing_python__/python3".to_owned();
 
-        let err = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
-            .expect_err("expected command-spawn failure for missing python binary");
+        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
+            .expect("expected report even when command spawn fails");
         assert!(
-            matches!(&err, super::HarnessError::Io(_)),
-            "expected Io error to propagate, got {err:?}"
+            !report.is_green(),
+            "expected non-green report for missing python binary: {report:?}"
+        );
+        assert!(
+            report.results.iter().all(|case| {
+                case.mismatch
+                    .as_deref()
+                    .is_some_and(|message| message.contains("No such file or directory"))
+            }),
+            "expected command-spawn io error mismatches in all failed cases: {report:?}"
         );
     }
 

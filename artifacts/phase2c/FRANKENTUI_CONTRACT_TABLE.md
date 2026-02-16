@@ -160,7 +160,7 @@ Source anchor: `FRANKENTUI_ANCHOR_MAP.md` (bd-2gi.28.1)
 | Conformal quantile `None` | `conformal_quantile()` returns `None` | Render threshold as "--" or "N/A" | Guard admits all actions (threshold = infinity) |
 | No hardened join row cap | `hardened_join_row_cap = None` | Display as "unlimited" | All joins admitted; no cap enforcement indicator |
 | Placeholder RaptorQ envelope | `source_hash = "blake3:placeholder"`, `k = 0`, `repair_symbols = 0` | Render as "placeholder" status with distinct styling | Not corruption or missing data; intentional sentinel |
-| Placeholder scrub status | `last_ok_unix_ms = 0`, `status = "ok"` | Render scrub time as "never scrubbed" | Misleading "ok" status must be contextualized with zero timestamp |
+| Placeholder scrub status | `last_ok_unix_ms = 0`, `status = "placeholder"` | Render scrub state as "placeholder" and scrub time as "never scrubbed" | Semantics are lost if UI collapses placeholder into ok/failed states |
 | Missing `artifact_path` in FailureDigest | `artifact_path: None` | Omit artifact link from failure digest display | Artifact not available for navigation |
 | Missing `packet_id` in report | `packet_id: None` | Display as "unknown" | Packet grouping and navigation degraded |
 | Empty `reasons` in gate result | `reasons: Vec::new()` | Display "no failure reasons reported" | Gate failed but no explanation available |

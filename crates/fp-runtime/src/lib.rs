@@ -72,6 +72,7 @@ impl Default for LossMatrix {
 
 const UNKNOWN_FEATURE_PRIOR: f64 = 0.25;
 const JOIN_ADMISSION_PRIOR: f64 = 0.6;
+const PRIOR_COMPATIBLE_EPSILON: f64 = 1e-10;
 
 const UNKNOWN_FEATURE_EVIDENCE: [EvidenceTerm; 2] = [
     EvidenceTerm {
@@ -306,6 +307,13 @@ fn now_unix_ms() -> Result<u64, RuntimeError> {
     Ok(ms as u64)
 }
 
+fn normalize_prior_compatible(prior_compatible: f64) -> f64 {
+    if !prior_compatible.is_finite() {
+        return 0.5;
+    }
+    prior_compatible.clamp(PRIOR_COMPATIBLE_EPSILON, 1.0 - PRIOR_COMPATIBLE_EPSILON)
+}
+
 fn decide(
     mode: RuntimeMode,
     issue: CompatibilityIssue,
@@ -313,6 +321,7 @@ fn decide(
     loss: LossMatrix,
     evidence: Vec<EvidenceTerm>,
 ) -> DecisionRecord {
+    let prior_compatible = normalize_prior_compatible(prior_compatible);
     let log_odds_prior = (prior_compatible / (1.0 - prior_compatible)).ln();
     let llr_sum: f64 = evidence
         .iter()
@@ -952,6 +961,67 @@ mod tests {
             assert_required_log_fields(&log_json);
             assert!(bounded, "posterior out of range; log={log_json}");
             assert!(finite, "non-finite metrics; log={log_json}");
+        }
+    }
+
+    #[test]
+    fn decide_clamps_boundary_priors_to_finite_range() {
+        for (input_prior, expected_prior) in [
+            (0.0, super::PRIOR_COMPATIBLE_EPSILON),
+            (1.0, 1.0 - super::PRIOR_COMPATIBLE_EPSILON),
+        ] {
+            let record = super::decide(
+                RuntimeMode::Strict,
+                super::CompatibilityIssue {
+                    kind: super::IssueKind::MalformedInput,
+                    subject: "prior_clamp_test".to_owned(),
+                    detail: "boundary prior".to_owned(),
+                },
+                input_prior,
+                super::LossMatrix::default(),
+                Vec::new(),
+            );
+
+            assert_eq!(
+                record.prior_compatible, expected_prior,
+                "prior should be clamped into open interval (0,1)"
+            );
+            assert!(
+                record.metrics.posterior_compatible.is_finite(),
+                "posterior must remain finite for boundary priors"
+            );
+            assert!(
+                record.metrics.expected_loss_allow.is_finite()
+                    && record.metrics.expected_loss_reject.is_finite()
+                    && record.metrics.expected_loss_repair.is_finite(),
+                "expected-loss metrics must remain finite for boundary priors"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_normalizes_non_finite_priors_to_neutral() {
+        for input_prior in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let record = super::decide(
+                RuntimeMode::Strict,
+                super::CompatibilityIssue {
+                    kind: super::IssueKind::MalformedInput,
+                    subject: "prior_clamp_test".to_owned(),
+                    detail: "non-finite prior".to_owned(),
+                },
+                input_prior,
+                super::LossMatrix::default(),
+                Vec::new(),
+            );
+
+            assert_eq!(
+                record.prior_compatible, 0.5,
+                "non-finite priors should normalize to neutral prior"
+            );
+            assert!(
+                record.metrics.posterior_compatible.is_finite(),
+                "posterior must remain finite for non-finite priors"
+            );
         }
     }
 

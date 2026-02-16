@@ -164,7 +164,7 @@ Source anchor: `ASUPERSYNC_ANCHOR_MAP.md` (bd-2gi.27.1)
 | Clock skew | `ts_unix_ms = 0` | Silent sentinel; no crash, no log | Decision records with timestamp 0 are indistinguishable from genuine epoch-0 records |
 | Empty evidence vector | `Vec::new()` | Prior dominates posterior; LLR sum = 0.0 | Valid but decision based solely on prior + loss matrix |
 | Placeholder RaptorQ envelope | `k = 0`, `repair_symbols = 0`, empty hashes | Structurally valid; no decode capability | Cannot reconstruct any artifact from placeholder |
-| Placeholder scrub status | `last_ok_unix_ms = 0`, `status = "ok"` | Claims OK despite never being scrubbed | Misleading if not recognized as placeholder |
+| Placeholder scrub status | `last_ok_unix_ms = 0`, `status = "placeholder"` | Explicitly marks placeholder envelope as never scrubbed | Consumers must treat as sentinel metadata, not a verified scrub result |
 | Uncalibrated conformal guard | `conformal_quantile() = None` | All actions admitted; threshold = infinity | No conformal protection until >= 2 scores |
 | No hardened join row cap | `hardened_join_row_cap = None` | `usize::MAX` used; effectively no cap | All joins admitted regardless of cardinality estimate |
 | Panic payload in `Outcome::Panicked` | Payload exists but is discarded | Maps to `Reject` without inspection | Diagnostic information from panic is lost at policy layer |

@@ -118,9 +118,9 @@ Surface) to distinguish from the general TS-N surfaces in
 - **ATS-4.4 Unbounded proof accumulation:** `decode_proofs: Vec<DecodeProof>` has
   no count limit. An adversary generating repeated decode attempts can grow this
   vector unboundedly, causing memory exhaustion.
-- **ATS-4.5 Scrub status trust:** `ScrubStatus` with `status: "ok"` and
-  `last_ok_unix_ms: 0` on placeholders claims the artifact is healthy despite
-  never being scrubbed. This is a false-positive integrity signal.
+- **ATS-4.5 Scrub status interpretation drift:** placeholder envelopes now use
+  `ScrubStatus { status: "placeholder", last_ok_unix_ms: 0 }`. Consumers that
+  assume only `"ok"`/`"failed"` may misclassify placeholder envelopes.
 
 ### ATS-5: Cancellation and Budget Absence
 
@@ -188,7 +188,7 @@ Surface) to distinguish from the general TS-N surfaces in
 | ATS-4.2 | Unauthenticated RaptorQ symbols | HIGH | LOW (current); HIGH (when wired) | Forged artifact reconstruction | Integrate `SecurityContext` + `AuthenticatedSymbol` | Strict: reject unauthenticated; Hardened: accept with warning |
 | ATS-4.3 | Decode proof cross-artifact replay | MEDIUM | LOW | False integrity attestation | Add `artifact_id` + nonce to `DecodeProof` | Both: enforce proof binding |
 | ATS-4.4 | Unbounded decode_proofs vector | LOW | LOW | Memory exhaustion | Cap vector at 1000 entries | Both: enforce cap |
-| ATS-4.5 | Placeholder scrub status claims "ok" | LOW | MEDIUM | False-positive integrity signal | Use `status: "placeholder"` instead of `"ok"` | Both: distinguish placeholder |
+| ATS-4.5 | Placeholder scrub status interpretation drift | LOW | LOW | Incorrect UI/policy handling of placeholder envelopes | Treat `status: "placeholder"` + zero timestamp as explicit unscrubbed sentinel | Both: distinguish placeholder sentinel from verified scrub results |
 | ATS-5.1 | Cancellation starvation on long operations | HIGH | MEDIUM | Resource holding; blocked cleanup | Insert `cx.checkpoint()` at kernel boundaries | Both: blocks cancellation |
 | ATS-5.2 | Deadline bypass via unbounded computation | HIGH | MEDIUM | Resource exhaustion DoS | Enforce `cx.scope_with_budget()` at entry points | Both: no enforcement |
 | ATS-5.3 | Polling starvation of sibling tasks | MEDIUM | MEDIUM | Latency spikes for colocated work | Periodic `cx.checkpoint()` in tight loops | Both: no enforcement |
@@ -566,11 +566,11 @@ Prioritized list of security hardening steps, ordered by impact and urgency.
 - **Blocked by:** Nothing.
 - **Blocks:** Memory exhaustion prevention.
 
-**R-08: Change placeholder `ScrubStatus` from `"ok"` to `"placeholder"`.**
-- This prevents false-positive integrity signals from placeholder envelopes.
-- All code that checks `scrub.status == "ok"` must be updated.
-- **Blocked by:** Nothing.
-- **Blocks:** Accurate integrity reporting.
+**R-08: Completed — placeholder `ScrubStatus` now uses `"placeholder"`.**
+- Runtime placeholder constructor now emits `status: "placeholder"` with
+  `last_ok_unix_ms = 0` sentinel metadata.
+- Keep downstream consumers aligned: treat `"placeholder"` as "never scrubbed",
+  distinct from real scrub outcomes.
 
 **R-09: Add `prior_compatible` clamping in `decide()`.**
 - Clamp `prior_compatible` to `(1e-10, 1.0 - 1e-10)` to prevent

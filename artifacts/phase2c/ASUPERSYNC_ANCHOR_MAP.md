@@ -165,7 +165,7 @@ Subsystem: `fp-runtime` asupersync outcome bridge + artifact synchronization int
    - 5a. `RaptorQEnvelope::placeholder()` accepts `artifact_id` and `artifact_type` as `impl Into<String>`.
    - 5b. Placeholder source hash is `"blake3:placeholder"` (not a real hash).
    - 5c. Placeholder metadata has `k=0`, `repair_symbols=0`, `overhead_ratio=0.0`.
-   - 5d. Placeholder scrub status is `"ok"` with `last_ok_unix_ms=0`.
+   - 5d. Placeholder scrub status is `"placeholder"` with `last_ok_unix_ms=0`.
    - 5e. Placeholder decode proofs list is empty.
    - 5f. Actual RaptorQ encoding will use `RaptorQSenderBuilder` from asupersync.
 

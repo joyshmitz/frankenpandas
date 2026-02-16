@@ -5481,6 +5481,7 @@ pub fn build_failure_forensics(e2e: &E2eReport) -> FailureForensicsReport {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{
         ArtifactId, CaseResult, CaseStatus, CiGate, CiGateResult, CiPipelineConfig,
@@ -5501,6 +5502,13 @@ mod tests {
         write_differential_validation_log, write_fault_injection_validation_report,
     };
     use fp_runtime::RuntimeMode;
+
+    fn phase2c_artifact_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("phase2c artifact test lock poisoned")
+    }
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -6296,6 +6304,7 @@ mod tests {
 
     #[test]
     fn compat_closure_final_evidence_pack_contains_required_fields() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let options = SuiteOptions {
             packet_filter: Some("FP-P2C-001".to_owned()),
@@ -6346,6 +6355,7 @@ mod tests {
 
     #[test]
     fn compat_closure_final_evidence_pack_writes_json_artifacts() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let options = SuiteOptions {
             packet_filter: Some("FP-P2C-001".to_owned()),
@@ -7189,6 +7199,7 @@ mod tests {
 
     #[test]
     fn verify_all_sidecars_ci_on_existing_packets() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let artifact_root = cfg.repo_root.join("artifacts");
         if !artifact_root.join("phase2c").exists() {

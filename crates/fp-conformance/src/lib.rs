@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use fp_frame::{FrameError, Series, concat_series};
+use fp_frame::{DataFrame, FrameError, Series, concat_series};
 use fp_groupby::{GroupByOptions, groupby_count, groupby_mean, groupby_sum};
 use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_io::{read_csv_str, write_csv_string};
@@ -150,6 +150,10 @@ pub enum FixtureOperation {
     SeriesHead,
     SeriesLoc,
     SeriesIloc,
+    #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
+    DataFrameLoc,
+    #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
+    DataFrameIloc,
     // FP-P2C-011: Full GroupBy aggregate matrix
     #[serde(rename = "groupby_mean", alias = "group_by_mean")]
     GroupByMean,
@@ -194,6 +198,18 @@ pub struct FixtureExpectedSeries {
     pub values: Vec<Scalar>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureDataFrame {
+    pub index: Vec<IndexLabel>,
+    pub columns: BTreeMap<String, Vec<Scalar>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureExpectedDataFrame {
+    pub index: Vec<IndexLabel>,
+    pub columns: BTreeMap<String, Vec<Scalar>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureExpectedAlignment {
     pub union_index: Vec<IndexLabel>,
@@ -221,6 +237,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub right: Option<FixtureSeries>,
     #[serde(default)]
+    pub frame: Option<FixtureDataFrame>,
+    #[serde(default)]
     pub index: Option<Vec<IndexLabel>>,
     #[serde(default)]
     pub join_type: Option<FixtureJoinType>,
@@ -228,6 +246,8 @@ pub struct PacketFixture {
     pub expected_series: Option<FixtureExpectedSeries>,
     #[serde(default)]
     pub expected_join: Option<FixtureExpectedJoin>,
+    #[serde(default)]
+    pub expected_frame: Option<FixtureExpectedDataFrame>,
     #[serde(default)]
     pub expected_alignment: Option<FixtureExpectedAlignment>,
     #[serde(default)]
@@ -438,7 +458,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         FixtureOperation::SeriesFilter
         | FixtureOperation::SeriesHead
         | FixtureOperation::SeriesLoc
-        | FixtureOperation::SeriesIloc => &["CC-004"],
+        | FixtureOperation::SeriesIloc
+        | FixtureOperation::DataFrameLoc
+        | FixtureOperation::DataFrameIloc => &["CC-004"],
     }
 }
 
@@ -890,6 +912,7 @@ struct OracleRequest {
     operation: FixtureOperation,
     left: Option<FixtureSeries>,
     right: Option<FixtureSeries>,
+    frame: Option<FixtureDataFrame>,
     index: Option<Vec<IndexLabel>>,
     join_type: Option<FixtureJoinType>,
     #[serde(default)]
@@ -911,6 +934,8 @@ struct OracleResponse {
     #[serde(default)]
     expected_join: Option<FixtureExpectedJoin>,
     #[serde(default)]
+    expected_frame: Option<FixtureExpectedDataFrame>,
+    #[serde(default)]
     expected_alignment: Option<FixtureExpectedAlignment>,
     #[serde(default)]
     expected_bool: Option<bool>,
@@ -928,6 +953,7 @@ struct OracleResponse {
 enum ResolvedExpected {
     Series(FixtureExpectedSeries),
     Join(FixtureExpectedJoin),
+    Frame(FixtureExpectedDataFrame),
     Alignment(FixtureExpectedAlignment),
     Bool(bool),
     Positions(Vec<Option<usize>>),
@@ -2946,6 +2972,28 @@ fn run_fixture_operation(
             };
             compare_series_expected(&actual, &expected)
         }
+        FixtureOperation::DataFrameLoc => {
+            let frame = require_frame(fixture)?;
+            let labels = require_loc_labels(fixture)?;
+            let frame = build_dataframe(frame)?;
+            let actual = frame.loc(labels).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Frame(frame) => frame,
+                _ => return Err("expected_frame is required for dataframe_loc".to_owned()),
+            };
+            compare_dataframe_expected(&actual, &expected)
+        }
+        FixtureOperation::DataFrameIloc => {
+            let frame = require_frame(fixture)?;
+            let positions = require_iloc_positions(fixture)?;
+            let frame = build_dataframe(frame)?;
+            let actual = frame.iloc(positions).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Frame(frame) => frame,
+                _ => return Err("expected_frame is required for dataframe_iloc".to_owned()),
+            };
+            compare_dataframe_expected(&actual, &expected)
+        }
         FixtureOperation::GroupByMean => {
             let keys = require_left_series(fixture)?;
             let values = require_right_series(fixture)?;
@@ -3083,6 +3131,16 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
+        FixtureOperation::DataFrameLoc | FixtureOperation::DataFrameIloc => fixture
+            .expected_frame
+            .clone()
+            .map(ResolvedExpected::Frame)
+            .ok_or_else(|| {
+                HarnessError::FixtureFormat(format!(
+                    "missing expected_frame for case {}",
+                    fixture.case_id
+                ))
+            }),
         FixtureOperation::NanSum => fixture
             .expected_scalar
             .clone()
@@ -3137,6 +3195,7 @@ fn capture_live_oracle_expected(
         operation: fixture.operation,
         left: fixture.left.clone(),
         right: fixture.right.clone(),
+        frame: fixture.frame.clone(),
         index: fixture.index.clone(),
         join_type: fixture.join_type,
         fill_value: fixture.fill_value.clone(),
@@ -3236,6 +3295,10 @@ fn capture_live_oracle_expected(
             .ok_or_else(|| {
                 HarnessError::FixtureFormat("oracle omitted expected_series".to_owned())
             }),
+        FixtureOperation::DataFrameLoc | FixtureOperation::DataFrameIloc => response
+            .expected_frame
+            .map(ResolvedExpected::Frame)
+            .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
         FixtureOperation::NanSum => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -3267,6 +3330,13 @@ fn require_right_series(fixture: &PacketFixture) -> Result<&FixtureSeries, Strin
         .ok_or_else(|| "missing right fixture series".to_owned())
 }
 
+fn require_frame(fixture: &PacketFixture) -> Result<&FixtureDataFrame, String> {
+    fixture
+        .frame
+        .as_ref()
+        .ok_or_else(|| "missing frame fixture payload".to_owned())
+}
+
 fn require_index(fixture: &PacketFixture) -> Result<&Vec<IndexLabel>, String> {
     fixture
         .index
@@ -3284,14 +3354,14 @@ fn require_loc_labels(fixture: &PacketFixture) -> Result<&Vec<IndexLabel>, Strin
     fixture
         .loc_labels
         .as_ref()
-        .ok_or_else(|| "loc_labels is required for series_loc".to_owned())
+        .ok_or_else(|| "loc_labels is required for loc operations".to_owned())
 }
 
 fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<usize>, String> {
     fixture
         .iloc_positions
         .as_ref()
-        .ok_or_else(|| "iloc_positions is required for series_iloc".to_owned())
+        .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
 }
 
 fn build_series(series: &FixtureSeries) -> Result<Series, String> {
@@ -3301,6 +3371,15 @@ fn build_series(series: &FixtureSeries) -> Result<Series, String> {
         series.values.clone(),
     )
     .map_err(|err| err.to_string())
+}
+
+fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
+    let columns = frame
+        .columns
+        .iter()
+        .map(|(name, values)| (name.as_str(), values.clone()))
+        .collect::<Vec<_>>();
+    DataFrame::from_dict_with_index(columns, frame.index.clone()).map_err(|err| err.to_string())
 }
 
 fn compare_series_expected(
@@ -3335,6 +3414,56 @@ fn compare_series_expected(
             ));
         }
     }
+    Ok(())
+}
+
+fn compare_dataframe_expected(
+    actual: &DataFrame,
+    expected: &FixtureExpectedDataFrame,
+) -> Result<(), String> {
+    if actual.index().labels() != expected.index {
+        return Err(format!(
+            "dataframe index mismatch: actual={:?}, expected={:?}",
+            actual.index().labels(),
+            expected.index
+        ));
+    }
+
+    let actual_names = actual.columns().keys().cloned().collect::<Vec<_>>();
+    let expected_names = expected.columns.keys().cloned().collect::<Vec<_>>();
+    if actual_names != expected_names {
+        return Err(format!(
+            "dataframe column mismatch: actual={actual_names:?}, expected={expected_names:?}"
+        ));
+    }
+
+    for (name, expected_values) in &expected.columns {
+        let Some(column) = actual.column(name) else {
+            return Err(format!("dataframe column missing in actual: {name}"));
+        };
+
+        if column.values().len() != expected_values.len() {
+            return Err(format!(
+                "dataframe column '{name}' length mismatch: actual={}, expected={}",
+                column.values().len(),
+                expected_values.len()
+            ));
+        }
+
+        for (idx, (left, right)) in column
+            .values()
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
+        {
+            if !left.semantic_eq(right) {
+                return Err(format!(
+                    "dataframe column '{name}' mismatch at idx={idx}: actual={left:?}, expected={right:?}"
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3721,6 +3850,28 @@ fn execute_and_compare_differential(
             };
             Ok(diff_series(&actual, &expected))
         }
+        FixtureOperation::DataFrameLoc => {
+            let frame = require_frame(fixture)?;
+            let labels = require_loc_labels(fixture)?;
+            let frame = build_dataframe(frame)?;
+            let actual = frame.loc(labels).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Frame(frame) => frame,
+                _ => return Err("expected_frame required for dataframe_loc".to_owned()),
+            };
+            Ok(diff_dataframe(&actual, &expected))
+        }
+        FixtureOperation::DataFrameIloc => {
+            let frame = require_frame(fixture)?;
+            let positions = require_iloc_positions(fixture)?;
+            let frame = build_dataframe(frame)?;
+            let actual = frame.iloc(positions).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Frame(frame) => frame,
+                _ => return Err("expected_frame required for dataframe_iloc".to_owned()),
+            };
+            Ok(diff_dataframe(&actual, &expected))
+        }
         FixtureOperation::GroupByMean => {
             let keys = require_left_series(fixture)?;
             let values = require_right_series(fixture)?;
@@ -3848,6 +3999,70 @@ fn diff_series(actual: &Series, expected: &FixtureExpectedSeries) -> Vec<DriftRe
         "series.values",
         &mut drifts,
     );
+    drifts
+}
+
+fn diff_dataframe(actual: &DataFrame, expected: &FixtureExpectedDataFrame) -> Vec<DriftRecord> {
+    let mut drifts = Vec::new();
+
+    if actual.index().labels() != expected.index {
+        drifts.push(make_drift_record(
+            ComparisonCategory::Index,
+            DriftLevel::Critical,
+            "dataframe.index",
+            format!(
+                "index mismatch: actual={:?}, expected={:?}",
+                actual.index().labels(),
+                expected.index
+            ),
+        ));
+    }
+
+    let actual_names = actual.columns().keys().cloned().collect::<Vec<_>>();
+    let expected_names = expected.columns.keys().cloned().collect::<Vec<_>>();
+    if actual_names != expected_names {
+        drifts.push(make_drift_record(
+            ComparisonCategory::Shape,
+            DriftLevel::Critical,
+            "dataframe.columns",
+            format!("column mismatch: actual={actual_names:?}, expected={expected_names:?}"),
+        ));
+    }
+
+    for (name, expected_values) in &expected.columns {
+        let Some(column) = actual.column(name) else {
+            drifts.push(make_drift_record(
+                ComparisonCategory::Shape,
+                DriftLevel::Critical,
+                format!("dataframe.columns.{name}"),
+                "column missing in actual result".to_owned(),
+            ));
+            continue;
+        };
+
+        let actual_values = column.values();
+        if actual_values.len() != expected_values.len() {
+            drifts.push(make_drift_record(
+                ComparisonCategory::Shape,
+                DriftLevel::Critical,
+                format!("dataframe.columns.{name}.len"),
+                format!(
+                    "length mismatch: actual={}, expected={}",
+                    actual_values.len(),
+                    expected_values.len()
+                ),
+            ));
+            continue;
+        }
+
+        diff_value_vectors(
+            actual_values,
+            expected_values,
+            &format!("dataframe.columns.{name}.values"),
+            &mut drifts,
+        );
+    }
+
     drifts
 }
 

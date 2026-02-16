@@ -329,6 +329,80 @@ def op_series_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def dataframe_from_json(pd, payload: dict[str, Any]):
+    index_raw = payload.get("index")
+    columns_raw = payload.get("columns")
+    if not isinstance(index_raw, list):
+        raise OracleError("frame payload requires index list")
+    if not isinstance(columns_raw, dict):
+        raise OracleError("frame payload requires columns object")
+
+    index = [label_from_json(item) for item in index_raw]
+    columns: dict[str, list[Any]] = {}
+    for name, values in columns_raw.items():
+        if not isinstance(values, list):
+            raise OracleError(f"frame column {name!r} must be a list")
+        parsed = [scalar_from_json(item) for item in values]
+        if len(parsed) != len(index):
+            raise OracleError(
+                f"frame column {name!r} length {len(parsed)} does not match index length {len(index)}"
+            )
+        columns[str(name)] = parsed
+
+    return pd.DataFrame(columns, index=index)
+
+
+def dataframe_to_json(frame) -> dict[str, Any]:
+    return {
+        "index": [label_to_json(v) for v in frame.index.tolist()],
+        "columns": {
+            str(name): [scalar_to_json(v) for v in frame[name].tolist()]
+            for name in frame.columns.tolist()
+        },
+    }
+
+
+def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    loc_labels = payload.get("loc_labels")
+    if frame_payload is None:
+        raise OracleError("dataframe_loc requires frame payload")
+    if not isinstance(loc_labels, list):
+        raise OracleError("dataframe_loc requires loc_labels list payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    labels = [label_from_json(item) for item in loc_labels]
+
+    try:
+        out = frame.loc[labels]
+    except KeyError as exc:
+        raise OracleError(f"dataframe_loc label lookup failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    iloc_positions = payload.get("iloc_positions")
+    if frame_payload is None:
+        raise OracleError("dataframe_iloc requires frame payload")
+    if not isinstance(iloc_positions, list):
+        raise OracleError("dataframe_iloc requires iloc_positions list payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        positions = [int(value) for value in iloc_positions]
+    except Exception as exc:  # pragma: no cover - defensive conversion
+        raise OracleError(f"dataframe_iloc positions must be integers: {exc}") from exc
+
+    try:
+        out = frame.iloc[positions]
+    except IndexError as exc:
+        raise OracleError(f"dataframe_iloc position lookup failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op = payload.get("operation")
     if op == "series_add":
@@ -347,6 +421,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_loc(pd, payload)
     if op == "series_iloc":
         return op_series_iloc(pd, payload)
+    if op == "dataframe_loc":
+        return op_dataframe_loc(pd, payload)
+    if op == "dataframe_iloc":
+        return op_dataframe_iloc(pd, payload)
     raise OracleError(f"unsupported operation: {op!r}")
 
 
@@ -358,6 +436,7 @@ def main() -> int:
         response = dispatch(pd, payload)
         response.setdefault("expected_series", None)
         response.setdefault("expected_join", None)
+        response.setdefault("expected_frame", None)
         response.setdefault("expected_alignment", None)
         response.setdefault("expected_bool", None)
         response.setdefault("expected_positions", None)
@@ -369,6 +448,7 @@ def main() -> int:
             {
                 "expected_series": None,
                 "expected_join": None,
+                "expected_frame": None,
                 "expected_alignment": None,
                 "expected_bool": None,
                 "expected_positions": None,
@@ -382,6 +462,7 @@ def main() -> int:
             {
                 "expected_series": None,
                 "expected_join": None,
+                "expected_frame": None,
                 "expected_alignment": None,
                 "expected_bool": None,
                 "expected_positions": None,

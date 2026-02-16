@@ -1,0 +1,19 @@
+{
+  "packet_id": "FP-P2C-010",
+  "case_id": "series_iloc_out_of_bounds_strict",
+  "mode": "strict",
+  "operation": "series_iloc",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 11 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1000 },
+      { "kind": "int64", "value": 1100 }
+    ]
+  },
+  "iloc_positions": [99],
+  "expected_error_contains": "out of bounds"
+}

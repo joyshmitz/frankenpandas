@@ -2958,23 +2958,55 @@ fn run_fixture_operation(
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
             let series = build_series(left)?;
-            let actual = series.loc(labels).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(series) => series,
-                _ => return Err("expected_series is required for series_loc".to_owned()),
-            };
-            compare_series_expected(&actual, &expected)
+            let actual = series.loc(labels).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_loc error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_loc to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_loc to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_series or expected_error is required for series_loc".to_owned()),
+            }
         }
         FixtureOperation::SeriesIloc => {
             let left = require_left_series(fixture)?;
             let positions = require_iloc_positions(fixture)?;
             let series = build_series(left)?;
-            let actual = series.iloc(positions).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(series) => series,
-                _ => return Err("expected_series is required for series_iloc".to_owned()),
-            };
-            compare_series_expected(&actual, &expected)
+            let actual = series.iloc(positions).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_iloc error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_iloc to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_iloc to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_series or expected_error is required for series_iloc".to_owned())
+                }
+            }
         }
         FixtureOperation::DataFrameLoc => {
             let frame = require_frame(fixture)?;
@@ -3899,23 +3931,71 @@ fn execute_and_compare_differential(
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
             let series = build_series(left)?;
-            let actual = series.loc(labels).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(s) => s,
-                _ => return Err("expected_series required for series_loc".to_owned()),
-            };
-            Ok(diff_series(&actual, &expected))
+            let actual = series.loc(labels).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_loc.error",
+                        format!("expected series_loc error containing '{substr}', got '{message}'"),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_loc.error",
+                        "expected series_loc to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_loc.error",
+                        "expected series_loc to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_loc".to_owned()),
+            }
         }
         FixtureOperation::SeriesIloc => {
             let left = require_left_series(fixture)?;
             let positions = require_iloc_positions(fixture)?;
             let series = build_series(left)?;
-            let actual = series.iloc(positions).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(s) => s,
-                _ => return Err("expected_series required for series_iloc".to_owned()),
-            };
-            Ok(diff_series(&actual, &expected))
+            let actual = series.iloc(positions).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_iloc.error",
+                        format!(
+                            "expected series_iloc error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_iloc.error",
+                        "expected series_iloc to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_iloc.error",
+                        "expected series_iloc to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_iloc".to_owned()),
+            }
         }
         FixtureOperation::DataFrameLoc => {
             let frame = require_frame(fixture)?;

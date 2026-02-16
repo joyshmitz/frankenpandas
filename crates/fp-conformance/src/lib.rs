@@ -2930,12 +2930,29 @@ fn run_fixture_operation(
             let right = require_right_series(fixture)?;
             let data = build_series(left)?;
             let mask = build_series(right)?;
-            let actual = data.filter(&mask).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(series) => series,
-                _ => return Err("expected_series is required for series_filter".to_owned()),
-            };
-            compare_series_expected(&actual, &expected)
+            let actual = data.filter(&mask).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_filter error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_filter to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_filter to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_filter".to_owned(),
+                ),
+            }
         }
         FixtureOperation::SeriesHead => {
             let left = require_left_series(fixture)?;
@@ -3903,12 +3920,37 @@ fn execute_and_compare_differential(
             let right = require_right_series(fixture)?;
             let data = build_series(left)?;
             let mask = build_series(right)?;
-            let actual = data.filter(&mask).map_err(|err| err.to_string())?;
-            let expected = match expected {
-                ResolvedExpected::Series(s) => s,
-                _ => return Err("expected_series required for series_filter".to_owned()),
-            };
-            Ok(diff_series(&actual, &expected))
+            let actual = data.filter(&mask).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_filter.error",
+                        format!(
+                            "expected series_filter error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_filter.error",
+                        "expected series_filter to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_filter.error",
+                        "expected series_filter to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_filter".to_owned()),
+            }
         }
         FixtureOperation::SeriesHead => {
             let left = require_left_series(fixture)?;

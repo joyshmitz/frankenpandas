@@ -359,6 +359,16 @@ impl Series {
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_mask = mask.column.reindex_by_positions(&plan.right_positions)?;
+        if let Some(offending) = aligned_mask
+            .values()
+            .iter()
+            .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "boolean mask required for filter; found dtype {:?}",
+                offending.dtype()
+            )));
+        }
 
         // Collect indices where mask is True.
         let mut new_labels = Vec::new();
@@ -854,6 +864,16 @@ impl DataFrame {
         validate_alignment_plan(&plan)?;
 
         let aligned_mask = mask.column().reindex_by_positions(&plan.right_positions)?;
+        if let Some(offending) = aligned_mask
+            .values()
+            .iter()
+            .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "boolean mask required for filter_rows; found dtype {:?}",
+                offending.dtype()
+            )));
+        }
 
         // Determine which rows to keep.
         let keep: Vec<bool> = aligned_mask
@@ -2190,6 +2210,27 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Int64(30));
     }
 
+    #[test]
+    fn series_filter_rejects_non_boolean_mask() {
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let mask = Series::from_values(
+            "mask",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0)],
+        )
+        .unwrap();
+
+        let err = s.filter(&mask).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean mask required for filter"))
+        );
+    }
+
     // ---- Series fillna/dropna tests ----
 
     #[test]
@@ -2488,6 +2529,36 @@ mod tests {
         assert_eq!(
             result.column("b").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn dataframe_filter_rows_rejects_non_boolean_mask() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let err = df.filter_rows(&mask).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean mask required for filter_rows"))
         );
     }
 

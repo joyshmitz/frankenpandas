@@ -1,0 +1,13 @@
+{
+  "packet_id": "FP-P2D-023",
+  "case_id": "dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_list_like",
+  "constructor_dtype": "boolean",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 2 }
+    ]
+  ],
+  "expected_error_contains": "expected 0/1 for bool cast from int64"
+}

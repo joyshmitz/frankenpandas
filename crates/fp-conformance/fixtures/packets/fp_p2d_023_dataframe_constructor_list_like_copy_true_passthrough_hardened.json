@@ -1,0 +1,26 @@
+{
+  "packet_id": "FP-P2D-023",
+  "case_id": "dataframe_constructor_list_like_copy_true_passthrough_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "constructor_copy": true,
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 }
+    ]
+  ],
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "int64", "value": 10 }
+      ],
+      "1": [
+        { "kind": "int64", "value": 20 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "packet_id": "FP-P2D-023",
+  "case_id": "dataframe_constructor_list_like_dtype_int64_lossy_float_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "constructor_dtype": "int64",
+  "matrix_rows": [
+    [
+      { "kind": "float64", "value": 1.5 }
+    ]
+  ],
+  "expected_error_contains": "cannot cast float 1.5 to int64 without loss"
+}

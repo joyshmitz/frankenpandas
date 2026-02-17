@@ -1,0 +1,75 @@
+{
+  "packet_id": "FP-P2D-023",
+  "fixtures": [
+    {
+      "id": "dataframe_constructor_list_like_dtype_float64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_float64_strict.json",
+      "class": "list_like_dtype_float64"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_int64_from_bool_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_int64_from_bool_hardened.json",
+      "class": "list_like_dtype_int64_from_bool"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_bool_invalid_int_error_strict.json",
+      "class": "list_like_dtype_bool_error"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_int64_lossy_float_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_int64_lossy_float_error_hardened.json",
+      "class": "list_like_dtype_lossy_float_error"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_unknown_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json",
+      "class": "list_like_dtype_unknown_error"
+    },
+    {
+      "id": "dataframe_constructor_list_like_copy_true_passthrough_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_copy_true_passthrough_hardened.json",
+      "class": "list_like_copy_passthrough"
+    },
+    {
+      "id": "dataframe_from_dict_dtype_float64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_from_dict_dtype_float64_strict.json",
+      "class": "from_dict_dtype_float64"
+    },
+    {
+      "id": "dataframe_from_dict_dtype_bool_invalid_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_from_dict_dtype_bool_invalid_error_hardened.json",
+      "class": "from_dict_dtype_bool_error"
+    },
+    {
+      "id": "dataframe_from_records_dtype_int64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_from_records_dtype_int64_strict.json",
+      "class": "from_records_dtype_int64"
+    },
+    {
+      "id": "dataframe_from_records_dtype_utf8_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_from_records_dtype_utf8_error_hardened.json",
+      "class": "from_records_dtype_utf8_error"
+    },
+    {
+      "id": "dataframe_constructor_dict_of_series_dtype_float64_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_dict_of_series_dtype_float64_hardened.json",
+      "class": "dict_of_series_dtype_float64"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_dtype_int64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_kwargs_dtype_int64_strict.json",
+      "class": "constructor_kwargs_dtype_int64"
+    },
+    {
+      "id": "dataframe_constructor_scalar_dtype_float64_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_constructor_scalar_dtype_float64_hardened.json",
+      "class": "constructor_scalar_dtype_float64"
+    },
+    {
+      "id": "dataframe_from_series_dtype_float64_copy_true_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_023_dataframe_from_series_dtype_float64_copy_true_strict.json",
+      "class": "from_series_dtype_float64_copy"
+    }
+  ]
+}

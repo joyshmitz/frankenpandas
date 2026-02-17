@@ -26,7 +26,8 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    NullKind, Scalar, dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum,
+    nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -365,6 +366,10 @@ pub struct PacketFixture {
     pub dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
     #[serde(default)]
     pub column_order: Option<Vec<String>>,
+    #[serde(default)]
+    pub constructor_dtype: Option<String>,
+    #[serde(default)]
+    pub constructor_copy: Option<bool>,
     #[serde(default)]
     pub records: Option<Vec<BTreeMap<String, Scalar>>>,
     #[serde(default)]
@@ -4048,6 +4053,39 @@ fn collect_dict_constructor_payloads<'a>(
     ))
 }
 
+fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
+    let normalized = dtype_spec.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "bool" | "boolean" => Ok(DType::Bool),
+        "int64" | "int" | "i64" => Ok(DType::Int64),
+        "float64" | "float" | "f64" => Ok(DType::Float64),
+        "utf8" | "string" | "str" => Ok(DType::Utf8),
+        _ => Err(format!(
+            "unsupported constructor dtype '{}'",
+            dtype_spec.trim()
+        )),
+    }
+}
+
+fn apply_constructor_options(
+    fixture: &PacketFixture,
+    operation_name: &str,
+    frame: DataFrame,
+) -> Result<DataFrame, String> {
+    let _copy_requested = fixture.constructor_copy.unwrap_or(false);
+    let Some(dtype_spec) = fixture.constructor_dtype.as_deref() else {
+        return Ok(frame);
+    };
+    let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
+    let mut coerced_columns = BTreeMap::new();
+    for (name, column) in frame.columns() {
+        let coerced = Column::new(target_dtype, column.values().to_vec())
+            .map_err(|err| format!("{operation_name} dtype='{dtype_spec}' cast failed: {err}"))?;
+        coerced_columns.insert(name.clone(), coerced);
+    }
+    DataFrame::new(frame.index().clone(), coerced_columns).map_err(|err| err.to_string())
+}
+
 fn execute_nanop_fixture_operation(
     fixture: &PacketFixture,
     operation: FixtureOperation,
@@ -4078,7 +4116,8 @@ fn execute_dataframe_from_series_fixture_operation(
         series_list
             .push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
     }
-    DataFrame::from_series(series_list).map_err(|err| err.to_string())
+    let frame = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
+    apply_constructor_options(fixture, "dataframe_from_series", frame)
 }
 
 fn execute_dataframe_from_dict_fixture_operation(
@@ -4090,10 +4129,12 @@ fn execute_dataframe_from_dict_fixture_operation(
         fixture.column_order.as_deref(),
         "dataframe_from_dict",
     )?;
-    if let Some(index) = fixture.index.clone() {
-        return DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string());
-    }
-    DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())
+    let frame = if let Some(index) = fixture.index.clone() {
+        DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string())?
+    } else {
+        DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())?
+    };
+    apply_constructor_options(fixture, "dataframe_from_dict", frame)
 }
 
 fn execute_dataframe_from_records_fixture_operation(
@@ -4132,7 +4173,7 @@ fn execute_dataframe_from_records_fixture_operation(
         "dataframe_from_records",
     )?;
 
-    if let Some(index) = fixture.index.clone() {
+    let frame = if let Some(index) = fixture.index.clone() {
         if index.len() != records.len() {
             return Err(format!(
                 "dataframe_from_records index length {} does not match records length {}",
@@ -4140,16 +4181,15 @@ fn execute_dataframe_from_records_fixture_operation(
                 records.len()
             ));
         }
-        return DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string());
-    }
-
-    if columns.is_empty() && !records.is_empty() {
+        DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string())?
+    } else if columns.is_empty() && !records.is_empty() {
         let default_index = (0..records.len() as i64).map(IndexLabel::from).collect();
-        return DataFrame::from_dict_with_index(Vec::new(), default_index)
-            .map_err(|err| err.to_string());
-    }
+        DataFrame::from_dict_with_index(Vec::new(), default_index).map_err(|err| err.to_string())?
+    } else {
+        DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())?
+    };
 
-    DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())
+    apply_constructor_options(fixture, "dataframe_from_records", frame)
 }
 
 fn execute_dataframe_constructor_kwargs_fixture_operation(
@@ -4157,11 +4197,12 @@ fn execute_dataframe_constructor_kwargs_fixture_operation(
 ) -> Result<DataFrame, String> {
     let frame = build_dataframe(require_frame(fixture)?)
         .map_err(|err| format!("frame build failed: {err}"))?;
-    materialize_dataframe_constructor_projection(
+    let projected = materialize_dataframe_constructor_projection(
         &frame,
         fixture.index.clone(),
         fixture.column_order.clone(),
-    )
+    )?;
+    apply_constructor_options(fixture, "dataframe_constructor_kwargs", projected)
 }
 
 fn materialize_dataframe_constructor_projection(
@@ -4228,7 +4269,8 @@ fn execute_dataframe_constructor_scalar_fixture_operation(
         columns.insert(name, column);
     }
 
-    DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())
+    let frame = DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())?;
+    apply_constructor_options(fixture, "dataframe_constructor_scalar", frame)
 }
 
 fn execute_dataframe_constructor_dict_of_series_fixture_operation(
@@ -4242,11 +4284,12 @@ fn execute_dataframe_constructor_dict_of_series_fixture_operation(
             .push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
     }
     let frame = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
-    materialize_dataframe_constructor_projection(
+    let projected = materialize_dataframe_constructor_projection(
         &frame,
         fixture.index.clone(),
         fixture.column_order.clone(),
-    )
+    )?;
+    apply_constructor_options(fixture, "dataframe_constructor_dict_of_series", projected)
 }
 
 fn execute_dataframe_constructor_list_like_fixture_operation(
@@ -4302,7 +4345,9 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
         Some(&selected_columns),
         "dataframe_constructor_list_like",
     )?;
-    DataFrame::from_dict_with_index(columns, index_labels).map_err(|err| err.to_string())
+    let frame =
+        DataFrame::from_dict_with_index(columns, index_labels).map_err(|err| err.to_string())?;
+    apply_constructor_options(fixture, "dataframe_constructor_list_like", frame)
 }
 
 fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -7572,6 +7617,19 @@ mod tests {
         assert!(
             report.fixture_count >= 14,
             "expected FP-P2D-022 list-like shape taxonomy fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_dtype_kwargs_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-023", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-023"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-023 constructor dtype/copy fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

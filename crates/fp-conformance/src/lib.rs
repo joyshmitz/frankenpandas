@@ -3064,7 +3064,9 @@ fn run_fixture_operation(
                     Err(_) => Ok(()),
                     Ok(_) => Err("expected csv_round_trip to fail".to_owned()),
                 },
-                _ => Err("expected_bool or expected_error is required for csv_round_trip".to_owned()),
+                _ => {
+                    Err("expected_bool or expected_error is required for csv_round_trip".to_owned())
+                }
             }
         }
         FixtureOperation::ColumnDtypeCheck => {

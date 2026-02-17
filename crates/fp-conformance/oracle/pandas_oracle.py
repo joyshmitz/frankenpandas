@@ -15,6 +15,7 @@ import importlib
 import json
 import math
 import os
+import struct
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -97,7 +98,7 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
     raw = value.get("value")
     if kind == "null":
         marker = str(raw)
-        if marker == "nan":
+        if marker in {"nan", "na_n"}:
             return float("nan")
         return None
     if kind == "bool":
@@ -125,7 +126,7 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
         return {"kind": "int64", "value": value}
     if isinstance(value, float):
         if math.isnan(value):
-            return {"kind": "null", "value": "nan"}
+            return {"kind": "null", "value": "na_n"}
         return {"kind": "float64", "value": value}
     return {"kind": "utf8", "value": str(value)}
 
@@ -136,6 +137,86 @@ def label_to_json(value: Any) -> dict[str, Any]:
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     return {"kind": "utf8", "value": str(value)}
+
+
+def scalar_is_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def encode_groupby_key_component(value: Any) -> str:
+    if isinstance(value, bool):
+        return f"b:{str(value).lower()}"
+    if isinstance(value, int):
+        return f"i:{value}"
+    if isinstance(value, float):
+        if math.isnan(value):
+            raise OracleError("groupby composite key component cannot be NaN")
+        bits = struct.unpack(">Q", struct.pack(">d", value))[0]
+        return f"f_bits:{bits:016x}"
+    escaped = json.dumps(str(value), ensure_ascii=False, separators=(",", ":"))
+    return f"s:{escaped}"
+
+
+def encode_groupby_composite_key(values: list[Any]) -> str:
+    return "|".join(encode_groupby_key_component(value) for value in values)
+
+
+def build_groupby_composite_key_series(
+    pd, payload: dict[str, Any], value_index: list[Any]
+) -> tuple[Any, list[Any]]:
+    groupby_keys = payload.get("groupby_keys")
+    if not isinstance(groupby_keys, list) or not groupby_keys:
+        raise OracleError(
+            "groupby_keys must be a non-empty list for multi-key groupby payloads"
+        )
+
+    union_index: list[Any] = []
+    seen_labels: set[Any] = set()
+    key_maps: list[dict[Any, Any]] = []
+
+    for key_payload in groupby_keys:
+        key_idx = [label_from_json(item) for item in key_payload["index"]]
+        key_vals = [scalar_from_json(item) for item in key_payload["values"]]
+        if len(key_idx) != len(key_vals):
+            raise OracleError(
+                "groupby_keys index/value length mismatch in multi-key payload"
+            )
+
+        for label in key_idx:
+            if label not in seen_labels:
+                seen_labels.add(label)
+                union_index.append(label)
+
+        first_map: dict[Any, Any] = {}
+        for label, value in zip(key_idx, key_vals):
+            first_map.setdefault(label, value)
+        key_maps.append(first_map)
+
+    composite_values: list[Any] = []
+    for label in union_index:
+        components: list[Any] = []
+        has_missing = False
+        for key_map in key_maps:
+            if label not in key_map or scalar_is_missing(key_map[label]):
+                has_missing = True
+                break
+            components.append(key_map[label])
+
+        if has_missing:
+            composite_values.append(None)
+        else:
+            composite_values.append(encode_groupby_composite_key(components))
+
+    key_series = pd.Series(composite_values, index=union_index, dtype="object")
+
+    combined_index = list(union_index)
+    seen = set(union_index)
+    for label in value_index:
+        if label not in seen:
+            seen.add(label)
+            combined_index.append(label)
+
+    return key_series, combined_index
 
 
 def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -201,25 +282,35 @@ def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
-    left = payload.get("left")
     right = payload.get("right")
-    if left is None or right is None:
-        raise OracleError(f"{op_name} requires left(keys) and right(values) payloads")
+    if right is None:
+        raise OracleError(f"{op_name} requires right(values) payload")
 
-    key_index = [label_from_json(item) for item in left["index"]]
     value_index = [label_from_json(item) for item in right["index"]]
-    keys = [scalar_from_json(item) for item in left["values"]]
     values = [scalar_from_json(item) for item in right["values"]]
-
-    key_series = pd.Series(keys, index=key_index, dtype="object")
     value_series = pd.Series(values, index=value_index, dtype="float64")
+    groupby_keys = payload.get("groupby_keys")
 
-    union_index = list(key_index)
-    seen = set(key_index)
-    for label in value_index:
-        if label not in seen:
-            seen.add(label)
-            union_index.append(label)
+    if isinstance(groupby_keys, list) and groupby_keys:
+        key_series, union_index = build_groupby_composite_key_series(
+            pd, payload, value_index
+        )
+    else:
+        left = payload.get("left")
+        if left is None:
+            raise OracleError(
+                f"{op_name} requires left(keys) payload when groupby_keys is absent"
+            )
+        key_index = [label_from_json(item) for item in left["index"]]
+        keys = [scalar_from_json(item) for item in left["values"]]
+        key_series = pd.Series(keys, index=key_index, dtype="object")
+
+        union_index = list(key_index)
+        seen = set(key_index)
+        for label in value_index:
+            if label not in seen:
+                seen.add(label)
+                union_index.append(label)
 
     aligned_keys = key_series.reindex(union_index)
     aligned_values = value_series.reindex(union_index)
@@ -241,13 +332,25 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
         out = grouped.first()
     elif agg == "last":
         out = grouped.last()
+    elif agg == "std":
+        out = grouped.std(ddof=1)
+    elif agg == "var":
+        out = grouped.var(ddof=1)
+    elif agg == "median":
+        out = grouped.median()
     else:
         raise OracleError(f"unsupported groupby aggregation: {agg!r}")
+
+    def groupby_agg_scalar_to_json(value: Any) -> dict[str, Any]:
+        if agg in {"std", "var"} and scalar_is_missing(value):
+            # Runtime currently models n<2 std/var as null (not NaN) for parity.
+            return {"kind": "null", "value": "null"}
+        return scalar_to_json(value)
 
     return {
         "expected_series": {
             "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
+            "values": [groupby_agg_scalar_to_json(v) for v in out.tolist()],
         }
     }
 
@@ -278,6 +381,18 @@ def op_groupby_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_groupby_last(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return op_groupby_agg(pd, payload, "last", "groupby_last")
+
+
+def op_groupby_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "std", "groupby_std")
+
+
+def op_groupby_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "var", "groupby_var")
+
+
+def op_groupby_median(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "median", "groupby_median")
 
 
 def op_index_align_union(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -539,6 +654,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_groupby_first(pd, payload)
     if op in {"groupby_last", "group_by_last"}:
         return op_groupby_last(pd, payload)
+    if op in {"groupby_std", "group_by_std"}:
+        return op_groupby_std(pd, payload)
+    if op in {"groupby_var", "group_by_var"}:
+        return op_groupby_var(pd, payload)
+    if op in {"groupby_median", "group_by_median"}:
+        return op_groupby_median(pd, payload)
     if op == "index_align_union":
         return op_index_align_union(pd, payload)
     if op == "index_has_duplicates":

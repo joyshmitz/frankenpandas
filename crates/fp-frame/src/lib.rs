@@ -32,6 +32,32 @@ pub struct Series {
     column: Column,
 }
 
+fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
+    let len_i128 = i128::try_from(len).map_err(|_| {
+        FrameError::CompatibilityRejected(format!(
+            "iloc cannot address length {len} on this platform"
+        ))
+    })?;
+    let position_i128 = i128::from(position);
+    let normalized = if position_i128 < 0 {
+        len_i128 + position_i128
+    } else {
+        position_i128
+    };
+
+    if normalized < 0 || normalized >= len_i128 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "iloc position {position} out of bounds for length {len}"
+        )));
+    }
+
+    usize::try_from(normalized).map_err(|_| {
+        FrameError::CompatibilityRejected(format!(
+            "iloc position {position} out of bounds for length {len}"
+        ))
+    })
+}
+
 impl Series {
     pub fn new(name: impl Into<String>, index: Index, column: Column) -> Result<Self, FrameError> {
         if index.len() != column.len() {
@@ -417,19 +443,15 @@ impl Series {
     ///
     /// Matches `series.iloc[[...]]` for list-like selectors.
     /// Positions are returned in selector order and duplicates are preserved.
-    pub fn iloc(&self, positions: &[usize]) -> Result<Self, FrameError> {
+    /// Negative positions are resolved from the end of the Series.
+    pub fn iloc(&self, positions: &[i64]) -> Result<Self, FrameError> {
         let mut out_labels = Vec::with_capacity(positions.len());
         let mut out_values = Vec::with_capacity(positions.len());
 
         for &position in positions {
-            if position >= self.len() {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "iloc position {position} out of bounds for length {}",
-                    self.len()
-                )));
-            }
-            out_labels.push(self.index.labels()[position].clone());
-            out_values.push(self.column.values()[position].clone());
+            let normalized = normalize_iloc_position(position, self.len())?;
+            out_labels.push(self.index.labels()[normalized].clone());
+            out_values.push(self.column.values()[normalized].clone());
         }
 
         Self::from_values(self.name.clone(), out_labels, out_values)
@@ -974,22 +996,23 @@ impl DataFrame {
     ///
     /// Matches `df.iloc[[...]]` for list selectors. Requested positions are
     /// returned in selector order and duplicates are preserved.
-    pub fn iloc(&self, positions: &[usize]) -> Result<Self, FrameError> {
-        let mut out_labels = Vec::with_capacity(positions.len());
-        for &position in positions {
-            if position >= self.len() {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "iloc position {position} out of bounds for length {}",
-                    self.len()
-                )));
-            }
+    /// Negative positions are resolved from the end of the DataFrame.
+    pub fn iloc(&self, positions: &[i64]) -> Result<Self, FrameError> {
+        let normalized_positions = positions
+            .iter()
+            .copied()
+            .map(|position| normalize_iloc_position(position, self.len()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut out_labels = Vec::with_capacity(normalized_positions.len());
+        for &position in &normalized_positions {
             out_labels.push(self.index.labels()[position].clone());
         }
 
         let mut columns = BTreeMap::new();
         for (name, column) in &self.columns {
-            let mut values = Vec::with_capacity(positions.len());
-            for &position in positions {
+            let mut values = Vec::with_capacity(normalized_positions.len());
+            for &position in &normalized_positions {
                 values.push(column.values()[position].clone());
             }
             columns.insert(name.clone(), Column::from_values(values)?);
@@ -2494,6 +2517,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn series_iloc_negative_positions_resolve_from_end() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from(10_i64),
+                IndexLabel::from(11_i64),
+                IndexLabel::from(12_i64),
+                IndexLabel::from(13_i64),
+            ],
+            vec![
+                Scalar::Int64(1000),
+                Scalar::Int64(1100),
+                Scalar::Int64(1200),
+                Scalar::Int64(1300),
+            ],
+        )
+        .unwrap();
+
+        let selected = s.iloc(&[-1, -3, 0]).unwrap();
+        assert_eq!(
+            selected.index().labels(),
+            &[
+                IndexLabel::from(13_i64),
+                IndexLabel::from(11_i64),
+                IndexLabel::from(10_i64)
+            ]
+        );
+        assert_eq!(
+            selected.values(),
+            &[
+                Scalar::Int64(1300),
+                Scalar::Int64(1100),
+                Scalar::Int64(1000)
+            ]
+        );
+    }
+
+    #[test]
+    fn series_iloc_negative_out_of_bounds_is_rejected() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let err = s.iloc(&[-3]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
+        );
+    }
+
     // ---- DataFrame filter_rows, head, tail, with_column, drop_column, rename tests ----
 
     #[test]
@@ -2707,6 +2783,74 @@ mod tests {
     fn dataframe_iloc_out_of_bounds_is_rejected() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
         let err = df.iloc(&[1]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_negative_positions_resolve_from_end() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1000),
+                        Scalar::Int64(1100),
+                        Scalar::Int64(1200),
+                        Scalar::Int64(1300),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(2000),
+                        Scalar::Int64(2100),
+                        Scalar::Int64(2200),
+                        Scalar::Int64(2300),
+                    ],
+                ),
+            ],
+            vec![
+                IndexLabel::from(10_i64),
+                IndexLabel::from(11_i64),
+                IndexLabel::from(12_i64),
+                IndexLabel::from(13_i64),
+            ],
+        )
+        .unwrap();
+
+        let selected = df.iloc(&[-1, -3, 0]).unwrap();
+        assert_eq!(
+            selected.index().labels(),
+            &[
+                IndexLabel::from(13_i64),
+                IndexLabel::from(11_i64),
+                IndexLabel::from(10_i64)
+            ]
+        );
+        assert_eq!(
+            selected.column("a").unwrap().values(),
+            &[
+                Scalar::Int64(1300),
+                Scalar::Int64(1100),
+                Scalar::Int64(1000)
+            ]
+        );
+        assert_eq!(
+            selected.column("b").unwrap().values(),
+            &[
+                Scalar::Int64(2300),
+                Scalar::Int64(2100),
+                Scalar::Int64(2000)
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_negative_out_of_bounds_is_rejected() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
+        let err = df.iloc(&[-2]).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
         );

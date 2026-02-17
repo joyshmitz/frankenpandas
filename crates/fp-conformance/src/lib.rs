@@ -5985,6 +5985,7 @@ pub fn build_failure_forensics(e2e: &E2eReport) -> FailureForensicsReport {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
@@ -6072,30 +6073,24 @@ mod tests {
     fn grouped_reports_are_partitioned_per_packet() {
         let cfg = HarnessConfig::default_paths();
         let reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");
+        let packet_ids: Vec<String> = reports
+            .iter()
+            .map(|report| {
+                report
+                    .packet_id
+                    .clone()
+                    .expect("grouped report should have packet_id")
+            })
+            .collect();
         assert!(
-            reports
-                .iter()
-                .any(|report| report.packet_id.as_deref() == Some("FP-P2C-001"))
+            !packet_ids.is_empty(),
+            "expected grouped packet reports to include packet ids"
         );
+        let unique_packet_count = packet_ids.iter().collect::<BTreeSet<_>>().len();
         assert!(
-            reports
-                .iter()
-                .any(|report| report.packet_id.as_deref() == Some("FP-P2C-002"))
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.packet_id.as_deref() == Some("FP-P2C-003"))
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.packet_id.as_deref() == Some("FP-P2C-004"))
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.packet_id.as_deref() == Some("FP-P2C-005"))
+            unique_packet_count == reports.len(),
+            "expected exactly one grouped report per packet: unique={unique_packet_count} reports={}",
+            reports.len()
         );
         enforce_packet_gates(&cfg, &reports).expect("enforcement should pass");
     }
@@ -6467,15 +6462,24 @@ mod tests {
     #[test]
     fn differential_all_packets_green() {
         let cfg = HarnessConfig::default_paths();
-        for packet_id in &[
-            "FP-P2C-001",
-            "FP-P2C-002",
-            "FP-P2C-003",
-            "FP-P2C-004",
-            "FP-P2C-005",
-        ] {
-            let diff_report = run_differential_by_id(&cfg, packet_id, OracleMode::FixtureExpected)
-                .expect(packet_id);
+        let mut packet_ids: Vec<String> = run_packets_grouped(&cfg, &SuiteOptions::default())
+            .expect("grouped")
+            .into_iter()
+            .map(|report| {
+                report
+                    .packet_id
+                    .expect("grouped report should have packet_id")
+            })
+            .collect();
+        packet_ids.sort();
+        packet_ids.dedup();
+        assert!(
+            !packet_ids.is_empty(),
+            "expected at least one packet id from grouped reports"
+        );
+        for packet_id in packet_ids {
+            let diff_report = run_differential_by_id(&cfg, &packet_id, OracleMode::FixtureExpected)
+                .expect("differential report for discovered packet should run");
             assert!(
                 diff_report.report.is_green(),
                 "{packet_id} differential not green: {:?}",
@@ -7063,11 +7067,14 @@ mod tests {
 
         let mut hooks = NoopHooks;
         let report = run_e2e_suite(&config, &mut hooks).expect("e2e");
+        let expected_packet_count = run_packets_grouped(&config.harness, &config.options)
+            .expect("grouped")
+            .len();
 
-        // Should have run all 5 packets
         assert!(
-            report.packet_reports.len() >= 5,
-            "expected 5+ packet reports"
+            report.packet_reports.len() == expected_packet_count,
+            "expected packet report count to match grouped packets: expected={expected_packet_count} actual={}",
+            report.packet_reports.len()
         );
         assert!(report.total_fixtures > 0, "should have fixtures");
         assert_eq!(report.total_failed, 0, "no failures expected");

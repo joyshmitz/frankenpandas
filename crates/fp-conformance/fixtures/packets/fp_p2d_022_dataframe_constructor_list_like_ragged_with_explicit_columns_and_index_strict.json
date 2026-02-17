@@ -1,0 +1,40 @@
+{
+  "packet_id": "FP-P2D-022",
+  "case_id": "dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 8 }
+    ],
+    [
+      { "kind": "int64", "value": 9 },
+      { "kind": "int64", "value": 10 }
+    ]
+  ],
+  "column_order": ["x", "y", "z"],
+  "index": [
+    { "kind": "utf8", "value": "r1" },
+    { "kind": "utf8", "value": "r2" }
+  ],
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
+    ],
+    "columns": {
+      "x": [
+        { "kind": "int64", "value": 8 },
+        { "kind": "int64", "value": 9 }
+      ],
+      "y": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 10 }
+      ],
+      "z": [
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}

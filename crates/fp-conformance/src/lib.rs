@@ -4254,7 +4254,11 @@ fn execute_dataframe_constructor_list_like_fixture_operation(
 ) -> Result<DataFrame, String> {
     let matrix_rows = require_matrix_rows(fixture)?;
     let row_count = matrix_rows.len();
-    let max_row_width = matrix_rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
+    let max_row_width = matrix_rows
+        .iter()
+        .map(std::vec::Vec::len)
+        .max()
+        .unwrap_or(0);
 
     let selected_columns: Vec<String> = if let Some(column_order) = fixture.column_order.clone() {
         if max_row_width > column_order.len() {
@@ -7555,6 +7559,19 @@ mod tests {
         assert!(
             report.fixture_count >= 14,
             "expected FP-P2D-021 constructor list-like fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_shape_taxonomy_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-022", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-022"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-022 list-like shape taxonomy fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

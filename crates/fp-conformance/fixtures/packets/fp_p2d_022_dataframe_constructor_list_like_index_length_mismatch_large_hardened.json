@@ -1,0 +1,22 @@
+{
+  "packet_id": "FP-P2D-022",
+  "case_id": "dataframe_constructor_list_like_index_length_mismatch_large_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 1 }
+    ],
+    [
+      { "kind": "int64", "value": 2 }
+    ],
+    [
+      { "kind": "int64", "value": 3 }
+    ]
+  ],
+  "index": [
+    { "kind": "utf8", "value": "a" },
+    { "kind": "utf8", "value": "b" }
+  ],
+  "expected_error_contains": "index length 2 does not match row count 3"
+}

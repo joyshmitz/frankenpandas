@@ -1,0 +1,75 @@
+{
+  "packet_id": "FP-P2D-022",
+  "fixtures": [
+    {
+      "id": "dataframe_constructor_list_like_shape_square_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_shape_square_strict.json",
+      "class": "shape_square"
+    },
+    {
+      "id": "dataframe_constructor_list_like_shape_wide_rectangular_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_shape_wide_rectangular_hardened.json",
+      "class": "shape_wide_rectangular"
+    },
+    {
+      "id": "dataframe_constructor_list_like_default_column_labels_three_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_default_column_labels_three_strict.json",
+      "class": "default_column_labels"
+    },
+    {
+      "id": "dataframe_constructor_list_like_ragged_three_rows_null_padding_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_ragged_three_rows_null_padding_hardened.json",
+      "class": "ragged_null_padding"
+    },
+    {
+      "id": "dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_ragged_with_explicit_columns_and_index_strict.json",
+      "class": "ragged_explicit_axes"
+    },
+    {
+      "id": "dataframe_constructor_list_like_explicit_columns_empty_rows_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_explicit_columns_empty_rows_hardened.json",
+      "class": "empty_rows_declared_columns"
+    },
+    {
+      "id": "dataframe_constructor_list_like_empty_rows_nonempty_index_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_empty_rows_nonempty_index_error_strict.json",
+      "class": "index_length_error_empty_rows"
+    },
+    {
+      "id": "dataframe_constructor_list_like_empty_columns_nonempty_rows_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_empty_columns_nonempty_rows_error_hardened.json",
+      "class": "row_width_error_empty_columns"
+    },
+    {
+      "id": "dataframe_constructor_list_like_row_width_exceeds_columns_by_two_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_row_width_exceeds_columns_by_two_strict.json",
+      "class": "row_width_error_large"
+    },
+    {
+      "id": "dataframe_constructor_list_like_index_length_mismatch_large_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_index_length_mismatch_large_hardened.json",
+      "class": "index_length_error_large"
+    },
+    {
+      "id": "dataframe_constructor_list_like_missing_matrix_rows_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_missing_matrix_rows_error_strict.json",
+      "class": "missing_payload_error"
+    },
+    {
+      "id": "dataframe_constructor_list_like_null_fill_determinism_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_null_fill_determinism_hardened.json",
+      "class": "null_fill_determinism"
+    },
+    {
+      "id": "dataframe_constructor_list_like_utf8_index_and_values_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_utf8_index_and_values_strict.json",
+      "class": "utf8_axes_and_values"
+    },
+    {
+      "id": "dataframe_constructor_list_like_float_and_int_columns_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_022_dataframe_constructor_list_like_float_and_int_columns_hardened.json",
+      "class": "mixed_numeric_columns"
+    }
+  ]
+}

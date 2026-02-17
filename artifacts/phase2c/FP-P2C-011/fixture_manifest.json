@@ -60,6 +60,51 @@
       "id": "groupby_last_null_hardened",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_last_hardened.json",
       "class": "groupby_last_aggregation_hardened"
+    },
+    {
+      "id": "groupby_std_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_std_basic_strict.json",
+      "class": "groupby_std_aggregation"
+    },
+    {
+      "id": "groupby_std_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_std_hardened.json",
+      "class": "groupby_std_aggregation_hardened"
+    },
+    {
+      "id": "groupby_var_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_var_basic_strict.json",
+      "class": "groupby_var_aggregation"
+    },
+    {
+      "id": "groupby_var_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_var_hardened.json",
+      "class": "groupby_var_aggregation_hardened"
+    },
+    {
+      "id": "groupby_median_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_median_basic_strict.json",
+      "class": "groupby_median_aggregation"
+    },
+    {
+      "id": "groupby_median_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_median_hardened.json",
+      "class": "groupby_median_aggregation_hardened"
+    },
+    {
+      "id": "groupby_std_multikey_ddof_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_std_multikey_strict.json",
+      "class": "groupby_std_multikey_aggregation"
+    },
+    {
+      "id": "groupby_var_multikey_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_var_multikey_hardened.json",
+      "class": "groupby_var_multikey_aggregation_hardened"
+    },
+    {
+      "id": "groupby_median_multikey_order_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_median_multikey_strict.json",
+      "class": "groupby_median_multikey_aggregation"
     }
   ]
 }

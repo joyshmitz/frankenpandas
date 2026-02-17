@@ -7,7 +7,8 @@ Mitigations:
 2. Dense-int fast path has isomorphism proof against generic path.
 3. Arena-backed path has behavioral equivalence proof against global allocator path.
 4. std/var use ddof=1 (sample statistics) matching pandas default.
-5. Hardened packet fixtures cover null-key exclusion and null-value skipping parity for `mean`, `count`, `min`, `max`, `first`, and `last`.
+5. Hardened packet fixtures cover null-key exclusion and null/NaN value skipping parity for `mean`, `count`, `min`, `max`, `first`, `last`, `std`, `var`, and `median`.
+6. Multi-key fixtures use deterministic composite-key encoding to lock tuple-key ordering and null-component drop behavior.
 
 ## Isomorphism Proof Hook
 
@@ -16,6 +17,7 @@ Mitigations:
 - dense/generic isomorphism: dense-int fast path produces identical output to generic path
 - arena/global isomorphism: arena-backed path produces identical output to global allocator path
 - null handling: null keys excluded (dropna=true), null values skipped in aggregations
+- ddof handling: std/var use sample-statistics denominator (`n-1`) with single-value groups mapped to null
 
 ## Invariant Ledger Hooks
 

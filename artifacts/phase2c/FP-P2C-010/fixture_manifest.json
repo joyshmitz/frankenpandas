@@ -2,14 +2,129 @@
   "packet_id": "FP-P2C-010",
   "fixtures": [
     {
+      "id": "dataframe_iloc_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_basic_strict.json",
+      "class": "dataframe_iloc_basic"
+    },
+    {
+      "id": "dataframe_iloc_negative_basic_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_negative_basic_hardened.json",
+      "class": "dataframe_iloc_negative"
+    },
+    {
+      "id": "dataframe_iloc_negative_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_negative_basic_strict.json",
+      "class": "dataframe_iloc_negative"
+    },
+    {
+      "id": "dataframe_iloc_negative_out_of_bounds_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_negative_out_of_bounds_hardened.json",
+      "class": "dataframe_iloc_negative_out_of_bounds"
+    },
+    {
+      "id": "dataframe_iloc_negative_out_of_bounds_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_negative_out_of_bounds_strict.json",
+      "class": "dataframe_iloc_negative_out_of_bounds"
+    },
+    {
+      "id": "dataframe_iloc_out_of_bounds_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_iloc_out_of_bounds_strict.json",
+      "class": "dataframe_iloc_out_of_bounds"
+    },
+    {
+      "id": "dataframe_loc_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_loc_basic_strict.json",
+      "class": "dataframe_loc_basic"
+    },
+    {
+      "id": "dataframe_loc_duplicate_labels_mixed_dtypes_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_loc_duplicate_labels_mixed_dtypes_hardened.json",
+      "class": "dataframe_loc_duplicate_labels_mixed_dtypes"
+    },
+    {
+      "id": "dataframe_loc_duplicate_labels_mixed_dtypes_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_loc_duplicate_labels_mixed_dtypes_strict.json",
+      "class": "dataframe_loc_duplicate_labels_mixed_dtypes"
+    },
+    {
+      "id": "dataframe_loc_missing_label_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_dataframe_loc_missing_label_strict.json",
+      "class": "dataframe_loc_missing_label"
+    },
+    {
       "id": "series_filter_basic_strict",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_filter_basic_strict.json",
       "class": "boolean_mask_filter"
     },
     {
+      "id": "series_filter_duplicate_index_null_mask_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_filter_duplicate_index_null_mask_hardened.json",
+      "class": "boolean_mask_filter_duplicate_index_null"
+    },
+    {
+      "id": "series_filter_duplicate_index_null_mask_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_filter_duplicate_index_null_mask_strict.json",
+      "class": "boolean_mask_filter_duplicate_index_null"
+    },
+    {
+      "id": "series_filter_non_boolean_mask_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_filter_non_boolean_mask_strict.json",
+      "class": "boolean_mask_filter_type_error"
+    },
+    {
       "id": "series_head_basic_strict",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_head_basic_strict.json",
       "class": "head_n_slice"
+    },
+    {
+      "id": "series_iloc_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_basic_strict.json",
+      "class": "series_iloc_basic"
+    },
+    {
+      "id": "series_iloc_negative_basic_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_negative_basic_hardened.json",
+      "class": "series_iloc_negative"
+    },
+    {
+      "id": "series_iloc_negative_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_negative_basic_strict.json",
+      "class": "series_iloc_negative"
+    },
+    {
+      "id": "series_iloc_negative_out_of_bounds_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_negative_out_of_bounds_hardened.json",
+      "class": "series_iloc_negative_out_of_bounds"
+    },
+    {
+      "id": "series_iloc_negative_out_of_bounds_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_negative_out_of_bounds_strict.json",
+      "class": "series_iloc_negative_out_of_bounds"
+    },
+    {
+      "id": "series_iloc_out_of_bounds_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_iloc_out_of_bounds_strict.json",
+      "class": "series_iloc_out_of_bounds"
+    },
+    {
+      "id": "series_loc_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_loc_basic_strict.json",
+      "class": "series_loc_basic"
+    },
+    {
+      "id": "series_loc_duplicate_labels_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_loc_duplicate_labels_hardened.json",
+      "class": "series_loc_duplicate_labels"
+    },
+    {
+      "id": "series_loc_duplicate_labels_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_loc_duplicate_labels_strict.json",
+      "class": "series_loc_duplicate_labels"
+    },
+    {
+      "id": "series_loc_missing_label_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_loc_missing_label_strict.json",
+      "class": "series_loc_missing_label"
     }
   ]
 }

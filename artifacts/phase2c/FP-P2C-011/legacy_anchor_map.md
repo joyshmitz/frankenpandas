@@ -68,14 +68,14 @@ Subsystem: full GroupBy planner split/apply/combine + aggregate matrix
 ## Hidden Assumptions
 
 1. Multi-aggregate planner behavior has high interaction complexity.
-2. Single-key series groupby only; multi-key DataFrame groupby deferred.
+2. Full DataFrameGroupBy planner API is deferred; packet-level multi-key parity currently flows through deterministic composite-key fixtures.
 3. No `transform`, `filter`, or `apply` paths implemented.
 4. No `observed` parameter for categorical key handling.
 
 ## Undefined-Behavior Edges
 
 1. Full aggregate planner matrix (custom aggregation functions, named aggregation).
-2. Multi-key DataFrame groupby semantics.
+2. Full DataFrameGroupBy semantics (`as_index`, named aggregation, transform/apply/filter).
 3. Categorical key handling with `observed` parameter.
 4. `transform`, `filter`, `apply` paths.
 5. Rolling/expanding window aggregation.

@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-024",
+  "case_id": "dataframe_from_dict_dtype_string_uppercase_strict",
+  "mode": "strict",
+  "operation": "dataframe_from_dict",
+  "constructor_dtype": "STRING",
+  "dict_columns": {
+    "name": [
+      { "kind": "utf8", "value": "alice" },
+      { "kind": "utf8", "value": "bob" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "name": [
+        { "kind": "utf8", "value": "alice" },
+        { "kind": "utf8", "value": "bob" }
+      ]
+    }
+  }
+}

@@ -7635,6 +7635,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_constructor_dtype_spec_normalization_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-024", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-024"));
+        assert!(
+            report.fixture_count >= 10,
+            "expected FP-P2D-024 constructor dtype-spec normalization fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn grouped_reports_are_partitioned_per_packet() {
         let cfg = HarnessConfig::default_paths();
         let reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");

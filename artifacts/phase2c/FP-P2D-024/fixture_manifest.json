@@ -1,0 +1,55 @@
+{
+  "packet_id": "FP-P2D-024",
+  "fixtures": [
+    {
+      "id": "dataframe_constructor_list_like_dtype_int64_trimmed_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_int64_trimmed_strict.json",
+      "class": "dtype_normalization_int64"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_float_alias_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_float_alias_hardened.json",
+      "class": "dtype_alias_float"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_boolean_uppercase_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_uppercase_strict.json",
+      "class": "dtype_alias_boolean"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_str_alias_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_str_alias_hardened.json",
+      "class": "dtype_alias_str"
+    },
+    {
+      "id": "dataframe_from_dict_dtype_string_uppercase_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_from_dict_dtype_string_uppercase_strict.json",
+      "class": "dtype_alias_string"
+    },
+    {
+      "id": "dataframe_from_series_dtype_f64_alias_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_from_series_dtype_f64_alias_hardened.json",
+      "class": "dtype_alias_f64"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json",
+      "class": "unsupported_uint64"
+    },
+    {
+      "id": "dataframe_from_dict_dtype_category_unsupported_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_from_dict_dtype_category_unsupported_error_hardened.json",
+      "class": "unsupported_category"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json",
+      "class": "unsupported_datetime64"
+    },
+    {
+      "id": "dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json",
+      "class": "unsupported_pyarrow_extension"
+    }
+  ]
+}

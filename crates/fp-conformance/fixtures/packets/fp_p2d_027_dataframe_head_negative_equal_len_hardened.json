@@ -1,0 +1,27 @@
+{
+  "packet_id": "FP-P2D-027",
+  "case_id": "dataframe_head_negative_equal_len_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_head",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 11 },
+        { "kind": "int64", "value": 22 },
+        { "kind": "int64", "value": 33 }
+      ]
+    }
+  },
+  "head_n": -3,
+  "expected_frame": {
+    "index": [],
+    "columns": {
+      "a": []
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-027",
+  "case_id": "dataframe_tail_negative_two_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_tail",
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" },
+      { "kind": "utf8", "value": "r3" },
+      { "kind": "utf8", "value": "r4" },
+      { "kind": "utf8", "value": "r5" }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.1 },
+        { "kind": "float64", "value": 2.2 },
+        { "kind": "float64", "value": 3.3 },
+        { "kind": "float64", "value": 4.4 },
+        { "kind": "float64", "value": 5.5 }
+      ],
+      "flag": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true }
+      ]
+    }
+  },
+  "tail_n": -2,
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r3" },
+      { "kind": "utf8", "value": "r4" },
+      { "kind": "utf8", "value": "r5" }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 3.3 },
+        { "kind": "float64", "value": 4.4 },
+        { "kind": "float64", "value": 5.5 }
+      ],
+      "flag": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true }
+      ]
+    }
+  }
+}

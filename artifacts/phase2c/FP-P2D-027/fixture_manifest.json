@@ -1,0 +1,55 @@
+{
+  "packet_id": "FP-P2D-027",
+  "fixtures": [
+    {
+      "id": "dataframe_head_negative_one_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_head_negative_one_strict.json",
+      "class": "head_negative_one"
+    },
+    {
+      "id": "dataframe_head_negative_two_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_head_negative_two_hardened.json",
+      "class": "head_negative_two"
+    },
+    {
+      "id": "dataframe_head_negative_exceeds_len_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_head_negative_exceeds_len_strict.json",
+      "class": "head_negative_exceeds_len"
+    },
+    {
+      "id": "dataframe_head_negative_equal_len_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_head_negative_equal_len_hardened.json",
+      "class": "head_negative_equal_len"
+    },
+    {
+      "id": "dataframe_head_negative_preserves_nulls_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_head_negative_preserves_nulls_strict.json",
+      "class": "head_negative_preserves_nulls"
+    },
+    {
+      "id": "dataframe_tail_negative_one_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_tail_negative_one_strict.json",
+      "class": "tail_negative_one"
+    },
+    {
+      "id": "dataframe_tail_negative_two_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_tail_negative_two_hardened.json",
+      "class": "tail_negative_two"
+    },
+    {
+      "id": "dataframe_tail_negative_exceeds_len_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_tail_negative_exceeds_len_strict.json",
+      "class": "tail_negative_exceeds_len"
+    },
+    {
+      "id": "dataframe_tail_negative_equal_len_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_tail_negative_equal_len_hardened.json",
+      "class": "tail_negative_equal_len"
+    },
+    {
+      "id": "dataframe_tail_negative_preserves_nulls_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_027_dataframe_tail_negative_preserves_nulls_strict.json",
+      "class": "tail_negative_preserves_nulls"
+    }
+  ]
+}

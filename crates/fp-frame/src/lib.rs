@@ -58,6 +58,36 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
     })
 }
 
+fn saturating_i64_to_usize(value: i64) -> usize {
+    if value < 0 {
+        0
+    } else {
+        usize::try_from(value).unwrap_or(usize::MAX)
+    }
+}
+
+fn saturating_i64_abs_to_usize(value: i64) -> usize {
+    usize::try_from(value.unsigned_abs()).unwrap_or(usize::MAX)
+}
+
+fn normalize_head_take(n: i64, len: usize) -> usize {
+    if n >= 0 {
+        saturating_i64_to_usize(n).min(len)
+    } else {
+        len.saturating_sub(saturating_i64_abs_to_usize(n))
+    }
+}
+
+fn normalize_tail_window(n: i64, len: usize) -> (usize, usize) {
+    if n >= 0 {
+        let take = saturating_i64_to_usize(n).min(len);
+        (len - take, take)
+    } else {
+        let skip = saturating_i64_abs_to_usize(n).min(len);
+        (skip, len - skip)
+    }
+}
+
 impl Series {
     pub fn new(name: impl Into<String>, index: Index, column: Column) -> Result<Self, FrameError> {
         if index.len() != column.len() {
@@ -955,9 +985,10 @@ impl DataFrame {
 
     /// Return the first `n` rows.
     ///
-    /// Matches `df.head(n)`.
-    pub fn head(&self, n: usize) -> Result<Self, FrameError> {
-        let take = n.min(self.len());
+    /// Matches `df.head(n)`. If `n` is negative, this returns all rows except
+    /// the last `-n` rows.
+    pub fn head(&self, n: i64) -> Result<Self, FrameError> {
+        let take = normalize_head_take(n, self.len());
         let labels = self.index.labels()[..take].to_vec();
         let mut columns = BTreeMap::new();
         for (name, col) in &self.columns {
@@ -969,10 +1000,10 @@ impl DataFrame {
 
     /// Return the last `n` rows.
     ///
-    /// Matches `df.tail(n)`.
-    pub fn tail(&self, n: usize) -> Result<Self, FrameError> {
-        let take = n.min(self.len());
-        let start = self.len() - take;
+    /// Matches `df.tail(n)`. If `n` is negative, this returns all rows except
+    /// the first `-n` rows.
+    pub fn tail(&self, n: i64) -> Result<Self, FrameError> {
+        let (start, _) = normalize_tail_window(n, self.len());
         let labels = self.index.labels()[start..].to_vec();
         let mut columns = BTreeMap::new();
         for (name, col) in &self.columns {
@@ -2729,6 +2760,58 @@ mod tests {
             tail.column("v").unwrap().values(),
             &[Scalar::Int64(4), Scalar::Int64(5)]
         );
+    }
+
+    #[test]
+    fn dataframe_head_tail_negative_n() {
+        let df = DataFrame::from_dict(
+            &["v"],
+            vec![(
+                "v",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                    Scalar::Int64(5),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let head = df.head(-2).unwrap();
+        assert_eq!(head.len(), 3);
+        assert_eq!(
+            head.column("v").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let tail = df.tail(-2).unwrap();
+        assert_eq!(tail.len(), 3);
+        assert_eq!(
+            tail.column("v").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]
+        );
+    }
+
+    #[test]
+    fn dataframe_head_tail_negative_n_saturates_to_empty() {
+        let df = DataFrame::from_dict(
+            &["v"],
+            vec![(
+                "v",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+
+        let head = df.head(-10).unwrap();
+        assert_eq!(head.len(), 0);
+        assert_eq!(head.column("v").unwrap().values(), &[]);
+
+        let tail = df.tail(-10).unwrap();
+        assert_eq!(tail.len(), 0);
+        assert_eq!(tail.column("v").unwrap().values(), &[]);
     }
 
     #[test]

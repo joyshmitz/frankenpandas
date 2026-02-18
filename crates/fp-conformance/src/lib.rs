@@ -407,9 +407,9 @@ pub struct PacketFixture {
     #[serde(default)]
     pub fill_value: Option<Scalar>,
     #[serde(default)]
-    pub head_n: Option<usize>,
+    pub head_n: Option<i64>,
     #[serde(default)]
-    pub tail_n: Option<usize>,
+    pub tail_n: Option<i64>,
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
@@ -1109,9 +1109,9 @@ struct OracleRequest {
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
-    head_n: Option<usize>,
+    head_n: Option<i64>,
     #[serde(default)]
-    tail_n: Option<usize>,
+    tail_n: Option<i64>,
     #[serde(default)]
     csv_input: Option<String>,
     #[serde(default)]
@@ -3385,7 +3385,7 @@ fn run_fixture_operation(
                 .head_n
                 .ok_or_else(|| "head_n is required for series_head".to_owned())?;
             let series = build_series(left)?;
-            let take = n.min(series.len());
+            let take = normalize_head_take(n, series.len());
             let labels = series.index().labels()[..take].to_vec();
             let values = series.values()[..take].to_vec();
             let actual =
@@ -4079,6 +4079,14 @@ fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<i64>, String> 
         .iloc_positions
         .as_ref()
         .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
+}
+
+fn normalize_head_take(n: i64, len: usize) -> usize {
+    if n >= 0 {
+        usize::try_from(n).unwrap_or(usize::MAX).min(len)
+    } else {
+        len.saturating_sub(usize::try_from(n.unsigned_abs()).unwrap_or(usize::MAX))
+    }
 }
 
 fn collect_constructor_series_payloads(
@@ -5483,7 +5491,7 @@ fn execute_and_compare_differential(
                 .head_n
                 .ok_or_else(|| "head_n is required for series_head".to_owned())?;
             let series = build_series(left)?;
-            let take = n.min(series.len());
+            let take = normalize_head_take(n, series.len());
             let labels = series.index().labels()[..take].to_vec();
             let values = series.values()[..take].to_vec();
             let actual =
@@ -7830,6 +7838,19 @@ mod tests {
         assert!(
             report.fixture_count >= 10,
             "expected FP-P2D-026 dataframe head/tail fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_head_tail_negative_n_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-027", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-027"));
+        assert!(
+            report.fixture_count >= 10,
+            "expected FP-P2D-027 dataframe head/tail negative-n fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

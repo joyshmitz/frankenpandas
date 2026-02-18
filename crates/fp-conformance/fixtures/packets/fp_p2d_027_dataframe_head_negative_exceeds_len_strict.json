@@ -1,0 +1,27 @@
+{
+  "packet_id": "FP-P2D-027",
+  "case_id": "dataframe_head_negative_exceeds_len_strict",
+  "mode": "strict",
+  "operation": "dataframe_head",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 8 },
+        { "kind": "int64", "value": 9 }
+      ]
+    }
+  },
+  "head_n": -10,
+  "expected_frame": {
+    "index": [],
+    "columns": {
+      "a": []
+    }
+  }
+}

@@ -1074,13 +1074,11 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     if axis == 0:
-        if join == "inner":
-            raise OracleError("concat(axis=0, join='inner') is not yet supported")
-        if sorted(left.columns.tolist()) != sorted(right.columns.tolist()):
+        if join == "outer" and sorted(left.columns.tolist()) != sorted(right.columns.tolist()):
             raise OracleError(
                 "dataframe_concat column mismatch: right frame columns do not match left frame"
             )
-        out = pd.concat([left, right], axis=0, sort=False)
+        out = pd.concat([left, right], axis=0, join=join, sort=False)
     else:
         overlapping = sorted(set(left.columns.tolist()) & set(right.columns.tolist()))
         if overlapping:

@@ -16,6 +16,5 @@ Invariant hooks:
 
 Residual risk:
 
-- Axis=0 `join='inner'` remains intentionally unsupported in this slice.
+- Axis=0 `join='outer'` union-column semantics remain out of scope for this packet.
 - Duplicate-column parity remains blocked by current unique-keyed column storage model.
-

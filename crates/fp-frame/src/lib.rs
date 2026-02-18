@@ -748,7 +748,7 @@ pub fn concat_dataframes_with_axis(
 /// Concatenate DataFrames along axis with explicit join policy.
 ///
 /// Supported combinations:
-/// - `axis=0, join=outer`: row-wise concatenation
+/// - `axis=0, join=outer|inner`: row-wise concatenation
 /// - `axis=1, join=outer|inner`: column-wise alignment
 pub fn concat_dataframes_with_axis_join(
     frames: &[&DataFrame],
@@ -756,19 +756,50 @@ pub fn concat_dataframes_with_axis_join(
     join: ConcatJoin,
 ) -> Result<DataFrame, FrameError> {
     match axis {
-        0 => {
-            if matches!(join, ConcatJoin::Inner) {
-                return Err(FrameError::CompatibilityRejected(
-                    "concat(axis=0, join='inner') is not yet supported".to_owned(),
-                ));
-            }
-            concat_dataframes(frames)
-        }
+        0 => match join {
+            ConcatJoin::Outer => concat_dataframes(frames),
+            ConcatJoin::Inner => concat_dataframes_axis0_inner(frames),
+        },
         1 => concat_dataframes_axis1(frames, join),
         _ => Err(FrameError::CompatibilityRejected(format!(
             "unsupported concat axis {axis}; expected 0 or 1"
         ))),
     }
+}
+
+fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
+    if frames.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+    }
+
+    let mut shared_columns: Vec<String> = frames[0].columns().keys().cloned().collect();
+    for frame in frames.iter().skip(1) {
+        let frame_columns: BTreeSet<&str> = frame.columns().keys().map(String::as_str).collect();
+        shared_columns.retain(|name| frame_columns.contains(name.as_str()));
+    }
+
+    let total_len: usize = frames.iter().map(|frame| frame.len()).sum();
+    let mut labels = Vec::with_capacity(total_len);
+    for frame in frames {
+        labels.extend_from_slice(frame.index().labels());
+    }
+    let index = Index::new(labels);
+
+    let mut columns = BTreeMap::new();
+    for name in shared_columns {
+        let mut values = Vec::with_capacity(total_len);
+        for frame in frames {
+            values.extend_from_slice(
+                frame
+                    .column(&name)
+                    .expect("shared concat(axis=0, join='inner') column must exist")
+                    .values(),
+            );
+        }
+        columns.insert(name, Column::from_values(values)?);
+    }
+
+    DataFrame::new(index, columns)
 }
 
 /// Column-wise DataFrame concat with deterministic outer index alignment.
@@ -2154,14 +2185,60 @@ mod tests {
     }
 
     #[test]
-    fn concat_dataframes_axis0_inner_is_rejected() {
+    fn concat_dataframes_axis0_inner_uses_column_intersection() {
+        let left = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["b", "c"],
+            vec![
+                ("b", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+                ("c", vec![Scalar::Int64(7), Scalar::Int64(8)]),
+            ],
+        )
+        .unwrap();
+
+        let out = concat_dataframes_with_axis_join(&[&left, &right], 0, ConcatJoin::Inner).unwrap();
+        let column_names = out.column_names();
+        assert_eq!(column_names.len(), 1);
+        assert_eq!(column_names[0], "b");
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(100),
+                Scalar::Int64(200)
+            ]
+        );
+        assert_eq!(out.index().labels().len(), 4);
+    }
+
+    #[test]
+    fn concat_dataframes_axis0_inner_no_shared_columns_yields_empty_columns() {
+        let left = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
+        let right = DataFrame::from_dict(&["y"], vec![("y", vec![Scalar::Int64(2)])]).unwrap();
+
+        let out = concat_dataframes_with_axis_join(&[&left, &right], 0, ConcatJoin::Inner).unwrap();
+        assert!(out.column_names().is_empty());
+        assert_eq!(out.index().labels().len(), 2);
+    }
+
+    #[test]
+    fn concat_dataframes_axis0_inner_all_shared_columns_matches_row_concat() {
         let left = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let right = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(2)])]).unwrap();
 
-        let err = concat_dataframes_with_axis_join(&[&left, &right], 0, ConcatJoin::Inner)
-            .expect_err("should reject");
-        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
-        assert!(err.to_string().contains("axis=0"));
+        let out = concat_dataframes_with_axis_join(&[&left, &right], 0, ConcatJoin::Inner).unwrap();
+        assert_eq!(
+            out.column("x").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
     }
 
     // ---- Series.align() tests (bd-2gi.15) ----

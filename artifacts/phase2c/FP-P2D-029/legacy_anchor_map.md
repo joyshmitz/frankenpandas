@@ -19,11 +19,10 @@ Subsystem: DataFrame concat axis=1 `join='inner'` parity
 
 1. `concat(axis=1, join='inner')` uses intersection of row labels while preserving left-order.
 2. Existing null values are preserved through intersection materialization.
-3. Unsupported selector combinations remain fail-closed with explicit diagnostics.
+3. Unsupported selector values and duplicate-label/column conflict paths remain fail-closed.
 
 ## Open Gaps
 
-1. Axis=0 `join='inner'` column-intersection semantics.
+1. Axis=0 `join='outer'` union-column semantics.
 2. MultiIndex concat join semantics.
 3. Duplicate-column-preserving output model parity.
-

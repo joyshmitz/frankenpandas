@@ -42,9 +42,9 @@
       "class": "axis1_invalid_join_error"
     },
     {
-      "id": "dataframe_concat_axis0_inner_unsupported_error_strict",
+      "id": "dataframe_concat_axis0_inner_sanity_strict",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2d_029_dataframe_concat_axis0_inner_unsupported_error_strict.json",
-      "class": "axis0_inner_unsupported_error"
+      "class": "axis0_inner_sanity"
     },
     {
       "id": "dataframe_concat_axis1_inner_duplicate_index_error_hardened",

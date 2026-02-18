@@ -14,6 +14,7 @@ pub enum JoinType {
     Left,
     Right,
     Outer,
+    Cross,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,6 +163,11 @@ fn estimate_output_rows(
                 })
                 .sum()
         }
+        JoinType::Cross => left
+            .index()
+            .labels()
+            .len()
+            .saturating_mul(right.index().labels().len()),
         JoinType::Outer => {
             // Left-matched rows + unmatched right rows
             let right_unmatched: usize = right
@@ -244,6 +250,15 @@ fn join_series_with_global_allocator(
                 right_positions.push(Some(right_pos));
             }
         }
+        JoinType::Cross => {
+            for (left_pos, left_label) in left.index().labels().iter().enumerate() {
+                for (right_pos, _) in right.index().labels().iter().enumerate() {
+                    out_labels.push(left_label.clone());
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(Some(right_pos));
+                }
+            }
+        }
     }
 
     let left_values = left.column().reindex_by_positions(&left_positions)?;
@@ -315,6 +330,15 @@ fn join_series_with_arena(
                 right_positions.push(Some(right_pos));
             }
         }
+        JoinType::Cross => {
+            for (left_pos, left_label) in left.index().labels().iter().enumerate() {
+                for (right_pos, _) in right.index().labels().iter().enumerate() {
+                    out_labels.push(left_label.clone());
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(Some(right_pos));
+                }
+            }
+        }
     }
 
     let left_values = left
@@ -363,6 +387,10 @@ pub fn merge_dataframes(
     on: &str,
     join_type: JoinType,
 ) -> Result<MergedDataFrame, JoinError> {
+    if matches!(join_type, JoinType::Cross) {
+        return merge_dataframes_cross(left, right);
+    }
+
     let left_key = left.column(on).ok_or_else(|| {
         JoinError::Frame(FrameError::CompatibilityRejected(format!(
             "left DataFrame missing key column '{on}'"
@@ -459,6 +487,9 @@ pub fn merge_dataframes(
                 right_positions.push(Some(right_pos));
             }
         }
+        JoinType::Cross => {
+            unreachable!("cross join handled by merge_dataframes_cross");
+        }
     }
 
     // Build output columns by reindexing.
@@ -494,6 +525,52 @@ pub fn merge_dataframes(
         }
         let reindexed = col.reindex_by_positions(&right_positions)?;
         let out_name = if left_col_names.contains(name) && name != on {
+            format!("{name}_right")
+        } else {
+            name.clone()
+        };
+        columns.insert(out_name, reindexed);
+    }
+
+    Ok(MergedDataFrame { index, columns })
+}
+
+fn merge_dataframes_cross(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+) -> Result<MergedDataFrame, JoinError> {
+    let left_rows = left.index().len();
+    let right_rows = right.index().len();
+    let out_rows = left_rows.saturating_mul(right_rows);
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_rows);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_rows);
+    for left_pos in 0..left_rows {
+        for right_pos in 0..right_rows {
+            left_positions.push(Some(left_pos));
+            right_positions.push(Some(right_pos));
+        }
+    }
+
+    let index = Index::new((0..out_rows as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+
+    for (name, col) in left.columns() {
+        let reindexed = col.reindex_by_positions(&left_positions)?;
+        let out_name = if right_col_names.contains(name) {
+            format!("{name}_left")
+        } else {
+            name.clone()
+        };
+        columns.insert(out_name, reindexed);
+    }
+
+    for (name, col) in right.columns() {
+        let reindexed = col.reindex_by_positions(&right_positions)?;
+        let out_name = if left_col_names.contains(name) {
             format!("{name}_right")
         } else {
             name.clone()
@@ -1099,5 +1176,93 @@ mod tests {
         let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
         // 2 left × 2 right = 4 rows
         assert_eq!(merged.columns.get("id").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn merge_cross_cartesian_product() {
+        let left = make_left_df();
+        let right = make_right_df();
+
+        let merged = merge_dataframes(&left, &right, "unused_key", JoinType::Cross).unwrap();
+
+        assert_eq!(merged.columns.get("id_left").unwrap().len(), 9);
+        assert_eq!(
+            &merged.columns.get("id_left").unwrap().values()[0..3],
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            &merged.columns.get("id_right").unwrap().values()[0..3],
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            &merged.columns.get("val_a").unwrap().values()[0..3],
+            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            &merged.columns.get("val_b").unwrap().values()[0..3],
+            &[Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)]
+        );
+    }
+
+    #[test]
+    fn merge_cross_does_not_require_on_column() {
+        let left = make_left_df();
+        let right = make_right_df();
+
+        let merged =
+            merge_dataframes(&left, &right, "definitely_missing", JoinType::Cross).unwrap();
+        assert_eq!(merged.columns.get("id_left").unwrap().len(), 9);
+    }
+
+    #[test]
+    fn merge_cross_with_empty_side_yields_empty_rows() {
+        let left = DataFrame::from_dict(
+            &["l"],
+            vec![("l", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(&["r"], vec![("r", vec![])]).unwrap();
+
+        let merged = merge_dataframes(&left, &right, "ignored", JoinType::Cross).unwrap();
+        assert_eq!(merged.index.labels().len(), 0);
+        assert!(merged.columns.get("l").unwrap().values().is_empty());
+        assert!(merged.columns.get("r").unwrap().values().is_empty());
+    }
+
+    #[test]
+    fn join_series_cross_cartesian_product() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec!["x".into(), "y".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let out = join_series(&left, &right, JoinType::Cross).unwrap();
+        assert_eq!(out.index.labels().len(), 4);
+        assert_eq!(
+            out.left_values.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2)
+            ]
+        );
+        assert_eq!(
+            out.right_values.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(10),
+                Scalar::Int64(20)
+            ]
+        );
     }
 }

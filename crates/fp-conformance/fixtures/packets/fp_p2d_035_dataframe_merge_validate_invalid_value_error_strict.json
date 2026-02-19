@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-035",
+  "case_id": "dataframe_merge_validate_invalid_value_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
+  "join_type": "inner",
+  "merge_on": "id",
+  "merge_validate": "diagonal",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "int64", "value": 1 }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 10 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 10 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "int64", "value": 1 }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 }
+      ]
+    }
+  },
+  "expected_error_contains": "merge_validate must be one_to_one, one_to_many, many_to_one, or many_to_many"
+}

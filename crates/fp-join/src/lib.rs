@@ -20,6 +20,25 @@ pub enum JoinType {
     Cross,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeValidateMode {
+    OneToOne,
+    OneToMany,
+    ManyToOne,
+    ManyToMany,
+}
+
+impl MergeValidateMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OneToOne => "one_to_one",
+            Self::OneToMany => "one_to_many",
+            Self::ManyToOne => "many_to_one",
+            Self::ManyToMany => "many_to_many",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoinedSeries {
     pub index: Index,
@@ -55,6 +74,7 @@ impl Default for JoinExecutionOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergeExecutionOptions {
     pub indicator_name: Option<String>,
+    pub validate_mode: Option<MergeValidateMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +442,55 @@ fn collect_composite_keys(key_columns: &[&Column]) -> Vec<CompositeJoinKey> {
     out
 }
 
+fn has_duplicate_composite_keys(keys: &[CompositeJoinKey]) -> bool {
+    let mut seen = HashSet::with_capacity(keys.len());
+    for key in keys {
+        if !seen.insert(key) {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_merge_cardinality(
+    validate_mode: MergeValidateMode,
+    left_keys: &[CompositeJoinKey],
+    right_keys: &[CompositeJoinKey],
+) -> Result<(), JoinError> {
+    let left_has_duplicates = has_duplicate_composite_keys(left_keys);
+    let right_has_duplicates = has_duplicate_composite_keys(right_keys);
+
+    let fail = |message: &str| {
+        Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            message.to_owned(),
+        )))
+    };
+
+    match validate_mode {
+        MergeValidateMode::OneToOne => {
+            if left_has_duplicates {
+                return fail("merge validate='one_to_one' failed: left keys are not unique");
+            }
+            if right_has_duplicates {
+                return fail("merge validate='one_to_one' failed: right keys are not unique");
+            }
+        }
+        MergeValidateMode::OneToMany => {
+            if left_has_duplicates {
+                return fail("merge validate='one_to_many' failed: left keys are not unique");
+            }
+        }
+        MergeValidateMode::ManyToOne => {
+            if right_has_duplicates {
+                return fail("merge validate='many_to_one' failed: right keys are not unique");
+            }
+        }
+        MergeValidateMode::ManyToMany => {}
+    }
+
+    Ok(())
+}
+
 fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
     let existing = values.clone();
     values.clear();
@@ -514,9 +583,23 @@ pub fn merge_dataframes_on_with_options(
     join_type: JoinType,
     options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
-    let indicator_name = resolve_merge_indicator_name(options.indicator_name.as_deref())?;
+    let MergeExecutionOptions {
+        indicator_name,
+        validate_mode,
+    } = options;
+    let indicator_name = resolve_merge_indicator_name(indicator_name.as_deref())?;
 
     if matches!(join_type, JoinType::Cross) {
+        if let Some(validate_mode) = validate_mode
+            && !matches!(validate_mode, MergeValidateMode::ManyToMany)
+        {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!(
+                    "merge validate='{}' is not supported for cross join",
+                    validate_mode.as_str()
+                ),
+            )));
+        }
         return merge_dataframes_cross(left, right, indicator_name.as_deref());
     }
 
@@ -554,6 +637,9 @@ pub fn merge_dataframes_on_with_options(
     // Convert key columns to hashable composite keys.
     let left_keys = collect_composite_keys(&left_key_columns);
     let right_keys = collect_composite_keys(&right_key_columns);
+    if let Some(validate_mode) = validate_mode {
+        validate_merge_cardinality(validate_mode, &left_keys, &right_keys)?;
+    }
 
     // Build hash map from right key → row positions.
     let mut right_map = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
@@ -1218,8 +1304,8 @@ mod tests {
     // ---- DataFrame merge tests (bd-2gi.17) ----
 
     use super::{
-        MergeExecutionOptions, merge_dataframes, merge_dataframes_on, merge_dataframes_on_with,
-        merge_dataframes_on_with_options,
+        MergeExecutionOptions, MergeValidateMode, merge_dataframes, merge_dataframes_on,
+        merge_dataframes_on_with, merge_dataframes_on_with_options,
     };
     use fp_frame::DataFrame;
 
@@ -1916,6 +2002,7 @@ mod tests {
             JoinType::Outer,
             MergeExecutionOptions {
                 indicator_name: Some("_merge".to_owned()),
+                ..MergeExecutionOptions::default()
             },
         )
         .expect("merge");
@@ -1958,6 +2045,7 @@ mod tests {
             JoinType::Outer,
             MergeExecutionOptions {
                 indicator_name: Some("origin".to_owned()),
+                ..MergeExecutionOptions::default()
             },
         )
         .expect("merge");
@@ -1987,6 +2075,7 @@ mod tests {
             JoinType::Inner,
             MergeExecutionOptions {
                 indicator_name: Some("id".to_owned()),
+                ..MergeExecutionOptions::default()
             },
         )
         .expect_err("expected indicator name conflict");
@@ -2010,6 +2099,7 @@ mod tests {
             JoinType::Cross,
             MergeExecutionOptions {
                 indicator_name: Some("_merge".to_owned()),
+                ..MergeExecutionOptions::default()
             },
         )
         .expect("cross merge");
@@ -2020,6 +2110,148 @@ mod tests {
                 Scalar::Utf8("both".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn merge_validate_one_to_one_rejects_duplicate_left_keys() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("one_to_one must reject duplicate left keys");
+        assert!(format!("{err}").contains("left keys are not unique"));
+    }
+
+    #[test]
+    fn merge_validate_one_to_many_allows_duplicate_right_keys() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(100), Scalar::Int64(101), Scalar::Int64(200)],
+                ),
+            ],
+        )
+        .expect("right frame");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("one_to_many should allow duplicate right keys");
+        assert_eq!(merged.columns.get("id").expect("id").values().len(), 3);
+    }
+
+    #[test]
+    fn merge_validate_many_to_one_rejects_duplicate_right_keys() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(101)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("many_to_one must reject duplicate right keys");
+        assert!(format!("{err}").contains("right keys are not unique"));
+    }
+
+    #[test]
+    fn merge_validate_many_to_many_allows_duplicates_on_both_sides() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("many_to_many should allow duplicate keys on both sides");
+        assert_eq!(merged.columns.get("id").expect("id").values().len(), 4);
     }
 
     #[test]

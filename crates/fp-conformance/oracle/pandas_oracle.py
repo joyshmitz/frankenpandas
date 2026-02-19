@@ -1099,6 +1099,26 @@ def resolve_merge_indicator(payload: dict[str, Any], op_name: str) -> bool | str
     return None
 
 
+def resolve_merge_validate(payload: dict[str, Any], op_name: str) -> str | None:
+    validate_raw = payload.get("merge_validate")
+    if validate_raw is None:
+        return None
+    if not isinstance(validate_raw, str):
+        raise OracleError(f"{op_name} merge_validate must be a string when provided")
+    normalized = validate_raw.strip().lower()
+    if normalized in {"1:1", "one_to_one"}:
+        return "one_to_one"
+    if normalized in {"1:m", "one_to_many"}:
+        return "one_to_many"
+    if normalized in {"m:1", "many_to_one"}:
+        return "many_to_one"
+    if normalized in {"m:m", "many_to_many"}:
+        return "many_to_many"
+    raise OracleError(
+        f"{op_name} merge_validate must be one_to_one, one_to_many, many_to_one, or many_to_many"
+    )
+
+
 def dataframe_with_index_keys(frame, key_names: list[str]):
     out = frame.copy()
     for key_name in key_names:
@@ -1129,6 +1149,7 @@ def op_dataframe_merge(
         default_key="__index_key" if left_use_index and right_use_index else None,
     )
     indicator = resolve_merge_indicator(payload, op_name)
+    validate_mode = resolve_merge_validate(payload, op_name)
 
     if left_use_index:
         left = dataframe_with_index_keys(left, left_merge_keys)
@@ -1143,6 +1164,8 @@ def op_dataframe_merge(
     }
     if indicator is not None:
         merge_kwargs["indicator"] = indicator
+    if validate_mode is not None:
+        merge_kwargs["validate"] = validate_mode
 
     if left_merge_keys == right_merge_keys:
         out = left.merge(right, on=left_merge_keys, **merge_kwargs)

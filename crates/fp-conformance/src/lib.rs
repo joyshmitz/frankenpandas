@@ -17,7 +17,10 @@ use fp_groupby::{
 };
 use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_io::{read_csv_str, write_csv_string};
-use fp_join::{JoinType, MergeExecutionOptions, join_series, merge_dataframes_on_with_options};
+use fp_join::{
+    JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
+    merge_dataframes_on_with_options,
+};
 #[cfg(feature = "asupersync")]
 use fp_runtime::asupersync::{
     ArtifactCodec, ArtifactPayload, Fnv1aVerifier, IntegrityVerifier, PassthroughCodec,
@@ -406,6 +409,8 @@ pub struct PacketFixture {
     pub merge_indicator: Option<bool>,
     #[serde(default)]
     pub merge_indicator_name: Option<String>,
+    #[serde(default)]
+    pub merge_validate: Option<String>,
     #[serde(default)]
     pub expected_series: Option<FixtureExpectedSeries>,
     #[serde(default)]
@@ -1144,6 +1149,8 @@ struct OracleRequest {
     merge_indicator: Option<bool>,
     #[serde(default)]
     merge_indicator_name: Option<String>,
+    #[serde(default)]
+    merge_validate: Option<String>,
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
@@ -3886,6 +3893,7 @@ fn capture_live_oracle_expected(
         right_index: fixture.right_index,
         merge_indicator: fixture.merge_indicator,
         merge_indicator_name: fixture.merge_indicator_name.clone(),
+        merge_validate: fixture.merge_validate.clone(),
         fill_value: fixture.fill_value.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
@@ -4232,6 +4240,28 @@ fn resolve_merge_indicator_name(
     }
 
     Ok(None)
+}
+
+fn resolve_merge_validate_mode(
+    merge_validate: Option<&str>,
+    operation_name: &str,
+) -> Result<Option<MergeValidateMode>, String> {
+    let Some(raw_mode) = merge_validate else {
+        return Ok(None);
+    };
+    let normalized = raw_mode.trim().to_ascii_lowercase();
+    let mode = match normalized.as_str() {
+        "one_to_one" | "1:1" => MergeValidateMode::OneToOne,
+        "one_to_many" | "1:m" => MergeValidateMode::OneToMany,
+        "many_to_one" | "m:1" => MergeValidateMode::ManyToOne,
+        "many_to_many" | "m:m" => MergeValidateMode::ManyToMany,
+        _ => {
+            return Err(format!(
+                "{operation_name} merge_validate must be one_to_one, one_to_many, many_to_one, or many_to_many"
+            ));
+        }
+    };
+    Ok(Some(mode))
 }
 
 fn normalize_concat_axis(fixture: &PacketFixture) -> Result<i64, String> {
@@ -4686,6 +4716,8 @@ fn execute_dataframe_merge_fixture_operation(
         fixture.merge_indicator_name.as_deref(),
         operation_name,
     )?;
+    let validate_mode =
+        resolve_merge_validate_mode(fixture.merge_validate.as_deref(), operation_name)?;
 
     let left_input = if left_use_index {
         dataframe_with_index_as_columns(&left, &left_merge_keys)?
@@ -4712,7 +4744,10 @@ fn execute_dataframe_merge_fixture_operation(
         &left_merge_refs,
         &right_merge_refs,
         join_type,
-        MergeExecutionOptions { indicator_name },
+        MergeExecutionOptions {
+            indicator_name,
+            validate_mode,
+        },
     )
     .map_err(|err| err.to_string())?;
     DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
@@ -8180,6 +8215,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-034 dataframe merge indicator fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_merge_validate_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-035", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-035"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-035 dataframe merge validate fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

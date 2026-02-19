@@ -412,6 +412,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub merge_validate: Option<String>,
     #[serde(default)]
+    pub merge_suffixes: Option<[Option<String>; 2]>,
+    #[serde(default)]
     pub expected_series: Option<FixtureExpectedSeries>,
     #[serde(default)]
     pub expected_join: Option<FixtureExpectedJoin>,
@@ -1151,6 +1153,8 @@ struct OracleRequest {
     merge_indicator_name: Option<String>,
     #[serde(default)]
     merge_validate: Option<String>,
+    #[serde(default)]
+    merge_suffixes: Option<[Option<String>; 2]>,
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
@@ -3894,6 +3898,7 @@ fn capture_live_oracle_expected(
         merge_indicator: fixture.merge_indicator,
         merge_indicator_name: fixture.merge_indicator_name.clone(),
         merge_validate: fixture.merge_validate.clone(),
+        merge_suffixes: fixture.merge_suffixes.clone(),
         fill_value: fixture.fill_value.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
@@ -4262,6 +4267,12 @@ fn resolve_merge_validate_mode(
         }
     };
     Ok(Some(mode))
+}
+
+fn resolve_merge_suffixes(
+    merge_suffixes: Option<&[Option<String>; 2]>,
+) -> Option<[Option<String>; 2]> {
+    merge_suffixes.cloned()
 }
 
 fn normalize_concat_axis(fixture: &PacketFixture) -> Result<i64, String> {
@@ -4718,6 +4729,7 @@ fn execute_dataframe_merge_fixture_operation(
     )?;
     let validate_mode =
         resolve_merge_validate_mode(fixture.merge_validate.as_deref(), operation_name)?;
+    let suffixes = resolve_merge_suffixes(fixture.merge_suffixes.as_ref());
 
     let left_input = if left_use_index {
         dataframe_with_index_as_columns(&left, &left_merge_keys)?
@@ -4747,6 +4759,7 @@ fn execute_dataframe_merge_fixture_operation(
         MergeExecutionOptions {
             indicator_name,
             validate_mode,
+            suffixes,
         },
     )
     .map_err(|err| err.to_string())?;
@@ -8228,6 +8241,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-035 dataframe merge validate fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_merge_suffix_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-036", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-036"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-036 dataframe merge suffix fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

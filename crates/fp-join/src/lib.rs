@@ -75,6 +75,7 @@ impl Default for JoinExecutionOptions {
 pub struct MergeExecutionOptions {
     pub indicator_name: Option<String>,
     pub validate_mode: Option<MergeValidateMode>,
+    pub suffixes: Option<[Option<String>; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,6 +501,86 @@ fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedMergeSuffixes {
+    left: Option<String>,
+    right: Option<String>,
+}
+
+impl Default for ResolvedMergeSuffixes {
+    fn default() -> Self {
+        Self {
+            left: Some("_left".to_owned()),
+            right: Some("_right".to_owned()),
+        }
+    }
+}
+
+fn resolve_merge_suffixes(suffixes: Option<[Option<String>; 2]>) -> ResolvedMergeSuffixes {
+    match suffixes {
+        Some([left, right]) => ResolvedMergeSuffixes { left, right },
+        None => ResolvedMergeSuffixes::default(),
+    }
+}
+
+fn suffix_is_present(suffix: Option<&str>) -> bool {
+    suffix.is_some_and(|value| !value.is_empty())
+}
+
+fn apply_merge_suffix(name: &str, suffix: Option<&str>) -> String {
+    match suffix {
+        Some(value) if !value.is_empty() => format!("{name}{value}"),
+        _ => name.to_owned(),
+    }
+}
+
+fn collect_overlapping_column_names(
+    left_col_names: &HashSet<&String>,
+    right_col_names: &HashSet<&String>,
+    excluded_names: &HashSet<&str>,
+) -> Vec<String> {
+    let mut overlaps = left_col_names
+        .iter()
+        .filter(|name| right_col_names.contains(*name) && !excluded_names.contains(name.as_str()))
+        .map(|name| (*name).clone())
+        .collect::<Vec<_>>();
+    overlaps.sort();
+    overlaps
+}
+
+fn ensure_merge_suffixes_for_overlaps(
+    overlap_names: &[String],
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<(), JoinError> {
+    if overlap_names.is_empty() {
+        return Ok(());
+    }
+    if !suffix_is_present(suffixes.left.as_deref()) && !suffix_is_present(suffixes.right.as_deref())
+    {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "columns overlap but no suffix specified: {}",
+                overlap_names.join(", ")
+            ),
+        )));
+    }
+    Ok(())
+}
+
+fn insert_merged_output_column(
+    output_columns: &mut std::collections::BTreeMap<String, Column>,
+    name: String,
+    column: Column,
+) -> Result<(), JoinError> {
+    if output_columns.contains_key(&name) {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!("merge suffixes cause duplicate output column '{name}'"),
+        )));
+    }
+    output_columns.insert(name, column);
+    Ok(())
+}
+
 fn resolve_merge_indicator_name(indicator_name: Option<&str>) -> Result<Option<String>, JoinError> {
     let Some(name) = indicator_name else {
         return Ok(None);
@@ -555,7 +636,7 @@ fn ensure_indicator_name_available(
 /// Matches `pd.merge(left, right, left_on=left_keys, right_on=right_keys, how=join_type)`.
 /// - Key columns are used for matching rows (hash join).
 /// - Non-key columns are carried through and reindexed.
-/// - Column name conflicts get `_left`/`_right` suffixes.
+/// - Column name conflicts use configurable suffixes (default `_left`/`_right`).
 /// - The output index is auto-generated (0..n RangeIndex-style).
 pub fn merge_dataframes_on_with(
     left: &fp_frame::DataFrame,
@@ -586,8 +667,10 @@ pub fn merge_dataframes_on_with_options(
     let MergeExecutionOptions {
         indicator_name,
         validate_mode,
+        suffixes,
     } = options;
     let indicator_name = resolve_merge_indicator_name(indicator_name.as_deref())?;
+    let suffixes = resolve_merge_suffixes(suffixes);
 
     if matches!(join_type, JoinType::Cross) {
         if let Some(validate_mode) = validate_mode
@@ -600,7 +683,7 @@ pub fn merge_dataframes_on_with_options(
                 ),
             )));
         }
-        return merge_dataframes_cross(left, right, indicator_name.as_deref());
+        return merge_dataframes_cross(left, right, indicator_name.as_deref(), &suffixes);
     }
 
     if left_on.is_empty() || right_on.is_empty() {
@@ -741,6 +824,13 @@ pub fn merge_dataframes_on_with_options(
             shared_name_positions.insert(*left_key_name, (idx, idx));
         }
     }
+    let shared_key_names = shared_name_positions
+        .keys()
+        .copied()
+        .collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, &suffixes)?;
 
     // Add left columns (including left key columns).
     for (name, col) in left.columns() {
@@ -759,19 +849,27 @@ pub fn merge_dataframes_on_with_options(
                         (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
                     })
                     .collect::<Vec<_>>();
-                columns.insert(name.clone(), Column::from_values(values)?);
+                insert_merged_output_column(
+                    &mut columns,
+                    name.clone(),
+                    Column::from_values(values)?,
+                )?;
             } else {
-                columns.insert(name.clone(), col.reindex_by_positions(&left_positions)?);
+                insert_merged_output_column(
+                    &mut columns,
+                    name.clone(),
+                    col.reindex_by_positions(&left_positions)?,
+                )?;
             }
             continue;
         }
         let reindexed = col.reindex_by_positions(&left_positions)?;
         let out_name = if right_col_names.contains(name) {
-            format!("{name}_left")
+            apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        columns.insert(out_name, reindexed);
+        insert_merged_output_column(&mut columns, out_name, reindexed)?;
     }
 
     // Add right columns (including right key alias columns).
@@ -784,11 +882,11 @@ pub fn merge_dataframes_on_with_options(
         }
         let reindexed = col.reindex_by_positions(&right_positions)?;
         let out_name = if left_col_names.contains(name) {
-            format!("{name}_right")
+            apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        columns.insert(out_name, reindexed);
+        insert_merged_output_column(&mut columns, out_name, reindexed)?;
     }
 
     if let Some(indicator_name) = indicator_name.as_deref() {
@@ -799,7 +897,7 @@ pub fn merge_dataframes_on_with_options(
             &columns,
         )?;
         let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
-        columns.insert(indicator_name.to_owned(), indicator_col);
+        insert_merged_output_column(&mut columns, indicator_name.to_owned(), indicator_col)?;
     }
 
     Ok(MergedDataFrame { index, columns })
@@ -831,6 +929,7 @@ fn merge_dataframes_cross(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
     indicator_name: Option<&str>,
+    suffixes: &ResolvedMergeSuffixes,
 ) -> Result<MergedDataFrame, JoinError> {
     let left_rows = left.index().len();
     let right_rows = right.index().len();
@@ -850,25 +949,28 @@ fn merge_dataframes_cross(
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &HashSet::new());
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
     for (name, col) in left.columns() {
         let reindexed = col.reindex_by_positions(&left_positions)?;
         let out_name = if right_col_names.contains(name) {
-            format!("{name}_left")
+            apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        columns.insert(out_name, reindexed);
+        insert_merged_output_column(&mut columns, out_name, reindexed)?;
     }
 
     for (name, col) in right.columns() {
         let reindexed = col.reindex_by_positions(&right_positions)?;
         let out_name = if left_col_names.contains(name) {
-            format!("{name}_right")
+            apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        columns.insert(out_name, reindexed);
+        insert_merged_output_column(&mut columns, out_name, reindexed)?;
     }
 
     if let Some(indicator_name) = indicator_name {
@@ -879,7 +981,7 @@ fn merge_dataframes_cross(
             &columns,
         )?;
         let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
-        columns.insert(indicator_name.to_owned(), indicator_col);
+        insert_merged_output_column(&mut columns, indicator_name.to_owned(), indicator_col)?;
     }
 
     Ok(MergedDataFrame { index, columns })
@@ -1450,6 +1552,169 @@ mod tests {
             merged.columns.get("val_right").unwrap().values(),
             &[Scalar::Int64(99)]
         );
+    }
+
+    #[test]
+    fn merge_column_name_conflict_honors_custom_suffixes() {
+        let left = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(99)]),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                suffixes: Some([Some("_L".to_owned()), Some("_R".to_owned())]),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("merge");
+        assert!(merged.columns.contains_key("val_L"));
+        assert!(merged.columns.contains_key("val_R"));
+        assert_eq!(
+            merged.columns.get("val_L").expect("left suffixed").values(),
+            &[Scalar::Int64(10)]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("val_R")
+                .expect("right suffixed")
+                .values(),
+            &[Scalar::Int64(99)]
+        );
+    }
+
+    #[test]
+    fn merge_column_name_conflict_allows_one_sided_suffix() {
+        let left = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(99)]),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                suffixes: Some([None, Some("_r".to_owned())]),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("merge");
+        assert!(merged.columns.contains_key("val"));
+        assert!(merged.columns.contains_key("val_r"));
+        assert_eq!(
+            merged.columns.get("val").expect("left unsuffixed").values(),
+            &[Scalar::Int64(10)]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("val_r")
+                .expect("right suffixed")
+                .values(),
+            &[Scalar::Int64(99)]
+        );
+    }
+
+    #[test]
+    fn merge_column_name_conflict_rejects_missing_suffixes_for_overlap() {
+        let left = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(99)]),
+            ],
+        )
+        .expect("right");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                suffixes: Some([Some(String::new()), Some(String::new())]),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("merge should reject overlapping columns without suffixes");
+        assert!(format!("{err}").contains("columns overlap but no suffix specified"));
+    }
+
+    #[test]
+    fn merge_column_name_conflict_rejects_duplicate_output_columns_from_suffixes() {
+        let left = DataFrame::from_dict(
+            &["id", "val", "val_L"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+                ("val_L", vec![Scalar::Int64(77)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(99)]),
+            ],
+        )
+        .expect("right");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                suffixes: Some([Some("_L".to_owned()), Some("_R".to_owned())]),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("merge should reject duplicate output names caused by suffixes");
+        assert!(format!("{err}").contains("duplicate output column"));
     }
 
     #[test]

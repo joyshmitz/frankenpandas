@@ -1119,6 +1119,26 @@ def resolve_merge_validate(payload: dict[str, Any], op_name: str) -> str | None:
     )
 
 
+def resolve_merge_suffixes(payload: dict[str, Any], op_name: str) -> tuple[str | None, str | None]:
+    suffixes_raw = payload.get("merge_suffixes")
+    if suffixes_raw is None:
+        return ("_left", "_right")
+    if not isinstance(suffixes_raw, (list, tuple)) or len(suffixes_raw) != 2:
+        raise OracleError(f"{op_name} merge_suffixes must be a two-item array when provided")
+
+    normalized: list[str | None] = []
+    for index, suffix in enumerate(suffixes_raw):
+        if suffix is None:
+            normalized.append(None)
+        elif isinstance(suffix, str):
+            normalized.append(suffix)
+        else:
+            raise OracleError(
+                f"{op_name} merge_suffixes[{index}] must be a string or null when provided"
+            )
+    return (normalized[0], normalized[1])
+
+
 def dataframe_with_index_keys(frame, key_names: list[str]):
     out = frame.copy()
     for key_name in key_names:
@@ -1150,6 +1170,7 @@ def op_dataframe_merge(
     )
     indicator = resolve_merge_indicator(payload, op_name)
     validate_mode = resolve_merge_validate(payload, op_name)
+    suffixes = resolve_merge_suffixes(payload, op_name)
 
     if left_use_index:
         left = dataframe_with_index_keys(left, left_merge_keys)
@@ -1160,7 +1181,7 @@ def op_dataframe_merge(
         "how": how,
         "sort": False,
         "copy": False,
-        "suffixes": ("_left", "_right"),
+        "suffixes": suffixes,
     }
     if indicator is not None:
         merge_kwargs["indicator"] = indicator

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
@@ -85,6 +86,32 @@ fn normalize_tail_window(n: i64, len: usize) -> (usize, usize) {
     } else {
         let skip = saturating_i64_abs_to_usize(n).min(len);
         (skip, len - skip)
+    }
+}
+
+fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Ordering {
+    match (left, right) {
+        (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs.cmp(rhs),
+        (Scalar::Int64(lhs), Scalar::Int64(rhs)) => lhs.cmp(rhs),
+        (Scalar::Float64(lhs), Scalar::Float64(rhs)) => {
+            lhs.partial_cmp(rhs).unwrap_or(Ordering::Equal)
+        }
+        (Scalar::Utf8(lhs), Scalar::Utf8(rhs)) => lhs.cmp(rhs),
+        // Columns are dtype-homogeneous; this fallback is only for defensive
+        // ordering when malformed mixed values leak in.
+        _ => left.dtype().cmp(&right.dtype()),
+    }
+}
+
+fn compare_scalars_with_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> Ordering {
+    match (left.is_missing(), right.is_missing()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let order = compare_non_missing_scalars_for_sort(left, right);
+            if ascending { order } else { order.reverse() }
+        }
     }
 }
 
@@ -968,6 +995,41 @@ impl DataFrame {
         Ok(selected)
     }
 
+    fn reorder_rows_by_positions(&self, positions: &[usize]) -> Result<Self, FrameError> {
+        if positions.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "row position list length {} does not match dataframe length {}",
+                positions.len(),
+                self.len()
+            )));
+        }
+
+        for &position in positions {
+            if position >= self.len() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "row position {position} out of bounds for length {}",
+                    self.len()
+                )));
+            }
+        }
+
+        let index = self.index.take(positions);
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let column = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            let values = positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect::<Vec<_>>();
+            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
+        }
+
+        Self::new_with_column_order(index, columns, self.column_order.clone())
+    }
+
     pub fn new(index: Index, columns: BTreeMap<String, Column>) -> Result<Self, FrameError> {
         Self::validate_column_lengths(&index, &columns)?;
         let column_order = columns.keys().cloned().collect();
@@ -1338,6 +1400,38 @@ impl DataFrame {
             columns.insert(name.clone(), Column::from_values(values)?);
         }
         Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
+    }
+
+    /// Return a new DataFrame sorted by index labels.
+    ///
+    /// Matches `df.sort_index(ascending=...)` for 1D index labels.
+    pub fn sort_index(&self, ascending: bool) -> Result<Self, FrameError> {
+        let mut order = self.index.argsort();
+        if !ascending {
+            order.reverse();
+        }
+        self.reorder_rows_by_positions(&order)
+    }
+
+    /// Return a new DataFrame sorted by a column's values.
+    ///
+    /// Matches `df.sort_values(by=column, ascending=...)` for a single
+    /// column key with default `na_position='last'`.
+    pub fn sort_values(&self, column: &str, ascending: bool) -> Result<Self, FrameError> {
+        let sort_column = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{column}' not found"))
+        })?;
+
+        let mut order = (0..self.len()).collect::<Vec<_>>();
+        order.sort_by(|&left_pos, &right_pos| {
+            compare_scalars_with_na_last(
+                &sort_column.values()[left_pos],
+                &sort_column.values()[right_pos],
+                ascending,
+            )
+        });
+
+        self.reorder_rows_by_positions(&order)
     }
 
     /// Label-based row selection for list-like indexers.
@@ -3499,6 +3593,115 @@ mod tests {
         let tail = df.tail(-10).unwrap();
         assert_eq!(tail.len(), 0);
         assert_eq!(tail.column("v").unwrap().values(), &[]);
+    }
+
+    #[test]
+    fn dataframe_sort_index_ascending_and_descending() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
+            vec!["b".into(), "a".into(), "c".into()],
+        )
+        .unwrap();
+
+        let asc = df.sort_index(true).unwrap();
+        assert_eq!(
+            asc.index().labels(),
+            &[
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c")
+            ]
+        );
+        assert_eq!(
+            asc.column("v").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30)]
+        );
+
+        let desc = df.sort_index(false).unwrap();
+        assert_eq!(
+            desc.index().labels(),
+            &[
+                IndexLabel::from("c"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a")
+            ]
+        );
+        assert_eq!(
+            desc.column("v").unwrap().values(),
+            &[Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_values_numeric_keeps_na_last_and_stable_ties() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "score",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "tag",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("null".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+            vec!["r1".into(), "r2".into(), "r3".into(), "r4".into()],
+        )
+        .unwrap();
+
+        let asc = df.sort_values("score", true).unwrap();
+        assert_eq!(
+            asc.index().labels(),
+            &[
+                IndexLabel::from("r3"),
+                IndexLabel::from("r1"),
+                IndexLabel::from("r4"),
+                IndexLabel::from("r2")
+            ]
+        );
+        // Stable ordering for equal key value (2): r1 before r4.
+        assert_eq!(
+            asc.column("tag").unwrap().values(),
+            &[
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("z".to_owned()),
+                Scalar::Utf8("null".to_owned())
+            ]
+        );
+
+        let desc = df.sort_values("score", false).unwrap();
+        assert_eq!(
+            desc.index().labels(),
+            &[
+                IndexLabel::from("r1"),
+                IndexLabel::from("r4"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r2")
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_values_missing_column_is_rejected() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let err = df.sort_values("missing", true).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
     }
 
     #[test]

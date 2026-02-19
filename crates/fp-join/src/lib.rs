@@ -76,6 +76,7 @@ pub struct MergeExecutionOptions {
     pub indicator_name: Option<String>,
     pub validate_mode: Option<MergeValidateMode>,
     pub suffixes: Option<[Option<String>; 2]>,
+    pub sort: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +502,20 @@ fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
     }
 }
 
+fn sort_merge_rows_by_join_keys(
+    out_row_keys: &[CompositeJoinKey],
+    left_positions: &mut Vec<Option<usize>>,
+    right_positions: &mut Vec<Option<usize>>,
+) {
+    if out_row_keys.is_empty() {
+        return;
+    }
+    let mut order: Vec<usize> = (0..out_row_keys.len()).collect();
+    order.sort_by(|a, b| out_row_keys[*a].cmp(&out_row_keys[*b]));
+    reorder_vec_by_index(left_positions, &order);
+    reorder_vec_by_index(right_positions, &order);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedMergeSuffixes {
     left: Option<String>,
@@ -668,6 +683,7 @@ pub fn merge_dataframes_on_with_options(
         indicator_name,
         validate_mode,
         suffixes,
+        sort,
     } = options;
     let indicator_name = resolve_merge_indicator_name(indicator_name.as_deref())?;
     let suffixes = resolve_merge_suffixes(suffixes);
@@ -798,12 +814,8 @@ pub fn merge_dataframes_on_with_options(
         }
     }
 
-    if matches!(join_type, JoinType::Outer) {
-        let mut order: Vec<usize> = (0..out_row_keys.len()).collect();
-        order.sort_by(|a, b| out_row_keys[*a].cmp(&out_row_keys[*b]));
-
-        reorder_vec_by_index(&mut left_positions, &order);
-        reorder_vec_by_index(&mut right_positions, &order);
+    if sort || matches!(join_type, JoinType::Outer) {
+        sort_merge_rows_by_join_keys(&out_row_keys, &mut left_positions, &mut right_positions);
     }
 
     // Build output columns by reindexing.
@@ -1520,6 +1532,160 @@ mod tests {
 
         // ids: 1, 2, 3 from left + 4 from right = 4 rows
         assert_eq!(merged.columns.get("id").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn merge_inner_sort_false_preserves_left_key_order() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(21)],
+                ),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions::default(),
+        )
+        .expect("merge");
+        assert_eq!(
+            merged.columns.get("id").expect("id").values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").expect("left_v").values(),
+            &[Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(21)]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").expect("right_v").values(),
+            &[Scalar::Int64(200), Scalar::Int64(100), Scalar::Int64(200)]
+        );
+    }
+
+    #[test]
+    fn merge_inner_sort_true_orders_join_keys_lexicographically() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(21)],
+                ),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("merge");
+        assert_eq!(
+            merged.columns.get("id").expect("id").values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").expect("left_v").values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(21)]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").expect("right_v").values(),
+            &[Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(200)]
+        );
+    }
+
+    #[test]
+    fn merge_right_sort_true_orders_join_keys_lexicographically() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(3), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(30), Scalar::Int64(10)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(200), Scalar::Int64(100), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Right,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("merge");
+        assert_eq!(
+            merged.columns.get("id").expect("id").values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").expect("left_v").values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").expect("right_v").values(),
+            &[Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)]
+        );
     }
 
     #[test]

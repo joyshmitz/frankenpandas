@@ -1139,6 +1139,15 @@ def resolve_merge_suffixes(payload: dict[str, Any], op_name: str) -> tuple[str |
     return (normalized[0], normalized[1])
 
 
+def resolve_merge_sort(payload: dict[str, Any], op_name: str) -> bool:
+    sort_raw = payload.get("merge_sort")
+    if sort_raw is None:
+        return False
+    if not isinstance(sort_raw, bool):
+        raise OracleError(f"{op_name} merge_sort must be a boolean when provided")
+    return sort_raw
+
+
 def dataframe_with_index_keys(frame, key_names: list[str]):
     out = frame.copy()
     for key_name in key_names:
@@ -1171,6 +1180,7 @@ def op_dataframe_merge(
     indicator = resolve_merge_indicator(payload, op_name)
     validate_mode = resolve_merge_validate(payload, op_name)
     suffixes = resolve_merge_suffixes(payload, op_name)
+    merge_sort = resolve_merge_sort(payload, op_name)
 
     if left_use_index:
         left = dataframe_with_index_keys(left, left_merge_keys)
@@ -1179,7 +1189,7 @@ def op_dataframe_merge(
 
     merge_kwargs = {
         "how": how,
-        "sort": False,
+        "sort": merge_sort,
         "copy": False,
         "suffixes": suffixes,
     }

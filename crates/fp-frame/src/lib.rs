@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
 use fp_index::{
-    AlignMode, Index, IndexError, IndexLabel, align, align_union, validate_alignment_plan,
+    AlignMode, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
+    validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimeMode, RuntimePolicy};
 use fp_types::{DType, NullKind, Scalar};
@@ -1282,6 +1283,43 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, self.column_order.clone())
     }
 
+    fn take_rows_by_positions(&self, positions: &[usize]) -> Result<Self, FrameError> {
+        for &position in positions {
+            if position >= self.len() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "row position {position} out of bounds for length {}",
+                    self.len()
+                )));
+            }
+        }
+
+        let labels = positions
+            .iter()
+            .map(|&position| self.index.labels()[position].clone())
+            .collect::<Vec<_>>();
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let column = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            let values = positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect::<Vec<_>>();
+            columns.insert(name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
+    }
+
+    fn rows_equal_on_subset(&self, left: usize, right: usize, subset: &[String]) -> bool {
+        subset.iter().all(|name| {
+            let column = self.columns.get(name).expect("selected column must exist");
+            column.values()[left].semantic_eq(&column.values()[right])
+        })
+    }
+
     fn reset_index_column_name(&self) -> Result<String, FrameError> {
         if !self.columns.contains_key("index") {
             return Ok("index".to_owned());
@@ -1886,6 +1924,86 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, keep_columns)
     }
 
+    /// Return a boolean Series indicating duplicated rows.
+    ///
+    /// Matches `df.duplicated(subset=..., keep=...)`.
+    pub fn duplicated(
+        &self,
+        subset: Option<&[String]>,
+        keep: DuplicateKeep,
+    ) -> Result<Series, FrameError> {
+        let selected_columns = self.resolve_column_selector(subset)?;
+        let row_count = self.len();
+        let mut duplicated = vec![false; row_count];
+
+        match keep {
+            DuplicateKeep::First => {
+                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
+                    for j in 0..i {
+                        if self.rows_equal_on_subset(i, j, &selected_columns) {
+                            *is_duplicated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            DuplicateKeep::Last => {
+                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
+                    for j in (i + 1)..row_count {
+                        if self.rows_equal_on_subset(i, j, &selected_columns) {
+                            *is_duplicated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
+                    for j in 0..row_count {
+                        if i != j && self.rows_equal_on_subset(i, j, &selected_columns) {
+                            *is_duplicated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Series::from_values(
+            "__duplicated__",
+            self.index.labels().to_vec(),
+            duplicated.into_iter().map(Scalar::Bool).collect::<Vec<_>>(),
+        )
+    }
+
+    /// Drop duplicated rows.
+    ///
+    /// Matches `df.drop_duplicates(subset=..., keep=..., ignore_index=...)`.
+    pub fn drop_duplicates(
+        &self,
+        subset: Option<&[String]>,
+        keep: DuplicateKeep,
+        ignore_index: bool,
+    ) -> Result<Self, FrameError> {
+        let duplicated = self.duplicated(subset, keep)?;
+        let keep_positions = duplicated
+            .values()
+            .iter()
+            .enumerate()
+            .filter_map(|(position, value)| match value {
+                Scalar::Bool(false) => Some(position),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let out = self.take_rows_by_positions(&keep_positions)?;
+        if ignore_index {
+            out.reset_index(true)
+        } else {
+            Ok(out)
+        }
+    }
+
     /// Return the first `n` rows.
     ///
     /// Matches `df.head(n)`. If `n` is negative, this returns all rows except
@@ -2221,7 +2339,7 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{DType, NullKind, Scalar};
 
-    use super::{DataFrame, DropNaHow, FrameError, IndexLabel, Series};
+    use super::{DataFrame, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series};
 
     #[test]
     fn series_add_aligns_on_union_index() {
@@ -4862,6 +4980,252 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(column_names, vec!["c".to_owned()]);
+    }
+
+    #[test]
+    fn dataframe_duplicated_keep_variants() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let first = df.duplicated(None, DuplicateKeep::First).unwrap();
+        assert_eq!(
+            first.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let last = df.duplicated(None, DuplicateKeep::Last).unwrap();
+        assert_eq!(
+            last.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let none = df.duplicated(None, DuplicateKeep::None).unwrap();
+        assert_eq!(
+            none.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_duplicated_subset_uses_semantic_missing_equality() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Float64(f64::NAN), Scalar::Null(NullKind::NaN)],
+                ),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+
+        let duplicated = df.duplicated(None, DuplicateKeep::First).unwrap();
+        assert_eq!(
+            duplicated.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_keep_first_preserves_index_order() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let out = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(2_i64),
+                IndexLabel::from(4_i64)
+            ]
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("z".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_keep_last_with_ignore_index_resets_labels() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let out = df.drop_duplicates(None, DuplicateKeep::Last, true).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(2_i64)
+            ]
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("z".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_subset_keep_none_removes_all_duplicates() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let subset = vec!["a".to_owned()];
+        let out = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::None, false)
+            .unwrap();
+        assert_eq!(out.index().labels(), &[IndexLabel::from(3_i64)]);
+        assert_eq!(out.column("a").unwrap().values(), &[Scalar::Int64(2)]);
+        assert_eq!(out.column("b").unwrap().values(), &[Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_rejects_missing_subset_column() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let subset = vec!["missing".to_owned()];
+        let err = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
     }
 
     #[test]

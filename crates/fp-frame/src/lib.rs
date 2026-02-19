@@ -89,6 +89,36 @@ fn normalize_tail_window(n: i64, len: usize) -> (usize, usize) {
     }
 }
 
+fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
+    match value {
+        Scalar::Int64(v) => Ok(IndexLabel::Int64(*v)),
+        Scalar::Utf8(v) => Ok(IndexLabel::Utf8(v.clone())),
+        Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
+            "set_index does not support missing label values".to_owned(),
+        )),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "set_index currently supports Int64/Utf8 labels; found {:?}",
+            value.dtype()
+        ))),
+    }
+}
+
+fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
+    match label {
+        IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
+    }
+}
+
+fn range_index(len: usize) -> Result<Index, FrameError> {
+    let len_i64 = i64::try_from(len).map_err(|_| {
+        FrameError::CompatibilityRejected(format!(
+            "cannot materialize RangeIndex for length {len} on this platform"
+        ))
+    })?;
+    Ok(Index::new((0..len_i64).map(IndexLabel::from).collect()))
+}
+
 fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Ordering {
     match (left, right) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs.cmp(rhs),
@@ -1244,6 +1274,19 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, self.column_order.clone())
     }
 
+    fn reset_index_column_name(&self) -> Result<String, FrameError> {
+        if !self.columns.contains_key("index") {
+            return Ok("index".to_owned());
+        }
+        if !self.columns.contains_key("level_0") {
+            return Ok("level_0".to_owned());
+        }
+        Err(FrameError::CompatibilityRejected(
+            "reset_index cannot insert index column because both 'index' and 'level_0' already exist"
+                .to_owned(),
+        ))
+    }
+
     pub fn new(index: Index, columns: BTreeMap<String, Column>) -> Result<Self, FrameError> {
         Self::validate_column_lengths(&index, &columns)?;
         let column_order = columns.keys().cloned().collect();
@@ -1871,6 +1914,89 @@ impl DataFrame {
             columns.insert(name.clone(), Column::from_values(values)?);
         }
         Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
+    }
+
+    /// Set the DataFrame index from an existing column.
+    ///
+    /// Matches `df.set_index(column, drop=...)` for a single column selector.
+    pub fn set_index(&self, column: &str, drop: bool) -> Result<Self, FrameError> {
+        let source = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{column}' not found"))
+        })?;
+
+        let labels = source
+            .values()
+            .iter()
+            .map(scalar_to_index_label)
+            .collect::<Result<Vec<_>, _>>()?;
+        let index = Index::new(labels);
+
+        if !drop {
+            return Self::new_with_column_order(
+                index,
+                self.columns.clone(),
+                self.column_order.clone(),
+            );
+        }
+
+        let mut columns = self.columns.clone();
+        columns.remove(column);
+        let column_order = self
+            .column_order
+            .iter()
+            .filter(|name| name.as_str() != column)
+            .cloned()
+            .collect::<Vec<_>>();
+        Self::new_with_column_order(index, columns, column_order)
+    }
+
+    /// Reset the index to a default RangeIndex.
+    ///
+    /// Matches `df.reset_index(drop=...)` for the single-index DataFrame model.
+    pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
+        let index = range_index(self.len())?;
+        if drop {
+            return Self::new_with_column_order(
+                index,
+                self.columns.clone(),
+                self.column_order.clone(),
+            );
+        }
+
+        let has_int = self
+            .index
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(_)));
+        let has_utf8 = self
+            .index
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(_)));
+        if has_int && has_utf8 {
+            return Err(FrameError::CompatibilityRejected(
+                "reset_index does not yet support mixed Int64/Utf8 index labels".to_owned(),
+            ));
+        }
+
+        let index_column_name = self.reset_index_column_name()?;
+        let index_values = self
+            .index
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect::<Vec<_>>();
+
+        let mut columns = self.columns.clone();
+        columns.insert(
+            index_column_name.clone(),
+            Column::from_values(index_values)?,
+        );
+        let mut column_order = Vec::with_capacity(self.column_order.len() + 1);
+        column_order.push(index_column_name);
+        column_order.extend(self.column_order.iter().cloned());
+
+        Self::new_with_column_order(index, columns, column_order)
     }
 
     /// Return a new DataFrame sorted by index labels.
@@ -4816,6 +4942,193 @@ mod tests {
         let tail = df.tail(-10).unwrap();
         assert_eq!(tail.len(), 0);
         assert_eq!(tail.column("v").unwrap().values(), &[]);
+    }
+
+    #[test]
+    fn dataframe_set_index_drop_true_moves_column_into_index() {
+        let df = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let out = df.set_index("id", true).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from(10_i64), IndexLabel::from(20_i64)]
+        );
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["v".to_owned()]);
+        assert!(out.column("id").is_none());
+        assert_eq!(
+            out.column("v").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn dataframe_set_index_drop_false_preserves_source_column() {
+        let df = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let out = df.set_index("id", false).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from(10_i64), IndexLabel::from(20_i64)]
+        );
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["id".to_owned(), "v".to_owned()]);
+        assert_eq!(
+            out.column("id").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_set_index_rejects_missing_or_unsupported_labels() {
+        let df = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let err = df.set_index("missing", true).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
+
+        let df_float = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let err = df_float.set_index("id", true).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("Int64/Utf8"))
+        );
+
+        let df_null = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![Scalar::Null(NullKind::Null), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let err = df_null.set_index("id", true).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("missing label values"))
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_drop_true_replaces_with_range_index() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(3), Scalar::Int64(4)])],
+            vec![IndexLabel::from("r1"), IndexLabel::from("r2")],
+        )
+        .unwrap();
+
+        let out = df.reset_index(true).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from(0_i64), IndexLabel::from(1_i64)]
+        );
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["v".to_owned()]);
+        assert_eq!(
+            out.column("v").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_drop_false_inserts_index_column_first() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(3), Scalar::Int64(4)])],
+            vec![IndexLabel::from("r1"), IndexLabel::from("r2")],
+        )
+        .unwrap();
+
+        let out = df.reset_index(false).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from(0_i64), IndexLabel::from(1_i64)]
+        );
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["index".to_owned(), "v".to_owned()]);
+        assert_eq!(
+            out.column("index").unwrap().values(),
+            &[Scalar::Utf8("r1".to_owned()), Scalar::Utf8("r2".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_drop_false_uses_level_0_and_rejects_name_collision() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "index",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+                ),
+                ("v", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+            vec![IndexLabel::from(10_i64), IndexLabel::from(20_i64)],
+        )
+        .unwrap();
+
+        let out = df.reset_index(false).unwrap();
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["level_0".to_owned(), "index".to_owned(), "v".to_owned()]
+        );
+        assert_eq!(
+            out.column("level_0").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+
+        let collision = DataFrame::from_dict_with_index(
+            vec![
+                ("index", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("level_0", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ("v", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+            vec![IndexLabel::from(0_i64), IndexLabel::from(1_i64)],
+        )
+        .unwrap();
+        let err = collision.reset_index(false).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("both 'index' and 'level_0'"))
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_rejects_mixed_index_label_types() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![IndexLabel::from("row-1"), IndexLabel::from(2_i64)],
+        )
+        .unwrap();
+
+        let err = df.reset_index(false).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("mixed Int64/Utf8"))
+        );
     }
 
     #[test]

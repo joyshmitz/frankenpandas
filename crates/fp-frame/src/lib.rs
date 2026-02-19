@@ -672,6 +672,13 @@ impl Series {
         Self::from_values(self.name.clone(), labels, values)
     }
 
+    /// Alias for `isna`.
+    ///
+    /// Matches `pd.Series.isnull()`.
+    pub fn isnull(&self) -> Result<Self, FrameError> {
+        self.isna()
+    }
+
     /// Return a boolean mask where non-missing values are `true`.
     ///
     /// Matches `pd.Series.notna()`.
@@ -684,6 +691,13 @@ impl Series {
             .map(|value| Scalar::Bool(!value.is_missing()))
             .collect::<Vec<_>>();
         Self::from_values(self.name.clone(), labels, values)
+    }
+
+    /// Alias for `notna`.
+    ///
+    /// Matches `pd.Series.notnull()`.
+    pub fn notnull(&self) -> Result<Self, FrameError> {
+        self.notna()
     }
 
     /// Return the number of non-null elements.
@@ -1584,6 +1598,20 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
     }
 
+    /// Alias for `isna`.
+    ///
+    /// Matches `df.isnull()`.
+    pub fn isnull(&self) -> Result<Self, FrameError> {
+        self.isna()
+    }
+
+    /// Alias for `notna`.
+    ///
+    /// Matches `df.notnull()`.
+    pub fn notnull(&self) -> Result<Self, FrameError> {
+        self.notna()
+    }
+
     /// Fill missing values in each column with `fill_value`.
     ///
     /// Matches `df.fillna(value)` for scalar `value`.
@@ -1646,6 +1674,13 @@ impl DataFrame {
             keep.into_iter().map(Scalar::Bool).collect::<Vec<_>>(),
         )?;
         self.filter_rows(&mask)
+    }
+
+    /// Drop columns containing missing values in any row.
+    ///
+    /// Matches default `df.dropna(axis=1)` behavior (`how='any'`).
+    pub fn dropna_columns(&self) -> Result<Self, FrameError> {
+        self.dropna_columns_with_options(DropNaHow::Any, None)
     }
 
     /// Drop columns by configurable missing-value policy.
@@ -3623,6 +3658,12 @@ mod tests {
                 Scalar::Bool(true)
             ]
         );
+
+        let isnull = s.isnull().unwrap();
+        assert_eq!(isnull.values(), isna.values());
+
+        let notnull = s.notnull().unwrap();
+        assert_eq!(notnull.values(), notna.values());
     }
 
     // ---- Series descriptive statistics tests ----
@@ -4170,6 +4211,24 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_dropna_columns_defaults_to_axis1_any() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+
+        let default_drop = df.dropna_columns().unwrap();
+        let optioned_drop = df
+            .dropna_columns_with_options(DropNaHow::Any, None)
+            .unwrap();
+        assert_eq!(default_drop, optioned_drop);
+    }
+
+    #[test]
     fn dataframe_dropna_columns_with_options_how_all_drops_only_all_missing_columns() {
         let df = DataFrame::from_dict(
             &["a", "b", "c"],
@@ -4319,6 +4378,12 @@ mod tests {
             notna.column("b").unwrap().values(),
             &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)]
         );
+
+        let isnull = df.isnull().unwrap();
+        assert_eq!(isnull, isna);
+
+        let notnull = df.notnull().unwrap();
+        assert_eq!(notnull, notna);
     }
 
     #[test]

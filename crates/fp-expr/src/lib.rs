@@ -163,6 +163,28 @@ pub fn evaluate_on_dataframe(
     evaluate(expr, &context, policy, ledger)
 }
 
+pub fn filter_dataframe_on_expr(
+    expr: &Expr,
+    frame: &fp_frame::DataFrame,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<fp_frame::DataFrame, ExprError> {
+    let mask = evaluate_on_dataframe(expr, frame, policy, ledger)?;
+    if let Some(offending) = mask
+        .values()
+        .iter()
+        .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+    {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "boolean mask required for query-style filter; found dtype {:?}",
+                offending.dtype()
+            ),
+        )));
+    }
+    frame.filter_rows(&mask).map_err(ExprError::from)
+}
+
 fn apply_series_comparison(
     left: &Series,
     right: &Series,
@@ -430,8 +452,8 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::Scalar;
 
-    use super::{EvalContext, Expr, SeriesRef, evaluate};
-    use fp_frame::Series;
+    use super::{EvalContext, Expr, ExprError, SeriesRef, evaluate};
+    use fp_frame::{FrameError, Series};
 
     use super::{Delta, MaterializedView};
 
@@ -820,6 +842,80 @@ mod tests {
 
         assert_eq!(via_frame.values(), manual_out.values());
         assert_eq!(via_frame.index().labels(), manual_out.index().labels());
+    }
+
+    #[test]
+    fn filter_dataframe_on_expr_applies_boolean_mask() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+
+        let expr = Expr::Compare {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".to_owned()),
+            }),
+            right: Box::new(Expr::Literal {
+                value: Scalar::Int64(2),
+            }),
+            op: ComparisonOp::Gt,
+        };
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let filtered = super::filter_dataframe_on_expr(&expr, &frame, &policy, &mut ledger)
+            .expect("filter via expr");
+
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(
+            filtered.column("a").expect("a").values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            filtered.column("b").expect("b").values(),
+            &[Scalar::Int64(30), Scalar::Int64(40)]
+        );
+    }
+
+    #[test]
+    fn filter_dataframe_on_expr_rejects_non_boolean_mask() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .expect("frame");
+
+        let expr = Expr::Series {
+            name: SeriesRef("a".to_owned()),
+        };
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let err = super::filter_dataframe_on_expr(&expr, &frame, &policy, &mut ledger).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ExprError::Frame(FrameError::CompatibilityRejected(msg))
+                if msg.contains("boolean mask required for query-style filter")
+        ));
     }
 
     // === AG-15: Incremental View Maintenance Tests ===

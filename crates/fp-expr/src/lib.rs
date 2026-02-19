@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
@@ -14,12 +15,33 @@ pub struct SeriesRef(pub String);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expr {
-    Series { name: SeriesRef },
-    Add { left: Box<Expr>, right: Box<Expr> },
-    Sub { left: Box<Expr>, right: Box<Expr> },
-    Mul { left: Box<Expr>, right: Box<Expr> },
-    Div { left: Box<Expr>, right: Box<Expr> },
-    Literal { value: Scalar },
+    Series {
+        name: SeriesRef,
+    },
+    Add {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Sub {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Mul {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Div {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Compare {
+        left: Box<Expr>,
+        right: Box<Expr>,
+        op: ComparisonOp,
+    },
+    Literal {
+        value: Scalar,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,7 +112,64 @@ pub fn evaluate(
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
+        Expr::Compare { left, right, op } => {
+            evaluate_comparison(left, right, *op, context, policy, ledger)
+        }
         Expr::Literal { .. } => Err(ExprError::UnanchoredLiteral),
+    }
+}
+
+fn apply_series_comparison(
+    left: &Series,
+    right: &Series,
+    op: ComparisonOp,
+) -> Result<Series, ExprError> {
+    match op {
+        ComparisonOp::Gt => left.gt(right),
+        ComparisonOp::Lt => left.lt(right),
+        ComparisonOp::Eq => left.eq_series(right),
+        ComparisonOp::Ne => left.ne_series(right),
+        ComparisonOp::Ge => left.ge(right),
+        ComparisonOp::Le => left.le(right),
+    }
+    .map_err(ExprError::from)
+}
+
+fn reverse_comparison_op(op: ComparisonOp) -> ComparisonOp {
+    match op {
+        ComparisonOp::Gt => ComparisonOp::Lt,
+        ComparisonOp::Lt => ComparisonOp::Gt,
+        ComparisonOp::Eq => ComparisonOp::Eq,
+        ComparisonOp::Ne => ComparisonOp::Ne,
+        ComparisonOp::Ge => ComparisonOp::Le,
+        ComparisonOp::Le => ComparisonOp::Ge,
+    }
+}
+
+fn evaluate_comparison(
+    left: &Expr,
+    right: &Expr,
+    op: ComparisonOp,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
+    match (left, right) {
+        (Expr::Literal { .. }, Expr::Literal { .. }) => Err(ExprError::UnanchoredLiteral),
+        (Expr::Literal { value }, right_expr) => {
+            let rhs = evaluate(right_expr, context, policy, ledger)?;
+            rhs.compare_scalar(value, reverse_comparison_op(op))
+                .map_err(ExprError::from)
+        }
+        (left_expr, Expr::Literal { value }) => {
+            let lhs = evaluate(left_expr, context, policy, ledger)?;
+            lhs.compare_scalar(value, op).map_err(ExprError::from)
+        }
+        (left_expr, right_expr) => {
+            let lhs = evaluate(left_expr, context, policy, ledger)?;
+            let rhs = evaluate(right_expr, context, policy, ledger)?;
+            apply_series_comparison(&lhs, &rhs, op)
+        }
     }
 }
 
@@ -129,7 +208,7 @@ impl MaterializedView {
 
     /// Apply a delta (appended rows) incrementally.
     ///
-    /// For linear expressions (series refs, additions), only the new rows
+    /// For linear expressions (series refs, arithmetic, anchored comparisons), only the new rows
     /// are computed and concatenated to the existing result. Falls back to
     /// full re-evaluation for expressions that cannot be incrementally maintained.
     pub fn apply_delta(
@@ -176,15 +255,29 @@ impl MaterializedView {
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
             | Expr::Div { left, right } => Self::is_linear(left) && Self::is_linear(right),
+            Expr::Compare { left, right, .. } => {
+                Self::is_linear_or_literal(left)
+                    && Self::is_linear_or_literal(right)
+                    && Self::comparison_is_anchored(left, right)
+            }
             Expr::Literal { .. } => false,
         }
+    }
+
+    fn is_linear_or_literal(expr: &Expr) -> bool {
+        matches!(expr, Expr::Literal { .. }) || Self::is_linear(expr)
+    }
+
+    fn comparison_is_anchored(left: &Expr, right: &Expr) -> bool {
+        !(matches!(left, Expr::Literal { .. }) && matches!(right, Expr::Literal { .. }))
     }
 }
 
 /// Evaluate only the delta rows of an expression.
 ///
 /// For `Expr::Series`, returns the delta rows for the named series.
-/// For `Expr::Add`, recursively evaluates delta for both operands and adds them.
+/// For arithmetic/comparison operators, recursively evaluates delta operands
+/// and applies the operation only on appended rows.
 fn evaluate_delta(
     expr: &Expr,
     delta_ctx: &EvalContext,
@@ -235,12 +328,44 @@ fn evaluate_delta(
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
+        Expr::Compare { left, right, op } => {
+            evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
+        }
         Expr::Literal { .. } => Err(ExprError::UnanchoredLiteral),
+    }
+}
+
+fn evaluate_delta_comparison(
+    left: &Expr,
+    right: &Expr,
+    op: ComparisonOp,
+    delta_ctx: &EvalContext,
+    delta: &Delta,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
+    match (left, right) {
+        (Expr::Literal { .. }, Expr::Literal { .. }) => Err(ExprError::UnanchoredLiteral),
+        (Expr::Literal { value }, right_expr) => {
+            let rhs = evaluate_delta(right_expr, delta_ctx, delta, policy, ledger)?;
+            rhs.compare_scalar(value, reverse_comparison_op(op))
+                .map_err(ExprError::from)
+        }
+        (left_expr, Expr::Literal { value }) => {
+            let lhs = evaluate_delta(left_expr, delta_ctx, delta, policy, ledger)?;
+            lhs.compare_scalar(value, op).map_err(ExprError::from)
+        }
+        (left_expr, right_expr) => {
+            let lhs = evaluate_delta(left_expr, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right_expr, delta_ctx, delta, policy, ledger)?;
+            apply_series_comparison(&lhs, &rhs, op)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use fp_columnar::ComparisonOp;
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::Scalar;
 
@@ -360,6 +485,125 @@ mod tests {
         assert_eq!(
             div_out.values(),
             &[Scalar::Float64(4.0), Scalar::Float64(2.0)]
+        );
+    }
+
+    #[test]
+    fn expression_compare_work_through_series_refs() {
+        let a = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)],
+        )
+        .expect("a");
+        let b = Series::from_values(
+            "b",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(2)],
+        )
+        .expect("b");
+
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+        ctx.insert_series(b);
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut ledger = EvidenceLedger::new();
+        let gt_out = evaluate(
+            &Expr::Compare {
+                left: Box::new(Expr::Series {
+                    name: SeriesRef("a".to_owned()),
+                }),
+                right: Box::new(Expr::Series {
+                    name: SeriesRef("b".to_owned()),
+                }),
+                op: ComparisonOp::Gt,
+            },
+            &ctx,
+            &policy,
+            &mut ledger,
+        )
+        .expect("gt eval");
+        assert_eq!(
+            gt_out.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let mut ledger = EvidenceLedger::new();
+        let eq_out = evaluate(
+            &Expr::Compare {
+                left: Box::new(Expr::Series {
+                    name: SeriesRef("a".to_owned()),
+                }),
+                right: Box::new(Expr::Series {
+                    name: SeriesRef("b".to_owned()),
+                }),
+                op: ComparisonOp::Eq,
+            },
+            &ctx,
+            &policy,
+            &mut ledger,
+        )
+        .expect("eq eval");
+        assert_eq!(
+            eq_out.values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn expression_compare_supports_series_scalar_and_scalar_series() {
+        let a = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .expect("a");
+
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut ledger = EvidenceLedger::new();
+        let series_gt_scalar = evaluate(
+            &Expr::Compare {
+                left: Box::new(Expr::Series {
+                    name: SeriesRef("a".to_owned()),
+                }),
+                right: Box::new(Expr::Literal {
+                    value: Scalar::Int64(2),
+                }),
+                op: ComparisonOp::Gt,
+            },
+            &ctx,
+            &policy,
+            &mut ledger,
+        )
+        .expect("series > scalar");
+        assert_eq!(
+            series_gt_scalar.values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let mut ledger = EvidenceLedger::new();
+        let scalar_ge_series = evaluate(
+            &Expr::Compare {
+                left: Box::new(Expr::Literal {
+                    value: Scalar::Int64(2),
+                }),
+                right: Box::new(Expr::Series {
+                    name: SeriesRef("a".to_owned()),
+                }),
+                op: ComparisonOp::Ge,
+            },
+            &ctx,
+            &policy,
+            &mut ledger,
+        )
+        .expect("scalar >= series");
+        assert_eq!(
+            scalar_ge_series.values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
         );
     }
 
@@ -562,6 +806,60 @@ mod tests {
     }
 
     #[test]
+    fn ivm_append_delta_comparison_expression() {
+        let a = make_series("a", vec![0, 1], vec![Scalar::Int64(1), Scalar::Int64(2)]);
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+
+        let expr = Expr::Compare {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Literal {
+                value: Scalar::Int64(1),
+            }),
+            op: ComparisonOp::Gt,
+        };
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &ctx, &policy, &mut ledger).expect("base");
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into(), 3_i64.into()],
+            new_values: vec![Scalar::Int64(3), Scalar::Int64(0)],
+        };
+        ctx.insert_series(make_series(
+            "a",
+            vec![0, 1, 2, 3],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(0),
+            ],
+        ));
+
+        view.apply_delta(&delta, &ctx, &policy, &mut ledger)
+            .expect("delta");
+        assert_eq!(
+            view.result.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+    }
+
+    #[test]
     fn ivm_isomorphism_incremental_matches_full() {
         // The key correctness property: incremental result must equal full re-eval.
         let a = make_series("a", vec![0, 1], vec![Scalar::Int64(5), Scalar::Int64(10)]);
@@ -717,6 +1015,33 @@ mod tests {
             right: Box::new(Expr::Series {
                 name: SeriesRef("b".into()),
             }),
+        }));
+        assert!(MaterializedView::is_linear(&Expr::Compare {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+            op: ComparisonOp::Ge,
+        }));
+        assert!(MaterializedView::is_linear(&Expr::Compare {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Literal {
+                value: Scalar::Int64(1),
+            }),
+            op: ComparisonOp::Gt,
+        }));
+        assert!(!MaterializedView::is_linear(&Expr::Compare {
+            left: Box::new(Expr::Literal {
+                value: Scalar::Int64(1),
+            }),
+            right: Box::new(Expr::Literal {
+                value: Scalar::Int64(2),
+            }),
+            op: ComparisonOp::Lt,
         }));
         assert!(!MaterializedView::is_linear(&Expr::Literal {
             value: Scalar::Int64(42),

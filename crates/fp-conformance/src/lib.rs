@@ -17,7 +17,7 @@ use fp_groupby::{
 };
 use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_io::{read_csv_str, write_csv_string};
-use fp_join::{JoinType, join_series, merge_dataframes};
+use fp_join::{JoinType, join_series, merge_dataframes_on_with};
 #[cfg(feature = "asupersync")]
 use fp_runtime::asupersync::{
     ArtifactCodec, ArtifactPayload, Fnv1aVerifier, IntegrityVerifier, PassthroughCodec,
@@ -392,6 +392,16 @@ pub struct PacketFixture {
     pub join_type: Option<FixtureJoinType>,
     #[serde(default)]
     pub merge_on: Option<String>,
+    #[serde(default)]
+    pub merge_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub left_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub right_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub left_index: Option<bool>,
+    #[serde(default)]
+    pub right_index: Option<bool>,
     #[serde(default)]
     pub expected_series: Option<FixtureExpectedSeries>,
     #[serde(default)]
@@ -1116,6 +1126,16 @@ struct OracleRequest {
     index: Option<Vec<IndexLabel>>,
     join_type: Option<FixtureJoinType>,
     merge_on: Option<String>,
+    #[serde(default)]
+    merge_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    left_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    right_on_keys: Option<Vec<String>>,
+    #[serde(default)]
+    left_index: Option<bool>,
+    #[serde(default)]
+    right_index: Option<bool>,
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
@@ -3851,6 +3871,11 @@ fn capture_live_oracle_expected(
         index: fixture.index.clone(),
         join_type: fixture.join_type,
         merge_on: fixture.merge_on.clone(),
+        merge_on_keys: fixture.merge_on_keys.clone(),
+        left_on_keys: fixture.left_on_keys.clone(),
+        right_on_keys: fixture.right_on_keys.clone(),
+        left_index: fixture.left_index,
+        right_index: fixture.right_index,
         fill_value: fixture.fill_value.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
@@ -4076,11 +4101,100 @@ fn require_join_type(fixture: &PacketFixture) -> Result<FixtureJoinType, String>
         .ok_or_else(|| "missing join_type for join fixture".to_owned())
 }
 
-fn require_merge_on(fixture: &PacketFixture) -> Result<&str, String> {
-    fixture
-        .merge_on
-        .as_deref()
-        .ok_or_else(|| "missing merge_on for dataframe_merge fixture".to_owned())
+fn resolve_merge_on_keys(
+    merge_on: Option<&str>,
+    merge_on_keys: Option<&[String]>,
+    operation_name: &str,
+    default_key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if let Some(keys) = merge_on_keys {
+        if keys.is_empty() {
+            return Err(format!(
+                "{operation_name} requires merge_on_keys with at least one key"
+            ));
+        }
+        let mut resolved = Vec::with_capacity(keys.len());
+        for (index, key) in keys.iter().enumerate() {
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(format!(
+                    "{operation_name} merge_on_keys[{index}] must be a non-empty string"
+                ));
+            }
+            resolved.push(key.to_owned());
+        }
+        return Ok(resolved);
+    }
+
+    if let Some(key) = merge_on {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!(
+                "{operation_name} merge_on must be a non-empty string"
+            ));
+        }
+        return Ok(vec![key.to_owned()]);
+    }
+
+    if let Some(key) = default_key {
+        return Ok(vec![key.to_owned()]);
+    }
+
+    Err(format!(
+        "{operation_name} requires merge_on string or merge_on_keys list payload"
+    ))
+}
+
+fn normalize_key_list(
+    keys: &[String],
+    operation_name: &str,
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    if keys.is_empty() {
+        return Err(format!(
+            "{operation_name} requires {field_name} with at least one key"
+        ));
+    }
+    let mut normalized = Vec::with_capacity(keys.len());
+    for (index, key) in keys.iter().enumerate() {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!(
+                "{operation_name} {field_name}[{index}] must be a non-empty string"
+            ));
+        }
+        normalized.push(key.to_owned());
+    }
+    Ok(normalized)
+}
+
+fn resolve_merge_key_pairs(
+    merge_on: Option<&str>,
+    merge_on_keys: Option<&[String]>,
+    left_on_keys: Option<&[String]>,
+    right_on_keys: Option<&[String]>,
+    operation_name: &str,
+    default_key: Option<&str>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    if left_on_keys.is_some() || right_on_keys.is_some() {
+        let left = left_on_keys.ok_or_else(|| {
+            format!("{operation_name} requires right_on_keys when left_on_keys is provided")
+        })?;
+        let right = right_on_keys.ok_or_else(|| {
+            format!("{operation_name} requires left_on_keys when right_on_keys is provided")
+        })?;
+        let left_keys = normalize_key_list(left, operation_name, "left_on_keys")?;
+        let right_keys = normalize_key_list(right, operation_name, "right_on_keys")?;
+        if left_keys.len() != right_keys.len() {
+            return Err(format!(
+                "{operation_name} left_on_keys and right_on_keys must have equal length"
+            ));
+        }
+        return Ok((left_keys, right_keys));
+    }
+
+    let keys = resolve_merge_on_keys(merge_on, merge_on_keys, operation_name, default_key)?;
+    Ok((keys.clone(), keys))
 }
 
 fn normalize_concat_axis(fixture: &PacketFixture) -> Result<i64, String> {
@@ -4205,13 +4319,19 @@ fn apply_constructor_options(
         return Ok(frame);
     };
     let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
+    let column_order = frame
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
     let mut coerced_columns = BTreeMap::new();
     for (name, column) in frame.columns() {
         let coerced = Column::new(target_dtype, column.values().to_vec())
             .map_err(|err| format!("{operation_name} dtype='{dtype_spec}' cast failed: {err}"))?;
         coerced_columns.insert(name.clone(), coerced);
     }
-    DataFrame::new(frame.index().clone(), coerced_columns).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(frame.index().clone(), coerced_columns, column_order)
+        .map_err(|err| err.to_string())
 }
 
 fn execute_nanop_fixture_operation(
@@ -4269,53 +4389,12 @@ fn execute_dataframe_from_records_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
     let records = require_records(fixture)?;
-
-    let selected_columns: Vec<String> = if let Some(column_order) = fixture.column_order.clone() {
-        column_order
-    } else {
-        records
-            .iter()
-            .flat_map(|record| record.keys().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    };
-
-    let mut dict_columns = BTreeMap::new();
-    for column in &selected_columns {
-        let values = records
-            .iter()
-            .map(|record| {
-                record
-                    .get(column)
-                    .cloned()
-                    .unwrap_or(Scalar::Null(NullKind::Null))
-            })
-            .collect::<Vec<_>>();
-        dict_columns.insert(column.clone(), values);
-    }
-
-    let (columns, selected_columns) = collect_dict_constructor_payloads(
-        &dict_columns,
-        Some(&selected_columns),
-        "dataframe_from_records",
-    )?;
-
-    let frame = if let Some(index) = fixture.index.clone() {
-        if index.len() != records.len() {
-            return Err(format!(
-                "dataframe_from_records index length {} does not match records length {}",
-                index.len(),
-                records.len()
-            ));
-        }
-        DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string())?
-    } else if columns.is_empty() && !records.is_empty() {
-        let default_index = (0..records.len() as i64).map(IndexLabel::from).collect();
-        DataFrame::from_dict_with_index(Vec::new(), default_index).map_err(|err| err.to_string())?
-    } else {
-        DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())?
-    };
+    let frame = DataFrame::from_records(
+        records.clone(),
+        fixture.column_order.as_deref(),
+        fixture.index.clone(),
+    )
+    .map_err(|err| err.to_string())?;
 
     apply_constructor_options(fixture, "dataframe_from_records", frame)
 }
@@ -4353,8 +4432,8 @@ fn materialize_dataframe_constructor_projection(
     }
 
     let mut columns = BTreeMap::new();
-    for name in target_columns {
-        let values = if let Some(source_column) = frame.column(&name) {
+    for name in &target_columns {
+        let values = if let Some(source_column) = frame.column(name) {
             target_index
                 .iter()
                 .map(|label| {
@@ -4368,10 +4447,11 @@ fn materialize_dataframe_constructor_projection(
             vec![Scalar::Null(NullKind::Null); target_index.len()]
         };
         let column = Column::from_values(values).map_err(|err| err.to_string())?;
-        columns.insert(name, column);
+        columns.insert(name.clone(), column);
     }
 
-    DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(Index::new(target_index), columns, target_columns)
+        .map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_constructor_scalar_fixture_operation(
@@ -4391,13 +4471,14 @@ fn execute_dataframe_constructor_scalar_fixture_operation(
         .ok_or_else(|| "column_order is required for dataframe_constructor_scalar".to_owned())?;
 
     let mut columns = BTreeMap::new();
-    for name in target_columns {
+    for name in &target_columns {
         let values = vec![fill_value.clone(); target_index.len()];
         let column = Column::from_values(values).map_err(|err| err.to_string())?;
-        columns.insert(name, column);
+        columns.insert(name.clone(), column);
     }
 
-    let frame = DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())?;
+    let frame = DataFrame::new_with_column_order(Index::new(target_index), columns, target_columns)
+        .map_err(|err| err.to_string())?;
     apply_constructor_options(fixture, "dataframe_constructor_scalar", frame)
 }
 
@@ -4544,36 +4625,74 @@ fn execute_dataframe_merge_fixture_operation(
         .map_err(|err| format!("right frame build failed: {err}"))?;
     let join_type = require_join_type(fixture)?.into_join_type();
 
-    let (left_input, right_input, merge_on) = if merge_on_index {
-        let key_name = fixture
-            .merge_on
-            .clone()
-            .unwrap_or_else(|| INDEX_MERGE_KEY_COLUMN.to_owned());
-        (
-            dataframe_with_index_as_column(&left, &key_name)?,
-            dataframe_with_index_as_column(&right, &key_name)?,
-            key_name,
-        )
+    let (left_use_index, right_use_index, operation_name) = if merge_on_index {
+        (true, true, "dataframe_merge_index")
     } else {
-        (left, right, require_merge_on(fixture)?.to_owned())
+        (
+            fixture.left_index.unwrap_or(false),
+            fixture.right_index.unwrap_or(false),
+            "dataframe_merge",
+        )
+    };
+    let default_index_key = (left_use_index && right_use_index).then_some(INDEX_MERGE_KEY_COLUMN);
+
+    let (left_merge_keys, right_merge_keys) = resolve_merge_key_pairs(
+        fixture.merge_on.as_deref(),
+        fixture.merge_on_keys.as_deref(),
+        fixture.left_on_keys.as_deref(),
+        fixture.right_on_keys.as_deref(),
+        operation_name,
+        default_index_key,
+    )?;
+
+    let left_input = if left_use_index {
+        dataframe_with_index_as_columns(&left, &left_merge_keys)?
+    } else {
+        left
+    };
+    let right_input = if right_use_index {
+        dataframe_with_index_as_columns(&right, &right_merge_keys)?
+    } else {
+        right
     };
 
-    let merged = merge_dataframes(&left_input, &right_input, &merge_on, join_type)
-        .map_err(|err| err.to_string())?;
+    let left_merge_refs = left_merge_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let right_merge_refs = right_merge_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let merged = merge_dataframes_on_with(
+        &left_input,
+        &right_input,
+        &left_merge_refs,
+        &right_merge_refs,
+        join_type,
+    )
+    .map_err(|err| err.to_string())?;
     DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
 }
 
-fn dataframe_with_index_as_column(frame: &DataFrame, key_name: &str) -> Result<DataFrame, String> {
-    let index_values = frame
-        .index()
-        .labels()
-        .iter()
-        .map(index_label_to_scalar)
-        .collect::<Vec<_>>();
-    let key_column = Column::from_values(index_values).map_err(|err| err.to_string())?;
-    frame
-        .with_column(key_name, key_column)
-        .map_err(|err| err.to_string())
+fn dataframe_with_index_as_columns(
+    frame: &DataFrame,
+    key_names: &[String],
+) -> Result<DataFrame, String> {
+    let mut out = frame.clone();
+    for key_name in key_names {
+        let index_values = frame
+            .index()
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect::<Vec<_>>();
+        let key_column = Column::from_values(index_values).map_err(|err| err.to_string())?;
+        out = out
+            .with_column(key_name.as_str(), key_column)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(out)
 }
 
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
@@ -4823,14 +4942,22 @@ fn compare_dataframe_expected(
         .into_iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    let expected_names = expected
-        .column_order
-        .clone()
-        .unwrap_or_else(|| expected.columns.keys().cloned().collect::<Vec<_>>());
-    if actual_names != expected_names {
-        return Err(format!(
-            "dataframe column mismatch: actual={actual_names:?}, expected={expected_names:?}"
-        ));
+    if let Some(expected_order) = expected.column_order.clone() {
+        if actual_names != expected_order {
+            return Err(format!(
+                "dataframe column mismatch: actual={actual_names:?}, expected={expected_order:?}"
+            ));
+        }
+    } else {
+        let mut expected_names = expected.columns.keys().cloned().collect::<Vec<_>>();
+        expected_names.sort();
+        let mut actual_sorted = actual_names.clone();
+        actual_sorted.sort();
+        if actual_sorted != expected_names {
+            return Err(format!(
+                "dataframe column set mismatch: actual={actual_names:?}, expected={expected_names:?}"
+            ));
+        }
     }
 
     for (name, expected_values) in &expected.columns {
@@ -7984,6 +8111,19 @@ mod tests {
         assert!(
             report.fixture_count >= 10,
             "expected FP-P2D-032 dataframe concat axis=0 outer column-order fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_merge_composite_key_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-033", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-033"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-033 dataframe composite-key merge fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

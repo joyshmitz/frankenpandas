@@ -918,23 +918,22 @@ impl DataFrame {
         }
 
         let mut normalized = Vec::with_capacity(columns.len());
-        let mut seen = BTreeSet::new();
         for name in column_order {
             if !columns.contains_key(&name) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column '{name}' not found in data"
                 )));
             }
-            if !seen.insert(name.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{name}'"
-                )));
+            // Match pandas-style selector normalization: if a selector is repeated,
+            // keep the last occurrence.
+            if let Some(existing_idx) = normalized.iter().position(|entry| entry == &name) {
+                normalized.remove(existing_idx);
             }
             normalized.push(name);
         }
 
         for name in columns.keys() {
-            if seen.insert(name.clone()) {
+            if !normalized.iter().any(|entry| entry == name) {
                 normalized.push(name.clone());
             }
         }
@@ -1081,6 +1080,77 @@ impl DataFrame {
                 }
             }
             explicit
+        };
+
+        Self::new_with_column_order(index, columns, output_order)
+    }
+
+    /// Construct a DataFrame from row records.
+    ///
+    /// Matches `pd.DataFrame.from_records(records, columns=..., index=...)`.
+    /// Missing keys are null-filled. If `column_order` is provided, it is used
+    /// as the exact output column selector/order and may include labels absent
+    /// from the records (materialized as all-null columns).
+    pub fn from_records(
+        records: Vec<BTreeMap<String, Scalar>>,
+        column_order: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+    ) -> Result<Self, FrameError> {
+        let row_count = records.len();
+
+        if let Some(labels) = index_labels.as_ref()
+            && labels.len() != row_count
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "dataframe_from_records index length {} does not match records length {}",
+                labels.len(),
+                row_count
+            )));
+        }
+
+        let mut discovered_columns = Vec::new();
+        let mut discovered_seen = BTreeSet::new();
+        for record in &records {
+            for key in record.keys() {
+                if discovered_seen.insert(key.clone()) {
+                    discovered_columns.push(key.clone());
+                }
+            }
+        }
+
+        let output_order = if let Some(requested_order) = column_order {
+            let mut explicit = Vec::with_capacity(requested_order.len());
+            let mut seen = BTreeSet::new();
+            for requested in requested_order {
+                if !seen.insert(requested.clone()) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "duplicate column selector: '{requested}'"
+                    )));
+                }
+                explicit.push(requested.clone());
+            }
+            explicit
+        } else {
+            discovered_columns
+        };
+
+        let mut columns = BTreeMap::new();
+        for name in &output_order {
+            let values = records
+                .iter()
+                .map(|record| {
+                    record
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(Scalar::Null(NullKind::Null))
+                })
+                .collect::<Vec<_>>();
+            columns.insert(name.clone(), Column::from_values(values)?);
+        }
+
+        let index = match index_labels {
+            Some(labels) => Index::new(labels),
+            None => Index::new((0..row_count as i64).map(IndexLabel::from).collect()),
         };
 
         Self::new_with_column_order(index, columns, output_order)
@@ -1433,6 +1503,8 @@ impl DataFrame {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{NullKind, Scalar};
 
@@ -2031,6 +2103,106 @@ mod tests {
         )
         .expect_err("should reject length mismatch");
         assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn dataframe_from_records_sparse_keys_null_fill() {
+        let records = vec![
+            BTreeMap::from([
+                ("a".to_owned(), Scalar::Int64(1)),
+                ("b".to_owned(), Scalar::Int64(10)),
+            ]),
+            BTreeMap::from([("a".to_owned(), Scalar::Int64(2))]),
+            BTreeMap::from([("b".to_owned(), Scalar::Int64(30))]),
+        ];
+
+        let df = DataFrame::from_records(records, None, None).unwrap();
+        assert_eq!(
+            df.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(
+            df.column("a").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+        assert_eq!(
+            df.column("b").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_column_order_allows_new_null_column() {
+        let records = vec![
+            BTreeMap::from([("a".to_owned(), Scalar::Int64(1))]),
+            BTreeMap::from([("a".to_owned(), Scalar::Int64(2))]),
+        ];
+        let order = vec!["a".to_owned(), "z".to_owned()];
+
+        let df = DataFrame::from_records(records, Some(&order), None).unwrap();
+        let names = df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "z"]);
+        assert_eq!(
+            df.column("z").unwrap().values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_with_explicit_index() {
+        let records = vec![
+            BTreeMap::from([("city".to_owned(), Scalar::Utf8("ny".to_owned()))]),
+            BTreeMap::from([("city".to_owned(), Scalar::Utf8("la".to_owned()))]),
+        ];
+
+        let df = DataFrame::from_records(
+            records,
+            None,
+            Some(vec![
+                IndexLabel::Utf8("row-a".to_owned()),
+                IndexLabel::Utf8("row-b".to_owned()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            df.index().labels(),
+            &[
+                IndexLabel::Utf8("row-a".to_owned()),
+                IndexLabel::Utf8("row-b".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_explicit_index_mismatch() {
+        let records = vec![
+            BTreeMap::from([("a".to_owned(), Scalar::Int64(1))]),
+            BTreeMap::from([("a".to_owned(), Scalar::Int64(2))]),
+        ];
+
+        let err = DataFrame::from_records(
+            records,
+            None,
+            Some(vec![IndexLabel::Utf8("only-one".to_owned())]),
+        )
+        .expect_err("should reject index length mismatch");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: dataframe_from_records index length 1 does not match records length 2"
+        );
     }
 
     #[test]

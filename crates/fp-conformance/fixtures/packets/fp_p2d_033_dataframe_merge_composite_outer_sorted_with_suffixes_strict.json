@@ -1,0 +1,112 @@
+{
+  "packet_id": "FP-P2D-033",
+  "case_id": "dataframe_merge_composite_outer_sorted_with_suffixes_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
+  "join_type": "outer",
+  "merge_on_keys": ["k1", "k2"],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "k2": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 1 }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 220 },
+        { "kind": "int64", "value": 120 },
+        { "kind": "int64", "value": 210 }
+      ],
+      "shared": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 21 },
+      { "kind": "int64", "value": 22 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "k2": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 1 }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 102 },
+        { "kind": "int64", "value": 201 },
+        { "kind": "int64", "value": 301 }
+      ],
+      "shared": [
+        { "kind": "int64", "value": 700 },
+        { "kind": "int64", "value": 800 },
+        { "kind": "int64", "value": 900 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "k2": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 1 }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 120 },
+        { "kind": "int64", "value": 210 },
+        { "kind": "int64", "value": 220 },
+        { "kind": "null", "value": "null" }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 102 },
+        { "kind": "int64", "value": 201 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 301 }
+      ],
+      "shared_left": [
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 10 },
+        { "kind": "null", "value": "null" }
+      ],
+      "shared_right": [
+        { "kind": "int64", "value": 700 },
+        { "kind": "int64", "value": 800 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 900 }
+      ]
+    }
+  }
+}

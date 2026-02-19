@@ -45,18 +45,18 @@
     ],
     "columns": {
       "id": [
-        { "kind": "int64", "value": 2 },
         { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
         { "kind": "int64", "value": 3 }
       ],
       "left_v": [
-        { "kind": "int64", "value": 20 },
         { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
         { "kind": "null", "value": "null" }
       ],
       "right_v": [
-        { "kind": "null", "value": "null" },
         { "kind": "int64", "value": 100 },
+        { "kind": "null", "value": "null" },
         { "kind": "int64", "value": 300 }
       ]
     }

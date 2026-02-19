@@ -1,9 +1,11 @@
 {
   "packet_id": "FP-P2D-014",
-  "case_id": "dataframe_merge_index_outer_order_hardened",
-  "mode": "hardened",
-  "operation": "dataframe_merge_index",
+  "case_id": "dataframe_merge_left_right_index_outer_default_key_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
   "join_type": "outer",
+  "left_index": true,
+  "right_index": true,
   "frame": {
     "index": [
       { "kind": "int64", "value": 1 },

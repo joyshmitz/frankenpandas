@@ -1021,9 +1021,66 @@ def require_join_type(payload: dict[str, Any], op_name: str) -> str:
     return str(join_type)
 
 
-def dataframe_with_index_key(frame, key_name: str):
+def _normalize_key_list(payload_key: Any, op_name: str, field_name: str) -> list[str]:
+    if not isinstance(payload_key, list) or len(payload_key) == 0:
+        raise OracleError(f"{op_name} requires non-empty {field_name} list payload")
+    keys: list[str] = []
+    for idx, key in enumerate(payload_key):
+        if not isinstance(key, str) or key.strip() == "":
+            raise OracleError(f"{op_name} {field_name}[{idx}] must be a non-empty string")
+        keys.append(key.strip())
+    return keys
+
+
+def _resolve_index_flag(payload: dict[str, Any], field_name: str, op_name: str, default: bool) -> bool:
+    raw = payload.get(field_name)
+    if raw is None:
+        return default
+    if not isinstance(raw, bool):
+        raise OracleError(f"{op_name} {field_name} must be a boolean when provided")
+    return raw
+
+
+def resolve_merge_key_pairs(
+    payload: dict[str, Any], op_name: str, *, default_key: str | None = None
+) -> tuple[list[str], list[str]]:
+    left_on_keys_raw = payload.get("left_on_keys")
+    right_on_keys_raw = payload.get("right_on_keys")
+    if left_on_keys_raw is not None or right_on_keys_raw is not None:
+        if left_on_keys_raw is None or right_on_keys_raw is None:
+            raise OracleError(
+                f"{op_name} requires both left_on_keys and right_on_keys when either is provided"
+            )
+        left_keys = _normalize_key_list(left_on_keys_raw, op_name, "left_on_keys")
+        right_keys = _normalize_key_list(right_on_keys_raw, op_name, "right_on_keys")
+        if len(left_keys) != len(right_keys):
+            raise OracleError(
+                f"{op_name} left_on_keys and right_on_keys must have equal length"
+            )
+        return left_keys, right_keys
+
+    merge_on_keys_raw = payload.get("merge_on_keys")
+    if merge_on_keys_raw is not None:
+        keys = _normalize_key_list(merge_on_keys_raw, op_name, "merge_on_keys")
+        return keys, keys
+
+    merge_on_raw = payload.get("merge_on")
+    if isinstance(merge_on_raw, str) and merge_on_raw.strip():
+        key = merge_on_raw.strip()
+        return [key], [key]
+
+    if default_key is not None:
+        return [default_key], [default_key]
+
+    raise OracleError(
+        f"{op_name} requires merge_on string, merge_on_keys list, or left_on_keys/right_on_keys lists"
+    )
+
+
+def dataframe_with_index_keys(frame, key_names: list[str]):
     out = frame.copy()
-    out[key_name] = frame.index.tolist()
+    for key_name in key_names:
+        out[key_name] = frame.index.tolist()
     return out
 
 
@@ -1035,36 +1092,45 @@ def op_dataframe_merge(
     if frame_payload is None or frame_right_payload is None:
         raise OracleError("dataframe_merge requires frame and frame_right payloads")
 
-    how = require_join_type(
-        payload, "dataframe_merge_index" if use_index_keys else "dataframe_merge"
-    )
+    op_name = "dataframe_merge_index" if use_index_keys else "dataframe_merge"
+    how = require_join_type(payload, op_name)
+
+    left_use_index = _resolve_index_flag(payload, "left_index", op_name, use_index_keys)
+    right_use_index = _resolve_index_flag(payload, "right_index", op_name, use_index_keys)
 
     left = dataframe_from_json(pd, frame_payload)
     right = dataframe_from_json(pd, frame_right_payload)
 
-    if use_index_keys:
-        merge_on_raw = payload.get("merge_on")
-        merge_on = (
-            str(merge_on_raw)
-            if isinstance(merge_on_raw, str) and merge_on_raw
-            else "__index_key"
-        )
-        left = dataframe_with_index_key(left, merge_on)
-        right = dataframe_with_index_key(right, merge_on)
-    else:
-        merge_on_raw = payload.get("merge_on")
-        if not isinstance(merge_on_raw, str) or not merge_on_raw:
-            raise OracleError("dataframe_merge requires merge_on string payload")
-        merge_on = merge_on_raw
-
-    out = left.merge(
-        right,
-        on=merge_on,
-        how=how,
-        sort=False,
-        copy=False,
-        suffixes=("_left", "_right"),
+    left_merge_keys, right_merge_keys = resolve_merge_key_pairs(
+        payload,
+        op_name,
+        default_key="__index_key" if left_use_index and right_use_index else None,
     )
+
+    if left_use_index:
+        left = dataframe_with_index_keys(left, left_merge_keys)
+    if right_use_index:
+        right = dataframe_with_index_keys(right, right_merge_keys)
+
+    if left_merge_keys == right_merge_keys:
+        out = left.merge(
+            right,
+            on=left_merge_keys,
+            how=how,
+            sort=False,
+            copy=False,
+            suffixes=("_left", "_right"),
+        )
+    else:
+        out = left.merge(
+            right,
+            left_on=left_merge_keys,
+            right_on=right_merge_keys,
+            how=how,
+            sort=False,
+            copy=False,
+            suffixes=("_left", "_right"),
+        )
     return {"expected_frame": dataframe_to_json(out)}
 
 

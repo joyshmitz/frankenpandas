@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, mem::size_of};
+use std::{
+    collections::{HashMap, HashSet},
+    mem::size_of,
+};
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
@@ -362,65 +365,130 @@ pub struct MergedDataFrame {
     pub columns: std::collections::BTreeMap<String, Column>,
 }
 
-/// Convert a Scalar to an IndexLabel for use as a hash key.
-/// Returns None for missing/NaN values (which cannot be join keys).
-fn scalar_to_key(s: &fp_types::Scalar) -> Option<IndexLabel> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum JoinKeyComponent {
+    Present(IndexLabel),
+    Missing,
+}
+
+fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
     match s {
-        fp_types::Scalar::Int64(v) => Some(IndexLabel::Int64(*v)),
-        fp_types::Scalar::Float64(v) if !v.is_nan() => Some(IndexLabel::Int64(*v as i64)),
-        fp_types::Scalar::Utf8(v) => Some(IndexLabel::Utf8(v.clone())),
-        fp_types::Scalar::Bool(b) => Some(IndexLabel::Int64(i64::from(*b))),
-        _ => None, // Null, NaN
+        fp_types::Scalar::Int64(v) => JoinKeyComponent::Present(IndexLabel::Int64(*v)),
+        fp_types::Scalar::Float64(v) if !v.is_nan() => {
+            JoinKeyComponent::Present(IndexLabel::Int64(*v as i64))
+        }
+        fp_types::Scalar::Utf8(v) => JoinKeyComponent::Present(IndexLabel::Utf8(v.clone())),
+        fp_types::Scalar::Bool(b) => JoinKeyComponent::Present(IndexLabel::Int64(i64::from(*b))),
+        _ => JoinKeyComponent::Missing, // Null, NaN, NaT
     }
 }
 
-/// Merge two DataFrames on a specified key column.
+type CompositeJoinKey = Vec<JoinKeyComponent>;
+
+fn collect_join_key_columns<'a>(
+    frame: &'a fp_frame::DataFrame,
+    on: &[&str],
+    side: &str,
+) -> Result<Vec<&'a Column>, JoinError> {
+    let mut key_columns = Vec::with_capacity(on.len());
+    for key_name in on {
+        let key_column = frame.column(key_name).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "{side} DataFrame missing key column '{key_name}'"
+            )))
+        })?;
+        key_columns.push(key_column);
+    }
+    Ok(key_columns)
+}
+
+fn collect_composite_keys(key_columns: &[&Column]) -> Vec<CompositeJoinKey> {
+    let row_count = key_columns.first().map_or(0, |column| column.len());
+    let mut out = Vec::with_capacity(row_count);
+
+    for row in 0..row_count {
+        let mut parts = Vec::with_capacity(key_columns.len());
+        for column in key_columns {
+            parts.push(scalar_to_key_component(&column.values()[row]));
+        }
+        out.push(parts);
+    }
+
+    out
+}
+
+fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
+    let existing = values.clone();
+    values.clear();
+    values.reserve(order.len());
+    for &idx in order {
+        values.push(existing[idx].clone());
+    }
+}
+
+/// Merge two DataFrames on one or more key columns.
 ///
-/// Matches `pd.merge(left, right, on=key, how=join_type)`.
-/// - The key column is used for matching rows (hash join).
+/// Matches `pd.merge(left, right, left_on=left_keys, right_on=right_keys, how=join_type)`.
+/// - Key columns are used for matching rows (hash join).
 /// - Non-key columns are carried through and reindexed.
 /// - Column name conflicts get `_left`/`_right` suffixes.
 /// - The output index is auto-generated (0..n RangeIndex-style).
-pub fn merge_dataframes(
+pub fn merge_dataframes_on_with(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    on: &str,
+    left_on: &[&str],
+    right_on: &[&str],
     join_type: JoinType,
 ) -> Result<MergedDataFrame, JoinError> {
     if matches!(join_type, JoinType::Cross) {
         return merge_dataframes_cross(left, right);
     }
 
-    let left_key = left.column(on).ok_or_else(|| {
-        JoinError::Frame(FrameError::CompatibilityRejected(format!(
-            "left DataFrame missing key column '{on}'"
-        )))
-    })?;
-    let right_key = right.column(on).ok_or_else(|| {
-        JoinError::Frame(FrameError::CompatibilityRejected(format!(
-            "right DataFrame missing key column '{on}'"
-        )))
-    })?;
+    if left_on.is_empty() || right_on.is_empty() {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            "merge requires at least one key column".to_owned(),
+        )));
+    }
+    if left_on.len() != right_on.len() {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            "merge requires left_on and right_on key lists with equal length".to_owned(),
+        )));
+    }
 
-    // Convert key columns to IndexLabel for hashing.
-    let left_keys: Vec<Option<IndexLabel>> = left_key.values().iter().map(scalar_to_key).collect();
-    let right_keys: Vec<Option<IndexLabel>> =
-        right_key.values().iter().map(scalar_to_key).collect();
-
-    // Build hash map from right key → row positions.
-    let mut right_map = HashMap::<&IndexLabel, Vec<usize>>::new();
-    for (pos, key) in right_keys.iter().enumerate() {
-        if let Some(k) = key {
-            right_map.entry(k).or_default().push(pos);
+    let mut seen_left_keys = HashSet::new();
+    for key_name in left_on {
+        if !seen_left_keys.insert(*key_name) {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge left key column '{key_name}' is duplicated"),
+            )));
+        }
+    }
+    let mut seen_right_keys = HashSet::new();
+    for key_name in right_on {
+        if !seen_right_keys.insert(*key_name) {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge right key column '{key_name}' is duplicated"),
+            )));
         }
     }
 
+    let left_key_columns = collect_join_key_columns(left, left_on, "left")?;
+    let right_key_columns = collect_join_key_columns(right, right_on, "right")?;
+
+    // Convert key columns to hashable composite keys.
+    let left_keys = collect_composite_keys(&left_key_columns);
+    let right_keys = collect_composite_keys(&right_key_columns);
+
+    // Build hash map from right key → row positions.
+    let mut right_map = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
+    for (pos, key) in right_keys.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = HashMap::<&IndexLabel, Vec<usize>>::new();
+        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
         for (pos, key) in left_keys.iter().enumerate() {
-            if let Some(k) = key {
-                m.entry(k).or_default().push(pos);
-            }
+            m.entry(key).or_default().push(pos);
         }
         Some(m)
     } else {
@@ -430,16 +498,14 @@ pub fn merge_dataframes(
     // Compute row position mappings.
     let mut left_positions = Vec::<Option<usize>>::new();
     let mut right_positions = Vec::<Option<usize>>::new();
-    let mut out_keys = Vec::<fp_types::Scalar>::new();
+    let mut out_row_keys = Vec::<CompositeJoinKey>::new();
 
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Outer => {
             for (left_pos, key) in left_keys.iter().enumerate() {
-                if let Some(k) = key
-                    && let Some(matches) = right_map.get(k)
-                {
+                if let Some(matches) = right_map.get(key) {
                     for &right_pos in matches {
-                        out_keys.push(left_key.values()[left_pos].clone());
+                        out_row_keys.push(key.clone());
                         left_positions.push(Some(left_pos));
                         right_positions.push(Some(right_pos));
                     }
@@ -447,7 +513,7 @@ pub fn merge_dataframes(
                 }
 
                 if matches!(join_type, JoinType::Left | JoinType::Outer) {
-                    out_keys.push(left_key.values()[left_pos].clone());
+                    out_row_keys.push(key.clone());
                     left_positions.push(Some(left_pos));
                     right_positions.push(None);
                 }
@@ -455,13 +521,10 @@ pub fn merge_dataframes(
 
             if matches!(join_type, JoinType::Outer) {
                 // Track which right keys already appeared via left.
-                let left_key_set: std::collections::HashSet<&IndexLabel> =
-                    left_keys.iter().filter_map(|k| k.as_ref()).collect();
+                let left_key_set: HashSet<&CompositeJoinKey> = left_keys.iter().collect();
                 for (right_pos, key) in right_keys.iter().enumerate() {
-                    if let Some(k) = key
-                        && !left_key_set.contains(k)
-                    {
-                        out_keys.push(right_key.values()[right_pos].clone());
+                    if !left_key_set.contains(key) {
+                        out_row_keys.push(key.clone());
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
                     }
@@ -471,18 +534,16 @@ pub fn merge_dataframes(
         JoinType::Right => {
             let left_map = left_map.as_ref().expect("left_map required for Right join");
             for (right_pos, key) in right_keys.iter().enumerate() {
-                if let Some(k) = key
-                    && let Some(matches) = left_map.get(k)
-                {
+                if let Some(matches) = left_map.get(key) {
                     for &left_pos in matches {
-                        out_keys.push(right_key.values()[right_pos].clone());
+                        out_row_keys.push(key.clone());
                         left_positions.push(Some(left_pos));
                         right_positions.push(Some(right_pos));
                     }
                     continue;
                 }
 
-                out_keys.push(right_key.values()[right_pos].clone());
+                out_row_keys.push(key.clone());
                 left_positions.push(None);
                 right_positions.push(Some(right_pos));
             }
@@ -490,6 +551,14 @@ pub fn merge_dataframes(
         JoinType::Cross => {
             unreachable!("cross join handled by merge_dataframes_cross");
         }
+    }
+
+    if matches!(join_type, JoinType::Outer) {
+        let mut order: Vec<usize> = (0..out_row_keys.len()).collect();
+        order.sort_by(|a, b| out_row_keys[*a].cmp(&out_row_keys[*b]));
+
+        reorder_vec_by_index(&mut left_positions, &order);
+        reorder_vec_by_index(&mut right_positions, &order);
     }
 
     // Build output columns by reindexing.
@@ -500,17 +569,42 @@ pub fn merge_dataframes(
     // Collect column names to handle conflicts.
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
 
-    // Add key column from output keys.
-    columns.insert(on.to_owned(), Column::from_values(out_keys)?);
+    // Track positional pairs where left_on[i] and right_on[i] share the same key name.
+    let mut shared_name_positions = HashMap::<&str, (usize, usize)>::new();
+    for (idx, (left_key_name, right_key_name)) in left_on.iter().zip(right_on.iter()).enumerate() {
+        if left_key_name == right_key_name {
+            shared_name_positions.insert(*left_key_name, (idx, idx));
+        }
+    }
 
-    // Add left non-key columns.
+    // Add left columns (including left key columns).
     for (name, col) in left.columns() {
-        if name == on {
+        if left_key_name_set.contains(name.as_str()) {
+            if let Some((left_key_idx, right_key_idx)) = shared_name_positions.get(name.as_str()) {
+                // Shared key name: for rows emitted from right-only keys, source key values from
+                // the right frame instead of leaving them null.
+                let left_key_col = left_key_columns[*left_key_idx];
+                let right_key_col = right_key_columns[*right_key_idx];
+                let values = left_positions
+                    .iter()
+                    .zip(right_positions.iter())
+                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                    })
+                    .collect::<Vec<_>>();
+                columns.insert(name.clone(), Column::from_values(values)?);
+            } else {
+                columns.insert(name.clone(), col.reindex_by_positions(&left_positions)?);
+            }
             continue;
         }
         let reindexed = col.reindex_by_positions(&left_positions)?;
-        let out_name = if right_col_names.contains(name) && name != on {
+        let out_name = if right_col_names.contains(name) {
             format!("{name}_left")
         } else {
             name.clone()
@@ -518,13 +612,16 @@ pub fn merge_dataframes(
         columns.insert(out_name, reindexed);
     }
 
-    // Add right non-key columns.
+    // Add right columns (including right key alias columns).
     for (name, col) in right.columns() {
-        if name == on {
+        if right_key_name_set.contains(name.as_str())
+            && shared_name_positions.contains_key(name.as_str())
+        {
+            // Shared same-name key already emitted from the left side.
             continue;
         }
         let reindexed = col.reindex_by_positions(&right_positions)?;
-        let out_name = if left_col_names.contains(name) && name != on {
+        let out_name = if left_col_names.contains(name) {
             format!("{name}_right")
         } else {
             name.clone()
@@ -533,6 +630,28 @@ pub fn merge_dataframes(
     }
 
     Ok(MergedDataFrame { index, columns })
+}
+
+/// Merge two DataFrames on one or more key columns with identical key names.
+///
+/// Matches `pd.merge(left, right, on=keys, how=join_type)`.
+pub fn merge_dataframes_on(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &[&str],
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes_on_with(left, right, on, on, join_type)
+}
+
+/// Merge two DataFrames on a single key column.
+pub fn merge_dataframes(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes_on(left, right, &[on], join_type)
 }
 
 fn merge_dataframes_cross(
@@ -999,7 +1118,7 @@ mod tests {
 
     // ---- DataFrame merge tests (bd-2gi.17) ----
 
-    use super::merge_dataframes;
+    use super::{merge_dataframes, merge_dataframes_on, merge_dataframes_on_with};
     use fp_frame::DataFrame;
 
     fn make_left_df() -> DataFrame {
@@ -1227,6 +1346,459 @@ mod tests {
         assert_eq!(merged.index.labels().len(), 0);
         assert!(merged.columns.get("l").unwrap().values().is_empty());
         assert!(merged.columns.get("r").unwrap().values().is_empty());
+    }
+
+    #[test]
+    fn merge_composite_inner_multiplies_cardinality_for_duplicates() {
+        let left = DataFrame::from_dict(
+            &["k1", "k2", "left_v"],
+            vec![
+                (
+                    "k1",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(1)],
+                ),
+                (
+                    "k2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k1", "k2", "right_v"],
+            vec![
+                (
+                    "k1",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(1)],
+                ),
+                (
+                    "k2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on(&left, &right, &["k1", "k2"], JoinType::Inner).unwrap();
+        assert_eq!(merged.columns.get("k1").unwrap().len(), 4);
+        assert_eq!(
+            merged.columns.get("k1").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("k2").unwrap().values(),
+            &[
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned())
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(200),
+                Scalar::Int64(100),
+                Scalar::Int64(200)
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_composite_outer_sorts_join_keys_lexicographically() {
+        let left = DataFrame::from_dict(
+            &["k1", "k2", "left_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(2), Scalar::Int64(1)]),
+                (
+                    "k2",
+                    vec![Scalar::Utf8("y".to_owned()), Scalar::Utf8("x".to_owned())],
+                ),
+                ("left_v", vec![Scalar::Int64(20), Scalar::Int64(10)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k1", "k2", "right_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "k2",
+                    vec![Scalar::Utf8("y".to_owned()), Scalar::Utf8("z".to_owned())],
+                ),
+                ("right_v", vec![Scalar::Int64(200), Scalar::Int64(300)]),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on(&left, &right, &["k1", "k2"], JoinType::Outer).unwrap();
+        assert_eq!(
+            merged.columns.get("k1").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            merged.columns.get("k2").unwrap().values(),
+            &[
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("z".to_owned())
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(200),
+                Scalar::Int64(300)
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_composite_inner_matches_missing_key_components() {
+        let left = DataFrame::from_dict(
+            &["k1", "k2", "left_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                (
+                    "k2",
+                    vec![Scalar::Null(NullKind::Null), Scalar::Utf8("a".to_owned())],
+                ),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k1", "k2", "right_v"],
+            vec![
+                (
+                    "k1",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "k2",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on(&left, &right, &["k1", "k2"], JoinType::Inner).unwrap();
+        assert_eq!(
+            merged.columns.get("k1").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            merged.columns.get("k2").unwrap().values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Utf8("a".to_owned())]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(200)]
+        );
+    }
+
+    #[test]
+    fn merge_composite_outer_keeps_right_only_rows_with_missing_keys() {
+        let left = DataFrame::from_dict(
+            &["k1", "k2", "left_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(1)]),
+                ("k2", vec![Scalar::Null(NullKind::Null)]),
+                ("left_v", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k1", "k2", "right_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "k2",
+                    vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+                ),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on(&left, &right, &["k1", "k2"], JoinType::Outer).unwrap();
+        assert_eq!(
+            merged.columns.get("k1").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            merged.columns.get("k2").unwrap().values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Null(NullKind::Null)]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(200)]
+        );
+    }
+
+    #[test]
+    fn merge_composite_missing_key_column_errors() {
+        let left = DataFrame::from_dict(
+            &["k1", "k2", "left_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(1)]),
+                ("k2", vec![Scalar::Utf8("x".to_owned())]),
+                ("left_v", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k1", "right_v"],
+            vec![
+                ("k1", vec![Scalar::Int64(1)]),
+                ("right_v", vec![Scalar::Int64(100)]),
+            ],
+        )
+        .unwrap();
+
+        let err = merge_dataframes_on(&left, &right, &["k1", "k2"], JoinType::Inner)
+            .expect_err("should fail");
+        assert!(format!("{err}").contains("right DataFrame missing key column 'k2'"));
+    }
+
+    #[test]
+    fn merge_composite_key_alias_inner_keeps_both_key_sets() {
+        let left = DataFrame::from_dict(
+            &["lk1", "lk2", "left_v"],
+            vec![
+                (
+                    "lk1",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "lk2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["rk1", "rk2", "right_v"],
+            vec![
+                (
+                    "rk1",
+                    vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+                ),
+                (
+                    "rk2",
+                    vec![
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("c".to_owned()),
+                        Scalar::Utf8("d".to_owned()),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on_with(
+            &left,
+            &right,
+            &["lk1", "lk2"],
+            &["rk1", "rk2"],
+            JoinType::Inner,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.columns.get("lk1").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            merged.columns.get("lk2").unwrap().values(),
+            &[Scalar::Utf8("b".to_owned()), Scalar::Utf8("c".to_owned())]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+        assert_eq!(
+            merged.columns.get("rk1").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            merged.columns.get("rk2").unwrap().values(),
+            &[Scalar::Utf8("b".to_owned()), Scalar::Utf8("c".to_owned())]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[Scalar::Int64(200), Scalar::Int64(300)]
+        );
+    }
+
+    #[test]
+    fn merge_composite_key_alias_outer_propagates_missing_per_side() {
+        let left = DataFrame::from_dict(
+            &["lk1", "lk2", "left_v"],
+            vec![
+                (
+                    "lk1",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "lk2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["rk1", "rk2", "right_v"],
+            vec![
+                (
+                    "rk1",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+                ),
+                (
+                    "rk2",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("d".to_owned()),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(400)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes_on_with(
+            &left,
+            &right,
+            &["lk1", "lk2"],
+            &["rk1", "rk2"],
+            JoinType::Outer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            merged.columns.get("lk1").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("rk1").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(4)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").unwrap().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(200),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(400)
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_key_alias_lists_must_have_equal_lengths() {
+        let left = make_left_df();
+        let right = make_right_df();
+        let err = merge_dataframes_on_with(&left, &right, &["id", "id"], &["id"], JoinType::Inner)
+            .expect_err("should fail");
+        assert!(format!("{err}").contains("equal length"));
     }
 
     #[test]

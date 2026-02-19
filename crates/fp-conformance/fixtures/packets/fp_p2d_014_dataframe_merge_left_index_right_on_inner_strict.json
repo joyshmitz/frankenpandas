@@ -1,0 +1,99 @@
+{
+  "packet_id": "FP-P2D-014",
+  "case_id": "dataframe_merge_left_index_right_on_inner_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
+  "join_type": "inner",
+  "left_index": true,
+  "left_on_keys": ["lix"],
+  "right_on_keys": ["rid"],
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "k" },
+      { "kind": "utf8", "value": "x" }
+    ],
+    "columns": {
+      "left_v": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "shared": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "rid": [
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "z" }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ],
+      "shared": [
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 8 },
+        { "kind": "int64", "value": 9 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "left_v": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "lix": [
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" }
+      ],
+      "rid": [
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" },
+        { "kind": "utf8", "value": "k" }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 }
+      ],
+      "shared_left": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 20 }
+      ],
+      "shared_right": [
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 8 },
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 8 }
+      ]
+    }
+  }
+}

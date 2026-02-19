@@ -1,0 +1,90 @@
+{
+  "packet_id": "FP-P2D-033",
+  "case_id": "dataframe_merge_composite_outer_null_keys_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_merge",
+  "join_type": "outer",
+  "merge_on_keys": ["k1", "k2"],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 2 }
+      ],
+      "k2": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "b" },
+        { "kind": "null", "value": "null" }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 11 },
+      { "kind": "int64", "value": 12 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 3 }
+      ],
+      "k2": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "b" },
+        { "kind": "null", "value": "null" }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "k1": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 },
+        { "kind": "null", "value": "null" }
+      ],
+      "k2": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "utf8", "value": "b" }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 30 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 20 }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 300 },
+        { "kind": "int64", "value": 200 }
+      ]
+    }
+  }
+}

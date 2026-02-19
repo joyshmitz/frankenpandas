@@ -631,6 +631,28 @@ impl Series {
         Self::from_values(self.name.clone(), out_labels, out_values)
     }
 
+    /// Return the first `n` rows.
+    ///
+    /// Matches `s.head(n)`. If `n` is negative, this returns all rows except
+    /// the last `-n` rows.
+    pub fn head(&self, n: i64) -> Result<Self, FrameError> {
+        let take = normalize_head_take(n, self.len());
+        let labels = self.index.labels()[..take].to_vec();
+        let values = self.values()[..take].to_vec();
+        Self::from_values(self.name.clone(), labels, values)
+    }
+
+    /// Return the last `n` rows.
+    ///
+    /// Matches `s.tail(n)`. If `n` is negative, this returns all rows except
+    /// the first `-n` rows.
+    pub fn tail(&self, n: i64) -> Result<Self, FrameError> {
+        let (start, _) = normalize_tail_window(n, self.len());
+        let labels = self.index.labels()[start..].to_vec();
+        let values = self.values()[start..].to_vec();
+        Self::from_values(self.name.clone(), labels, values)
+    }
+
     // --- Missing Data Operations ---
 
     /// Fill missing values with a scalar.
@@ -4019,6 +4041,101 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
         );
+    }
+
+    #[test]
+    fn series_head_tail() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+                IndexLabel::from("e"),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+
+        let head = s.head(3).unwrap();
+        assert_eq!(
+            head.index().labels(),
+            &[
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c")
+            ]
+        );
+        assert_eq!(
+            head.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let tail = s.tail(2).unwrap();
+        assert_eq!(
+            tail.index().labels(),
+            &[IndexLabel::from("d"), IndexLabel::from("e")]
+        );
+        assert_eq!(tail.values(), &[Scalar::Int64(4), Scalar::Int64(5)]);
+    }
+
+    #[test]
+    fn series_head_tail_negative_n() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        )
+        .unwrap();
+
+        let head = s.head(-2).unwrap();
+        assert_eq!(
+            head.values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let tail = s.tail(-2).unwrap();
+        assert_eq!(
+            tail.values(),
+            &[Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]
+        );
+    }
+
+    #[test]
+    fn series_head_tail_negative_n_saturates_to_empty() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let head = s.head(-10).unwrap();
+        assert_eq!(head.len(), 0);
+        assert_eq!(head.values(), &[]);
+
+        let tail = s.tail(-10).unwrap();
+        assert_eq!(tail.len(), 0);
+        assert_eq!(tail.values(), &[]);
     }
 
     // ---- DataFrame filter_rows/fillna/dropna/head/tail/column-mutation tests ----

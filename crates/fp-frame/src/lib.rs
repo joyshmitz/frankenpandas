@@ -1065,6 +1065,12 @@ pub struct DataFrame {
     column_order: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropNaHow {
+    Any,
+    All,
+}
+
 impl DataFrame {
     fn validate_column_lengths(
         index: &Index,
@@ -1571,21 +1577,40 @@ impl DataFrame {
     ///
     /// Matches default `df.dropna()` row-wise behavior (`axis=0`, `how='any'`).
     pub fn dropna(&self) -> Result<Self, FrameError> {
-        if self.is_empty() || self.column_order.is_empty() {
+        self.dropna_with_options(DropNaHow::Any, None)
+    }
+
+    /// Drop rows by configurable missing-value policy.
+    ///
+    /// Matches `df.dropna(how=..., subset=...)` for row-wise mode (`axis=0`).
+    pub fn dropna_with_options(
+        &self,
+        how: DropNaHow,
+        subset: Option<&[String]>,
+    ) -> Result<Self, FrameError> {
+        if self.is_empty() {
             return Ok(self.clone());
         }
 
-        let mut keep = vec![true; self.len()];
-        for name in &self.column_order {
-            let column = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            for (position, value) in column.values().iter().enumerate() {
-                if value.is_missing() {
-                    keep[position] = false;
+        let selected_columns = self.resolve_column_selector(subset)?;
+        if selected_columns.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let mut keep = Vec::with_capacity(self.len());
+        for row_position in 0..self.len() {
+            let mut missing_count = 0_usize;
+            for name in &selected_columns {
+                let column = self.columns.get(name).expect("selected column must exist");
+                if column.values()[row_position].is_missing() {
+                    missing_count += 1;
                 }
             }
+            let row_keep = match how {
+                DropNaHow::Any => missing_count == 0,
+                DropNaHow::All => missing_count < selected_columns.len(),
+            };
+            keep.push(row_keep);
         }
 
         let mask = Series::from_values(
@@ -1834,7 +1859,7 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{NullKind, Scalar};
 
-    use super::{DataFrame, FrameError, IndexLabel, Series};
+    use super::{DataFrame, DropNaHow, FrameError, IndexLabel, Series};
 
     #[test]
     fn series_add_aligns_on_union_index() {
@@ -3932,6 +3957,88 @@ mod tests {
         assert_eq!(dropped.index().labels(), &[IndexLabel::from(2_i64)]);
         assert_eq!(dropped.column("a").unwrap().values(), &[Scalar::Int64(3)]);
         assert_eq!(dropped.column("b").unwrap().values(), &[Scalar::Int64(30)]);
+    }
+
+    #[test]
+    fn dataframe_dropna_with_options_how_all_drops_only_all_missing_rows() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let dropped = df.dropna_with_options(DropNaHow::All, None).unwrap();
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::from(0_i64), IndexLabel::from(2_i64)]
+        );
+    }
+
+    #[test]
+    fn dataframe_dropna_with_options_subset_any_scopes_missing_check() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let subset = vec!["a".to_owned()];
+        let dropped = df
+            .dropna_with_options(DropNaHow::Any, Some(&subset))
+            .unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped.index().labels(), &[IndexLabel::from(1_i64)]);
+    }
+
+    #[test]
+    fn dataframe_dropna_with_options_rejects_invalid_subset() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let missing_subset = vec!["z".to_owned()];
+        let err = df
+            .dropna_with_options(DropNaHow::Any, Some(&missing_subset))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("column 'z' not found")
+        ));
+
+        let duplicate_subset = vec!["a".to_owned(), "a".to_owned()];
+        let err = df
+            .dropna_with_options(DropNaHow::Any, Some(&duplicate_subset))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column selector")
+        ));
     }
 
     #[test]

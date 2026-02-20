@@ -876,6 +876,28 @@ def op_series_head(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_any requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    return {"expected_bool": bool(series.any(skipna=True))}
+
+
+def op_series_all(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_all requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    return {"expected_bool": bool(series.all(skipna=True))}
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -1009,6 +1031,50 @@ def op_dataframe_tail(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError(f"dataframe_tail tail_n must be an integer: {exc}") from exc
 
     out = frame.tail(n)
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
+    raw = payload.get("sort_ascending")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    raise OracleError(f"{op_name} sort_ascending must be a boolean")
+
+
+def op_dataframe_sort_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_sort_index requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.sort_index(ascending=_resolve_sort_ascending(payload, "dataframe_sort_index"))
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    sort_column = payload.get("sort_column")
+    if frame_payload is None:
+        raise OracleError("dataframe_sort_values requires frame payload")
+    if not isinstance(sort_column, str) or sort_column.strip() == "":
+        raise OracleError("dataframe_sort_values requires sort_column string payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    ascending = _resolve_sort_ascending(payload, "dataframe_sort_values")
+    try:
+        out = frame.sort_values(
+            by=sort_column.strip(),
+            ascending=ascending,
+            na_position="last",
+            kind="mergesort",
+        )
+    except KeyError as exc:
+        raise OracleError(
+            f"dataframe_sort_values column '{sort_column}' not found"
+        ) from exc
+
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -1376,6 +1442,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_filter(pd, payload)
     if op == "series_head":
         return op_series_head(pd, payload)
+    if op == "series_any":
+        return op_series_any(pd, payload)
+    if op == "series_all":
+        return op_series_all(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
     if op == "dataframe_iloc":
@@ -1384,6 +1454,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_head(pd, payload)
     if op in {"dataframe_tail", "data_frame_tail"}:
         return op_dataframe_tail(pd, payload)
+    if op in {"dataframe_sort_index", "data_frame_sort_index"}:
+        return op_dataframe_sort_index(pd, payload)
+    if op in {"dataframe_sort_values", "data_frame_sort_values"}:
+        return op_dataframe_sort_values(pd, payload)
     if op in {"dataframe_merge", "data_frame_merge"}:
         return op_dataframe_merge(pd, payload)
     if op in {"dataframe_merge_index", "data_frame_merge_index"}:

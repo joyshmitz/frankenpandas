@@ -771,6 +771,17 @@ impl Series {
 
     // --- Descriptive Statistics ---
 
+    #[must_use]
+    fn scalar_truthy(value: &Scalar) -> bool {
+        match value {
+            Scalar::Null(_) => false,
+            Scalar::Bool(flag) => *flag,
+            Scalar::Int64(v) => *v != 0,
+            Scalar::Float64(v) => !v.is_nan() && *v != 0.0,
+            Scalar::Utf8(v) => !v.is_empty(),
+        }
+    }
+
     /// Sum of non-null numeric values. Returns `Scalar::Float64(0.0)` for empty.
     ///
     /// Matches `pd.Series.sum()`.
@@ -897,6 +908,36 @@ impl Series {
             vals[mid]
         };
         Ok(Scalar::Float64(result))
+    }
+
+    /// Whether any non-missing value is truthy.
+    ///
+    /// Matches `pd.Series.any()` with default `skipna=True`.
+    pub fn any(&self) -> Result<bool, FrameError> {
+        for value in self.column.values() {
+            if value.is_missing() {
+                continue;
+            }
+            if Self::scalar_truthy(value) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether all non-missing values are truthy.
+    ///
+    /// Matches `pd.Series.all()` with default `skipna=True`.
+    pub fn all(&self) -> Result<bool, FrameError> {
+        for value in self.column.values() {
+            if value.is_missing() {
+                continue;
+            }
+            if !Self::scalar_truthy(value) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -4411,6 +4452,56 @@ mod tests {
         assert_eq!(s.sum().unwrap(), Scalar::Float64(0.0));
         assert_eq!(s.count(), 0);
         assert!(matches!(s.mean().unwrap(), Scalar::Float64(v) if v.is_nan()));
+        assert!(!s.any().unwrap());
+        assert!(s.all().unwrap());
+    }
+
+    #[test]
+    fn series_any_all_numeric_with_missing() {
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        assert!(s.any().unwrap());
+        assert!(!s.all().unwrap());
+    }
+
+    #[test]
+    fn series_any_all_all_missing_matches_pandas_skipna_defaults() {
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+        )
+        .unwrap();
+
+        assert!(!s.any().unwrap());
+        assert!(s.all().unwrap());
+    }
+
+    #[test]
+    fn series_any_all_falsy_values() {
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        assert!(!s.any().unwrap());
+        assert!(!s.all().unwrap());
     }
 
     #[test]

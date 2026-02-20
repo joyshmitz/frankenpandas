@@ -196,6 +196,8 @@ pub enum FixtureOperation {
     // FP-P2C-010: loc/iloc
     SeriesFilter,
     SeriesHead,
+    SeriesAny,
+    SeriesAll,
     SeriesLoc,
     SeriesIloc,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
@@ -206,6 +208,11 @@ pub enum FixtureOperation {
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
     DataFrameTail,
+    // FP-P2D-040: DataFrame ordering parity matrix
+    #[serde(rename = "dataframe_sort_index", alias = "data_frame_sort_index")]
+    DataFrameSortIndex,
+    #[serde(rename = "dataframe_sort_values", alias = "data_frame_sort_values")]
+    DataFrameSortValues,
     // FP-P2D-014: DataFrame merge/join/concat parity matrix
     #[serde(rename = "dataframe_merge", alias = "data_frame_merge")]
     DataFrameMerge,
@@ -266,12 +273,16 @@ impl FixtureOperation {
             Self::ColumnDtypeCheck => "column_dtype_check",
             Self::SeriesFilter => "series_filter",
             Self::SeriesHead => "series_head",
+            Self::SeriesAny => "series_any",
+            Self::SeriesAll => "series_all",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
+            Self::DataFrameSortIndex => "dataframe_sort_index",
+            Self::DataFrameSortValues => "dataframe_sort_values",
             Self::DataFrameMerge => "dataframe_merge",
             Self::DataFrameMergeIndex => "dataframe_merge_index",
             Self::DataFrameConcat => "dataframe_concat",
@@ -441,6 +452,10 @@ pub struct PacketFixture {
     pub head_n: Option<i64>,
     #[serde(default)]
     pub tail_n: Option<i64>,
+    #[serde(default)]
+    pub sort_column: Option<String>,
+    #[serde(default)]
+    pub sort_ascending: Option<bool>,
     #[serde(default)]
     pub concat_axis: Option<i64>,
     #[serde(default)]
@@ -669,12 +684,16 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         FixtureOperation::ColumnDtypeCheck => &["CC-001"],
         FixtureOperation::SeriesFilter
         | FixtureOperation::SeriesHead
+        | FixtureOperation::SeriesAny
+        | FixtureOperation::SeriesAll
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameHead
-        | FixtureOperation::DataFrameTail => &["CC-004"],
+        | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameSortIndex
+        | FixtureOperation::DataFrameSortValues => &["CC-004"],
     }
 }
 
@@ -1167,6 +1186,10 @@ struct OracleRequest {
     head_n: Option<i64>,
     #[serde(default)]
     tail_n: Option<i64>,
+    #[serde(default)]
+    sort_column: Option<String>,
+    #[serde(default)]
+    sort_ascending: Option<bool>,
     #[serde(default)]
     concat_axis: Option<i64>,
     #[serde(default)]
@@ -3475,6 +3498,74 @@ fn run_fixture_operation(
             };
             compare_series_expected(&actual, &expected)
         }
+        FixtureOperation::SeriesAny => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.any().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Bool(value) => {
+                    let actual = actual?;
+                    if actual == value {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "series_any mismatch: actual={actual}, expected={value}"
+                        ))
+                    }
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_any error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_any to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_any to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_bool or expected_error is required for series_any".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesAll => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.all().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Bool(value) => {
+                    let actual = actual?;
+                    if actual == value {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "series_all mismatch: actual={actual}, expected={value}"
+                        ))
+                    }
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_all error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_all to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_all to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_bool or expected_error is required for series_all".to_owned()),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -3651,7 +3742,9 @@ fn run_fixture_operation(
         }
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
-        | FixtureOperation::DataFrameConcat => {
+        | FixtureOperation::DataFrameConcat
+        | FixtureOperation::DataFrameSortIndex
+        | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
@@ -3785,6 +3878,15 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
+        FixtureOperation::SeriesAny | FixtureOperation::SeriesAll => fixture
+            .expected_bool
+            .map(ResolvedExpected::Bool)
+            .ok_or_else(|| {
+                HarnessError::FixtureFormat(format!(
+                    "missing expected_bool for case {}",
+                    fixture.case_id
+                ))
+            }),
         FixtureOperation::IndexFirstPositions => fixture
             .expected_positions
             .clone()
@@ -3834,7 +3936,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameConstructorListLike
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
-        | FixtureOperation::DataFrameConcat => fixture
+        | FixtureOperation::DataFrameConcat
+        | FixtureOperation::DataFrameSortIndex
+        | FixtureOperation::DataFrameSortValues => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -3929,6 +4033,8 @@ fn capture_live_oracle_expected(
         fill_value: fixture.fill_value.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
+        sort_column: fixture.sort_column.clone(),
+        sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
         concat_join: fixture.concat_join.clone(),
         csv_input: fixture.csv_input.clone(),
@@ -4021,6 +4127,10 @@ fn capture_live_oracle_expected(
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
+        FixtureOperation::SeriesAny | FixtureOperation::SeriesAll => response
+            .expected_bool
+            .map(ResolvedExpected::Bool)
+            .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
         FixtureOperation::IndexFirstPositions => response
             .expected_positions
             .map(ResolvedExpected::Positions)
@@ -4062,7 +4172,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameConstructorListLike
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
-        | FixtureOperation::DataFrameConcat => response
+        | FixtureOperation::DataFrameConcat
+        | FixtureOperation::DataFrameSortIndex
+        | FixtureOperation::DataFrameSortValues => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -4381,6 +4493,17 @@ fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<i64>, String> 
         .iloc_positions
         .as_ref()
         .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
+}
+
+fn require_sort_column(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .sort_column
+        .as_deref()
+        .ok_or_else(|| "sort_column is required for dataframe_sort_values".to_owned())
+}
+
+fn resolve_sort_ascending(fixture: &PacketFixture) -> bool {
+    fixture.sort_ascending.unwrap_or(true)
 }
 
 fn normalize_head_take(n: i64, len: usize) -> usize {
@@ -4755,6 +4878,23 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let axis = normalize_concat_axis(fixture)?;
             let join = normalize_concat_join(fixture)?;
             concat_dataframes_with_axis_join(&[&left, &right], axis, join)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameSortIndex => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .sort_index(resolve_sort_ascending(fixture))
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameSortValues => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .sort_values(
+                    require_sort_column(fixture)?,
+                    resolve_sort_ascending(fixture),
+                )
                 .map_err(|err| err.to_string())
         }
         _ => Err(format!(
@@ -5895,6 +6035,76 @@ fn execute_and_compare_differential(
             };
             Ok(diff_series(&actual, &expected))
         }
+        FixtureOperation::SeriesAny => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.any().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, "series_any")),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_any.error",
+                        format!(
+                            "expected series_any error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_any.error",
+                        "expected series_any to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_any.error",
+                        "expected series_any to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_bool or expected_error required for series_any".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesAll => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.all().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, "series_all")),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_all.error",
+                        format!(
+                            "expected series_all error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_all.error",
+                        "expected series_all to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_all.error",
+                        "expected series_all to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_bool or expected_error required for series_all".to_owned()),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -6119,7 +6329,9 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
-        | FixtureOperation::DataFrameConcat => {
+        | FixtureOperation::DataFrameConcat
+        | FixtureOperation::DataFrameSortIndex
+        | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
@@ -8400,6 +8612,32 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-039 dataframe merge cross-join fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_sort_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-040", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-040"));
+        assert!(
+            report.fixture_count >= 10,
+            "expected FP-P2D-040 dataframe sort index/value fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_any_all_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-041", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-041"));
+        assert!(
+            report.fixture_count >= 8,
+            "expected FP-P2D-041 series any/all fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

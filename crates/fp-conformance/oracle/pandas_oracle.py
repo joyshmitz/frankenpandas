@@ -1337,6 +1337,51 @@ def op_dataframe_dropna_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_set_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_set_index requires frame payload")
+
+    set_index_column = payload.get("set_index_column")
+    if not isinstance(set_index_column, str) or set_index_column.strip() == "":
+        raise OracleError(
+            "dataframe_set_index requires set_index_column string payload"
+        )
+
+    set_index_drop = payload.get("set_index_drop")
+    if not isinstance(set_index_drop, bool):
+        raise OracleError("dataframe_set_index requires set_index_drop boolean payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    column_name = set_index_column.strip()
+    if column_name not in frame.columns:
+        raise OracleError(f"dataframe_set_index column '{column_name}' not found")
+    try:
+        out = frame.set_index(column_name, drop=set_index_drop)
+    except Exception as exc:
+        raise OracleError(f"dataframe_set_index failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_reset_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_reset_index requires frame payload")
+
+    reset_index_drop = payload.get("reset_index_drop")
+    if not isinstance(reset_index_drop, bool):
+        raise OracleError(
+            "dataframe_reset_index requires reset_index_drop boolean payload"
+        )
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.reset_index(drop=reset_index_drop)
+    except Exception as exc:
+        raise OracleError(f"dataframe_reset_index failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -1795,6 +1840,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_dropna(pd, payload)
     if op in {"dataframe_dropna_columns", "data_frame_dropna_columns"}:
         return op_dataframe_dropna_columns(pd, payload)
+    if op in {"dataframe_set_index", "data_frame_set_index"}:
+        return op_dataframe_set_index(pd, payload)
+    if op in {"dataframe_reset_index", "data_frame_reset_index"}:
+        return op_dataframe_reset_index(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

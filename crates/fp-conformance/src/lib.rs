@@ -249,6 +249,10 @@ pub enum FixtureOperation {
         alias = "data_frame_dropna_columns"
     )]
     DataFrameDropNaColumns,
+    #[serde(rename = "dataframe_set_index", alias = "data_frame_set_index")]
+    DataFrameSetIndex,
+    #[serde(rename = "dataframe_reset_index", alias = "data_frame_reset_index")]
+    DataFrameResetIndex,
     // FP-P2D-040: DataFrame ordering parity matrix
     #[serde(rename = "dataframe_sort_index", alias = "data_frame_sort_index")]
     DataFrameSortIndex,
@@ -341,6 +345,8 @@ impl FixtureOperation {
             Self::DataFrameFillNa => "dataframe_fillna",
             Self::DataFrameDropNa => "dataframe_dropna",
             Self::DataFrameDropNaColumns => "dataframe_dropna_columns",
+            Self::DataFrameSetIndex => "dataframe_set_index",
+            Self::DataFrameResetIndex => "dataframe_reset_index",
             Self::DataFrameSortIndex => "dataframe_sort_index",
             Self::DataFrameSortValues => "dataframe_sort_values",
             Self::DataFrameMerge => "dataframe_merge",
@@ -520,6 +526,12 @@ pub struct PacketFixture {
     pub concat_axis: Option<i64>,
     #[serde(default)]
     pub concat_join: Option<String>,
+    #[serde(default)]
+    pub set_index_column: Option<String>,
+    #[serde(default)]
+    pub set_index_drop: Option<bool>,
+    #[serde(default)]
+    pub reset_index_drop: Option<bool>,
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
@@ -772,6 +784,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameSetIndex
+        | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => &["CC-004"],
     }
@@ -1274,6 +1288,12 @@ struct OracleRequest {
     concat_axis: Option<i64>,
     #[serde(default)]
     concat_join: Option<String>,
+    #[serde(default)]
+    set_index_column: Option<String>,
+    #[serde(default)]
+    set_index_drop: Option<bool>,
+    #[serde(default)]
+    reset_index_drop: Option<bool>,
     #[serde(default)]
     csv_input: Option<String>,
     #[serde(default)]
@@ -4158,6 +4178,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns
+        | FixtureOperation::DataFrameSetIndex
+        | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -4367,6 +4389,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns
+        | FixtureOperation::DataFrameSetIndex
+        | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat
@@ -4471,6 +4495,9 @@ fn capture_live_oracle_expected(
         sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
         concat_join: fixture.concat_join.clone(),
+        set_index_column: fixture.set_index_column.clone(),
+        set_index_drop: fixture.set_index_drop,
+        reset_index_drop: fixture.reset_index_drop,
         csv_input: fixture.csv_input.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
@@ -4622,6 +4649,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns
+        | FixtureOperation::DataFrameSetIndex
+        | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat
@@ -4953,6 +4982,25 @@ fn require_sort_column(fixture: &PacketFixture) -> Result<&str, String> {
         .sort_column
         .as_deref()
         .ok_or_else(|| "sort_column is required for dataframe_sort_values".to_owned())
+}
+
+fn require_set_index_column(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .set_index_column
+        .as_deref()
+        .ok_or_else(|| "set_index_column is required for dataframe_set_index".to_owned())
+}
+
+fn require_set_index_drop(fixture: &PacketFixture) -> Result<bool, String> {
+    fixture
+        .set_index_drop
+        .ok_or_else(|| "set_index_drop is required for dataframe_set_index".to_owned())
+}
+
+fn require_reset_index_drop(fixture: &PacketFixture) -> Result<bool, String> {
+    fixture
+        .reset_index_drop
+        .ok_or_else(|| "reset_index_drop is required for dataframe_reset_index".to_owned())
 }
 
 fn resolve_sort_ascending(fixture: &PacketFixture) -> bool {
@@ -5388,6 +5436,23 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.dropna_columns().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameSetIndex => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .set_index(
+                    require_set_index_column(fixture)?,
+                    require_set_index_drop(fixture)?,
+                )
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameResetIndex => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .reset_index(require_reset_index_drop(fixture)?)
+                .map_err(|err| err.to_string())
         }
         _ => Err(format!(
             "unsupported dataframe operation for fixture execution: {:?}",
@@ -7244,6 +7309,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns
+        | FixtureOperation::DataFrameSetIndex
+        | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);

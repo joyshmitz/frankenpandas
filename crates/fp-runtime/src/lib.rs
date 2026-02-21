@@ -509,7 +509,7 @@ impl ConformalGuard {
         let n = sorted.len() as f64;
         let level = (1.0 - self.alpha) * (1.0 + 1.0 / n);
         let idx = (level * n).ceil() as usize;
-        let idx = idx.min(sorted.len()) - 1;
+        let idx = idx.min(sorted.len()).saturating_sub(1);
         Some(sorted[idx])
     }
 

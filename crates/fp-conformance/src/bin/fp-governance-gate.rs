@@ -410,7 +410,10 @@ fn find_unnegated_narrowing_phrase(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     for phrase in NARROWING_PHRASES {
         for (index, _) in lower.match_indices(phrase) {
-            let start = index.saturating_sub(128);
+            let mut start = index.saturating_sub(128);
+            while start > 0 && !lower.is_char_boundary(start) {
+                start -= 1;
+            }
             let context = &lower[start..index];
             if !NEGATION_HINTS.iter().any(|token| context.contains(token)) {
                 return Some(phrase);

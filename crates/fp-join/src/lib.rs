@@ -397,6 +397,7 @@ pub struct MergedDataFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum JoinKeyComponent {
     Present(IndexLabel),
+    FloatBits(u64),
     Missing,
 }
 
@@ -404,7 +405,11 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
     match s {
         fp_types::Scalar::Int64(v) => JoinKeyComponent::Present(IndexLabel::Int64(*v)),
         fp_types::Scalar::Float64(v) if !v.is_nan() => {
-            JoinKeyComponent::Present(IndexLabel::Int64(*v as i64))
+            if *v == v.trunc() && *v >= i64::MIN as f64 && *v < 9223372036854775808.0 {
+                JoinKeyComponent::Present(IndexLabel::Int64(*v as i64))
+            } else {
+                JoinKeyComponent::FloatBits(v.to_bits())
+            }
         }
         fp_types::Scalar::Utf8(v) => JoinKeyComponent::Present(IndexLabel::Utf8(v.clone())),
         fp_types::Scalar::Bool(b) => JoinKeyComponent::Present(IndexLabel::Int64(i64::from(*b))),

@@ -746,12 +746,12 @@ impl HyperLogLog {
     pub fn insert_hash(&mut self, hash: u64) {
         let m = self.registers.len();
         let idx = (hash >> (64 - self.p)) as usize;
-        let remaining = if self.p >= 64 {
-            0
-        } else {
-            (hash << self.p) | (1_u64 << (self.p - 1))
-        };
-        let rho = remaining.leading_zeros() as u8 + 1;
+        let remaining = hash << self.p;
+        // If remaining is 0, leading_zeros is 64. But we only have 64 - p bits.
+        // The maximum run of zeros before we hit the 'implicit' 1 is 64 - p.
+        // We can place a sentinel 1 at the bit just below the remaining bits:
+        let sentinel = if self.p == 0 { 0 } else { 1_u64 << (self.p - 1) };
+        let rho = (remaining | sentinel).leading_zeros() as u8 + 1;
         if rho > self.registers[idx % m] {
             self.registers[idx % m] = rho;
         }

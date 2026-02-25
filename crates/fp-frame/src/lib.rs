@@ -1740,6 +1740,244 @@ impl Series {
             .map(|(lbl, val)| (lbl.clone(), val.clone()))
             .collect()
     }
+
+    /// Create a rolling window view of this Series.
+    ///
+    /// Matches `series.rolling(window, min_periods=None)`.
+    pub fn rolling(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
+        Rolling {
+            series: self,
+            window,
+            min_periods: min_periods.unwrap_or(window),
+        }
+    }
+
+    /// Create an expanding window view of this Series.
+    ///
+    /// Matches `series.expanding(min_periods=1)`.
+    pub fn expanding(&self, min_periods: Option<usize>) -> Expanding<'_> {
+        Expanding {
+            series: self,
+            min_periods: min_periods.unwrap_or(1),
+        }
+    }
+}
+
+/// Rolling window aggregation over a Series.
+///
+/// Created by `Series::rolling()`. Provides methods for computing
+/// rolling statistics over a sliding window.
+pub struct Rolling<'a> {
+    series: &'a Series,
+    window: usize,
+    min_periods: usize,
+}
+
+impl Rolling<'_> {
+    /// Helper: collect non-null f64 values from a window slice.
+    fn window_values(vals: &[Scalar]) -> Vec<f64> {
+        vals.iter()
+            .filter_map(|v| {
+                if v.is_missing() {
+                    None
+                } else {
+                    v.to_f64().ok()
+                }
+            })
+            .collect()
+    }
+
+    /// Apply a rolling aggregation function to produce a new Series.
+    fn apply_rolling<F>(&self, agg: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let start = (i + 1).saturating_sub(self.window);
+            let window_slice = &vals[start..=i];
+            let nums = Self::window_values(window_slice);
+
+            if i + 1 < self.window || nums.len() < self.min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(agg(&nums)));
+            }
+        }
+
+        Series::from_values(
+            name,
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Rolling sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(|nums| nums.iter().sum(), self.series.name())
+    }
+
+    /// Rolling mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().sum::<f64>() / nums.len() as f64
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Rolling minimum.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(
+            |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
+            self.series.name(),
+        )
+    }
+
+    /// Rolling maximum.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(
+            |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            self.series.name(),
+        )
+    }
+
+    /// Rolling sample standard deviation (ddof=1).
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(
+            |nums| {
+                if nums.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    / (nums.len() - 1) as f64;
+                var.sqrt()
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Rolling count of non-null values.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let start = (i + 1).saturating_sub(self.window);
+            let window_slice = &vals[start..=i];
+            let count = window_slice.iter().filter(|v| !v.is_missing()).count();
+
+            if i + 1 < self.window {
+                // Before full window, still emit count (pandas behavior)
+                out.push(Scalar::Float64(count as f64));
+            } else {
+                out.push(Scalar::Float64(count as f64));
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+}
+
+/// Expanding window aggregation over a Series.
+///
+/// Created by `Series::expanding()`. All prior elements are included
+/// in each window computation.
+pub struct Expanding<'a> {
+    series: &'a Series,
+    min_periods: usize,
+}
+
+impl Expanding<'_> {
+    /// Apply an expanding aggregation function.
+    fn apply_expanding<F>(&self, agg: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+        let mut nums = Vec::new();
+
+        for val in vals {
+            if !val.is_missing()
+                && let Ok(v) = val.to_f64()
+            {
+                nums.push(v);
+            }
+
+            if nums.len() < self.min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(agg(&nums)));
+            }
+        }
+
+        Series::from_values(
+            name,
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Expanding sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(|nums| nums.iter().sum(), self.series.name())
+    }
+
+    /// Expanding mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| nums.iter().sum::<f64>() / nums.len() as f64,
+            self.series.name(),
+        )
+    }
+
+    /// Expanding minimum.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
+            self.series.name(),
+        )
+    }
+
+    /// Expanding maximum.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            self.series.name(),
+        )
+    }
+
+    /// Expanding sample standard deviation (ddof=1).
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| {
+                if nums.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    / (nums.len() - 1) as f64;
+                var.sqrt()
+            },
+            self.series.name(),
+        )
+    }
 }
 
 /// Concatenate multiple Series along axis 0 (row-wise).
@@ -9601,5 +9839,202 @@ mod tests {
 
         assert_eq!(result.num_columns(), 2);
         assert!(result.column("b").is_some());
+    }
+
+    // --- Rolling window tests ---
+
+    #[test]
+    fn rolling_mean_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.rolling(3, None).mean().unwrap();
+        // First 2 should be NaN (window not full)
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing());
+        // rolling(3).mean() at index 2 = (1+2+3)/3 = 2.0
+        assert_eq!(result.values()[2], Scalar::Float64(2.0));
+        // at index 3 = (2+3+4)/3 = 3.0
+        assert_eq!(result.values()[3], Scalar::Float64(3.0));
+        // at index 4 = (3+4+5)/3 = 4.0
+        assert_eq!(result.values()[4], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn rolling_sum_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.rolling(2, None).sum().unwrap();
+        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[1], Scalar::Float64(30.0)); // 10+20
+        assert_eq!(result.values()[2], Scalar::Float64(50.0)); // 20+30
+    }
+
+    #[test]
+    fn rolling_min_max() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let mins = s.rolling(2, None).min().unwrap();
+        assert!(mins.values()[0].is_missing());
+        assert_eq!(mins.values()[1], Scalar::Float64(1.0)); // min(3,1)
+        assert_eq!(mins.values()[2], Scalar::Float64(1.0)); // min(1,4)
+        assert_eq!(mins.values()[3], Scalar::Float64(2.0)); // min(4,2)
+
+        let maxs = s.rolling(2, None).max().unwrap();
+        assert_eq!(maxs.values()[1], Scalar::Float64(3.0)); // max(3,1)
+        assert_eq!(maxs.values()[2], Scalar::Float64(4.0)); // max(1,4)
+        assert_eq!(maxs.values()[3], Scalar::Float64(4.0)); // max(4,2)
+    }
+
+    #[test]
+    fn rolling_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        // min_periods=2 means we need at least 2 non-null in the window
+        let result = s.rolling(3, Some(2)).mean().unwrap();
+        assert!(result.values()[0].is_missing()); // window too small
+        assert!(result.values()[1].is_missing()); // window too small
+        // window [1, NaN, 3] -> non-null: [1,3] -> mean = 2.0
+        assert_eq!(result.values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn rolling_std() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.rolling(3, None).std().unwrap();
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing());
+        // std of [2,4,6] = 2.0
+        let std_val = result.values()[2].to_f64().unwrap();
+        assert!((std_val - 2.0).abs() < 1e-10);
+    }
+
+    // --- Expanding window tests ---
+
+    #[test]
+    fn expanding_sum_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.expanding(None).sum().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(3.0)); // 1+2
+        assert_eq!(result.values()[2], Scalar::Float64(6.0)); // 1+2+3
+        assert_eq!(result.values()[3], Scalar::Float64(10.0)); // 1+2+3+4
+    }
+
+    #[test]
+    fn expanding_mean_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.expanding(None).mean().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(2.0)); // 2/1
+        assert_eq!(result.values()[1], Scalar::Float64(3.0)); // (2+4)/2
+        assert_eq!(result.values()[2], Scalar::Float64(4.0)); // (2+4+6)/3
+    }
+
+    #[test]
+    fn expanding_min_periods() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.expanding(Some(2)).sum().unwrap();
+        assert!(result.values()[0].is_missing()); // only 1 element, need 2
+        assert_eq!(result.values()[1], Scalar::Float64(3.0)); // 1+2
+        assert_eq!(result.values()[2], Scalar::Float64(6.0)); // 1+2+3
+    }
+
+    #[test]
+    fn expanding_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.expanding(None).sum().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(1.0)); // null skipped
+        assert_eq!(result.values()[2], Scalar::Float64(4.0)); // 1+3
     }
 }

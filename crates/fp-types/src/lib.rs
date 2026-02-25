@@ -320,6 +320,29 @@ pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
     }
 }
 
+/// Product of non-missing values. Returns 1.0 for empty input (matching pandas).
+pub fn nanprod(values: &[Scalar]) -> Scalar {
+    let nums = collect_finite(values);
+    if nums.is_empty() {
+        return Scalar::Float64(1.0);
+    }
+    Scalar::Float64(nums.iter().product())
+}
+
+/// Count of unique non-missing values.
+pub fn nannunique(values: &[Scalar]) -> Scalar {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    for val in values {
+        if val.is_missing() {
+            continue;
+        }
+        // Use debug representation as a hashable key
+        seen.insert(format!("{val:?}"));
+    }
+    Scalar::Int64(seen.len() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DType, NullKind, Scalar, cast_scalar, common_dtype, infer_dtype};

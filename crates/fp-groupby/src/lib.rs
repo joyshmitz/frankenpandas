@@ -455,6 +455,9 @@ pub enum AggFunc {
     Std,
     Var,
     Median,
+    Nunique,
+    Prod,
+    Size,
 }
 
 /// Generic groupby aggregation supporting all standard aggregation functions.
@@ -494,9 +497,9 @@ pub fn groupby_agg(
             (keys.values(), values.values())
         };
 
-    // Collect groups: key_ref -> (source_idx, accumulated values as Scalar vec).
+    // Collect groups: key_ref -> (source_idx, non-null values, total count).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut groups = HashMap::<GroupKeyRef<'_>, (usize, Vec<Scalar>)>::new();
+    let mut groups = HashMap::<GroupKeyRef<'_>, (usize, Vec<Scalar>, usize)>::new();
 
     for (pos, (key, value)) in key_vals.iter().zip(val_vals.iter()).enumerate() {
         if options.dropna && key.is_missing() {
@@ -506,9 +509,10 @@ pub fn groupby_agg(
         let key_id = GroupKeyRef::from_scalar(key);
         let entry = groups.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
-            (pos, Vec::new())
+            (pos, Vec::new(), 0)
         });
 
+        entry.2 += 1; // total count (including nulls)
         if !value.is_missing() {
             entry.1.push(value.clone());
         }
@@ -526,13 +530,16 @@ pub fn groupby_agg(
         AggFunc::Std => "std",
         AggFunc::Var => "var",
         AggFunc::Median => "median",
+        AggFunc::Nunique => "nunique",
+        AggFunc::Prod => "prod",
+        AggFunc::Size => "size",
     };
 
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
 
     for key in &ordering {
-        let (source_idx, vals) = groups
+        let (source_idx, vals, total_count) = groups
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &key_vals[*source_idx];
@@ -577,6 +584,9 @@ pub fn groupby_agg(
             AggFunc::Var => fp_types::nanvar(vals, 1),
             AggFunc::Std => fp_types::nanstd(vals, 1),
             AggFunc::Median => fp_types::nanmedian(vals),
+            AggFunc::Nunique => fp_types::nannunique(vals),
+            AggFunc::Prod => fp_types::nanprod(vals),
+            AggFunc::Size => Scalar::Int64(*total_count as i64),
         };
 
         out_values.push(agg_value);
@@ -683,6 +693,39 @@ pub fn groupby_median(
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, GroupByError> {
     groupby_agg(keys, values, AggFunc::Median, options, policy, ledger)
+}
+
+/// Convenience: `groupby_nunique` (count of unique non-null values per group).
+pub fn groupby_nunique(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Nunique, options, policy, ledger)
+}
+
+/// Convenience: `groupby_prod` (product of non-null values per group).
+pub fn groupby_prod(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Prod, options, policy, ledger)
+}
+
+/// Convenience: `groupby_size` (total count per group, including nulls).
+pub fn groupby_size(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Size, options, policy, ledger)
 }
 
 // ---------------------------------------------------------------------------

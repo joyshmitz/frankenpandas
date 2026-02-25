@@ -1761,6 +1761,170 @@ impl Series {
             min_periods: min_periods.unwrap_or(1),
         }
     }
+
+    /// Rank values in the Series.
+    ///
+    /// `method`: "average" (default), "min", "max", "first", "dense"
+    /// `ascending`: rank direction (default true = smallest gets rank 1)
+    /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Self, FrameError> {
+        let vals = self.column().values();
+        let len = vals.len();
+
+        // Separate null and non-null indices
+        let mut null_positions = Vec::new();
+        let mut sortable: Vec<(usize, f64)> = Vec::new();
+
+        for (i, v) in vals.iter().enumerate() {
+            if v.is_missing() {
+                null_positions.push(i);
+            } else if let Ok(f) = v.to_f64() {
+                sortable.push((i, f));
+            } else {
+                null_positions.push(i);
+            }
+        }
+
+        // Sort by value; stable sort preserves original order for ties
+        if ascending {
+            sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // Assign ranks based on method
+        let mut ranks = vec![f64::NAN; len];
+
+        match method {
+            "average" => {
+                let mut i = 0;
+                while i < sortable.len() {
+                    let mut j = i + 1;
+                    while j < sortable.len()
+                        && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                    {
+                        j += 1;
+                    }
+                    // Positions i..j have equal values; average rank
+                    let avg: f64 = ((i + 1)..=(j)).map(|r| r as f64).sum::<f64>()
+                        / (j - i) as f64;
+                    for item in &sortable[i..j] {
+                        ranks[item.0] = avg;
+                    }
+                    i = j;
+                }
+            }
+            "min" => {
+                let mut i = 0;
+                while i < sortable.len() {
+                    let mut j = i + 1;
+                    while j < sortable.len()
+                        && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                    {
+                        j += 1;
+                    }
+                    let min_rank = (i + 1) as f64;
+                    for item in &sortable[i..j] {
+                        ranks[item.0] = min_rank;
+                    }
+                    i = j;
+                }
+            }
+            "max" => {
+                let mut i = 0;
+                while i < sortable.len() {
+                    let mut j = i + 1;
+                    while j < sortable.len()
+                        && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                    {
+                        j += 1;
+                    }
+                    let max_rank = j as f64;
+                    for item in &sortable[i..j] {
+                        ranks[item.0] = max_rank;
+                    }
+                    i = j;
+                }
+            }
+            "first" => {
+                for (rank_idx, item) in sortable.iter().enumerate() {
+                    ranks[item.0] = (rank_idx + 1) as f64;
+                }
+            }
+            "dense" => {
+                let mut dense_rank = 0u64;
+                let mut i = 0;
+                while i < sortable.len() {
+                    dense_rank += 1;
+                    let mut j = i + 1;
+                    while j < sortable.len()
+                        && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                    {
+                        j += 1;
+                    }
+                    for item in &sortable[i..j] {
+                        ranks[item.0] = dense_rank as f64;
+                    }
+                    i = j;
+                }
+            }
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "rank method '{method}' not supported"
+                )));
+            }
+        }
+
+        // Handle na_option
+        match na_option {
+            "keep" => {
+                // nulls stay as NaN — already set
+            }
+            "top" => {
+                // NaN values get the lowest ranks (1, 2, ...)
+                // Shift all existing ranks up by null count
+                let null_count = null_positions.len();
+                for r in &mut ranks {
+                    if !r.is_nan() {
+                        *r += null_count as f64;
+                    }
+                }
+                for (i, &pos) in null_positions.iter().enumerate() {
+                    ranks[pos] = (i + 1) as f64;
+                }
+            }
+            "bottom" => {
+                // NaN values get the highest ranks
+                let non_null_count = sortable.len();
+                for (i, &pos) in null_positions.iter().enumerate() {
+                    ranks[pos] = (non_null_count + i + 1) as f64;
+                }
+            }
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "na_option '{na_option}' not supported"
+                )));
+            }
+        }
+
+        let out: Vec<Scalar> = ranks
+            .into_iter()
+            .map(|r| {
+                if r.is_nan() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(r)
+                }
+            })
+            .collect();
+
+        Self::from_values(self.name(), self.index().labels().to_vec(), out)
+    }
 }
 
 /// Rolling window aggregation over a Series.
@@ -4088,6 +4252,275 @@ impl DataFrame {
         F: FnOnce(&Self) -> Result<Self, FrameError>,
     {
         func(self)
+    }
+
+    /// Rank values in each column of the DataFrame.
+    ///
+    /// Applies `Series::rank` independently to each column.
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Self, FrameError> {
+        let mut ranked_cols = BTreeMap::new();
+        for col_name in &self.column_order {
+            let col = self
+                .columns
+                .get(col_name)
+                .ok_or_else(|| FrameError::CompatibilityRejected(format!("missing column: {col_name}")))?;
+            let series = Series::new(col_name, self.index.clone(), col.clone())?;
+            let ranked = series.rank(method, ascending, na_option)?;
+            ranked_cols.insert(col_name.clone(), ranked.column().clone());
+        }
+        Ok(Self {
+            columns: ranked_cols,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+        })
+    }
+
+    /// Unpivot (melt) a DataFrame from wide to long format.
+    ///
+    /// `id_vars`: columns to keep as identifiers
+    /// `value_vars`: columns to unpivot (if empty, uses all non-id columns)
+    /// `var_name`: name for the variable column (default "variable")
+    /// `value_name`: name for the value column (default "value")
+    pub fn melt(
+        &self,
+        id_vars: &[&str],
+        value_vars: &[&str],
+        var_name: Option<&str>,
+        value_name: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let var_col_name = var_name.unwrap_or("variable");
+        let val_col_name = value_name.unwrap_or("value");
+
+        // Determine value_vars: if empty, use all non-id columns
+        let actual_value_vars: Vec<String> = if value_vars.is_empty() {
+            self.column_order
+                .iter()
+                .filter(|c| !id_vars.contains(&c.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            value_vars.iter().map(|s| (*s).to_string()).collect()
+        };
+
+        // Validate columns exist
+        for col in id_vars {
+            if !self.columns.contains_key(*col) {
+                return Err(FrameError::CompatibilityRejected(format!("missing column: {col}")));
+            }
+        }
+        for col in &actual_value_vars {
+            if !self.columns.contains_key(col) {
+                return Err(FrameError::CompatibilityRejected(format!("missing column: {col}")));
+            }
+        }
+
+        let n_rows = self.index.len();
+        let n_value_vars = actual_value_vars.len();
+        let total_rows = n_rows * n_value_vars;
+
+        // Build id columns (repeated for each value var)
+        let mut result_cols: BTreeMap<String, Column> = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &id_col in id_vars {
+            let src = &self.columns[id_col];
+            let mut repeated = Vec::with_capacity(total_rows);
+            for _ in 0..n_value_vars {
+                repeated.extend_from_slice(src.values());
+            }
+            result_cols.insert(
+                id_col.to_string(),
+                Column::new(src.dtype(), repeated)?,
+            );
+            col_order.push(id_col.to_string());
+        }
+
+        // Build the "variable" column
+        let mut var_vals = Vec::with_capacity(total_rows);
+        for vv in &actual_value_vars {
+            for _ in 0..n_rows {
+                var_vals.push(Scalar::Utf8(vv.clone()));
+            }
+        }
+        result_cols.insert(
+            var_col_name.to_string(),
+            Column::new(DType::Utf8, var_vals)?,
+        );
+        col_order.push(var_col_name.to_string());
+
+        // Build the "value" column
+        let mut value_vals = Vec::with_capacity(total_rows);
+        for vv in &actual_value_vars {
+            let src = &self.columns[vv];
+            value_vals.extend_from_slice(src.values());
+        }
+        // Determine the common dtype for the value column
+        let value_dtype = if actual_value_vars.is_empty() {
+            DType::Float64
+        } else {
+            self.columns[&actual_value_vars[0]].dtype()
+        };
+        result_cols.insert(
+            val_col_name.to_string(),
+            Column::new(value_dtype, value_vals)?,
+        );
+        col_order.push(val_col_name.to_string());
+
+        // Build the new index (0..total_rows)
+        let new_labels: Vec<IndexLabel> =
+            (0..total_rows as i64).map(IndexLabel::Int64).collect();
+        let new_index = Index::new(new_labels);
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: col_order,
+            index: new_index,
+        })
+    }
+
+    /// Pivot table: aggregate values grouped by index and column keys.
+    ///
+    /// `values`: column containing values to aggregate
+    /// `index_col`: column to use as the new row index
+    /// `columns_col`: column whose unique values become new columns
+    /// `aggfunc`: aggregation function ("mean", "sum", "count", "min", "max", "first")
+    pub fn pivot_table(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+    ) -> Result<Self, FrameError> {
+        // Validate columns
+        for col in [values, index_col, columns_col] {
+            if !self.columns.contains_key(col) {
+                return Err(FrameError::CompatibilityRejected(format!("missing column: {col}")));
+            }
+        }
+
+        let val_col = &self.columns[values];
+        let idx_col = &self.columns[index_col];
+        let cols_col = &self.columns[columns_col];
+        let n_rows = self.index.len();
+
+        // Collect unique index values (preserving first-seen order)
+        let mut idx_order: Vec<String> = Vec::new();
+        let mut idx_set = std::collections::HashSet::new();
+        for i in 0..n_rows {
+            let key = format!("{:?}", idx_col.values()[i]);
+            if idx_set.insert(key.clone()) {
+                idx_order.push(key);
+            }
+        }
+
+        // Collect unique column values (preserving first-seen order)
+        let mut col_order_unique: Vec<String> = Vec::new();
+        let mut col_set = std::collections::HashSet::new();
+        for i in 0..n_rows {
+            let key = format!("{:?}", cols_col.values()[i]);
+            if col_set.insert(key.clone()) {
+                col_order_unique.push(key);
+            }
+        }
+
+        // Build groups: (idx_key, col_key) -> Vec<f64>
+        let mut groups: std::collections::HashMap<(String, String), Vec<f64>> =
+            std::collections::HashMap::new();
+        for i in 0..n_rows {
+            let ik = format!("{:?}", idx_col.values()[i]);
+            let ck = format!("{:?}", cols_col.values()[i]);
+            if let Ok(v) = val_col.values()[i].to_f64() {
+                groups.entry((ik, ck)).or_default().push(v);
+            }
+        }
+
+        // Aggregate
+        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
+            "sum" => |vals: &[f64]| vals.iter().sum(),
+            "mean" => |vals: &[f64]| {
+                if vals.is_empty() {
+                    f64::NAN
+                } else {
+                    vals.iter().sum::<f64>() / vals.len() as f64
+                }
+            },
+            "count" => |vals: &[f64]| vals.len() as f64,
+            "min" => |vals: &[f64]| {
+                vals.iter().copied().fold(f64::INFINITY, f64::min)
+            },
+            "max" => |vals: &[f64]| {
+                vals.iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            },
+            "first" => |vals: &[f64]| {
+                vals.first().copied().unwrap_or(f64::NAN)
+            },
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "pivot_table aggfunc '{aggfunc}' not supported"
+                )));
+            }
+        };
+
+        // Build result columns
+        let mut result_cols = BTreeMap::new();
+        let mut result_col_order = Vec::new();
+
+        // Extract clean column names from debug format
+        let clean_col_name = |s: &str| -> String {
+            // Strip Utf8("...") or Int64(...) wrappers
+            if let Some(inner) = s.strip_prefix("Utf8(\"") {
+                inner.strip_suffix("\")").unwrap_or(inner).to_string()
+            } else if let Some(inner) = s.strip_prefix("Int64(") {
+                inner.strip_suffix(')').unwrap_or(inner).to_string()
+            } else if let Some(inner) = s.strip_prefix("Float64(") {
+                inner.strip_suffix(')').unwrap_or(inner).to_string()
+            } else {
+                s.to_string()
+            }
+        };
+
+        for ck in &col_order_unique {
+            let col_name = clean_col_name(ck);
+            let mut col_vals = Vec::with_capacity(idx_order.len());
+            for ik in &idx_order {
+                if let Some(vals) = groups.get(&(ik.clone(), ck.clone())) {
+                    col_vals.push(Scalar::Float64(agg_fn(vals)));
+                } else {
+                    col_vals.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+            result_cols.insert(
+                col_name.clone(),
+                Column::new(DType::Float64, col_vals)?,
+            );
+            result_col_order.push(col_name);
+        }
+
+        // Build index from idx_order
+        let new_labels: Vec<IndexLabel> = idx_order
+            .iter()
+            .map(|s| {
+                let cleaned = clean_col_name(s);
+                if let Ok(i) = cleaned.parse::<i64>() {
+                    IndexLabel::Int64(i)
+                } else {
+                    IndexLabel::Utf8(cleaned)
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: result_col_order,
+            index: Index::new(new_labels),
+        })
     }
 }
 
@@ -10036,5 +10469,446 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert_eq!(result.values()[1], Scalar::Float64(1.0)); // null skipped
         assert_eq!(result.values()[2], Scalar::Float64(4.0)); // 1+3
+    }
+
+    // ── rank tests ──
+
+    #[test]
+    fn series_rank_average() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", true, "keep").unwrap();
+        // 1.0 ties at positions 1,2 → average rank (1+2)/2 = 1.5
+        assert_eq!(ranked.values()[0], Scalar::Float64(4.0)); // 3.0 → rank 4
+        assert_eq!(ranked.values()[1], Scalar::Float64(1.5)); // 1.0 → avg rank
+        assert_eq!(ranked.values()[2], Scalar::Float64(1.5)); // 1.0 → avg rank
+        assert_eq!(ranked.values()[3], Scalar::Float64(3.0)); // 2.0 → rank 3
+    }
+
+    #[test]
+    fn series_rank_min_max() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let min_ranked = s.rank("min", true, "keep").unwrap();
+        assert_eq!(min_ranked.values()[0], Scalar::Float64(3.0)); // 2.0 → rank 3
+        assert_eq!(min_ranked.values()[1], Scalar::Float64(1.0)); // 1.0 → min rank 1
+        assert_eq!(min_ranked.values()[2], Scalar::Float64(1.0)); // 1.0 → min rank 1
+
+        let max_ranked = s.rank("max", true, "keep").unwrap();
+        assert_eq!(max_ranked.values()[0], Scalar::Float64(3.0)); // 2.0 → rank 3
+        assert_eq!(max_ranked.values()[1], Scalar::Float64(2.0)); // 1.0 → max rank 2
+        assert_eq!(max_ranked.values()[2], Scalar::Float64(2.0)); // 1.0 → max rank 2
+    }
+
+    #[test]
+    fn series_rank_first() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("first", true, "keep").unwrap();
+        assert_eq!(ranked.values()[0], Scalar::Float64(3.0)); // 2.0 → rank 3
+        assert_eq!(ranked.values()[1], Scalar::Float64(1.0)); // first 1.0 → rank 1
+        assert_eq!(ranked.values()[2], Scalar::Float64(2.0)); // second 1.0 → rank 2
+    }
+
+    #[test]
+    fn series_rank_dense() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("dense", true, "keep").unwrap();
+        assert_eq!(ranked.values()[0], Scalar::Float64(3.0)); // 3.0 → dense rank 3
+        assert_eq!(ranked.values()[1], Scalar::Float64(1.0)); // 1.0 → dense rank 1
+        assert_eq!(ranked.values()[2], Scalar::Float64(1.0)); // 1.0 → dense rank 1
+        assert_eq!(ranked.values()[3], Scalar::Float64(2.0)); // 2.0 → dense rank 2
+    }
+
+    #[test]
+    fn series_rank_descending() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", false, "keep").unwrap();
+        assert_eq!(ranked.values()[0], Scalar::Float64(3.0)); // 1.0 → rank 3 (desc)
+        assert_eq!(ranked.values()[1], Scalar::Float64(2.0)); // 2.0 → rank 2
+        assert_eq!(ranked.values()[2], Scalar::Float64(1.0)); // 3.0 → rank 1
+    }
+
+    #[test]
+    fn series_rank_na_keep() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", true, "keep").unwrap();
+        assert_eq!(ranked.values()[0], Scalar::Float64(2.0));
+        assert!(ranked.values()[1].is_missing()); // NaN stays NaN
+        assert_eq!(ranked.values()[2], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn series_rank_na_top() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", true, "top").unwrap();
+        // NaN gets rank 1 (top), others shift up
+        assert_eq!(ranked.values()[0], Scalar::Float64(3.0)); // 2.0 → rank 3
+        assert_eq!(ranked.values()[1], Scalar::Float64(1.0)); // NaN → rank 1 (top)
+        assert_eq!(ranked.values()[2], Scalar::Float64(2.0)); // 1.0 → rank 2
+    }
+
+    #[test]
+    fn series_rank_na_bottom() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", true, "bottom").unwrap();
+        assert_eq!(ranked.values()[0], Scalar::Float64(2.0)); // 2.0 → rank 2
+        assert_eq!(ranked.values()[1], Scalar::Float64(3.0)); // NaN → rank 3 (bottom)
+        assert_eq!(ranked.values()[2], Scalar::Float64(1.0)); // 1.0 → rank 1
+    }
+
+    #[test]
+    fn dataframe_rank_basic() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let ranked = df.rank("average", true, "keep").unwrap();
+        // Column "a": 3.0→3, 1.0→1, 2.0→2
+        assert_eq!(ranked.columns["a"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(ranked.columns["a"].values()[1], Scalar::Float64(1.0));
+        assert_eq!(ranked.columns["a"].values()[2], Scalar::Float64(2.0));
+        // Column "b": 10.0→1, 30.0→3, 20.0→2
+        assert_eq!(ranked.columns["b"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(ranked.columns["b"].values()[1], Scalar::Float64(3.0));
+        assert_eq!(ranked.columns["b"].values()[2], Scalar::Float64(2.0));
+    }
+
+    // ── melt tests ──
+
+    #[test]
+    fn dataframe_melt_basic() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "id",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let melted = df.melt(&["id"], &["x", "y"], None, None).unwrap();
+        assert_eq!(melted.index.len(), 4); // 2 rows * 2 value_vars
+        assert_eq!(melted.column_order.len(), 3); // id, variable, value
+
+        // id column repeated: a,b,a,b
+        assert_eq!(melted.columns["id"].values()[0], Scalar::Utf8("a".into()));
+        assert_eq!(melted.columns["id"].values()[1], Scalar::Utf8("b".into()));
+        assert_eq!(melted.columns["id"].values()[2], Scalar::Utf8("a".into()));
+        assert_eq!(melted.columns["id"].values()[3], Scalar::Utf8("b".into()));
+
+        // variable column: x,x,y,y
+        assert_eq!(
+            melted.columns["variable"].values()[0],
+            Scalar::Utf8("x".into())
+        );
+        assert_eq!(
+            melted.columns["variable"].values()[1],
+            Scalar::Utf8("x".into())
+        );
+        assert_eq!(
+            melted.columns["variable"].values()[2],
+            Scalar::Utf8("y".into())
+        );
+        assert_eq!(
+            melted.columns["variable"].values()[3],
+            Scalar::Utf8("y".into())
+        );
+
+        // value column: 1,2,3,4
+        assert_eq!(melted.columns["value"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(melted.columns["value"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(melted.columns["value"].values()[2], Scalar::Float64(3.0));
+        assert_eq!(melted.columns["value"].values()[3], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn dataframe_melt_auto_value_vars() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "id",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val1",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(10.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val2",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Empty value_vars → uses all non-id columns
+        let melted = df.melt(&["id"], &[], None, None).unwrap();
+        assert_eq!(melted.index.len(), 2); // 1 row * 2 value_vars
+    }
+
+    #[test]
+    fn dataframe_melt_custom_names() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "key",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8("k".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "a",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(1.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let melted = df
+            .melt(&["key"], &["a"], Some("col_name"), Some("col_value"))
+            .unwrap();
+        assert!(melted.columns.contains_key("col_name"));
+        assert!(melted.columns.contains_key("col_value"));
+    }
+
+    // ── pivot_table tests ──
+
+    #[test]
+    fn dataframe_pivot_table_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "sum").unwrap();
+        assert_eq!(pivoted.index.len(), 2); // r1, r2
+        assert_eq!(pivoted.column_order.len(), 2); // c1, c2
+
+        // r1, c1 → 1.0; r1, c2 → 2.0; r2, c1 → 3.0; r2, c2 → 4.0
+        assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pivoted.columns["c1"].values()[1], Scalar::Float64(3.0));
+        assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_mean() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "mean").unwrap();
+        // r1, c1 → mean(10, 20) = 15.0; r1, c2 → 30.0
+        assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(15.0));
+        assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_missing_cell() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(5.0), Scalar::Float64(10.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "sum").unwrap();
+        // r1 has c1 but not c2; r2 has c2 but not c1
+        assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(5.0));
+        assert!(pivoted.columns["c2"].values()[0].is_missing()); // missing cell → NaN
+        assert!(pivoted.columns["c1"].values()[1].is_missing()); // missing cell → NaN
+        assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(10.0));
     }
 }

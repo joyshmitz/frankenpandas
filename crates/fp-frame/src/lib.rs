@@ -3204,35 +3204,53 @@ impl DataFrame {
                         .sum::<f64>();
                     sum_sq_diff / (vals.len() as f64 - 1.0)
                 };
-                let result = match func {
-                    "sum" => row_vals.iter().sum::<f64>(),
-                    "mean" => {
-                        if row_vals.is_empty() {
-                            f64::NAN
-                        } else {
-                            row_vals.iter().sum::<f64>() / row_vals.len() as f64
-                        }
+                let sample_median = |vals: &[f64]| -> f64 {
+                    if vals.is_empty() {
+                        return f64::NAN;
                     }
-                    "min" => row_vals
-                        .iter()
-                        .copied()
-                        .reduce(f64::min)
-                        .unwrap_or(f64::NAN),
-                    "max" => row_vals
-                        .iter()
-                        .copied()
-                        .reduce(f64::max)
-                        .unwrap_or(f64::NAN),
-                    "count" => row_vals.len() as f64,
-                    "var" => sample_var(&row_vals),
-                    "std" => sample_var(&row_vals).sqrt(),
+                    let mut sorted = vals.to_vec();
+                    sorted.sort_unstable_by(|a, b| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let mid = sorted.len() / 2;
+                    if sorted.len().is_multiple_of(2) {
+                        (sorted[mid - 1] + sorted[mid]) / 2.0
+                    } else {
+                        sorted[mid]
+                    }
+                };
+                let result = match func {
+                    "sum" => Scalar::Float64(row_vals.iter().sum::<f64>()),
+                    "mean" => Scalar::Float64(if row_vals.is_empty() {
+                        f64::NAN
+                    } else {
+                        row_vals.iter().sum::<f64>() / row_vals.len() as f64
+                    }),
+                    "min" => Scalar::Float64(
+                        row_vals
+                            .iter()
+                            .copied()
+                            .reduce(f64::min)
+                            .unwrap_or(f64::NAN),
+                    ),
+                    "max" => Scalar::Float64(
+                        row_vals
+                            .iter()
+                            .copied()
+                            .reduce(f64::max)
+                            .unwrap_or(f64::NAN),
+                    ),
+                    "count" => Scalar::Int64(row_vals.len() as i64),
+                    "median" => Scalar::Float64(sample_median(&row_vals)),
+                    "var" => Scalar::Float64(sample_var(&row_vals)),
+                    "std" => Scalar::Float64(sample_var(&row_vals).sqrt()),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
                         )));
                     }
                 };
-                values.push(Scalar::Float64(result));
+                values.push(result);
             }
             Series::from_values(func, self.index.labels().to_vec(), values)
         } else {
@@ -5815,6 +5833,84 @@ mod tests {
         assert!(
             matches!(row_stds.values()[1], Scalar::Float64(v) if (v - 2.0_f64.sqrt()).abs() < 1e-10)
         );
+    }
+
+    #[test]
+    fn dataframe_apply_row_wise_median() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(6.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let row_medians = df.apply("median", 1).unwrap();
+        assert!(matches!(row_medians.values()[0], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
+        assert!(matches!(row_medians.values()[1], Scalar::Float64(v) if (v - 4.0).abs() < 1e-10));
+        assert!(matches!(row_medians.values()[2], Scalar::Float64(v) if v.is_nan()));
+    }
+
+    #[test]
+    fn dataframe_apply_row_wise_count_int64() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(6.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let row_counts = df.apply("count", 1).unwrap();
+        assert_eq!(row_counts.values()[0], Scalar::Int64(2));
+        assert_eq!(row_counts.values()[1], Scalar::Int64(2));
+        assert_eq!(row_counts.values()[2], Scalar::Int64(0));
     }
 
     #[test]

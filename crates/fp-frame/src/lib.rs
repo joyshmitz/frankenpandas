@@ -4771,12 +4771,14 @@ impl DataFrame {
 
         // Extract clean column names from debug format
         let clean_col_name = |s: &str| -> String {
-            // Strip Utf8("...") or Int64(...) wrappers
+            // Strip Utf8("...") or Int64(...) or Bool(...) wrappers
             if let Some(inner) = s.strip_prefix("Utf8(\"") {
                 inner.strip_suffix("\")").unwrap_or(inner).to_string()
             } else if let Some(inner) = s.strip_prefix("Int64(") {
                 inner.strip_suffix(')').unwrap_or(inner).to_string()
             } else if let Some(inner) = s.strip_prefix("Float64(") {
+                inner.strip_suffix(')').unwrap_or(inner).to_string()
+            } else if let Some(inner) = s.strip_prefix("Bool(") {
                 inner.strip_suffix(')').unwrap_or(inner).to_string()
             } else {
                 s.to_string()
@@ -4871,7 +4873,7 @@ impl DataFrame {
                 }
                 result_cols.insert(
                     col_name.clone(),
-                    Column::new(DType::Float64, vals)?,
+                    Column::from_values(vals)?,
                 );
                 col_order.push(col_name.clone());
             }

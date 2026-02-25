@@ -2612,4 +2612,184 @@ mod tests {
             assert_eq!(counts.len(), 1, "only non-null values counted");
         }
     }
+
+    // --- groupby_nunique / groupby_prod / groupby_size tests ---
+
+    #[test]
+    fn groupby_nunique_basic() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let options = GroupByOptions::default();
+
+        let keys = Series::from_values(
+            "key",
+            vec!["a".into(), "a".into(), "b".into(), "b".into(), "b".into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let values = Series::from_values(
+            "val",
+            vec!["a".into(), "a".into(), "b".into(), "b".into(), "b".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let result = groupby_nunique(&keys, &values, options, &policy, &mut ledger).unwrap();
+        // Group "x": values [1, 2] -> 2 unique
+        // Group "y": values [3, 3, 4] -> 2 unique
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(2)); // x: 2 unique
+        assert_eq!(result.values()[1], Scalar::Int64(2)); // y: 2 unique
+    }
+
+    #[test]
+    fn groupby_nunique_with_nulls() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let options = GroupByOptions::default();
+
+        let keys = Series::from_values(
+            "key",
+            vec!["a".into(), "a".into(), "a".into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let values = Series::from_values(
+            "val",
+            vec!["a".into(), "a".into(), "a".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+
+        let result = groupby_nunique(&keys, &values, options, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(1)); // only 1 unique non-null
+    }
+
+    #[test]
+    fn groupby_prod_basic() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let options = GroupByOptions::default();
+
+        let keys = Series::from_values(
+            "key",
+            vec!["a".into(), "a".into(), "b".into(), "b".into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let values = Series::from_values(
+            "val",
+            vec!["a".into(), "a".into(), "b".into(), "b".into()],
+            vec![
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+
+        let result = groupby_prod(&keys, &values, options, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Float64(6.0)); // x: 2*3
+        assert_eq!(result.values()[1], Scalar::Float64(20.0)); // y: 4*5
+    }
+
+    #[test]
+    fn groupby_size_counts_including_nulls() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let options = GroupByOptions::default();
+
+        let keys = Series::from_values(
+            "key",
+            vec!["a".into(), "a".into(), "a".into(), "b".into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let values = Series::from_values(
+            "val",
+            vec!["a".into(), "a".into(), "a".into(), "b".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let result = groupby_size(&keys, &values, options, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+        // size counts ALL elements including nulls (unlike count)
+        assert_eq!(result.values()[0], Scalar::Int64(3)); // x: 3 total
+        assert_eq!(result.values()[1], Scalar::Int64(1)); // y: 1 total
+    }
+
+    #[test]
+    fn groupby_size_vs_count_difference() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let options = GroupByOptions::default();
+
+        let keys = Series::from_values(
+            "key",
+            vec!["a".into(), "a".into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let values = Series::from_values(
+            "val",
+            vec!["a".into(), "a".into()],
+            vec![Scalar::Null(NullKind::Null), Scalar::Int64(5)],
+        )
+        .unwrap();
+
+        let count_result =
+            groupby_count(&keys, &values, options, &policy, &mut ledger).unwrap();
+        let size_result =
+            groupby_size(&keys, &values, options, &policy, &mut ledger).unwrap();
+
+        // count excludes nulls, size includes nulls
+        assert_eq!(count_result.values()[0], Scalar::Int64(1)); // 1 non-null
+        assert_eq!(size_result.values()[0], Scalar::Int64(2)); // 2 total
+    }
 }

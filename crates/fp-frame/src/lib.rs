@@ -1983,6 +1983,11 @@ impl Series {
 
         Ok((cov, var_x, var_y, count))
     }
+
+    /// Access string methods on a Utf8 Series (analogous to `pandas.Series.str`).
+    pub fn str(&self) -> StringAccessor<'_> {
+        StringAccessor { series: self }
+    }
 }
 
 /// Rolling window aggregation over a Series.
@@ -2196,6 +2201,212 @@ impl Expanding<'_> {
                 let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                     / (nums.len() - 1) as f64;
                 var.sqrt()
+            },
+            self.series.name(),
+        )
+    }
+}
+
+/// String accessor for Series containing Utf8 data.
+///
+/// Created by `Series::str()`. Provides string manipulation methods
+/// analogous to pandas `Series.str` namespace.
+pub struct StringAccessor<'a> {
+    series: &'a Series,
+}
+
+impl StringAccessor<'_> {
+    /// Helper: apply a string transformation to each value.
+    fn apply_str<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> Scalar,
+    {
+        let vals = self.series.column().values();
+        let out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => func(s),
+                _ if v.is_missing() => Scalar::Null(NullKind::NaN),
+                _ => v.clone(),
+            })
+            .collect();
+        Series::from_values(name, self.series.index().labels().to_vec(), out)
+    }
+
+    /// Convert strings to lowercase.
+    pub fn lower(&self) -> Result<Series, FrameError> {
+        self.apply_str(|s| Scalar::Utf8(s.to_lowercase()), self.series.name())
+    }
+
+    /// Convert strings to uppercase.
+    pub fn upper(&self) -> Result<Series, FrameError> {
+        self.apply_str(|s| Scalar::Utf8(s.to_uppercase()), self.series.name())
+    }
+
+    /// Strip leading and trailing whitespace.
+    pub fn strip(&self) -> Result<Series, FrameError> {
+        self.apply_str(|s| Scalar::Utf8(s.trim().to_string()), self.series.name())
+    }
+
+    /// Strip leading whitespace.
+    pub fn lstrip(&self) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Utf8(s.trim_start().to_string()),
+            self.series.name(),
+        )
+    }
+
+    /// Strip trailing whitespace.
+    pub fn rstrip(&self) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Utf8(s.trim_end().to_string()),
+            self.series.name(),
+        )
+    }
+
+    /// Check whether each string contains a pattern.
+    pub fn contains(&self, pat: &str) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(s.contains(pat)),
+            self.series.name(),
+        )
+    }
+
+    /// Replace occurrences of a pattern with a replacement string.
+    pub fn replace(&self, pat: &str, repl: &str) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Utf8(s.replace(pat, repl)),
+            self.series.name(),
+        )
+    }
+
+    /// Check whether each string starts with a prefix.
+    pub fn startswith(&self, pat: &str) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(s.starts_with(pat)),
+            self.series.name(),
+        )
+    }
+
+    /// Check whether each string ends with a suffix.
+    pub fn endswith(&self, pat: &str) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(s.ends_with(pat)),
+            self.series.name(),
+        )
+    }
+
+    /// Get the length of each string.
+    pub fn len(&self) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Int64(s.len() as i64),
+            self.series.name(),
+        )
+    }
+
+    /// Slice each string from start to end.
+    pub fn slice(&self, start: usize, end: Option<usize>) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| {
+                let chars: Vec<char> = s.chars().collect();
+                let stop = end.unwrap_or(chars.len()).min(chars.len());
+                let begin = start.min(stop);
+                Scalar::Utf8(chars[begin..stop].iter().collect())
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Split each string by a separator and return the n-th element.
+    pub fn split_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| {
+                let parts: Vec<&str> = s.split(pat).collect();
+                if n < parts.len() {
+                    Scalar::Utf8(parts[n].to_string())
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Capitalize the first character of each string.
+    pub fn capitalize(&self) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| {
+                let mut chars = s.chars();
+                match chars.next() {
+                    None => Scalar::Utf8(String::new()),
+                    Some(c) => {
+                        let upper: String = c.to_uppercase().collect();
+                        let rest: String = chars.collect();
+                        Scalar::Utf8(format!("{upper}{rest}"))
+                    }
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Title case each string.
+    pub fn title(&self) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| {
+                let mut result = String::with_capacity(s.len());
+                let mut capitalize_next = true;
+                for c in s.chars() {
+                    if c.is_whitespace() || c == '_' || c == '-' {
+                        result.push(c);
+                        capitalize_next = true;
+                    } else if capitalize_next {
+                        for uc in c.to_uppercase() {
+                            result.push(uc);
+                        }
+                        capitalize_next = false;
+                    } else {
+                        for lc in c.to_lowercase() {
+                            result.push(lc);
+                        }
+                    }
+                }
+                Scalar::Utf8(result)
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Repeat each string n times.
+    pub fn repeat(&self, n: usize) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Utf8(s.repeat(n)),
+            self.series.name(),
+        )
+    }
+
+    /// Pad strings to a minimum width with a fill character.
+    pub fn pad(&self, width: usize, side: &str, fillchar: char) -> Result<Series, FrameError> {
+        let side_owned = side.to_string();
+        self.apply_str(
+            |s| {
+                if s.len() >= width {
+                    return Scalar::Utf8(s.to_string());
+                }
+                let pad_len = width - s.len();
+                let padding: String = std::iter::repeat_n(fillchar, pad_len).collect();
+                match side_owned.as_str() {
+                    "left" => Scalar::Utf8(format!("{padding}{s}")),
+                    "right" => Scalar::Utf8(format!("{s}{padding}")),
+                    "both" => {
+                        let left = pad_len / 2;
+                        let right = pad_len - left;
+                        let lpad: String = std::iter::repeat_n(fillchar, left).collect();
+                        let rpad: String = std::iter::repeat_n(fillchar, right).collect();
+                        Scalar::Utf8(format!("{lpad}{s}{rpad}"))
+                    }
+                    _ => Scalar::Utf8(s.to_string()),
+                }
             },
             self.series.name(),
         )
@@ -11571,5 +11782,164 @@ mod tests {
         assert_eq!(reindexed.columns["val"].values()[0], Scalar::Float64(30.0)); // label 2
         assert_eq!(reindexed.columns["val"].values()[1], Scalar::Float64(10.0)); // label 0
         assert!(reindexed.columns["val"].values()[2].is_missing()); // label 5 → NaN
+    }
+
+    // ── str accessor tests ──
+
+    #[test]
+    fn str_lower() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("Hello".into()), Scalar::Utf8("WORLD".into())],
+        )
+        .unwrap();
+        let result = s.str().lower().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("world".into()));
+    }
+
+    #[test]
+    fn str_upper() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("hello".into()), Scalar::Utf8("World".into())],
+        )
+        .unwrap();
+        let result = s.str().upper().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("HELLO".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("WORLD".into()));
+    }
+
+    #[test]
+    fn str_strip() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("  hello  ".into()),
+                Scalar::Utf8("world\n".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().strip().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("world".into()));
+    }
+
+    #[test]
+    fn str_contains() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("foo bar".into()),
+                Scalar::Utf8("baz".into()),
+                Scalar::Utf8("foobar".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().contains("foo").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_replace() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hello world".into())],
+        )
+        .unwrap();
+        let result = s.str().replace("world", "rust").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("hello rust".into()));
+    }
+
+    #[test]
+    fn str_startswith_endswith() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("prefix_data".into()),
+                Scalar::Utf8("data_suffix".into()),
+            ],
+        )
+        .unwrap();
+        let starts = s.str().startswith("prefix").unwrap();
+        assert_eq!(starts.values()[0], Scalar::Bool(true));
+        assert_eq!(starts.values()[1], Scalar::Bool(false));
+
+        let ends = s.str().endswith("suffix").unwrap();
+        assert_eq!(ends.values()[0], Scalar::Bool(false));
+        assert_eq!(ends.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_len() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("hi".into()), Scalar::Utf8("hello".into())],
+        )
+        .unwrap();
+        let result = s.str().len().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Int64(5));
+    }
+
+    #[test]
+    fn str_slice() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hello world".into())],
+        )
+        .unwrap();
+        let result = s.str().slice(0, Some(5)).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+    }
+
+    #[test]
+    fn str_split_get() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into())],
+        )
+        .unwrap();
+        let result = s.str().split_get("-", 1).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("b".into()));
+    }
+
+    #[test]
+    fn str_capitalize() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hello".into())],
+        )
+        .unwrap();
+        let result = s.str().capitalize().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("Hello".into()));
+    }
+
+    #[test]
+    fn str_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let result = s.str().upper().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("HELLO".into()));
+        assert!(result.values()[1].is_missing());
     }
 }

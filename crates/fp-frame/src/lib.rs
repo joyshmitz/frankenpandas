@@ -5069,6 +5069,323 @@ impl DataFrame {
             index: Index::new(new_labels),
         })
     }
+
+    /// Group by one or more columns and aggregate.
+    ///
+    /// Returns a `DataFrameGroupBy` for deferred aggregation.
+    pub fn groupby(&self, by: &[&str]) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        // Validate columns exist
+        for col in by {
+            if !self.columns.contains_key(*col) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "missing column: {col}"
+                )));
+            }
+        }
+        Ok(DataFrameGroupBy {
+            df: self,
+            by: by.iter().map(|s| (*s).to_string()).collect(),
+        })
+    }
+
+    /// Get summary info about the DataFrame: dtypes, non-null counts, memory.
+    pub fn info(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("DataFrame: {} rows x {} columns", self.len(), self.column_order.len()));
+        lines.push(format!("Index: {} entries", self.index.len()));
+        lines.push(String::new());
+        lines.push(format!("{:<20} {:<10} {:<10}", "Column", "Non-Null", "Dtype"));
+        lines.push(format!("{:<20} {:<10} {:<10}", "------", "--------", "-----"));
+        for col_name in &self.column_order {
+            let col = &self.columns[col_name];
+            let non_null = col.values().iter().filter(|v| !v.is_missing()).count();
+            lines.push(format!(
+                "{:<20} {:<10} {:?}",
+                col_name,
+                non_null,
+                col.dtype()
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// Randomly sample rows from the DataFrame.
+    ///
+    /// `n`: number of rows to sample (mutually exclusive with `frac`).
+    /// `frac`: fraction of rows to sample.
+    /// `replace`: whether to sample with replacement.
+    /// `seed`: optional deterministic seed.
+    pub fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+        seed: Option<u64>,
+    ) -> Result<Self, FrameError> {
+        let total = self.len();
+        let sample_n = match (n, frac) {
+            (Some(count), None) => count,
+            (None, Some(f)) => (total as f64 * f).ceil() as usize,
+            (None, None) => 1,
+            (Some(_), Some(_)) => {
+                return Err(FrameError::CompatibilityRejected(
+                    "cannot specify both n and frac".to_string(),
+                ));
+            }
+        };
+
+        if !replace && sample_n > total {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot sample {sample_n} rows from {total} without replacement"
+            )));
+        }
+
+        // Simple LCG for deterministic sampling
+        let mut rng_state = seed.unwrap_or(42);
+        let mut next_rand = || -> usize {
+            rng_state = rng_state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (rng_state >> 33) as usize
+        };
+
+        let indices: Vec<usize> = if replace {
+            (0..sample_n).map(|_| next_rand() % total).collect()
+        } else {
+            // Fisher-Yates shuffle on index array, take first sample_n
+            let mut pool: Vec<usize> = (0..total).collect();
+            for i in 0..sample_n {
+                let j = i + (next_rand() % (total - i));
+                pool.swap(i, j);
+            }
+            pool[..sample_n].to_vec()
+        };
+
+        // Build result
+        let mut result_cols = BTreeMap::new();
+        for col_name in &self.column_order {
+            let col = &self.columns[col_name];
+            let vals: Vec<Scalar> = indices.iter().map(|&i| col.values()[i].clone()).collect();
+            result_cols.insert(col_name.clone(), Column::new(col.dtype(), vals)?);
+        }
+
+        let new_labels: Vec<IndexLabel> = indices
+            .iter()
+            .map(|&i| self.index.labels()[i].clone())
+            .collect();
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: self.column_order.clone(),
+            index: Index::new(new_labels),
+        })
+    }
+}
+
+/// Deferred GroupBy object for DataFrame.
+///
+/// Created by `DataFrame::groupby()`. Call aggregation methods to produce results.
+pub struct DataFrameGroupBy<'a> {
+    df: &'a DataFrame,
+    by: Vec<String>,
+}
+
+impl DataFrameGroupBy<'_> {
+    /// Internal: build groups as (composite_key -> Vec<row_index>).
+    fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+        let n = self.df.len();
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+
+        for row in 0..n {
+            let key: String = self
+                .by
+                .iter()
+                .map(|col_name| {
+                    let val = &self.df.columns[col_name].values()[row];
+                    format!("{val:?}")
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+
+            if !groups.contains_key(&key) {
+                group_order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(row);
+        }
+
+        (group_order, groups)
+    }
+
+    /// Internal: extract the group key label for a given row index.
+    fn group_key_label(&self, row: usize) -> IndexLabel {
+        if self.by.len() == 1 {
+            let val = &self.df.columns[&self.by[0]].values()[row];
+            match val {
+                Scalar::Int64(v) => IndexLabel::Int64(*v),
+                Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+                other => IndexLabel::Utf8(format!("{other:?}")),
+            }
+        } else {
+            let parts: Vec<String> = self
+                .by
+                .iter()
+                .map(|col_name| {
+                    let val = &self.df.columns[col_name].values()[row];
+                    match val {
+                        Scalar::Int64(v) => v.to_string(),
+                        Scalar::Utf8(v) => v.clone(),
+                        other => format!("{other:?}"),
+                    }
+                })
+                .collect();
+            IndexLabel::Utf8(parts.join(", "))
+        }
+    }
+
+    /// Aggregate each value column per group with the given function.
+    fn aggregate(&self, func_name: &str) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+
+        // Determine value columns (all columns not in group-by keys)
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let n_groups = group_order.len();
+
+        // Build index from group keys
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        // Aggregate each value column
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut agg_vals = Vec::with_capacity(n_groups);
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+
+                let agg_val = match func_name {
+                    "sum" => fp_types::nansum(&group_vals),
+                    "mean" => fp_types::nanmean(&group_vals),
+                    "count" => fp_types::nancount(&group_vals),
+                    "min" => fp_types::nanmin(&group_vals),
+                    "max" => fp_types::nanmax(&group_vals),
+                    "std" => fp_types::nanstd(&group_vals, 1),
+                    "var" => fp_types::nanvar(&group_vals, 1),
+                    "median" => fp_types::nanmedian(&group_vals),
+                    "first" => {
+                        if group_vals.is_empty() {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            group_vals[0].clone()
+                        }
+                    }
+                    "last" => {
+                        if group_vals.is_empty() {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            group_vals[group_vals.len() - 1].clone()
+                        }
+                    }
+                    other => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "unsupported groupby aggregation: '{other}'"
+                        )));
+                    }
+                };
+                agg_vals.push(agg_val);
+            }
+
+            result_cols.insert(col_name.clone(), Column::new(DType::Float64, agg_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+        })
+    }
+
+    /// GroupBy sum.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("sum")
+    }
+
+    /// GroupBy mean.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("mean")
+    }
+
+    /// GroupBy count.
+    pub fn count(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("count")
+    }
+
+    /// GroupBy min.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("min")
+    }
+
+    /// GroupBy max.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("max")
+    }
+
+    /// GroupBy std.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("std")
+    }
+
+    /// GroupBy var.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("var")
+    }
+
+    /// GroupBy median.
+    pub fn median(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("median")
+    }
+
+    /// GroupBy first.
+    pub fn first(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("first")
+    }
+
+    /// GroupBy last.
+    pub fn last(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("last")
+    }
+
+    /// GroupBy size (number of rows per group).
+    pub fn size(&self) -> Result<Series, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(group_order.len());
+        let mut values = Vec::with_capacity(group_order.len());
+
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+            values.push(Scalar::Int64(groups[gkey].len() as i64));
+        }
+
+        Series::from_values("size", labels, values)
+    }
 }
 
 #[cfg(test)]
@@ -11941,5 +12258,225 @@ mod tests {
         let result = s.str().upper().unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("HELLO".into()));
         assert!(result.values()[1].is_missing());
+    }
+
+    // ── DataFrame groupby tests ──
+
+    #[test]
+    fn dataframe_groupby_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().sum().unwrap();
+        assert_eq!(result.len(), 2); // groups: a, b
+        // Group "a": 1+3=4; Group "b": 2+4=6
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(6.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_mean() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().mean().unwrap();
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(15.0)); // mean(10,20)
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(35.0)); // mean(30,40)
+    }
+
+    #[test]
+    fn dataframe_groupby_count() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().count().unwrap();
+        // Group "a": 1 non-null (NaN doesn't count); Group "b": 1
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(1.0)); // count skips NaN
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_size() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().size().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2)); // group "a" has 2 rows
+        assert_eq!(result.values()[1], Scalar::Int64(1)); // group "b" has 1 row
+    }
+
+    // ── sample tests ──
+
+    #[test]
+    fn dataframe_sample_n() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                    Scalar::Float64(50.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let sampled = df.sample(Some(3), None, false, Some(123)).unwrap();
+        assert_eq!(sampled.len(), 3);
+    }
+
+    #[test]
+    fn dataframe_sample_frac() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let sampled = df.sample(None, Some(0.5), false, Some(42)).unwrap();
+        assert_eq!(sampled.len(), 2); // 50% of 4 rows
+    }
+
+    #[test]
+    fn dataframe_sample_deterministic() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let s1 = df.sample(Some(2), None, false, Some(99)).unwrap();
+        let s2 = df.sample(Some(2), None, false, Some(99)).unwrap();
+        // Same seed → same result
+        assert_eq!(s1.columns["val"].values(), s2.columns["val"].values());
+    }
+
+    // ── info test ──
+
+    #[test]
+    fn dataframe_info_basic() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let info = df.info();
+        assert!(info.contains("2 rows"));
+        assert!(info.contains("1 columns"));
+        assert!(info.contains("Float64"));
     }
 }

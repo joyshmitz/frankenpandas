@@ -5,10 +5,13 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+arrow = { workspace = true }
+bytes = { workspace = true }
 csv = { workspace = true }
 fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
+parquet = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

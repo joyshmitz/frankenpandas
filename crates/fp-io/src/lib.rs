@@ -2,12 +2,20 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow::array::{
+    Array, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
+    RecordBatch, StringBuilder, StringArray,
+};
+use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use csv::{ReaderBuilder, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError};
 use fp_index::{Index, IndexLabel};
-use fp_types::{NullKind, Scalar};
+use fp_types::{DType, NullKind, Scalar};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,6 +26,8 @@ pub enum IoError {
     MissingIndexColumn(String),
     #[error("json format error: {0}")]
     JsonFormat(String),
+    #[error("parquet error: {0}")]
+    Parquet(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -651,6 +661,282 @@ pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<
     Ok(())
 }
 
+// ── Parquet I/O ─────────────────────────────────────────────────────────────
+
+/// Convert an fp-types DType to an Arrow DataType.
+fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
+    match dtype {
+        DType::Int64 => ArrowDataType::Int64,
+        DType::Float64 => ArrowDataType::Float64,
+        DType::Utf8 => ArrowDataType::Utf8,
+        DType::Bool => ArrowDataType::Boolean,
+        DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
+    }
+}
+
+/// Build an Arrow RecordBatch from a DataFrame.
+fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
+    let col_names = frame.column_names();
+    let mut fields = Vec::with_capacity(col_names.len());
+    let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(col_names.len());
+
+    for name in &col_names {
+        let col = frame
+            .column(name)
+            .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
+        let dt = col.dtype();
+        fields.push(Field::new(name.as_str(), dtype_to_arrow(dt), true));
+
+        let arr: Arc<dyn Array> = match dt {
+            DType::Int64 => {
+                let mut builder = Int64Builder::with_capacity(col.len());
+                for v in col.values() {
+                    match v {
+                        Scalar::Int64(n) => builder.append_value(*n),
+                        _ if v.is_missing() => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            DType::Float64 => {
+                let mut builder = Float64Builder::with_capacity(col.len());
+                for v in col.values() {
+                    match v {
+                        Scalar::Float64(n) => {
+                            if n.is_nan() {
+                                builder.append_null();
+                            } else {
+                                builder.append_value(*n);
+                            }
+                        }
+                        _ if v.is_missing() => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            DType::Bool => {
+                let mut builder = BooleanBuilder::with_capacity(col.len());
+                for v in col.values() {
+                    match v {
+                        Scalar::Bool(b) => builder.append_value(*b),
+                        _ if v.is_missing() => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            DType::Utf8 | DType::Null => {
+                let mut builder = StringBuilder::with_capacity(col.len(), col.len() * 8);
+                for v in col.values() {
+                    match v {
+                        Scalar::Utf8(s) => builder.append_value(s),
+                        _ if v.is_missing() => builder.append_null(),
+                        _ => builder.append_value(format!("{v:?}")),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        };
+        arrays.push(arr);
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
+}
+
+/// Convert an Arrow RecordBatch back into a DataFrame.
+fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> {
+    let n_rows = batch.num_rows();
+    let schema = batch.schema();
+    let mut columns = BTreeMap::new();
+    let mut col_order = Vec::new();
+
+    for (i, field) in schema.fields().iter().enumerate() {
+        let name = field.name().clone();
+        let arr = batch.column(i);
+        let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
+        let col = Column::from_values(values)?;
+        columns.insert(name.clone(), col);
+        col_order.push(name);
+    }
+
+    let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+
+    DataFrame::new_with_column_order(index, columns, col_order).map_err(IoError::from)
+}
+
+/// Convert an Arrow array + data type to a Vec of Scalars.
+fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Scalar>, IoError> {
+    let len = arr.len();
+    let mut scalars = Vec::with_capacity(len);
+
+    match dt {
+        ArrowDataType::Int64 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| IoError::Parquet("expected Int64Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::Null));
+                } else {
+                    scalars.push(Scalar::Int64(typed.value(i)));
+                }
+            }
+        }
+        ArrowDataType::Int32 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .ok_or_else(|| IoError::Parquet("expected Int32Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::Null));
+                } else {
+                    scalars.push(Scalar::Int64(i64::from(typed.value(i))));
+                }
+            }
+        }
+        ArrowDataType::Float64 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| IoError::Parquet("expected Float64Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    scalars.push(Scalar::Float64(typed.value(i)));
+                }
+            }
+        }
+        ArrowDataType::Float32 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<arrow::array::Float32Array>()
+                .ok_or_else(|| IoError::Parquet("expected Float32Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    scalars.push(Scalar::Float64(f64::from(typed.value(i))));
+                }
+            }
+        }
+        ArrowDataType::Boolean => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| IoError::Parquet("expected BooleanArray".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::Null));
+                } else {
+                    scalars.push(Scalar::Bool(typed.value(i)));
+                }
+            }
+        }
+        ArrowDataType::Utf8 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| IoError::Parquet("expected StringArray".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::Null));
+                } else {
+                    scalars.push(Scalar::Utf8(typed.value(i).to_owned()));
+                }
+            }
+        }
+        ArrowDataType::LargeUtf8 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<arrow::array::LargeStringArray>()
+                .ok_or_else(|| IoError::Parquet("expected LargeStringArray".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::Null));
+                } else {
+                    scalars.push(Scalar::Utf8(typed.value(i).to_owned()));
+                }
+            }
+        }
+        other => {
+            return Err(IoError::Parquet(format!(
+                "unsupported Arrow data type: {other:?}"
+            )));
+        }
+    }
+
+    Ok(scalars)
+}
+
+/// Write a DataFrame to an in-memory Parquet buffer.
+pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    let batch = dataframe_to_record_batch(frame)?;
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None)
+        .map_err(|e| IoError::Parquet(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| IoError::Parquet(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| IoError::Parquet(e.to_string()))?;
+    Ok(buf)
+}
+
+/// Read a DataFrame from in-memory Parquet bytes.
+pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
+    let b = bytes::Bytes::from(data.to_vec());
+    let reader = ParquetRecordBatchReaderBuilder::try_new(b)
+        .map_err(|e| IoError::Parquet(e.to_string()))?
+        .build()
+        .map_err(|e| IoError::Parquet(e.to_string()))?;
+
+    let mut all_frames: Vec<DataFrame> = Vec::new();
+    for batch_result in reader {
+        let batch: RecordBatch =
+            batch_result.map_err(|e: arrow::error::ArrowError| IoError::Parquet(e.to_string()))?;
+        all_frames.push(record_batch_to_dataframe(&batch)?);
+    }
+
+    if all_frames.is_empty() {
+        // Return empty DataFrame
+        return Ok(DataFrame::new_with_column_order(
+            Index::new(vec![]),
+            BTreeMap::new(),
+            vec![],
+        )?);
+    }
+
+    // For a single batch (common case), return directly
+    if all_frames.len() == 1 {
+        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+    }
+
+    // Multiple batches: concatenate via fp_frame::concat_dataframes
+    let refs: Vec<&DataFrame> = all_frames.iter().collect();
+    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+}
+
+/// Write a DataFrame to a Parquet file.
+pub fn write_parquet(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let bytes = write_parquet_bytes(frame)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Read a DataFrame from a Parquet file.
+pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
+    let data = std::fs::read(path)?;
+    read_parquet_bytes(&data)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1213,5 +1499,206 @@ mod tests {
         let frame2 = super::read_json(&path, JsonOrient::Records).expect("read file");
         assert_eq!(frame2.index().len(), 2);
         std::fs::remove_file(&path).ok();
+    }
+
+    // ── Parquet I/O tests ──────────────────────────────────────────────
+
+    fn make_test_dataframe() -> DataFrame {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "ints".to_string(),
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        );
+        columns.insert(
+            "floats".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(2.5),
+                    Scalar::Float64(3.5),
+                ],
+            )
+            .unwrap(),
+        );
+        columns.insert(
+            "names".to_string(),
+            Column::from_values(vec![
+                Scalar::Utf8("alice".into()),
+                Scalar::Utf8("bob".into()),
+                Scalar::Utf8("carol".into()),
+            ])
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec![
+                "ints".to_string(),
+                "floats".to_string(),
+                "names".to_string(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parquet_bytes_roundtrip() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_parquet_bytes(&frame).expect("write parquet");
+        assert!(!bytes.is_empty());
+
+        let frame2 = super::read_parquet_bytes(&bytes).expect("read parquet");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(
+            frame2
+                .column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ints", "floats", "names"]
+        );
+
+        // Check values round-tripped correctly
+        let ints = frame2.column("ints").unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(10));
+        assert_eq!(ints.values()[1], Scalar::Int64(20));
+        assert_eq!(ints.values()[2], Scalar::Int64(30));
+
+        let floats = frame2.column("floats").unwrap();
+        assert_eq!(floats.values()[0], Scalar::Float64(1.5));
+        assert_eq!(floats.values()[1], Scalar::Float64(2.5));
+        assert_eq!(floats.values()[2], Scalar::Float64(3.5));
+
+        let names = frame2.column("names").unwrap();
+        assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
+        assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
+        assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn parquet_file_roundtrip() {
+        let frame = make_test_dataframe();
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_parquet_roundtrip.parquet");
+
+        super::write_parquet(&frame, &path).expect("write parquet file");
+        let frame2 = super::read_parquet(&path).expect("read parquet file");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(frame2.column("ints").unwrap().values()[0], Scalar::Int64(10));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parquet_with_nulls() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        columns.insert(
+            "strs".to_string(),
+            Column::from_values(vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("c".into()),
+            ])
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["vals".to_string(), "strs".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write");
+        let frame2 = super::read_parquet_bytes(&bytes).expect("read");
+
+        assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Float64(1.0));
+        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
+        assert_eq!(frame2.column("vals").unwrap().values()[2], Scalar::Float64(3.0));
+
+        assert_eq!(frame2.column("strs").unwrap().values()[0], Scalar::Utf8("a".into()));
+        assert!(frame2.column("strs").unwrap().values()[1].is_missing());
+        assert_eq!(frame2.column("strs").unwrap().values()[2], Scalar::Utf8("c".into()));
+    }
+
+    #[test]
+    fn parquet_bool_column() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flags".to_string(),
+            Column::new(
+                DType::Bool,
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["flags".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_parquet_bytes(&frame).expect("write");
+        let frame2 = super::read_parquet_bytes(&bytes).expect("read");
+
+        assert_eq!(frame2.column("flags").unwrap().values()[0], Scalar::Bool(true));
+        assert_eq!(frame2.column("flags").unwrap().values()[1], Scalar::Bool(false));
+        assert_eq!(frame2.column("flags").unwrap().values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn parquet_empty_dataframe_errors() {
+        // Parquet format requires at least one column — empty DataFrames
+        // cannot be represented, matching pandas behavior where
+        // pd.DataFrame().to_parquet() also fails.
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![]),
+            BTreeMap::new(),
+            vec![],
+        )
+        .unwrap();
+
+        let result = super::write_parquet_bytes(&frame);
+        assert!(result.is_err());
     }
 }

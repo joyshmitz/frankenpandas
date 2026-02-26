@@ -1010,6 +1010,77 @@ fn merge_dataframes_cross(
     Ok(MergedDataFrame { index, columns })
 }
 
+/// Extension trait adding `.merge()` and `.join()` instance methods to `DataFrame`.
+///
+/// Import this trait to get pandas-style `df.merge(other, ...)` and `df.join(other, ...)`
+/// as instance methods.
+pub trait DataFrameMergeExt {
+    /// Merge this DataFrame with another on shared key columns.
+    ///
+    /// Matches `pd.DataFrame.merge(other, on=keys, how=join_type)`.
+    fn merge(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &[&str],
+        how: JoinType,
+    ) -> Result<MergedDataFrame, JoinError>;
+
+    /// Merge with separate left/right key columns and execution options.
+    ///
+    /// Matches `pd.DataFrame.merge(other, left_on=..., right_on=..., how=...)`.
+    fn merge_with_options(
+        &self,
+        other: &fp_frame::DataFrame,
+        left_on: &[&str],
+        right_on: &[&str],
+        how: JoinType,
+        options: MergeExecutionOptions,
+    ) -> Result<MergedDataFrame, JoinError>;
+
+    /// Join another DataFrame on the index.
+    ///
+    /// Matches `pd.DataFrame.join(other, how=join_type)` (index-based join).
+    fn join_on_index(
+        &self,
+        other: &fp_frame::DataFrame,
+        how: JoinType,
+    ) -> Result<MergedDataFrame, JoinError>;
+}
+
+impl DataFrameMergeExt for fp_frame::DataFrame {
+    fn merge(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &[&str],
+        how: JoinType,
+    ) -> Result<MergedDataFrame, JoinError> {
+        merge_dataframes_on(self, other, on, how)
+    }
+
+    fn merge_with_options(
+        &self,
+        other: &fp_frame::DataFrame,
+        left_on: &[&str],
+        right_on: &[&str],
+        how: JoinType,
+        options: MergeExecutionOptions,
+    ) -> Result<MergedDataFrame, JoinError> {
+        merge_dataframes_on_with_options(self, other, left_on, right_on, how, options)
+    }
+
+    fn join_on_index(
+        &self,
+        other: &fp_frame::DataFrame,
+        how: JoinType,
+    ) -> Result<MergedDataFrame, JoinError> {
+        // Index-based join: materialize index as a column, merge, then return.
+        let left = self.reset_index(false)?;
+        let right = other.reset_index(false)?;
+        // reset_index(false) adds index as column "index"
+        merge_dataframes_on(&left, &right, &["index"], how)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fp_index::IndexLabel;
@@ -2731,5 +2802,53 @@ mod tests {
                 Scalar::Int64(20)
             ]
         );
+    }
+
+    // ── DataFrameMergeExt trait tests ──
+
+    #[test]
+    fn dataframe_merge_via_trait() {
+        use super::{DataFrameMergeExt, merge_dataframes_on};
+        use fp_frame::DataFrame;
+
+        let left = DataFrame::from_series(vec![
+            Series::from_values(
+                "key",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val_l",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let right = DataFrame::from_series(vec![
+            Series::from_values(
+                "key",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val_r",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(100), Scalar::Int64(300)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Instance method
+        let result = left.merge(&right, &["key"], JoinType::Inner).unwrap();
+        assert_eq!(result.index.len(), 1); // only key=1 matches
+
+        // Standalone function should give same result
+        let result2 = merge_dataframes_on(&left, &right, &["key"], JoinType::Inner).unwrap();
+        assert_eq!(result.index.len(), result2.index.len());
     }
 }

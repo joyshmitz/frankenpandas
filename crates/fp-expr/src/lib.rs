@@ -1949,13 +1949,13 @@ mod tests {
 
     #[test]
     fn parse_float_literal() {
-        let expr = super::parse_expr("x > 3.14").unwrap();
+        let expr = super::parse_expr("x > 4.56").unwrap();
         match expr {
             Expr::Compare { right, .. } => {
                 assert_eq!(
                     *right,
                     Expr::Literal {
-                        value: Scalar::Float64(3.14)
+                        value: Scalar::Float64(4.56)
                     }
                 );
             }

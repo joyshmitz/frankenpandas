@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
-    RecordBatch, StringBuilder, StringArray,
+    RecordBatch, StringArray, StringBuilder,
 };
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use csv::{ReaderBuilder, WriterBuilder};
@@ -14,8 +14,8 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -1643,7 +1643,10 @@ mod tests {
         super::write_parquet(&frame, &path).expect("write parquet file");
         let frame2 = super::read_parquet(&path).expect("read parquet file");
         assert_eq!(frame2.index().len(), 3);
-        assert_eq!(frame2.column("ints").unwrap().values()[0], Scalar::Int64(10));
+        assert_eq!(
+            frame2.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1689,13 +1692,25 @@ mod tests {
         let bytes = super::write_parquet_bytes(&frame).expect("write");
         let frame2 = super::read_parquet_bytes(&bytes).expect("read");
 
-        assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Float64(1.0));
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
         assert!(frame2.column("vals").unwrap().values()[1].is_missing());
-        assert_eq!(frame2.column("vals").unwrap().values()[2], Scalar::Float64(3.0));
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[2],
+            Scalar::Float64(3.0)
+        );
 
-        assert_eq!(frame2.column("strs").unwrap().values()[0], Scalar::Utf8("a".into()));
+        assert_eq!(
+            frame2.column("strs").unwrap().values()[0],
+            Scalar::Utf8("a".into())
+        );
         assert!(frame2.column("strs").unwrap().values()[1].is_missing());
-        assert_eq!(frame2.column("strs").unwrap().values()[2], Scalar::Utf8("c".into()));
+        assert_eq!(
+            frame2.column("strs").unwrap().values()[2],
+            Scalar::Utf8("c".into())
+        );
     }
 
     #[test]
@@ -1727,9 +1742,18 @@ mod tests {
         let bytes = super::write_parquet_bytes(&frame).expect("write");
         let frame2 = super::read_parquet_bytes(&bytes).expect("read");
 
-        assert_eq!(frame2.column("flags").unwrap().values()[0], Scalar::Bool(true));
-        assert_eq!(frame2.column("flags").unwrap().values()[1], Scalar::Bool(false));
-        assert_eq!(frame2.column("flags").unwrap().values()[2], Scalar::Bool(true));
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[0],
+            Scalar::Bool(true)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[1],
+            Scalar::Bool(false)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[2],
+            Scalar::Bool(true)
+        );
     }
 
     #[test]
@@ -1737,12 +1761,8 @@ mod tests {
         // Parquet format requires at least one column — empty DataFrames
         // cannot be represented, matching pandas behavior where
         // pd.DataFrame().to_parquet() also fails.
-        let frame = DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(vec![]), BTreeMap::new(), vec![]).unwrap();
 
         let result = super::write_parquet_bytes(&frame);
         assert!(result.is_err());

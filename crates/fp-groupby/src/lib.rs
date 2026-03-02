@@ -2623,7 +2623,13 @@ mod tests {
 
         let keys = Series::from_values(
             "key",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Utf8("x".to_owned()),
                 Scalar::Utf8("x".to_owned()),
@@ -2636,7 +2642,13 @@ mod tests {
 
         let values = Series::from_values(
             "val",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -2769,10 +2781,7 @@ mod tests {
         let keys = Series::from_values(
             "key",
             vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Utf8("x".to_owned()),
-                Scalar::Utf8("x".to_owned()),
-            ],
+            vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("x".to_owned())],
         )
         .unwrap();
 
@@ -2783,10 +2792,8 @@ mod tests {
         )
         .unwrap();
 
-        let count_result =
-            groupby_count(&keys, &values, options, &policy, &mut ledger).unwrap();
-        let size_result =
-            groupby_size(&keys, &values, options, &policy, &mut ledger).unwrap();
+        let count_result = groupby_count(&keys, &values, options, &policy, &mut ledger).unwrap();
+        let size_result = groupby_size(&keys, &values, options, &policy, &mut ledger).unwrap();
 
         // count excludes nulls, size includes nulls
         assert_eq!(count_result.values()[0], Scalar::Int64(1)); // 1 non-null

@@ -3026,13 +3026,24 @@ mod tests {
         let left = fp_frame::DataFrame::from_dict(
             &["time", "price"],
             vec![
-                ("time", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)]),
-                ("price", vec![
-                    Scalar::Float64(100.0),
-                    Scalar::Float64(101.0),
-                    Scalar::Float64(102.0),
-                    Scalar::Float64(103.0),
-                ]),
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
+                        Scalar::Int64(5),
+                        Scalar::Int64(7),
+                    ],
+                ),
+                (
+                    "price",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(101.0),
+                        Scalar::Float64(102.0),
+                        Scalar::Float64(103.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -3041,12 +3052,18 @@ mod tests {
         let right = fp_frame::DataFrame::from_dict(
             &["time", "bid"],
             vec![
-                ("time", vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(6)]),
-                ("bid", vec![
-                    Scalar::Float64(99.5),
-                    Scalar::Float64(100.5),
-                    Scalar::Float64(101.5),
-                ]),
+                (
+                    "time",
+                    vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(6)],
+                ),
+                (
+                    "bid",
+                    vec![
+                        Scalar::Float64(99.5),
+                        Scalar::Float64(100.5),
+                        Scalar::Float64(101.5),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -3109,12 +3126,18 @@ mod tests {
         let right = fp_frame::DataFrame::from_dict(
             &["time", "ref_val"],
             vec![
-                ("time", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)]),
-                ("ref_val", vec![
-                    Scalar::Float64(100.0),
-                    Scalar::Float64(500.0),
-                    Scalar::Float64(1000.0),
-                ]),
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+                ),
+                (
+                    "ref_val",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(500.0),
+                        Scalar::Float64(1000.0),
+                    ],
+                ),
             ],
         )
         .unwrap();

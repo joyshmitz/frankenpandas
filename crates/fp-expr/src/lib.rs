@@ -853,9 +853,7 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 
 fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     if *pos >= tokens.len() {
-        return Err(ExprError::ParseError(
-            "unexpected end of expression".into(),
-        ));
+        return Err(ExprError::ParseError("unexpected end of expression".into()));
     }
     match &tokens[*pos] {
         Token::Int(n) => {
@@ -2120,8 +2118,7 @@ mod tests {
         .unwrap();
 
         // Query for a > 2 and b < 25
-        let result =
-            super::query_str("a > 2 and b < 25", &frame, &policy, &mut ledger).unwrap();
+        let result = super::query_str("a > 2 and b < 25", &frame, &policy, &mut ledger).unwrap();
         assert_eq!(result.len(), 1); // only row 1 (a=5, b=20)
         assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));

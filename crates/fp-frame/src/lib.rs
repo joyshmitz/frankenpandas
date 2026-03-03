@@ -816,6 +816,25 @@ impl Series {
         Self::new(self.name.clone(), new_index, col)
     }
 
+    /// Reindex to new labels with a fill method for introduced NaN.
+    ///
+    /// Matches `s.reindex(new_labels, method='ffill'|'bfill')`.
+    /// After reindexing, missing values are filled using the specified method.
+    pub fn reindex_with_method(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+    ) -> Result<Self, FrameError> {
+        let reindexed = self.reindex(new_labels)?;
+        match method {
+            "ffill" | "pad" => reindexed.ffill(None),
+            "bfill" | "backfill" => reindexed.bfill(None),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported reindex method: '{other}'"
+            ))),
+        }
+    }
+
     // --- Comparison Operators ---
 
     /// Core comparison: align indexes, reindex columns, apply comparison.
@@ -11057,6 +11076,25 @@ impl DataFrame {
         })
     }
 
+    /// Reindex to new labels with a fill method for introduced NaN.
+    ///
+    /// Matches `df.reindex(new_labels, method='ffill'|'bfill')`.
+    /// After reindexing, missing values introduced by new labels are filled.
+    pub fn reindex_with_method(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+    ) -> Result<Self, FrameError> {
+        let reindexed = self.reindex(new_labels)?;
+        match method {
+            "ffill" | "pad" => reindexed.ffill(),
+            "bfill" | "backfill" => reindexed.bfill(),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported reindex method: '{other}'"
+            ))),
+        }
+    }
+
     /// Update values using non-null values from another DataFrame.
     ///
     /// Analogous to `pandas.DataFrame.update(other)`. Only updates values
@@ -11435,7 +11473,7 @@ impl DataFrame {
     ///
     /// Returns a `DataFrameGroupBy` for deferred aggregation.
     pub fn groupby(&self, by: &[&str]) -> Result<DataFrameGroupBy<'_>, FrameError> {
-        self.groupby_with_as_index(by, true)
+        self.groupby_full(by, true, true)
     }
 
     /// Group the DataFrame by one or more columns with explicit `as_index`.
@@ -11447,6 +11485,20 @@ impl DataFrame {
         &self,
         by: &[&str],
         as_index: bool,
+    ) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        self.groupby_full(by, as_index, true)
+    }
+
+    /// Group the DataFrame with full parameter control.
+    ///
+    /// Matches `df.groupby(by, as_index=..., sort=...)`.
+    /// When `sort` is `true` (default), groups are sorted by key.
+    /// When `sort` is `false`, groups appear in first-seen order.
+    pub fn groupby_full(
+        &self,
+        by: &[&str],
+        as_index: bool,
+        sort: bool,
     ) -> Result<DataFrameGroupBy<'_>, FrameError> {
         // Validate columns exist
         for col in by {
@@ -11460,6 +11512,7 @@ impl DataFrame {
             df: self,
             by: by.iter().map(|s| (*s).to_string()).collect(),
             as_index,
+            sort,
         })
     }
 
@@ -14634,6 +14687,7 @@ pub struct DataFrameGroupBy<'a> {
     df: &'a DataFrame,
     by: Vec<String>,
     as_index: bool,
+    sort: bool,
 }
 
 impl DataFrameGroupBy<'_> {
@@ -14659,6 +14713,10 @@ impl DataFrameGroupBy<'_> {
                 group_order.push(key.clone());
             }
             groups.entry(key).or_default().push(row);
+        }
+
+        if self.sort {
+            group_order.sort();
         }
 
         (group_order, groups)
@@ -18002,6 +18060,82 @@ mod tests {
 
         let result = s.reindex(Vec::new()).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn series_reindex_with_method_ffill() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into(), 3_i64.into(), 5_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(50.0)],
+        )
+        .unwrap();
+
+        let result = s
+            .reindex_with_method(
+                vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into(), 5_i64.into()],
+                "ffill",
+            )
+            .unwrap();
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.values()[0], Scalar::Float64(10.0)); // exact match
+        assert_eq!(result.values()[1], Scalar::Float64(10.0)); // ffill from 1
+        assert_eq!(result.values()[2], Scalar::Float64(30.0)); // exact match
+        assert_eq!(result.values()[3], Scalar::Float64(30.0)); // ffill from 3
+        assert_eq!(result.values()[4], Scalar::Float64(50.0)); // exact match
+    }
+
+    #[test]
+    fn series_reindex_with_method_bfill() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(30.0)],
+        )
+        .unwrap();
+
+        let result = s
+            .reindex_with_method(
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                "bfill",
+            )
+            .unwrap();
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.values()[0], Scalar::Float64(10.0)); // bfill from 1
+        assert_eq!(result.values()[1], Scalar::Float64(10.0)); // exact match
+        assert_eq!(result.values()[2], Scalar::Float64(30.0)); // bfill from 3
+        assert_eq!(result.values()[3], Scalar::Float64(30.0)); // exact match
+    }
+
+    #[test]
+    fn series_reindex_with_method_invalid_rejected() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into()],
+            vec![Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        assert!(s.reindex_with_method(vec![1_i64.into()], "nearest").is_err());
+    }
+
+    #[test]
+    fn dataframe_reindex_with_method_ffill() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Float64(10.0), Scalar::Float64(30.0)])],
+            vec![1_i64.into(), 3_i64.into()],
+        )
+        .unwrap();
+
+        let result = df
+            .reindex_with_method(
+                vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+                "ffill",
+            )
+            .unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.column("v").unwrap().values()[0], Scalar::Float64(10.0));
+        assert_eq!(result.column("v").unwrap().values()[1], Scalar::Float64(10.0)); // ffill
+        assert_eq!(result.column("v").unwrap().values()[2], Scalar::Float64(30.0));
     }
 
     // ---- Series comparison operator tests ----
@@ -24200,15 +24334,63 @@ mod tests {
         .unwrap();
 
         let result = df.groupby(&["grp"]).unwrap().sum().unwrap();
+        // sort=True (default) gives sorted key order: "False" < "True"
         assert_eq!(
             result.index().labels(),
             &[
+                IndexLabel::Utf8("False".to_owned()),
                 IndexLabel::Utf8("True".to_owned()),
-                IndexLabel::Utf8("False".to_owned())
             ]
         );
-        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(4.0));
-        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_sort_false_preserves_first_seen_order() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // sort=False: groups in first-seen order (b first, then a)
+        let unsorted = df.groupby_full(&["grp"], true, false).unwrap().sum().unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &[IndexLabel::Utf8("b".into()), IndexLabel::Utf8("a".into())]
+        );
+        assert_eq!(unsorted.columns["val"].values()[0], Scalar::Float64(40.0)); // b: 10+30
+        assert_eq!(unsorted.columns["val"].values()[1], Scalar::Float64(60.0)); // a: 20+40
+
+        // sort=True (default): groups sorted by key
+        let sorted = df.groupby(&["grp"]).unwrap().sum().unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(sorted.columns["val"].values()[0], Scalar::Float64(60.0)); // a: 20+40
+        assert_eq!(sorted.columns["val"].values()[1], Scalar::Float64(40.0)); // b: 10+30
     }
 
     #[test]

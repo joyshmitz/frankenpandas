@@ -14146,6 +14146,11 @@ impl DataFrameGroupBy<'_> {
             match val {
                 Scalar::Int64(v) => IndexLabel::Int64(*v),
                 Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+                Scalar::Bool(v) => IndexLabel::Utf8(if *v {
+                    "True".to_owned()
+                } else {
+                    "False".to_owned()
+                }),
                 other => IndexLabel::Utf8(format!("{other:?}")),
             }
         } else {
@@ -22616,6 +22621,40 @@ mod tests {
         // Group "a": 1 non-null (NaN doesn't count); Group "b": 1
         assert_eq!(result.columns["val"].values()[0], Scalar::Int64(1)); // count skips NaN
         assert_eq!(result.columns["val"].values()[1], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn dataframe_groupby_bool_key_labels_are_pandas_style() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().sum().unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("True".to_owned()),
+                IndexLabel::Utf8("False".to_owned())
+            ]
+        );
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(2.0));
     }
 
     #[test]

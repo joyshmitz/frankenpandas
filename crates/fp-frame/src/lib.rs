@@ -1160,6 +1160,24 @@ impl Series {
         self.loc_bool(mask)
     }
 
+    /// Label-based boolean Series mask selection with index alignment.
+    ///
+    /// Matches `series.loc[bool_series]` in pandas, which is the most common
+    /// usage pattern (e.g., `s.loc[s > 5]`). The mask Series is aligned with
+    /// this Series by index before filtering. Missing mask values are treated
+    /// as `False`. This is an alias for `Series::filter`.
+    pub fn loc_bool_series(&self, mask: &Self) -> Result<Self, FrameError> {
+        self.filter(mask)
+    }
+
+    /// Position-based boolean Series mask selection with index alignment.
+    ///
+    /// Matches `series.iloc[bool_series]` in pandas. Semantically identical
+    /// to `loc_bool_series` (delegates to `filter`).
+    pub fn iloc_bool_series(&self, mask: &Self) -> Result<Self, FrameError> {
+        self.filter(mask)
+    }
+
     /// Label-based slice selection (inclusive on both ends).
     ///
     /// Matches `series.loc[start:stop]` in pandas. Both `start` and `stop` are
@@ -9050,6 +9068,24 @@ impl DataFrame {
     /// `loc_bool` for DataFrames (the mask selects rows by position either way).
     pub fn iloc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
         self.loc_bool(mask)
+    }
+
+    /// Boolean Series mask row selection with index alignment.
+    ///
+    /// Matches `df.loc[bool_series]` in pandas, the most common usage pattern
+    /// (e.g., `df.loc[df['col'] > 5]`). The mask Series is aligned with the
+    /// DataFrame by index before filtering. Missing mask values are treated
+    /// as `False`. This is an alias for `DataFrame::filter_rows`.
+    pub fn loc_bool_series(&self, mask: &Series) -> Result<Self, FrameError> {
+        self.filter_rows(mask)
+    }
+
+    /// Position-based boolean Series mask row selection with index alignment.
+    ///
+    /// Matches `df.iloc[bool_series]` in pandas. Semantically identical to
+    /// `loc_bool_series` (delegates to `filter_rows`).
+    pub fn iloc_bool_series(&self, mask: &Series) -> Result<Self, FrameError> {
+        self.filter_rows(mask)
     }
 
     /// Label-based slice row selection (inclusive on both ends).
@@ -19026,6 +19062,98 @@ mod tests {
         let out = s.iloc_bool(&[false, true, false]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out.column().values(), &[Scalar::Int64(2)]);
+    }
+
+    // -------- Series loc_bool_series / iloc_bool_series tests --------
+
+    #[test]
+    fn series_loc_bool_series_with_aligned_mask() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let out = s.loc_bool_series(&mask).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out.column().values(), &[Scalar::Int64(10), Scalar::Int64(30)]);
+    }
+
+    #[test]
+    fn series_loc_bool_series_partial_mask_alignment() {
+        // Mask has different labels - alignment should handle mismatches
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        // Mask has "a" and "c" but not "b" - "b" should be treated as False
+        let mask = Series::from_values(
+            "mask",
+            vec![IndexLabel::from("a"), IndexLabel::from("c")],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let out = s.loc_bool_series(&mask).unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    // -------- DataFrame loc_bool_series / iloc_bool_series tests --------
+
+    #[test]
+    fn dataframe_loc_bool_series_filters_rows() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let out = df.loc_bool_series(&mask).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     // -------- Series loc_slice / iloc_slice tests --------

@@ -10212,6 +10212,33 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), new_columns, new_order)
     }
 
+    /// Assign new columns computed from the DataFrame via closures.
+    ///
+    /// Matches `df.assign(col=lambda df: ...)`. Each closure receives a
+    /// reference to the *current* DataFrame (including previously-assigned
+    /// columns in this call) and must return a `Column` of the correct length.
+    pub fn assign_fn(
+        &self,
+        assignments: Vec<(&str, Box<dyn Fn(&DataFrame) -> Result<Column, FrameError>>)>,
+    ) -> Result<Self, FrameError> {
+        let mut current = self.clone();
+        for (name, func) in assignments {
+            let col = func(&current)?;
+            if col.len() != current.len() {
+                return Err(FrameError::LengthMismatch {
+                    index_len: current.len(),
+                    column_len: col.len(),
+                });
+            }
+            let name_str = name.to_owned();
+            if !current.columns.contains_key(&name_str) {
+                current.column_order.push(name_str.clone());
+            }
+            current.columns.insert(name_str, col);
+        }
+        Ok(current)
+    }
+
     /// Apply a transformation function to the DataFrame.
     ///
     /// Matches `df.pipe(func)`. The function receives a reference to `self`
@@ -10660,6 +10687,32 @@ impl DataFrame {
         for col_name in &self.column_order {
             let col = &self.columns[col_name];
             let new_vals: Vec<Scalar> = col.values().iter().map(&func).collect();
+            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+        }
+        Ok(Self {
+            columns: result_cols,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+        })
+    }
+
+    /// Apply a function element-wise, skipping missing values.
+    ///
+    /// Matches `df.applymap(func, na_action='ignore')`. Missing values
+    /// (Null/NaN) are passed through unchanged; `func` is only called on
+    /// non-missing values.
+    pub fn applymap_na_action<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        let mut result_cols = BTreeMap::new();
+        for col_name in &self.column_order {
+            let col = &self.columns[col_name];
+            let new_vals: Vec<Scalar> = col
+                .values()
+                .iter()
+                .map(|v| if v.is_missing() { v.clone() } else { func(v) })
+                .collect();
             result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
         }
         Ok(Self {
@@ -14521,6 +14574,37 @@ impl DataFrame {
                 .iter()
                 .map(|v| Scalar::Bool(values.contains(v)))
                 .collect();
+            new_cols.insert(name.clone(), Column::from_values(bools)?);
+        }
+        Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
+    }
+
+    /// Element-wise membership test with per-column value sets.
+    ///
+    /// Matches `df.isin({'col': [v1, v2], ...})`. Each column is tested
+    /// against its own set of allowed values. Columns not in `per_column`
+    /// get all-False.
+    pub fn isin_dict(
+        &self,
+        per_column: &BTreeMap<String, Vec<Scalar>>,
+    ) -> Result<Self, FrameError> {
+        let mut new_cols = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            let bools: Vec<Scalar> = if let Some(allowed) = per_column.get(name) {
+                col.values()
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Bool(allowed.iter().any(|a| a.is_missing()))
+                        } else {
+                            Scalar::Bool(allowed.contains(v))
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![Scalar::Bool(false); col.len()]
+            };
             new_cols.insert(name.clone(), Column::from_values(bools)?);
         }
         Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
@@ -34998,5 +35082,202 @@ mod tests {
         assert_eq!(result.columns["y"].values()[0], Scalar::Float64(2.0));
         assert_eq!(result.columns["y"].values()[1], Scalar::Float64(6.0));
         assert_eq!(result.columns["y"].values()[2], Scalar::Float64(24.0));
+    }
+
+    // ── isin_dict ──────────────────────────────────────────────
+
+    #[test]
+    fn dataframe_isin_dict_per_column_values() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![1_i64.into(), 2_i64.into(), 3_i64.into()]),
+                ("b", vec!["x".into(), "y".into(), "z".into()]),
+            ],
+        )
+        .unwrap();
+
+        let mut per_column = BTreeMap::new();
+        per_column.insert("a".to_string(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        per_column.insert("b".to_string(), vec![Scalar::Utf8("y".into())]);
+
+        let result = df.isin_dict(&per_column).unwrap();
+        assert_eq!(
+            result.columns["a"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            result.columns["b"].values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn dataframe_isin_dict_missing_column_all_false() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![1_i64.into(), 2_i64.into()]),
+                ("b", vec![10_i64.into(), 20_i64.into()]),
+            ],
+        )
+        .unwrap();
+
+        let mut per_column = BTreeMap::new();
+        per_column.insert("a".to_string(), vec![Scalar::Int64(1)]);
+        // "b" not in per_column → all False
+
+        let result = df.isin_dict(&per_column).unwrap();
+        assert_eq!(
+            result.columns["b"].values(),
+            &[Scalar::Bool(false), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn dataframe_isin_dict_with_nan() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![1_i64.into(), Scalar::Null(NullKind::NaN), 3_i64.into()])],
+        )
+        .unwrap();
+
+        let mut per_column = BTreeMap::new();
+        per_column.insert(
+            "a".to_string(),
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        );
+
+        let result = df.isin_dict(&per_column).unwrap();
+        assert_eq!(
+            result.columns["a"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    // ── applymap_na_action ─────────────────────────────────────
+
+    #[test]
+    fn dataframe_applymap_na_action_skips_missing() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+            )],
+        )
+        .unwrap();
+
+        let result = df
+            .applymap_na_action(|v| {
+                let f = v.to_f64().unwrap();
+                Scalar::Float64(f * 10.0)
+            })
+            .unwrap();
+
+        assert_eq!(result.columns["x"].values()[0], Scalar::Float64(10.0));
+        assert!(result.columns["x"].values()[1].is_missing());
+        assert_eq!(result.columns["x"].values()[2], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_applymap_na_action_preserves_non_missing() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![1_i64.into(), 2_i64.into()]),
+                ("b", vec![10_i64.into(), 20_i64.into()]),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .applymap_na_action(|v| {
+                let f = v.to_f64().unwrap();
+                Scalar::Float64(f + 100.0)
+            })
+            .unwrap();
+
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(101.0));
+        assert_eq!(result.columns["b"].values()[1], Scalar::Float64(120.0));
+    }
+
+    // ── assign_fn ──────────────────────────────────────────────
+
+    #[test]
+    fn dataframe_assign_fn_computed_column() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)])],
+        )
+        .unwrap();
+
+        let result = df
+            .assign_fn(vec![(
+                "x_doubled",
+                Box::new(|df: &DataFrame| {
+                    let x_col = &df.columns["x"];
+                    let vals: Vec<Scalar> = x_col
+                        .values()
+                        .iter()
+                        .map(|v| Scalar::Float64(v.to_f64().unwrap() * 2.0))
+                        .collect();
+                    Ok(Column::from_values(vals)?)
+                }),
+            )])
+            .unwrap();
+
+        assert_eq!(result.column_names().len(), 2);
+        assert_eq!(
+            result.columns["x_doubled"].values()[0],
+            Scalar::Float64(2.0)
+        );
+        assert_eq!(
+            result.columns["x_doubled"].values()[2],
+            Scalar::Float64(6.0)
+        );
+    }
+
+    #[test]
+    fn dataframe_assign_fn_chained_sees_prior() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)])],
+        )
+        .unwrap();
+
+        let result = df
+            .assign_fn(vec![
+                (
+                    "b",
+                    Box::new(|df: &DataFrame| {
+                        let vals: Vec<Scalar> = df.columns["a"]
+                            .values()
+                            .iter()
+                            .map(|v| Scalar::Float64(v.to_f64().unwrap() + 1.0))
+                            .collect();
+                        Ok(Column::from_values(vals)?)
+                    }) as Box<dyn Fn(&DataFrame) -> Result<Column, FrameError>>,
+                ),
+                (
+                    "c",
+                    Box::new(|df: &DataFrame| {
+                        // c depends on b which was just assigned
+                        let vals: Vec<Scalar> = df.columns["b"]
+                            .values()
+                            .iter()
+                            .map(|v| Scalar::Float64(v.to_f64().unwrap() * 100.0))
+                            .collect();
+                        Ok(Column::from_values(vals)?)
+                    }),
+                ),
+            ])
+            .unwrap();
+
+        assert_eq!(result.column_names().len(), 3);
+        // a=[10,20], b=[11,21], c=[1100,2100]
+        assert_eq!(result.columns["b"].values()[0], Scalar::Float64(11.0));
+        assert_eq!(result.columns["c"].values()[0], Scalar::Float64(1100.0));
+        assert_eq!(result.columns["c"].values()[1], Scalar::Float64(2100.0));
     }
 }

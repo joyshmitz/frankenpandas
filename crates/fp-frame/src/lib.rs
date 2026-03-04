@@ -10609,7 +10609,7 @@ impl DataFrame {
                 let unique = freq_map.len();
                 let (top, freq) = freq_map
                     .iter()
-                    .max_by_key(|(_, &c)| c)
+                    .max_by_key(|(_, c)| *c)
                     .map(|(k, &c)| (k.clone(), c))
                     .unwrap_or_default();
 

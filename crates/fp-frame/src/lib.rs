@@ -10865,6 +10865,45 @@ impl DataFrame {
         self.applymap(func)
     }
 
+    /// Create a pivot table applying multiple aggregation functions.
+    ///
+    /// Matches `df.pivot_table(values, index, columns, aggfunc=['sum','mean'])`.
+    /// Returns a DataFrame with columns named `"{col}_{func}"` for each
+    /// combination of pivot column value and aggregation function.
+    pub fn pivot_table_multi_agg(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfuncs: &[&str],
+    ) -> Result<Self, FrameError> {
+        if aggfuncs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "pivot_table_multi_agg: at least one aggfunc required".into(),
+            ));
+        }
+
+        // Build individual pivot tables and merge their columns
+        let first = self.pivot_table(values, index_col, columns_col, aggfuncs[0])?;
+        let mut combined_cols = BTreeMap::new();
+        let mut combined_order = Vec::new();
+
+        for &func in aggfuncs {
+            let pt = self.pivot_table(values, index_col, columns_col, func)?;
+            for col_name in &pt.column_order {
+                let new_name = format!("{col_name}_{func}");
+                combined_cols.insert(new_name.clone(), pt.columns[col_name].clone());
+                combined_order.push(new_name);
+            }
+        }
+
+        Ok(Self {
+            columns: combined_cols,
+            column_order: combined_order,
+            index: first.index.clone(),
+        })
+    }
+
     /// Compute the Pearson correlation matrix between numeric columns.
     pub fn corr(&self) -> Result<Self, FrameError> {
         self.pairwise_stat_min("corr", 1)
@@ -35718,5 +35757,73 @@ mod tests {
 
         let result = df.to_csv_options(',', false, "", Some(&["missing"]));
         assert!(result.is_err());
+    }
+
+    // ── value_counts_bins ──────────────────────────────────────
+
+    #[test]
+    fn series_value_counts_bins_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.value_counts_bins(3).unwrap();
+        // 3 bins over range [1, 10], should have 3 interval entries
+        assert_eq!(result.len(), 3);
+    }
+
+    // ── pivot_table_multi_agg ──────────────────────────────────
+
+    #[test]
+    fn dataframe_pivot_table_multi_agg() {
+        let df = DataFrame::from_dict(
+            &["row", "col", "val"],
+            vec![
+                (
+                    "row",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "col",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .pivot_table_multi_agg("val", "row", "col", &["sum", "mean"])
+            .unwrap();
+
+        // Should have columns: x_sum, x_mean
+        assert!(result.columns.contains_key("x_sum"));
+        assert!(result.columns.contains_key("x_mean"));
+        // Row "a": sum=30, mean=15
+        assert_eq!(result.columns["x_sum"].values()[0], Scalar::Float64(30.0));
+        assert_eq!(result.columns["x_mean"].values()[0], Scalar::Float64(15.0));
+        // Row "b": sum=30, mean=30
+        assert_eq!(result.columns["x_sum"].values()[1], Scalar::Float64(30.0));
+        assert_eq!(result.columns["x_mean"].values()[1], Scalar::Float64(30.0));
     }
 }

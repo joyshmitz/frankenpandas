@@ -1485,6 +1485,85 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Interpolate missing values using the specified method.
+    ///
+    /// Matches `s.interpolate(method='linear'|'nearest'|'zero')`.
+    /// - `linear`: linear interpolation between bounding valid values (default)
+    /// - `nearest`: use the nearest valid value
+    /// - `zero`: use the left bounding value (step function / zero-order hold)
+    pub fn interpolate_method(&self, method: &str) -> Result<Self, FrameError> {
+        match method {
+            "linear" => self.interpolate(),
+            "nearest" => {
+                let vals = self.column.values();
+                let n = vals.len();
+                let mut out: Vec<Scalar> = vals.to_vec();
+
+                let mut i = 0;
+                while i < n {
+                    if out[i].is_missing() {
+                        let gap_start = i;
+                        let left = if gap_start > 0 {
+                            out[gap_start - 1].to_f64().ok()
+                        } else {
+                            None
+                        };
+
+                        let mut j = i;
+                        while j < n && out[j].is_missing() {
+                            j += 1;
+                        }
+                        let right = if j < n { out[j].to_f64().ok() } else { None };
+
+                        for (offset, slot) in out[gap_start..j].iter_mut().enumerate() {
+                            let dist_left = offset + 1;
+                            let dist_right = j - gap_start - offset;
+                            *slot = match (left, right) {
+                                (Some(lv), Some(rv)) => {
+                                    if dist_left <= dist_right {
+                                        Scalar::Float64(lv)
+                                    } else {
+                                        Scalar::Float64(rv)
+                                    }
+                                }
+                                (Some(lv), None) => Scalar::Float64(lv),
+                                (None, Some(rv)) => Scalar::Float64(rv),
+                                (None, None) => Scalar::Null(NullKind::NaN),
+                            };
+                        }
+
+                        i = j + 1;
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+            }
+            "zero" | "pad" => {
+                let vals = self.column.values();
+                let n = vals.len();
+                let mut out: Vec<Scalar> = vals.to_vec();
+
+                let mut last_valid: Option<f64> = None;
+                for i in 0..n {
+                    if out[i].is_missing() {
+                        if let Some(lv) = last_valid {
+                            out[i] = Scalar::Float64(lv);
+                        }
+                    } else if let Ok(v) = out[i].to_f64() {
+                        last_valid = Some(v);
+                    }
+                }
+
+                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+            }
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported interpolation method: '{other}'"
+            ))),
+        }
+    }
+
     /// Remove entries with missing values.
     ///
     /// Matches `pd.Series.dropna()`.
@@ -10400,6 +10479,110 @@ impl DataFrame {
         })
     }
 
+    /// Create a pivot table with optional margin totals.
+    ///
+    /// Matches `df.pivot_table(values, index, columns, aggfunc, margins=True)`.
+    /// When `margins` is `true`, appends an "All" row and "All" column with
+    /// totals computed using the same aggregation function.
+    pub fn pivot_table_with_margins(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        margins: bool,
+    ) -> Result<Self, FrameError> {
+        let base = self.pivot_table(values, index_col, columns_col, aggfunc)?;
+        if !margins {
+            return Ok(base);
+        }
+
+        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
+            "sum" => |vals: &[f64]| vals.iter().sum(),
+            "mean" => |vals: &[f64]| {
+                if vals.is_empty() {
+                    f64::NAN
+                } else {
+                    vals.iter().sum::<f64>() / vals.len() as f64
+                }
+            },
+            "count" => |vals: &[f64]| vals.len() as f64,
+            "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
+            "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "pivot_table aggfunc '{aggfunc}' not supported for margins"
+                )));
+            }
+        };
+
+        let n_rows = base.len();
+        let col_names = base.column_order.clone();
+
+        // Add "All" column: row-wise aggregation across all pivot columns
+        let mut all_col_vals = Vec::with_capacity(n_rows);
+        for row in 0..n_rows {
+            let mut row_vals = Vec::new();
+            for name in &col_names {
+                if let Some(col) = base.columns.get(name) {
+                    if let Ok(v) = col.values()[row].to_f64() {
+                        row_vals.push(v);
+                    }
+                }
+            }
+            if row_vals.is_empty() {
+                all_col_vals.push(Scalar::Null(NullKind::NaN));
+            } else {
+                all_col_vals.push(Scalar::Float64(agg_fn(&row_vals)));
+            }
+        }
+
+        // Add "All" row: column-wise aggregation across all index rows
+        let mut new_cols = BTreeMap::new();
+        let mut new_col_order = col_names.clone();
+        let mut all_row_vals_for_all_col = Vec::new();
+
+        for name in &col_names {
+            let col = &base.columns[name];
+            let mut col_vals: Vec<Scalar> = col.values().to_vec();
+            // Compute margin for this column
+            let nums: Vec<f64> = col
+                .values()
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .collect();
+            let margin = if nums.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(agg_fn(&nums))
+            };
+            if let Ok(v) = margin.to_f64() {
+                all_row_vals_for_all_col.push(v);
+            }
+            col_vals.push(margin);
+            new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
+        }
+
+        // "All" column data including margin-of-margins
+        all_col_vals.push(if all_row_vals_for_all_col.is_empty() {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(agg_fn(&all_row_vals_for_all_col))
+        });
+        new_cols.insert("All".to_owned(), Column::new(DType::Float64, all_col_vals)?);
+        new_col_order.push("All".to_owned());
+
+        // Build new index with "All" label appended
+        let mut new_labels = base.index.labels().to_vec();
+        new_labels.push(IndexLabel::Utf8("All".to_owned()));
+
+        Ok(Self {
+            columns: new_cols,
+            column_order: new_col_order,
+            index: Index::new(new_labels),
+        })
+    }
+
     /// Aggregate using one or more operations over the specified axis.
     ///
     /// `funcs`: mapping of column_name → list of aggregation function names.
@@ -11087,8 +11270,8 @@ impl DataFrame {
     ) -> Result<Self, FrameError> {
         let reindexed = self.reindex(new_labels)?;
         match method {
-            "ffill" | "pad" => reindexed.ffill(),
-            "bfill" | "backfill" => reindexed.bfill(),
+            "ffill" | "pad" => reindexed.ffill(None),
+            "bfill" | "backfill" => reindexed.bfill(None),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported reindex method: '{other}'"
             ))),
@@ -13727,6 +13910,13 @@ impl DataFrame {
     /// Matches `pd.DataFrame.interpolate()`. Non-numeric columns are preserved.
     pub fn interpolate(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.interpolate())
+    }
+
+    /// Interpolate missing values per numeric column with the specified method.
+    ///
+    /// Matches `df.interpolate(method='linear'|'nearest'|'zero')`.
+    pub fn interpolate_method(&self, method: &str) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.interpolate_method(method))
     }
 
     /// Convert dtypes to best-possible types.
@@ -23736,6 +23926,107 @@ mod tests {
         assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(10.0));
     }
 
+    #[test]
+    fn dataframe_pivot_table_with_margins_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pt = df
+            .pivot_table_with_margins("val", "row", "col", "sum", true)
+            .unwrap();
+
+        // Should have 3 rows (r1, r2, All) and 3 columns (c1, c2, All)
+        assert_eq!(pt.len(), 3);
+        assert_eq!(pt.column_names().len(), 3);
+
+        // r1: c1=1, c2=2, All=3
+        assert_eq!(pt.columns["c1"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pt.columns["c2"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pt.columns["All"].values()[0], Scalar::Float64(3.0));
+
+        // r2: c1=3, c2=4, All=7
+        assert_eq!(pt.columns["c1"].values()[1], Scalar::Float64(3.0));
+        assert_eq!(pt.columns["c2"].values()[1], Scalar::Float64(4.0));
+        assert_eq!(pt.columns["All"].values()[1], Scalar::Float64(7.0));
+
+        // All row: c1=4, c2=6, All=10
+        assert_eq!(pt.columns["c1"].values()[2], Scalar::Float64(4.0));
+        assert_eq!(pt.columns["c2"].values()[2], Scalar::Float64(6.0));
+        assert_eq!(pt.columns["All"].values()[2], Scalar::Float64(10.0));
+
+        // Index should end with "All"
+        assert_eq!(
+            pt.index().labels()[2],
+            IndexLabel::Utf8("All".to_owned())
+        );
+    }
+
+    #[test]
+    fn dataframe_pivot_table_margins_false_matches_base() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("r1".into()), Scalar::Utf8("r2".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("c1".into()), Scalar::Utf8("c1".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let base = df.pivot_table("val", "row", "col", "sum").unwrap();
+        let no_margins = df
+            .pivot_table_with_margins("val", "row", "col", "sum", false)
+            .unwrap();
+        assert_eq!(base.len(), no_margins.len());
+        assert_eq!(base.column_names(), no_margins.column_names());
+    }
+
     // ── agg tests ──
 
     #[test]
@@ -28515,6 +28806,72 @@ mod tests {
         let v4 = result.values()[4].to_f64().unwrap();
         assert!((v3 - 3.0).abs() < 1e-10);
         assert!((v4 - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_interpolate_nearest() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.interpolate_method("nearest").unwrap();
+        // dist_left=1, dist_right=3 → left (0.0)
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        // dist_left=2, dist_right=2 → left (tie goes to left)
+        assert_eq!(result.values()[2], Scalar::Float64(0.0));
+        // dist_left=3, dist_right=1 → right (10.0)
+        assert_eq!(result.values()[3], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn series_interpolate_zero_hold() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.interpolate_method("zero").unwrap();
+        // zero-order hold: use last valid value
+        assert_eq!(result.values()[1], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_interpolate_method_linear_matches_default() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let default_interp = s.interpolate().unwrap();
+        let linear_interp = s.interpolate_method("linear").unwrap();
+        assert_eq!(default_interp.values(), linear_interp.values());
+    }
+
+    #[test]
+    fn series_interpolate_method_invalid_rejected() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap();
+        assert!(s.interpolate_method("polynomial").is_err());
     }
 
     // ── argsort / argmin / argmax / take / searchsorted / factorize ──

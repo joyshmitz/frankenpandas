@@ -11688,6 +11688,86 @@ impl DataFrame {
         })
     }
 
+    /// Combine two DataFrames element-wise using a binary function.
+    ///
+    /// Matches `df.combine(other, func)`. Aligns on both index and columns
+    /// (union), filling missing positions with NaN before applying `func`.
+    pub fn combine<F>(&self, other: &Self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Scalar, &Scalar) -> Scalar,
+    {
+        let fill = Scalar::Null(NullKind::NaN);
+
+        // Union of index labels
+        let mut seen = std::collections::HashSet::new();
+        let mut union_labels = Vec::new();
+        for label in self.index.labels() {
+            if seen.insert(label.clone()) {
+                union_labels.push(label.clone());
+            }
+        }
+        for label in other.index.labels() {
+            if seen.insert(label.clone()) {
+                union_labels.push(label.clone());
+            }
+        }
+
+        // Union of columns
+        let mut col_order = Vec::new();
+        let mut col_set = std::collections::HashSet::new();
+        for name in &self.column_order {
+            if col_set.insert(name.clone()) {
+                col_order.push(name.clone());
+            }
+        }
+        for name in &other.column_order {
+            if col_set.insert(name.clone()) {
+                col_order.push(name.clone());
+            }
+        }
+
+        // Index position lookups
+        let self_idx: BTreeMap<&IndexLabel, usize> = self
+            .index
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l, i))
+            .collect();
+        let other_idx: BTreeMap<&IndexLabel, usize> = other
+            .index
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l, i))
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        for col_name in &col_order {
+            let self_col = self.columns.get(col_name);
+            let other_col = other.columns.get(col_name);
+            let vals: Vec<Scalar> = union_labels
+                .iter()
+                .map(|label| {
+                    let left = self_col
+                        .and_then(|c| self_idx.get(label).map(|&i| &c.values()[i]))
+                        .unwrap_or(&fill);
+                    let right = other_col
+                        .and_then(|c| other_idx.get(label).map(|&i| &c.values()[i]))
+                        .unwrap_or(&fill);
+                    func(left, right)
+                })
+                .collect();
+            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+        }
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(union_labels),
+        })
+    }
+
     /// Create a rolling window view over all numeric columns.
     ///
     /// Matches `df.rolling(window)` semantics.
@@ -35923,5 +36003,61 @@ mod tests {
             result.values(),
             &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
         );
+    }
+
+    // ── DataFrame.combine ──────────────────────────────────────
+
+    #[test]
+    fn dataframe_combine_element_wise() {
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
+
+        let df2 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)])],
+        )
+        .unwrap();
+
+        let result = df1
+            .combine(&df2, |left, right| {
+                match (left.to_f64(), right.to_f64()) {
+                    (Ok(l), Ok(r)) => Scalar::Float64(l + r),
+                    _ => Scalar::Null(NullKind::NaN),
+                }
+            })
+            .unwrap();
+
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(11.0));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(22.0));
+    }
+
+    #[test]
+    fn dataframe_combine_min() {
+        let df1 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(5.0), Scalar::Float64(1.0)])],
+        )
+        .unwrap();
+
+        let df2 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(3.0), Scalar::Float64(7.0)])],
+        )
+        .unwrap();
+
+        let result = df1
+            .combine(&df2, |left, right| {
+                match (left.to_f64(), right.to_f64()) {
+                    (Ok(l), Ok(r)) => Scalar::Float64(l.min(r)),
+                    _ => Scalar::Null(NullKind::NaN),
+                }
+            })
+            .unwrap();
+
+        assert_eq!(result.columns["x"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(result.columns["x"].values()[1], Scalar::Float64(1.0));
     }
 }

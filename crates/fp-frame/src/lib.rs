@@ -3426,17 +3426,17 @@ impl Series {
                 "kurt" | "kurtosis" => Scalar::Float64(self.kurt()?),
                 "nunique" => Scalar::Int64(self.nunique() as i64),
                 "first" => {
-                    if self.len() > 0 {
-                        self.column.values()[0].clone()
-                    } else {
+                    if self.is_empty() {
                         Scalar::Null(NullKind::NaN)
+                    } else {
+                        self.column.values()[0].clone()
                     }
                 }
                 "last" => {
-                    if self.len() > 0 {
-                        self.column.values()[self.len() - 1].clone()
-                    } else {
+                    if self.is_empty() {
                         Scalar::Null(NullKind::NaN)
+                    } else {
+                        self.column.values()[self.len() - 1].clone()
                     }
                 }
                 other => {
@@ -37427,7 +37427,8 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result.column().values()[0], Scalar::Float64(6.0)); // sum
         assert_eq!(result.column().values()[1], Scalar::Float64(2.0)); // mean
-        assert_eq!(result.column().values()[2], Scalar::Int64(3));     // count
+        // count is Int64 but Column::from_values promotes mixed types to Float64
+        assert_eq!(result.column().values()[2], Scalar::Float64(3.0)); // count
     }
 
     #[test]

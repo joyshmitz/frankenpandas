@@ -5170,6 +5170,43 @@ impl Rolling<'_> {
             self.series.name(),
         )
     }
+
+    /// Aggregate with multiple functions, returning a DataFrame.
+    ///
+    /// Matches `series.rolling(window).agg(['sum', 'mean'])`. Returns a
+    /// DataFrame with one column per function, same index as the input.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &func in funcs {
+            let result = match func {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                "median" => self.median()?,
+                "count" => self.count()?,
+                "skew" => self.skew()?,
+                "kurt" => self.kurt()?,
+                _ => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "rolling.agg: unsupported function '{func}'"
+                    )));
+                }
+            };
+            result_cols.insert(func.to_string(), result.column().clone());
+            col_order.push(func.to_string());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.series.index().clone(),
+        })
+    }
 }
 
 /// Expanding window aggregation over a Series.
@@ -8000,6 +8037,37 @@ impl DatetimeAccessor<'_> {
                     _ => 0,
                 };
                 Scalar::Int64(h * 3600 + mi * 60 + sec)
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Convert period-like strings to full timestamp strings.
+    ///
+    /// Matches `pd.Series.dt.to_timestamp()`. For date-only strings ("YYYY-MM-DD"),
+    /// appends "00:00:00" to produce a full datetime. Month periods ("YYYY-MM")
+    /// become "YYYY-MM-01 00:00:00". Year periods ("YYYY") become "YYYY-01-01 00:00:00".
+    pub fn to_timestamp(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                let trimmed = s.trim();
+                // Already a full datetime?
+                if trimmed.contains('T') || trimmed.contains(' ') {
+                    return Scalar::Utf8(trimmed.to_string());
+                }
+                let parts: Vec<&str> = trimmed.split('-').collect();
+                match parts.len() {
+                    3 => Scalar::Utf8(format!("{trimmed} 00:00:00")),
+                    2 => Scalar::Utf8(format!("{trimmed}-01 00:00:00")),
+                    1 => {
+                        if parts[0].parse::<i64>().is_ok() {
+                            Scalar::Utf8(format!("{}-01-01 00:00:00", parts[0]))
+                        } else {
+                            Scalar::Null(NullKind::NaN)
+                        }
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                }
             },
             self.series.name(),
         )
@@ -11692,6 +11760,36 @@ impl DataFrame {
             records.push(row);
         }
         records
+    }
+
+    /// Convert numeric columns to a 2D Vec<Vec<f64>>.
+    ///
+    /// Matches `df.to_numpy()`. Rows are outer, columns are inner.
+    /// Non-numeric values become `f64::NAN`.
+    pub fn to_numpy_2d(&self) -> Vec<Vec<f64>> {
+        let n = self.len();
+        let mut result = Vec::with_capacity(n);
+        let num_cols: Vec<&str> = self
+            .column_order
+            .iter()
+            .filter(|c| {
+                let dt = self.columns[*c].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .map(|c| c.as_str())
+            .collect();
+
+        for i in 0..n {
+            let row: Vec<f64> = num_cols
+                .iter()
+                .map(|&col_name| {
+                    let val = &self.columns[col_name].values()[i];
+                    val.to_f64().unwrap_or(f64::NAN)
+                })
+                .collect();
+            result.push(row);
+        }
+        result
     }
 
     /// Iterate over columns as `(column_name, Series)` pairs.
@@ -39593,5 +39691,68 @@ mod tests {
         // Top by (a desc, b desc): (3,30) then (3,10)
         assert_eq!(result.columns["a"].values()[0], Scalar::Int64(3));
         assert_eq!(result.columns["b"].values()[0], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn test_rolling_agg_multi() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(2, None).agg(&["sum", "mean"]).unwrap();
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"sum".to_string()));
+        assert!(col_names.contains(&"mean".to_string()));
+        assert_eq!(result.len(), 4); // same length as input
+    }
+
+    #[test]
+    fn test_to_numpy_2d() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        )
+        .unwrap();
+        let arr = df.to_numpy_2d();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], vec![1.0, 3.0]);
+        assert_eq!(arr[1], vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn test_dt_to_timestamp() {
+        let s = Series::from_values(
+            "periods",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01".to_string()),
+                Scalar::Utf8("2023-06-15".to_string()),
+                Scalar::Utf8("2023".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().to_timestamp().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2023-01-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2023-06-15 00:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("2023-01-01 00:00:00".to_string())
+        );
     }
 }

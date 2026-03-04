@@ -8621,6 +8621,129 @@ impl DatetimeAccessor<'_> {
             _ => Scalar::Null(NullKind::NaN),
         }
     }
+
+    /// Localize tz-naive datetimes to a timezone.
+    ///
+    /// Matches `pd.Series.dt.tz_localize(tz)`. Appends timezone info to
+    /// each datetime string. Supported zones: "UTC", fixed offsets like
+    /// "+05:00", "-08:00", or IANA-style names (stored as metadata only).
+    pub fn tz_localize(&self, tz: &str) -> Result<Series, FrameError> {
+        let suffix = tz_to_suffix(tz);
+        self.extract_component(
+            |s| {
+                let trimmed = strip_tz_suffix(s);
+                Scalar::Utf8(format!("{trimmed}{suffix}"))
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Convert timezone-aware datetimes to a different timezone.
+    ///
+    /// Matches `pd.Series.dt.tz_convert(tz)`. Adjusts the UTC offset and
+    /// replaces the timezone suffix. For simplicity, converts through UTC:
+    /// strips current tz info, applies offset difference, sets new tz.
+    pub fn tz_convert(&self, tz: &str) -> Result<Series, FrameError> {
+        let target_offset_mins = tz_offset_minutes(tz);
+        let new_suffix = tz_to_suffix(tz);
+        self.extract_component(
+            |s| {
+                let (base, src_offset) = parse_datetime_with_tz(s);
+                if base.is_empty() {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                // Shift by (target - source) offset
+                let shift_mins = target_offset_mins - src_offset;
+                let shifted = shift_datetime_by_minutes(&base, shift_mins);
+                Scalar::Utf8(format!("{shifted}{new_suffix}"))
+            },
+            self.series.name(),
+        )
+    }
+}
+
+/// Parse a timezone string to an offset suffix.
+fn tz_to_suffix(tz: &str) -> String {
+    match tz {
+        "UTC" => "+00:00".to_string(),
+        s if s.starts_with('+') || s.starts_with('-') => s.to_string(),
+        _ => format!("[{tz}]"), // IANA-style: stored as metadata
+    }
+}
+
+/// Get UTC offset in minutes for a timezone string.
+fn tz_offset_minutes(tz: &str) -> i32 {
+    match tz {
+        "UTC" => 0,
+        s if (s.starts_with('+') || s.starts_with('-')) && s.len() >= 5 => {
+            let sign = if s.starts_with('-') { -1 } else { 1 };
+            let parts: Vec<&str> = s[1..].split(':').collect();
+            let hours: i32 = parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
+            let mins: i32 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+            sign * (hours * 60 + mins)
+        }
+        _ => 0, // Unknown timezone treated as UTC
+    }
+}
+
+/// Strip timezone suffix from a datetime string.
+fn strip_tz_suffix(s: &str) -> &str {
+    // Strip +HH:MM or -HH:MM or [TZ] suffix
+    if s.len() > 6 {
+        let tail = &s[s.len() - 6..];
+        if (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':') {
+            return &s[..s.len() - 6];
+        }
+    }
+    if let Some(bracket_start) = s.rfind('[') {
+        return &s[..bracket_start];
+    }
+    s
+}
+
+/// Parse a datetime string with tz info, returning (base, offset_minutes).
+fn parse_datetime_with_tz(s: &str) -> (String, i32) {
+    let len = s.len();
+    if len > 6 {
+        let tail = &s[len - 6..];
+        if (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':') {
+            let base = s[..len - 6].to_string();
+            let offset = tz_offset_minutes(tail);
+            return (base, offset);
+        }
+    }
+    // No tz info found — treat as UTC
+    (strip_tz_suffix(s).to_string(), 0)
+}
+
+/// Shift a base datetime string (no tz suffix) by a number of minutes.
+fn shift_datetime_by_minutes(base: &str, shift_mins: i32) -> String {
+    let parts: Vec<&str> = base
+        .split(|c| c == 'T' || c == ' ')
+        .collect();
+    let date_str = parts.first().unwrap_or(&"");
+    let time_str = parts.get(1).unwrap_or(&"00:00:00");
+
+    let date_parts: Vec<&str> = date_str.split('-').collect();
+    let time_parts: Vec<&str> = time_str.split(':').collect();
+
+    let year: i32 = date_parts.first().and_then(|p| p.parse().ok()).unwrap_or(2000);
+    let month: i32 = date_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1);
+    let day: i32 = date_parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(1);
+    let hour: i32 = time_parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minute: i32 = time_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+    let second: i32 = time_parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+    let total_mins = hour * 60 + minute + shift_mins;
+    let extra_days = total_mins.div_euclid(1440);
+    let new_mins = total_mins.rem_euclid(1440);
+    let new_h = new_mins / 60;
+    let new_m = new_mins % 60;
+
+    let jdn = date_to_jdn(year, month, day) + extra_days;
+    let (ny, nm, nd) = jdn_to_date(jdn);
+
+    format!("{ny:04}-{nm:02}-{nd:02} {new_h:02}:{new_m:02}:{second:02}")
 }
 
 impl std::fmt::Display for Series {
@@ -9754,6 +9877,32 @@ impl DataFrame {
 
         let labels: Vec<IndexLabel> = (0..n_rows).map(|i| (i as i64).into()).collect();
         Self::new_with_column_order(Index::new(labels), cols, col_order)
+    }
+
+    /// Construct a DataFrame from a list of row tuples with custom index.
+    ///
+    /// Matches `pd.DataFrame(data, columns=columns, index=index)` for list-of-lists.
+    pub fn from_tuples_with_index(
+        records: Vec<Vec<Scalar>>,
+        columns: &[&str],
+        index_labels: Vec<IndexLabel>,
+    ) -> Result<Self, FrameError> {
+        if !records.is_empty() && index_labels.len() != records.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: index_labels.len(),
+                column_len: records.len(),
+            });
+        }
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for (col_idx, &col_name) in columns.iter().enumerate() {
+            let vals: Vec<Scalar> = records.iter().map(|row| {
+                row.get(col_idx).cloned().unwrap_or(Scalar::Null(NullKind::NaN))
+            }).collect();
+            cols.insert(col_name.to_string(), Column::from_values(vals)?);
+            col_order.push(col_name.to_string());
+        }
+        Self::new_with_column_order(Index::new(index_labels), cols, col_order)
     }
 
     /// Construct a DataFrame from mixed dict inputs (`Vec<Scalar>` and scalar).
@@ -41210,32 +41359,6 @@ mod tests {
 
     #[test]
     fn groupby_resample_sum() {
-        let df = DataFrame::from_dict(
-            &["grp", "val"],
-            vec![
-                (
-                    "grp",
-                    vec![
-                        Scalar::Utf8("a".to_string()),
-                        Scalar::Utf8("a".to_string()),
-                        Scalar::Utf8("b".to_string()),
-                        Scalar::Utf8("b".to_string()),
-                    ],
-                ),
-                (
-                    "val",
-                    vec![
-                        Scalar::Float64(100.0),
-                        Scalar::Float64(200.0),
-                        Scalar::Float64(10.0),
-                        Scalar::Float64(20.0),
-                    ],
-                ),
-            ],
-        )
-        .unwrap();
-
-        // Set datetime index
         let df_with_idx = DataFrame::from_dict_with_index(
             vec![
                 (
@@ -41573,5 +41696,92 @@ mod tests {
         let result = s.first_offset("2M").unwrap();
         // 2024-01-15 + 2M = 2024-03-15, include 01-15 and 02-10
         assert_eq!(result.len(), 2);
+    }
+
+    // ── DataFrame.from_tuples_with_index ───────────────────────────
+
+    #[test]
+    fn df_from_tuples_with_index() {
+        let df = DataFrame::from_tuples_with_index(
+            vec![
+                vec![Scalar::Float64(1.0)],
+                vec![Scalar::Float64(2.0)],
+            ],
+            &["val"],
+            vec!["x".into(), "y".into()],
+        )
+        .unwrap();
+        assert_eq!(df.len(), 2);
+        assert_eq!(df.index().labels()[0], IndexLabel::Utf8("x".into()));
+        assert_eq!(
+            df.column("val").unwrap().values()[1],
+            Scalar::Float64(2.0)
+        );
+    }
+
+    // ── dt.tz_localize / tz_convert ─────────────────────────────────
+
+    #[test]
+    fn dt_tz_localize_utc() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-06-20 14:00:00".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().tz_localize("UTC").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00+00:00".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_localize("+05:30").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00+05:30".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_convert_utc_to_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:00:00+00:00".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_convert("+05:00").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 15:00:00+05:00".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_convert_negative_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 03:00:00+00:00".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_convert("-05:00").unwrap();
+        // 03:00 UTC -> 03:00 - 5h = 22:00 previous day
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-14 22:00:00-05:00".into())
+        );
     }
 }

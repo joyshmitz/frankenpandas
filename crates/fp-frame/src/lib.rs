@@ -1542,16 +1542,15 @@ impl Series {
             }
             "zero" | "pad" => {
                 let vals = self.column.values();
-                let n = vals.len();
                 let mut out: Vec<Scalar> = vals.to_vec();
 
                 let mut last_valid: Option<f64> = None;
-                for i in 0..n {
-                    if out[i].is_missing() {
+                for slot in &mut out {
+                    if slot.is_missing() {
                         if let Some(lv) = last_valid {
-                            out[i] = Scalar::Float64(lv);
+                            *slot = Scalar::Float64(lv);
                         }
-                    } else if let Ok(v) = out[i].to_f64() {
+                    } else if let Ok(v) = slot.to_f64() {
                         last_valid = Some(v);
                     }
                 }
@@ -10217,6 +10216,7 @@ impl DataFrame {
     /// Matches `df.assign(col=lambda df: ...)`. Each closure receives a
     /// reference to the *current* DataFrame (including previously-assigned
     /// columns in this call) and must return a `Column` of the correct length.
+    #[allow(clippy::type_complexity)]
     pub fn assign_fn(
         &self,
         assignments: Vec<(&str, Box<dyn Fn(&DataFrame) -> Result<Column, FrameError>>)>,
@@ -10551,10 +10551,8 @@ impl DataFrame {
         for row in 0..n_rows {
             let mut row_vals = Vec::new();
             for name in &col_names {
-                if let Some(col) = base.columns.get(name) {
-                    if let Ok(v) = col.values()[row].to_f64() {
-                        row_vals.push(v);
-                    }
+                if let Some(col) = base.columns.get(name) && let Ok(v) = col.values()[row].to_f64() {
+                    row_vals.push(v);
                 }
             }
             if row_vals.is_empty() {

@@ -1766,6 +1766,17 @@ impl Series {
         Self::from_values("count", labels, values)
     }
 
+    /// Count values binned into equal-width intervals.
+    ///
+    /// Matches `pd.Series.value_counts(bins=n)`. Divides the numeric range
+    /// into `bins` equal-width intervals using `cut`, then counts values
+    /// per interval. Returns a Series indexed by interval labels, sorted
+    /// descending by count.
+    pub fn value_counts_bins(&self, bins: usize) -> Result<Self, FrameError> {
+        let binned = cut(self, bins)?;
+        binned.value_counts()
+    }
+
     /// Check if all values in the Series are unique (no duplicates).
     ///
     /// Matches `pd.Series.is_unique`.

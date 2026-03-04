@@ -6082,6 +6082,32 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Replace a positional slice of each string.
+    ///
+    /// Matches `pd.Series.str.slice_replace(start, stop, repl)`.
+    /// Replaces characters from `start` to `stop` with `repl`.
+    pub fn slice_replace(
+        &self,
+        start: usize,
+        stop: Option<usize>,
+        repl: &str,
+    ) -> Result<Series, FrameError> {
+        let replacement = repl.to_string();
+        self.apply_str(
+            |s| {
+                let chars: Vec<char> = s.chars().collect();
+                let end = stop.unwrap_or(chars.len()).min(chars.len());
+                let begin = start.min(end);
+                let mut result = String::new();
+                result.extend(&chars[..begin]);
+                result.push_str(&replacement);
+                result.extend(&chars[end..]);
+                Scalar::Utf8(result)
+            },
+            self.series.name(),
+        )
+    }
+
     /// Split each string by a separator and return the n-th element.
     pub fn split_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
         self.apply_str(
@@ -10512,6 +10538,105 @@ impl DataFrame {
         Self::new_with_column_order(out_index, out_columns, out_order)
     }
 
+    /// Describe with include/exclude dtype filters.
+    ///
+    /// Matches `df.describe(include=[...], exclude=[...])`. Pass empty
+    /// slices to use defaults (numeric only). Supported dtype strings:
+    /// "int64", "float64", "bool", "object"/"string".
+    pub fn describe_dtypes(
+        &self,
+        include: &[&str],
+        exclude: &[&str],
+    ) -> Result<Self, FrameError> {
+        let dtype_matches = |dt: DType, filter: &str| -> bool {
+            match filter {
+                "int64" | "int" => dt == DType::Int64,
+                "float64" | "float" => dt == DType::Float64,
+                "bool" | "boolean" => dt == DType::Bool,
+                "object" | "string" | "str" => dt == DType::Utf8,
+                "number" | "numeric" => matches!(dt, DType::Int64 | DType::Float64),
+                "all" => true,
+                _ => false,
+            }
+        };
+
+        let should_include = |dt: DType| -> bool {
+            let inc = if include.is_empty() {
+                matches!(dt, DType::Int64 | DType::Float64)
+            } else {
+                include.iter().any(|f| dtype_matches(dt, f))
+            };
+            let exc = if exclude.is_empty() {
+                false
+            } else {
+                exclude.iter().any(|f| dtype_matches(dt, f))
+            };
+            inc && !exc
+        };
+
+        // For non-numeric types, describe shows count, unique, top, freq
+        let has_non_numeric = self.column_order.iter().any(|name| {
+            let dt = self.columns[name].dtype();
+            should_include(dt) && !matches!(dt, DType::Int64 | DType::Float64)
+        });
+
+        if has_non_numeric {
+            // Object-style describe: count, unique, top, freq
+            let stat_labels = vec![
+                IndexLabel::Utf8("count".into()),
+                IndexLabel::Utf8("unique".into()),
+                IndexLabel::Utf8("top".into()),
+                IndexLabel::Utf8("freq".into()),
+            ];
+            let out_index = Index::new(stat_labels);
+            let mut out_columns = BTreeMap::new();
+            let mut out_order = Vec::new();
+
+            for name in &self.column_order {
+                let col = &self.columns[name];
+                if !should_include(col.dtype()) {
+                    continue;
+                }
+                let vals = col.values();
+                let count = vals.iter().filter(|v| !v.is_missing()).count();
+                let mut freq_map: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for v in vals {
+                    if !v.is_missing() {
+                        *freq_map.entry(format!("{v:?}")).or_default() += 1;
+                    }
+                }
+                let unique = freq_map.len();
+                let (top, freq) = freq_map
+                    .iter()
+                    .max_by_key(|(_, &c)| c)
+                    .map(|(k, &c)| (k.clone(), c))
+                    .unwrap_or_default();
+
+                let stats = vec![
+                    Scalar::Int64(count as i64),
+                    Scalar::Int64(unique as i64),
+                    Scalar::Utf8(top),
+                    Scalar::Int64(freq as i64),
+                ];
+                out_columns.insert(name.clone(), Column::from_values(stats)?);
+                out_order.push(name.clone());
+            }
+            return Self::new_with_column_order(out_index, out_columns, out_order);
+        }
+
+        // Numeric describe: filter to included columns, then delegate
+        let selected = self.select_columns(
+            &self
+                .column_order
+                .iter()
+                .filter(|name| should_include(self.columns[*name].dtype()))
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        )?;
+        selected.describe()
+    }
+
     /// Compute quantile(s) for each numeric column.
     ///
     /// Matches `df.quantile(q)` for a single quantile value.
@@ -12096,6 +12221,22 @@ impl DataFrame {
         let values: Vec<Scalar> = key_counts.iter().map(|(_, c)| Scalar::Int64(*c)).collect();
 
         Series::from_values("count".to_string(), labels, values)
+    }
+
+    /// Count unique value combinations for a subset of columns.
+    ///
+    /// Matches `df.value_counts(subset=['col1','col2'])`. Counts
+    /// combinations of values in the specified columns only.
+    pub fn value_counts_subset(&self, subset: &[&str]) -> Result<Series, FrameError> {
+        for name in subset {
+            if !self.columns.contains_key(*name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column not found: '{name}'"
+                )));
+            }
+        }
+        let selected = self.select_columns(subset)?;
+        selected.value_counts()
     }
 
     /// Infer better dtypes for object columns.
@@ -37951,5 +38092,89 @@ mod tests {
         // Should show first 2 and last 2 rows
         assert!(s.contains("1"));
         assert!(s.contains("6"));
+    }
+
+    #[test]
+    fn test_describe_dtypes() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("x".into()),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        // include only object/string columns
+        let desc = df.describe_dtypes(&["object"], &[]).unwrap();
+        // Should have columns: b (the only string column)
+        assert_eq!(desc.column_names().len(), 1);
+        assert!(desc.columns.contains_key("b"));
+        // Should have count, unique, top, freq
+        assert_eq!(desc.len(), 4);
+    }
+
+    #[test]
+    fn test_str_slice_replace() {
+        let s = Series::from_values(
+            "w",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("abcdef".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().slice_replace(5, Some(11), "!").unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("hello!".into()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("abcde!".into()));
+    }
+
+    #[test]
+    fn test_value_counts_subset() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let vc = df.value_counts_subset(&["a"]).unwrap();
+        assert_eq!(vc.len(), 2); // x appears 2 times, y 1 time
+        // First entry should be "x" with count 2 (sorted by count desc)
+        assert_eq!(vc.column().values()[0], Scalar::Int64(2));
     }
 }

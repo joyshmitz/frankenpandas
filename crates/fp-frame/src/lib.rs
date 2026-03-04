@@ -10614,10 +10614,10 @@ impl DataFrame {
                     .unwrap_or_default();
 
                 let stats = vec![
-                    Scalar::Int64(count as i64),
-                    Scalar::Int64(unique as i64),
+                    Scalar::Utf8(count.to_string()),
+                    Scalar::Utf8(unique.to_string()),
                     Scalar::Utf8(top),
-                    Scalar::Int64(freq as i64),
+                    Scalar::Utf8(freq.to_string()),
                 ];
                 out_columns.insert(name.clone(), Column::from_values(stats)?);
                 out_order.push(name.clone());

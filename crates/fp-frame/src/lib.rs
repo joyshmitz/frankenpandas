@@ -13289,6 +13289,42 @@ impl DataFrame {
         self.reduce_numeric("var")
     }
 
+    /// Standard deviation per column with configurable degrees of freedom.
+    ///
+    /// Matches `pd.DataFrame.std(ddof=n)`.
+    pub fn std_agg_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                continue;
+            }
+            let s = self.column_as_series(name)?;
+            labels.push(IndexLabel::Utf8(name.clone()));
+            values.push(s.std_ddof(ddof)?);
+        }
+        Series::from_values("std".to_string(), labels, values)
+    }
+
+    /// Variance per column with configurable degrees of freedom.
+    ///
+    /// Matches `pd.DataFrame.var(ddof=n)`.
+    pub fn var_agg_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                continue;
+            }
+            let s = self.column_as_series(name)?;
+            labels.push(IndexLabel::Utf8(name.clone()));
+            values.push(s.var_ddof(ddof)?);
+        }
+        Series::from_values("var".to_string(), labels, values)
+    }
+
     /// Median of non-null values per column.
     ///
     /// Matches `pd.DataFrame.median()`.
@@ -36141,5 +36177,38 @@ mod tests {
         // ddof=1 with 1 value → NaN
         let result = s.var_ddof(1).unwrap().to_f64().unwrap();
         assert!(result.is_nan());
+    }
+
+    // ── DataFrame.std_agg_ddof / var_agg_ddof ──────────────────
+
+    #[test]
+    fn dataframe_var_agg_ddof_population() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+            )],
+        )
+        .unwrap();
+
+        let result = df.var_agg_ddof(0).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn dataframe_std_agg_ddof() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+            )],
+        )
+        .unwrap();
+
+        let result = df.std_agg_ddof(0).unwrap();
+        let std_val = result.values()[0].to_f64().unwrap();
+        assert!((std_val - 5.0_f64.sqrt()).abs() < 1e-10);
     }
 }

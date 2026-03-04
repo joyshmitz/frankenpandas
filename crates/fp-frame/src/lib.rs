@@ -16753,7 +16753,7 @@ mod tests {
 
         let s1 = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .expect("s1");
@@ -16769,7 +16769,7 @@ mod tests {
         assert_eq!(result.len(), 4);
         assert_eq!(
             result.index().labels(),
-            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()]
         );
         assert_eq!(
             result.values(),
@@ -16969,7 +16969,7 @@ mod tests {
     fn dataframe_from_series_reindexes_existing_columns() {
         let s1 = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
         )
         .expect("s1");
@@ -16983,7 +16983,7 @@ mod tests {
         let df = DataFrame::from_series(vec![s1, s2]).expect("frame");
         assert_eq!(
             df.index().labels(),
-            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
         );
         assert_eq!(
             df.column("a").expect("a").values(),
@@ -17000,7 +17000,7 @@ mod tests {
     fn make_pair() -> (Series, Series) {
         let left = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -17057,7 +17057,7 @@ mod tests {
         // Union: [1, 2, 3, 4]. Overlap at 2 (20-5=15) and 3 (30-7=23).
         assert_eq!(
             out.index().labels(),
-            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()]
         );
         assert_eq!(
             out.values(),
@@ -17097,7 +17097,7 @@ mod tests {
         // Division promotes to Float64. Overlap at 2 (20/5=4.0) and 3 (30/7≈4.2857).
         assert_eq!(
             out.index().labels(),
-            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()]
         );
         assert!(out.values()[0].is_missing());
         assert_eq!(out.values()[1], Scalar::Float64(4.0));
@@ -17139,13 +17139,13 @@ mod tests {
     fn series_arithmetic_with_nulls_propagates() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Null(NullKind::Null), Scalar::Int64(10)],
         )
         .unwrap();
         let right = Series::from_values(
             "b",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(3)],
         )
         .unwrap();
@@ -17242,13 +17242,13 @@ mod tests {
     fn series_all_four_ops_identical_indexes() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
         let right = Series::from_values(
             "b",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(4)],
         )
         .unwrap();
@@ -17295,7 +17295,7 @@ mod tests {
     fn series_arithmetic_disjoint_indexes_all_null() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
@@ -17341,7 +17341,7 @@ mod tests {
         let s = Series::broadcast(
             "fill",
             Scalar::Float64(7.5),
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
         )
         .unwrap();
         assert_eq!(s.len(), 3);
@@ -17361,7 +17361,7 @@ mod tests {
         let s = Series::broadcast(
             "n",
             Scalar::Null(NullKind::Null),
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
         )
         .unwrap();
         for v in s.values() {
@@ -17531,7 +17531,7 @@ mod tests {
         let df = DataFrame::from_records(records, None, None).unwrap();
         assert_eq!(
             df.index().labels(),
-            &[0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)]
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(
             df.column("a").unwrap().values(),
@@ -17828,14 +17828,14 @@ mod tests {
         .unwrap();
         let right = DataFrame::from_dict_with_index(
             vec![("b", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
         )
         .unwrap();
 
         let out = concat_dataframes_with_axis(&[&left, &right], 1).unwrap();
         assert_eq!(
             out.index().labels(),
-            &[0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)]
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(
             out.column("a").unwrap().values(),
@@ -18056,7 +18056,7 @@ mod tests {
     fn series_align_inner_keeps_overlapping_labels() {
         let left = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -18146,7 +18146,7 @@ mod tests {
     fn series_align_outer_matches_arithmetic_union() {
         let left = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
@@ -18161,7 +18161,7 @@ mod tests {
         assert_eq!(la.len(), 3);
         assert_eq!(
             la.index().labels(),
-            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
         );
         assert_eq!(la.values()[1], Scalar::Int64(20));
         assert!(la.values()[2].is_missing());
@@ -18174,13 +18174,13 @@ mod tests {
     fn series_align_identical_indexes() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
         let right = Series::from_values(
             "b",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200)],
         )
         .unwrap();
@@ -18222,7 +18222,7 @@ mod tests {
     fn combine_first_fills_nulls_from_other() {
         let left = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -18232,7 +18232,7 @@ mod tests {
         .unwrap();
         let right = Series::from_values(
             "y",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
         )
         .unwrap();
@@ -18250,7 +18250,7 @@ mod tests {
         let left = Series::from_values("x", vec![1_i64.into()], vec![Scalar::Int64(10)]).unwrap();
         let right = Series::from_values(
             "y",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200)],
         )
         .unwrap();
@@ -18265,13 +18265,13 @@ mod tests {
     fn combine_first_self_has_all_values() {
         let left = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
         let right = Series::from_values(
             "y",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200)],
         )
         .unwrap();
@@ -18286,13 +18286,13 @@ mod tests {
     fn reindex_to_superset_fills_nulls() {
         let s = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
 
         let result = s
-            .reindex(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+            .reindex(vec![1_i64.into(), 2_i64.into(), 3_i64.into()])
             .unwrap();
         assert_eq!(result.len(), 3);
         assert_eq!(result.values()[0], Scalar::Int64(10));
@@ -18304,7 +18304,7 @@ mod tests {
     fn reindex_to_subset_drops_labels() {
         let s = Series::from_values(
             "x",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -18347,7 +18347,7 @@ mod tests {
 
         let result = s
             .reindex_with_method(
-                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into(), 5_i64.into()],
+                vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into(), 5_i64.into()],
                 "ffill",
             )
             .unwrap();
@@ -18370,7 +18370,7 @@ mod tests {
 
         let result = s
             .reindex_with_method(
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 "bfill",
             )
             .unwrap();
@@ -18402,7 +18402,7 @@ mod tests {
 
         let result = df
             .reindex_with_method(
-                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
                 "ffill",
             )
             .unwrap();
@@ -18418,13 +18418,13 @@ mod tests {
     fn series_gt_basic() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
         )
         .unwrap();
         let right = Series::from_values(
             "b",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(3), Scalar::Int64(3)],
         )
         .unwrap();
@@ -18439,7 +18439,7 @@ mod tests {
     fn series_compare_scalar_gt() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
         )
         .unwrap();
@@ -18456,7 +18456,7 @@ mod tests {
     fn series_comparison_with_alignment() {
         let left = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
@@ -18481,13 +18481,13 @@ mod tests {
     fn series_eq_ne_basic() {
         let s1 = Series::from_values(
             "a",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(10)],
         )
         .unwrap();
         let s2 = Series::from_values(
             "b",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(20)],
         )
         .unwrap();
@@ -18505,7 +18505,7 @@ mod tests {
     fn series_logical_ops_with_alignment_and_nulls() {
         let left = Series::from_values(
             "m1",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Bool(true),
                 Scalar::Bool(false),
@@ -18561,13 +18561,13 @@ mod tests {
     fn series_logical_ops_reject_non_boolean_input() {
         let left = Series::from_values(
             "left",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(0)],
         )
         .unwrap();
         let right = Series::from_values(
             "right",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false)],
         )
         .unwrap();
@@ -18589,13 +18589,13 @@ mod tests {
     fn series_filter_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
         let mask = Series::from_values(
             "mask",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
         )
         .unwrap();
@@ -18610,7 +18610,7 @@ mod tests {
     fn series_filter_with_compare() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -18628,13 +18628,13 @@ mod tests {
     fn series_filter_rejects_non_boolean_mask() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
         let mask = Series::from_values(
             "mask",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(0)],
         )
         .unwrap();
@@ -18651,7 +18651,7 @@ mod tests {
     fn series_fillna_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -18670,7 +18670,7 @@ mod tests {
     fn series_dropna_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -18690,7 +18690,7 @@ mod tests {
     fn series_isna_notna_flags_null_and_nan() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -18735,7 +18735,7 @@ mod tests {
     fn series_sum_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -18747,7 +18747,7 @@ mod tests {
     fn series_sum_with_nulls() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -18763,7 +18763,7 @@ mod tests {
     fn series_mean_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -18775,7 +18775,7 @@ mod tests {
     fn series_count_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
@@ -19460,7 +19460,7 @@ mod tests {
     fn series_min_max_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(5), Scalar::Int64(30)],
         )
         .unwrap();
@@ -19473,7 +19473,7 @@ mod tests {
     fn series_std_var_basic() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -19503,7 +19503,7 @@ mod tests {
     fn series_median_odd() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -19519,7 +19519,7 @@ mod tests {
     fn series_median_even() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(3.0),
@@ -19547,7 +19547,7 @@ mod tests {
     fn series_any_all_numeric_with_missing() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
             vec![
                 Scalar::Int64(0),
                 Scalar::Int64(3),
@@ -19565,7 +19565,7 @@ mod tests {
     fn series_any_all_all_missing_matches_pandas_skipna_defaults() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
         )
         .unwrap();
@@ -19578,7 +19578,7 @@ mod tests {
     fn series_any_all_falsy_values() {
         let s = Series::from_values(
             "vals",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Bool(false),
                 Scalar::Bool(false),
@@ -19634,7 +19634,7 @@ mod tests {
     fn series_iloc_selects_positions_in_request_order_with_duplicates() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
         )
         .unwrap();
@@ -19871,7 +19871,7 @@ mod tests {
 
         let mask = Series::from_values(
             "mask",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
         )
         .unwrap();
@@ -20395,7 +20395,7 @@ mod tests {
     fn series_head_tail_negative_n_saturates_to_empty() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -20430,7 +20430,7 @@ mod tests {
 
         let mask = Series::from_values(
             "mask",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
         )
         .unwrap();
@@ -20466,7 +20466,7 @@ mod tests {
 
         let mask = Series::from_values(
             "mask",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
         )
         .unwrap();
@@ -23436,7 +23436,7 @@ mod tests {
     fn rolling_sum_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -23455,7 +23455,7 @@ mod tests {
     fn rolling_min_max() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -23481,7 +23481,7 @@ mod tests {
     fn rolling_with_nulls() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -23503,7 +23503,7 @@ mod tests {
     fn rolling_std() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -23526,7 +23526,7 @@ mod tests {
     fn expanding_sum_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -23547,7 +23547,7 @@ mod tests {
     fn expanding_mean_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -23566,7 +23566,7 @@ mod tests {
     fn expanding_min_periods() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -23585,7 +23585,7 @@ mod tests {
     fn expanding_with_nulls() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -23606,7 +23606,7 @@ mod tests {
     fn series_rank_average() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -23627,7 +23627,7 @@ mod tests {
     fn series_rank_min_max() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(1.0),
@@ -23650,7 +23650,7 @@ mod tests {
     fn series_rank_first() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(1.0),
@@ -23668,7 +23668,7 @@ mod tests {
     fn series_rank_dense() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -23688,7 +23688,7 @@ mod tests {
     fn series_rank_descending() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -23706,7 +23706,7 @@ mod tests {
     fn series_rank_na_keep() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
@@ -23724,7 +23724,7 @@ mod tests {
     fn series_rank_na_top() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
@@ -23743,7 +23743,7 @@ mod tests {
     fn series_rank_na_bottom() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
@@ -23762,7 +23762,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(3.0),
                     Scalar::Float64(1.0),
@@ -23772,7 +23772,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(30.0),
@@ -23891,7 +23891,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "row",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("r1".into()),
                     Scalar::Utf8("r1".into()),
@@ -23902,7 +23902,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "col",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("c1".into()),
                     Scalar::Utf8("c2".into()),
@@ -23913,7 +23913,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -23941,7 +23941,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "row",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Utf8("r1".into()),
                     Scalar::Utf8("r1".into()),
@@ -23951,7 +23951,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "col",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Utf8("c1".into()),
                     Scalar::Utf8("c1".into()),
@@ -23961,7 +23961,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -24015,7 +24015,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "row",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("r1".into()),
                     Scalar::Utf8("r1".into()),
@@ -24026,7 +24026,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "col",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("c1".into()),
                     Scalar::Utf8("c2".into()),
@@ -24037,7 +24037,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24118,7 +24118,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24128,7 +24128,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -24216,7 +24216,7 @@ mod tests {
     fn series_corr_perfect() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -24226,7 +24226,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -24243,7 +24243,7 @@ mod tests {
     fn series_corr_negative() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -24253,7 +24253,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(2.0),
@@ -24270,7 +24270,7 @@ mod tests {
     fn series_cov_basic() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -24280,7 +24280,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -24299,7 +24299,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24309,7 +24309,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(4.0),
@@ -24334,7 +24334,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24344,7 +24344,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(4.0),
@@ -24369,7 +24369,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(30.0),
@@ -24392,7 +24392,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(30.0),
@@ -24417,7 +24417,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -24484,7 +24484,7 @@ mod tests {
     fn str_contains() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("foo bar".into()),
                 Scalar::Utf8("baz".into()),
@@ -24591,7 +24591,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("b".into()),
@@ -24602,7 +24602,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24626,7 +24626,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -24637,7 +24637,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -24659,7 +24659,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -24669,7 +24669,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Null(NullKind::NaN),
@@ -24691,13 +24691,13 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
             )
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24726,7 +24726,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("b".into()),
                     Scalar::Utf8("a".into()),
@@ -24737,7 +24737,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -24773,7 +24773,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -24783,7 +24783,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24806,7 +24806,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("b".into()),
@@ -24817,7 +24817,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24960,7 +24960,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -24981,7 +24981,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25058,7 +25058,7 @@ mod tests {
     fn series_apply_fn() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -25147,7 +25147,7 @@ mod tests {
     fn series_map_values() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("b".into()),
@@ -25172,7 +25172,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25183,7 +25183,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(1.0),
@@ -25206,7 +25206,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25217,7 +25217,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(3.0),
@@ -25240,7 +25240,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("b".into()),
@@ -25251,7 +25251,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "x",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25262,7 +25262,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "y",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25293,7 +25293,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25304,7 +25304,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25342,7 +25342,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25353,7 +25353,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25382,7 +25382,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(4.0),
@@ -25430,7 +25430,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25452,7 +25452,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(4.0),
@@ -25500,7 +25500,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25511,7 +25511,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "x",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(3.0),
@@ -25522,7 +25522,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "y",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(100.0),
                     Scalar::Float64(200.0),
@@ -25588,7 +25588,7 @@ mod tests {
         // Perfectly monotonic: [1,2,3,4] vs [10,20,30,40] → Spearman = 1.0
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -25599,7 +25599,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -25618,7 +25618,7 @@ mod tests {
         // Perfectly inversely monotonic: [1,2,3] vs [30,20,10] → Spearman = -1.0
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -25628,7 +25628,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(30.0),
                 Scalar::Float64(20.0),
@@ -25646,7 +25646,7 @@ mod tests {
         // Perfect concordance: [1,2,3] vs [4,5,6] → Kendall tau = 1.0
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -25656,7 +25656,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
@@ -25674,7 +25674,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "x",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25684,7 +25684,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "y",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25712,7 +25712,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25723,7 +25723,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25767,7 +25767,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -25778,7 +25778,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(10.0),
                     Scalar::Float64(20.0),
@@ -25807,7 +25807,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Utf8("x".into()),
                     Scalar::Utf8("x".into()),
@@ -25817,7 +25817,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -25839,7 +25839,7 @@ mod tests {
         // Original index is preserved
         assert_eq!(
             result.index().labels(),
-            &[0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)]
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
     }
 
@@ -25849,7 +25849,7 @@ mod tests {
     fn str_contains_regex() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("foo123".into()),
                 Scalar::Utf8("bar".into()),
@@ -25928,7 +25928,7 @@ mod tests {
     fn str_extract_with_group() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("foo123".into()),
                 Scalar::Utf8("bar456".into()),
@@ -25959,7 +25959,7 @@ mod tests {
     fn str_count_matches() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("aabaa".into()),
                 Scalar::Utf8("bb".into()),
@@ -25993,7 +25993,7 @@ mod tests {
     fn str_fullmatch() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("123".into()),
                 Scalar::Utf8("abc123".into()),
@@ -26011,7 +26011,7 @@ mod tests {
     fn str_match_regex() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("123abc".into()),
                 Scalar::Utf8("abc123".into()),
@@ -26050,7 +26050,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "grp",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Utf8("a".into()),
                     Scalar::Utf8("a".into()),
@@ -26061,7 +26061,7 @@ mod tests {
             .unwrap(),
             Series::from_values(
                 "val",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -26126,7 +26126,7 @@ mod tests {
     fn series_eq_scalar() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
         )
         .unwrap();
@@ -26140,7 +26140,7 @@ mod tests {
     fn series_gt_scalar() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
         )
         .unwrap();
@@ -26217,13 +26217,13 @@ mod tests {
     fn series_update_replaces_matching_labels() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
         let other = Series::from_values(
             "y",
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -26298,13 +26298,13 @@ mod tests {
         let df2 = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![Scalar::Int64(1), Scalar::Int64(2)],
+                vec![1_i64.into(), 2_i64.into()],
                 vec![Scalar::Int64(20), Scalar::Int64(30)],
             )
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![Scalar::Int64(1), Scalar::Int64(2)],
+                vec![1_i64.into(), 2_i64.into()],
                 vec![Scalar::Int64(200), Scalar::Int64(300)],
             )
             .unwrap(),
@@ -26349,7 +26349,7 @@ mod tests {
     fn series_clip_lower() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
@@ -26367,7 +26367,7 @@ mod tests {
     fn series_clip_upper() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
@@ -26422,7 +26422,7 @@ mod tests {
     fn series_prod() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(3.0),
@@ -26438,7 +26438,7 @@ mod tests {
     fn series_prod_with_nulls() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
@@ -26456,7 +26456,7 @@ mod tests {
     fn series_mode_single() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -26474,7 +26474,7 @@ mod tests {
     fn series_mode_tie() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(1),
@@ -26494,13 +26494,13 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
             )
             .unwrap(),
             Series::from_values(
                 "b",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
             )
             .unwrap(),
@@ -26583,7 +26583,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
             )
             .unwrap(),
@@ -26628,7 +26628,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -26652,7 +26652,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -26691,7 +26691,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(3.0),
@@ -26713,7 +26713,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(2.0),
@@ -26735,7 +26735,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(5.0),
@@ -26757,7 +26757,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(100.0),
                     Scalar::Float64(110.0),
@@ -26782,7 +26782,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(2.0),
                     Scalar::Float64(3.0),
@@ -26803,7 +26803,7 @@ mod tests {
         let df = DataFrame::from_series(vec![
             Series::from_values(
                 "a",
-                vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
                 vec![
                     Scalar::Float64(3.0),
                     Scalar::Float64(1.0),
@@ -26862,7 +26862,7 @@ mod tests {
     fn series_display() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.5),
@@ -26908,7 +26908,7 @@ mod tests {
     fn dt_year_month_day() {
         let s = Series::from_values(
             "dates",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-03-15".to_string()),
                 Scalar::Utf8("2023-12-25".to_string()),
@@ -26996,7 +26996,7 @@ mod tests {
     fn dt_with_nulls() {
         let s = Series::from_values(
             "dates",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-03-15".to_string()),
                 Scalar::Null(NullKind::NaN),
@@ -27033,7 +27033,7 @@ mod tests {
     fn series_map_fn_infallible() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -27462,7 +27462,7 @@ mod tests {
 
         let df2 = DataFrame::from_dict_with_index(
             vec![("b", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
         )
         .unwrap();
 
@@ -27488,13 +27488,13 @@ mod tests {
                 "a",
                 vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
             )],
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
         )
         .unwrap();
 
         let df2 = DataFrame::from_dict_with_index(
             vec![("b", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![1_i64.into(), 2_i64.into()],
         )
         .unwrap();
 
@@ -27540,7 +27540,7 @@ mod tests {
     fn series_value_counts_with_options_normalize() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(1),
@@ -27567,7 +27567,7 @@ mod tests {
     fn series_value_counts_ascending() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)],
         )
         .unwrap();
@@ -27584,7 +27584,7 @@ mod tests {
     fn series_value_counts_include_na() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::NaN),
@@ -27604,7 +27604,7 @@ mod tests {
     fn series_is_unique_true() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -27616,7 +27616,7 @@ mod tests {
     fn series_is_unique_false() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
         )
         .unwrap();
@@ -27628,7 +27628,7 @@ mod tests {
     fn series_is_monotonic_increasing_true() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -27641,7 +27641,7 @@ mod tests {
     fn series_is_monotonic_decreasing_true() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)],
         )
         .unwrap();
@@ -27667,7 +27667,7 @@ mod tests {
     fn series_is_monotonic_with_nan() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::NaN),
@@ -27789,7 +27789,7 @@ mod tests {
     fn str_zfill() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("42".to_owned()),
                 Scalar::Utf8("-5".to_owned()),
@@ -27829,7 +27829,7 @@ mod tests {
     fn str_isdigit() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("123".to_owned()),
                 Scalar::Utf8("12a".to_owned()),
@@ -27899,7 +27899,7 @@ mod tests {
     fn str_islower_isupper() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("hello".to_owned()),
                 Scalar::Utf8("HELLO".to_owned()),
@@ -27942,7 +27942,7 @@ mod tests {
     fn series_add_fill_basic() {
         let s1 = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -27953,7 +27953,7 @@ mod tests {
 
         let s2 = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -28222,7 +28222,7 @@ mod tests {
     fn str_istitle() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("Hello World".to_owned()),
                 Scalar::Utf8("hello world".to_owned()),
@@ -28241,7 +28241,7 @@ mod tests {
     fn str_cat_concatenation() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("hello".to_owned()),
                 Scalar::Utf8("world".to_owned()),
@@ -28260,7 +28260,7 @@ mod tests {
     fn series_nlargest_keep_first() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(3),
                 Scalar::Int64(1),
@@ -28280,7 +28280,7 @@ mod tests {
     fn series_nsmallest_keep_all() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -28618,7 +28618,7 @@ mod tests {
     fn series_ffill_leading_nan() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(2.0),
@@ -28638,7 +28638,7 @@ mod tests {
     fn series_ffill_with_limit() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -28688,7 +28688,7 @@ mod tests {
     fn series_bfill_trailing_nan() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -28708,7 +28708,7 @@ mod tests {
     fn series_bfill_with_limit() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Null(NullKind::NaN),
@@ -28763,7 +28763,7 @@ mod tests {
     fn series_interpolate_leading_trailing_nan() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(10.0),
@@ -28785,7 +28785,7 @@ mod tests {
     fn series_interpolate_single_gap() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Null(NullKind::NaN),
@@ -28845,7 +28845,7 @@ mod tests {
     fn series_ffill_string_values() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("hello".to_owned()),
                 Scalar::Null(NullKind::NaN),
@@ -28896,7 +28896,7 @@ mod tests {
     fn series_interpolate_nearest() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), 4_i64.into()],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Null(NullKind::NaN),
@@ -28920,7 +28920,7 @@ mod tests {
     fn series_interpolate_zero_hold() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(5.0),
                 Scalar::Null(NullKind::NaN),
@@ -28938,7 +28938,7 @@ mod tests {
     fn series_interpolate_method_linear_matches_default() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -28964,7 +28964,7 @@ mod tests {
     fn series_argsort() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -28983,7 +28983,7 @@ mod tests {
     fn series_argsort_descending() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -29002,7 +29002,7 @@ mod tests {
     fn series_argmin_argmax() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(5.0),
                 Scalar::Float64(1.0),
@@ -29019,7 +29019,7 @@ mod tests {
     fn series_argmin_with_nan() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(3.0),
@@ -29036,7 +29036,7 @@ mod tests {
     fn series_take() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -29064,7 +29064,7 @@ mod tests {
     fn series_searchsorted_left() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -29084,7 +29084,7 @@ mod tests {
     fn series_searchsorted_right() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -29136,7 +29136,7 @@ mod tests {
     fn series_sem() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -29501,7 +29501,7 @@ mod tests {
     fn dt_quarter() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-15".to_owned()),
                 Scalar::Utf8("2024-04-01".to_owned()),
@@ -29540,7 +29540,7 @@ mod tests {
     fn dt_is_month_start_end() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-01".to_owned()),
                 Scalar::Utf8("2024-01-15".to_owned()),
@@ -29564,7 +29564,7 @@ mod tests {
     fn dt_is_quarter_start_end() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-01".to_owned()),
                 Scalar::Utf8("2024-03-31".to_owned()),
@@ -29752,7 +29752,7 @@ mod tests {
     fn series_first_valid_index() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(1.0),
@@ -29768,7 +29768,7 @@ mod tests {
     fn series_last_valid_index() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -29852,7 +29852,7 @@ mod tests {
     fn series_astype_safe_coerce() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("1".to_owned()),
                 Scalar::Utf8("bad".to_owned()),
@@ -29951,7 +29951,7 @@ mod tests {
     fn ewm_mean_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -29977,7 +29977,7 @@ mod tests {
     fn ewm_mean_with_alpha() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -29996,7 +29996,7 @@ mod tests {
     fn ewm_mean_with_nulls() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -30016,7 +30016,7 @@ mod tests {
     fn ewm_var_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -30041,7 +30041,7 @@ mod tests {
     fn ewm_std_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -30108,7 +30108,7 @@ mod tests {
     fn series_dot_product() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -30118,7 +30118,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
@@ -30136,7 +30136,7 @@ mod tests {
     fn series_dot_with_nulls() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -30146,7 +30146,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
@@ -30563,7 +30563,7 @@ mod tests {
     fn crosstab_basic() {
         let idx = Series::from_values(
             "gender",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("M".to_owned()),
                 Scalar::Utf8("F".to_owned()),
@@ -30574,7 +30574,7 @@ mod tests {
         .unwrap();
         let cols = Series::from_values(
             "hand",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("L".to_owned()),
                 Scalar::Utf8("R".to_owned()),
@@ -30594,7 +30594,7 @@ mod tests {
     fn crosstab_counts() {
         let idx = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("x".to_owned()),
                 Scalar::Utf8("x".to_owned()),
@@ -30605,7 +30605,7 @@ mod tests {
         .unwrap();
         let cols = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("p".to_owned()),
                 Scalar::Utf8("q".to_owned()),
@@ -31473,7 +31473,7 @@ mod tests {
     fn rolling_var() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -31494,7 +31494,7 @@ mod tests {
     fn rolling_median() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(3.0),
@@ -31513,7 +31513,7 @@ mod tests {
     fn rolling_quantile() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Float64(5.0),
@@ -31530,7 +31530,7 @@ mod tests {
     fn rolling_apply_custom() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -31553,7 +31553,7 @@ mod tests {
     fn expanding_var() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -31572,7 +31572,7 @@ mod tests {
     fn expanding_median() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -31591,7 +31591,7 @@ mod tests {
     fn expanding_apply_custom() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -31662,7 +31662,7 @@ mod tests {
                     Scalar::Int64(3),
                 ],
             )],
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
         )
         .unwrap();
         assert_eq!(df.first_valid_index(), Some(1_i64.into()));
@@ -31679,7 +31679,7 @@ mod tests {
                     Scalar::Null(NullKind::NaN),
                 ],
             )],
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
         )
         .unwrap();
         assert_eq!(df.last_valid_index(), Some(0_i64.into()));
@@ -31715,7 +31715,7 @@ mod tests {
     fn series_sample_frac() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -32116,12 +32116,12 @@ mod tests {
                     vec![Scalar::Int64(40), Scalar::Int64(50), Scalar::Int64(60)],
                 ),
             ],
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
         )
         .unwrap();
         let result = df
             .lookup(
-                &[0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+                &[0_i64.into(), 1_i64.into(), 2_i64.into()],
                 &["x", "y", "x"],
             )
             .unwrap();
@@ -32137,7 +32137,7 @@ mod tests {
     fn series_iat() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
         )
         .unwrap();
@@ -32161,7 +32161,7 @@ mod tests {
     fn series_transform() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -32474,7 +32474,7 @@ mod tests {
     fn series_duplicated() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -32494,7 +32494,7 @@ mod tests {
     fn series_drop_duplicates() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -32514,13 +32514,13 @@ mod tests {
     fn series_compare_with() {
         let s1 = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
         let s2 = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(99), Scalar::Int64(3)],
         )
         .unwrap();
@@ -33005,7 +33005,7 @@ mod tests {
     fn str_removeprefix() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("hello_world".into()),
                 Scalar::Utf8("hello_foo".into()),
@@ -33023,7 +33023,7 @@ mod tests {
     fn str_removesuffix() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("file.txt".into()),
                 Scalar::Utf8("data.csv".into()),
@@ -33349,7 +33349,7 @@ mod tests {
     fn crosstab_normalize_all() {
         let idx = Series::from_values(
             "idx",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("a".into()),
@@ -33360,7 +33360,7 @@ mod tests {
         .unwrap();
         let col = Series::from_values(
             "col",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("x".into()),
                 Scalar::Utf8("y".into()),
@@ -33381,7 +33381,7 @@ mod tests {
     fn crosstab_normalize_index() {
         let idx = Series::from_values(
             "idx",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("a".into()),
@@ -33392,7 +33392,7 @@ mod tests {
         .unwrap();
         let col = Series::from_values(
             "col",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("x".into()),
                 Scalar::Utf8("y".into()),
@@ -33417,7 +33417,7 @@ mod tests {
         // NaN values should NOT appear as differences (pandas treats NaN == NaN)
         let s1 = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::NaN),
@@ -33427,7 +33427,7 @@ mod tests {
         .unwrap();
         let s2 = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::NaN),
@@ -33559,7 +33559,7 @@ mod tests {
     fn series_map_with_na_action_ignore() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::NaN),
@@ -33597,31 +33597,31 @@ mod tests {
     fn series_case_when() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(0), Scalar::Int64(0), Scalar::Int64(0)],
         )
         .unwrap();
         let cond1 = Series::from_values(
             "c1",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
         )
         .unwrap();
         let val1 = Series::from_values(
             "v1",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(10)],
         )
         .unwrap();
         let cond2 = Series::from_values(
             "c2",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
         )
         .unwrap();
         let val2 = Series::from_values(
             "v2",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(20), Scalar::Int64(20), Scalar::Int64(20)],
         )
         .unwrap();
@@ -33895,7 +33895,7 @@ mod tests {
     fn to_numeric_basic() {
         let s = Series::from_values(
             "data",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("10".to_string()),
                 Scalar::Utf8("20.5".to_string()),
@@ -33933,7 +33933,7 @@ mod tests {
     fn cut_basic() {
         let s = Series::from_values(
             "data",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Float64(5.0),
@@ -33960,7 +33960,7 @@ mod tests {
     fn qcut_basic() {
         let s = Series::from_values(
             "data",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -33985,7 +33985,7 @@ mod tests {
     fn cut_with_nan() {
         let s = Series::from_values(
             "data",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -34003,7 +34003,7 @@ mod tests {
     fn series_drop_labels() {
         let s = Series::from_values(
             "test",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -34036,7 +34036,7 @@ mod tests {
     fn series_asof_exact() {
         let s = Series::from_values(
             "test",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -34069,7 +34069,7 @@ mod tests {
     fn series_asof_with_nan() {
         let s = Series::from_values(
             "test",
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Null(NullKind::NaN),
@@ -34202,7 +34202,7 @@ mod tests {
     fn str_get_dummies_basic() {
         let s = Series::from_values(
             "tags",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("a|b".to_string()),
                 Scalar::Utf8("b|c".to_string()),
@@ -34577,7 +34577,7 @@ mod tests {
     fn str_encode_returns_byte_lengths() {
         let s = Series::from_values(
             "s",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("hello".to_string()),
                 Scalar::Utf8("café".to_string()),
@@ -34612,7 +34612,7 @@ mod tests {
     fn str_translate_chars() {
         let s = Series::from_values(
             "s",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("abc".to_string()),
                 Scalar::Utf8("aabbcc".to_string()),
@@ -34679,7 +34679,7 @@ mod tests {
     fn str_split_expand_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("a_b_c".to_string()),
                 Scalar::Utf8("d_e".to_string()),
@@ -34725,7 +34725,7 @@ mod tests {
     fn rolling_corr_basic() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -34736,7 +34736,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
@@ -34758,7 +34758,7 @@ mod tests {
     fn rolling_cov_basic() {
         let a = Series::from_values(
             "a",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -34768,7 +34768,7 @@ mod tests {
         .unwrap();
         let b = Series::from_values(
             "b",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -34790,7 +34790,7 @@ mod tests {
     fn expanding_count_basic() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -34810,7 +34810,7 @@ mod tests {
     fn expanding_quantile_median() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(3.0),
@@ -34864,7 +34864,7 @@ mod tests {
     fn series_to_numpy() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Int64(1),
                 Scalar::Float64(2.5),
@@ -34901,7 +34901,7 @@ mod tests {
     fn dt_days_in_month() {
         let s = Series::from_values(
             "d",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-02-15".to_string()), // leap year Feb
                 Scalar::Utf8("2023-02-15".to_string()), // non-leap Feb
@@ -34935,7 +34935,7 @@ mod tests {
     fn dt_is_year_start_end() {
         let s = Series::from_values(
             "d",
-            vec![0_i64.into(), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-01".to_string()),
                 Scalar::Utf8("2024-12-31".to_string()),
@@ -35091,7 +35091,7 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("a", vec![1_i64.into(), 2_i64.into(), 3_i64.into()]),
                 ("b", vec!["x".into(), "y".into(), "z".into()]),
             ],
         )
@@ -35117,8 +35117,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("a", vec![1_i64.into(), 2_i64.into()]),
+                ("b", vec![10_i64.into(), 20_i64.into()]),
             ],
         )
         .unwrap();
@@ -35138,7 +35138,7 @@ mod tests {
     fn dataframe_isin_dict_with_nan() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)])],
+            vec![("a", vec![1_i64.into(), Scalar::Null(NullKind::NaN), 3_i64.into()])],
         )
         .unwrap();
 
@@ -35185,8 +35185,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("a", vec![1_i64.into(), 2_i64.into()]),
+                ("b", vec![10_i64.into(), 20_i64.into()]),
             ],
         )
         .unwrap();

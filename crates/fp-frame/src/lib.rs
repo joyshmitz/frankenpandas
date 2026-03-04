@@ -3242,6 +3242,83 @@ impl Series {
         DataFrame::new_with_column_order(self.index.clone(), columns, vec![col_name])
     }
 
+    /// Generate descriptive statistics for a numeric Series.
+    ///
+    /// Matches `pd.Series.describe()`. Returns a Series with index
+    /// `[count, mean, std, min, 25%, 50%, 75%, max]`.
+    pub fn describe(&self) -> Result<Self, FrameError> {
+        self.describe_with_percentiles(&[0.25, 0.5, 0.75])
+    }
+
+    /// Generate descriptive statistics with custom percentiles.
+    ///
+    /// Matches `pd.Series.describe(percentiles=[...])`.
+    pub fn describe_with_percentiles(&self, percentiles: &[f64]) -> Result<Self, FrameError> {
+        let floats: Vec<f64> = self
+            .column
+            .values()
+            .iter()
+            .filter_map(|v| v.to_f64().ok())
+            .filter(|v| !v.is_nan())
+            .collect();
+
+        let count = floats.len() as f64;
+        let (mean, std, min, max) = if floats.is_empty() {
+            (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+        } else {
+            let sum: f64 = floats.iter().sum();
+            let mean = sum / count;
+            let var = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                / (count - 1.0).max(1.0);
+            let std = var.sqrt();
+            let min = floats.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = floats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (mean, std, min, max)
+        };
+
+        let mut sorted = floats.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let compute_percentile = |p: f64| -> f64 {
+            if sorted.is_empty() {
+                return f64::NAN;
+            }
+            let idx = p * (sorted.len() as f64 - 1.0);
+            let lo = idx.floor() as usize;
+            let hi = idx.ceil() as usize;
+            if lo == hi || hi >= sorted.len() {
+                sorted[lo.min(sorted.len() - 1)]
+            } else {
+                let frac = idx - lo as f64;
+                sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+            }
+        };
+
+        let mut labels = vec![
+            IndexLabel::Utf8("count".into()),
+            IndexLabel::Utf8("mean".into()),
+            IndexLabel::Utf8("std".into()),
+            IndexLabel::Utf8("min".into()),
+        ];
+        let mut values = vec![
+            Scalar::Float64(count),
+            Scalar::Float64(mean),
+            Scalar::Float64(std),
+            Scalar::Float64(min),
+        ];
+
+        for &p in percentiles {
+            let pct_label = format!("{}%", (p * 100.0).round() as i64);
+            labels.push(IndexLabel::Utf8(pct_label));
+            values.push(Scalar::Float64(compute_percentile(p)));
+        }
+
+        labels.push(IndexLabel::Utf8("max".into()));
+        values.push(Scalar::Float64(max));
+
+        Self::from_values(self.name.clone(), labels, values)
+    }
+
     /// Unstack a Series with string-composite index into a DataFrame.
     ///
     /// Matches `pd.Series.unstack()`. Expects index labels in the format
@@ -3453,22 +3530,59 @@ impl Series {
     ///
     /// Matches `pd.Series.drop_duplicates(keep='first')`.
     pub fn drop_duplicates(&self) -> Result<Self, FrameError> {
-        let mut seen = Vec::<&Scalar>::new();
+        self.drop_duplicates_keep(DuplicateKeep::First)
+    }
+
+    /// Remove duplicate values with control over which occurrence to keep.
+    ///
+    /// Matches `pd.Series.drop_duplicates(keep=...)`.
+    /// - `First`: keep the first occurrence of each value
+    /// - `Last`: keep the last occurrence of each value
+    /// - `None`: drop all duplicated values entirely
+    pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        let vals = self.column.values();
         let mut indices = Vec::new();
-        for (i, val) in self.column.values().iter().enumerate() {
-            let is_dup = seen.iter().any(|existing| existing.semantic_eq(val));
-            if !is_dup {
-                seen.push(val);
-                indices.push(i);
+
+        match keep {
+            DuplicateKeep::First => {
+                let mut seen = Vec::<&Scalar>::new();
+                for (i, val) in vals.iter().enumerate() {
+                    if !seen.iter().any(|e| e.semantic_eq(val)) {
+                        seen.push(val);
+                        indices.push(i);
+                    }
+                }
+            }
+            DuplicateKeep::Last => {
+                let mut seen = Vec::<&Scalar>::new();
+                for (i, val) in vals.iter().enumerate().rev() {
+                    if !seen.iter().any(|e| e.semantic_eq(val)) {
+                        seen.push(val);
+                        indices.push(i);
+                    }
+                }
+                indices.reverse();
+            }
+            DuplicateKeep::None => {
+                for (i, val) in vals.iter().enumerate() {
+                    let count = vals
+                        .iter()
+                        .filter(|v| v.semantic_eq(val))
+                        .count();
+                    if count == 1 {
+                        indices.push(i);
+                    }
+                }
             }
         }
+
         let labels: Vec<IndexLabel> = indices
             .iter()
             .map(|&i| self.index.labels()[i].clone())
             .collect();
         let values: Vec<Scalar> = indices
             .iter()
-            .map(|&i| self.column.values()[i].clone())
+            .map(|&i| vals[i].clone())
             .collect();
         Self::from_values(self.name.clone(), labels, values)
     }
@@ -11972,6 +12086,83 @@ impl DataFrame {
         }
 
         out
+    }
+
+    /// Export DataFrame to CSV string with additional formatting options.
+    ///
+    /// Matches `df.to_csv(sep, index, na_rep, columns)`.
+    /// - `na_rep`: string to represent missing values (default empty)
+    /// - `columns`: optional subset of columns to include
+    pub fn to_csv_options(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        let col_order: Vec<&str> = match columns {
+            Some(cols) => {
+                for &c in cols {
+                    if !self.columns.contains_key(c) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{c}' not found"
+                        )));
+                    }
+                }
+                cols.to_vec()
+            }
+            None => self.column_order.iter().map(|s| s.as_str()).collect(),
+        };
+
+        let mut out = String::new();
+
+        // Header
+        if include_index {
+            out.push_str("index");
+            out.push(sep);
+        }
+        for (i, name) in col_order.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push_str(name);
+        }
+        out.push('\n');
+
+        // Rows
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                match label {
+                    IndexLabel::Int64(v) => out.push_str(&v.to_string()),
+                    IndexLabel::Utf8(s) => out.push_str(s),
+                }
+                out.push(sep);
+            }
+            for (col_idx, name) in col_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                let val = &self.columns[*name].values()[row_idx];
+                match val {
+                    Scalar::Null(_) => out.push_str(na_rep),
+                    Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+                    Scalar::Int64(v) => out.push_str(&v.to_string()),
+                    Scalar::Float64(v) => out.push_str(&v.to_string()),
+                    Scalar::Utf8(s) => {
+                        if s.contains(sep) || s.contains('"') || s.contains('\n') {
+                            out.push('"');
+                            out.push_str(&s.replace('"', "\"\""));
+                            out.push('"');
+                        } else {
+                            out.push_str(s);
+                        }
+                    }
+                }
+            }
+            out.push('\n');
+        }
+
+        Ok(out)
     }
 
     /// Export DataFrame to JSON string in records orientation.
@@ -35378,5 +35569,143 @@ mod tests {
         let result = df.cov_min_periods(5).unwrap();
         let cov_ab = result.columns["a"].values()[1].to_f64().unwrap();
         assert!(cov_ab.is_nan());
+    }
+
+    // ── Series.drop_duplicates_keep ────────────────────────────
+
+    #[test]
+    fn series_drop_duplicates_keep_first() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.drop_duplicates_keep(DuplicateKeep::First).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.values(), &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn series_drop_duplicates_keep_last() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.drop_duplicates_keep(DuplicateKeep::Last).unwrap();
+        assert_eq!(result.len(), 3);
+        // keeps index 1(=2), 2(=1), 3(=3)
+        assert_eq!(result.values(), &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn series_drop_duplicates_keep_none() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.drop_duplicates_keep(DuplicateKeep::None).unwrap();
+        // 1 appears twice → dropped; 2 and 3 appear once → kept
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+    }
+
+    // ── Series.describe ────────────────────────────────────────
+
+    #[test]
+    fn series_describe_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        )
+        .unwrap();
+
+        let result = s.describe().unwrap();
+        assert_eq!(result.len(), 8); // count, mean, std, min, 25%, 50%, 75%, max
+        assert_eq!(result.values()[0], Scalar::Float64(4.0)); // count
+        assert_eq!(result.values()[1], Scalar::Float64(2.5)); // mean
+        assert_eq!(result.values()[3], Scalar::Float64(1.0)); // min
+        assert_eq!(result.values()[7], Scalar::Float64(4.0)); // max
+    }
+
+    #[test]
+    fn series_describe_with_percentiles_custom() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.describe_with_percentiles(&[0.1, 0.5, 0.9]).unwrap();
+        // count, mean, std, min, 10%, 50%, 90%, max → 8 entries
+        assert_eq!(result.len(), 8);
+        assert_eq!(result.index().labels()[4], IndexLabel::Utf8("10%".into()));
+        assert_eq!(result.index().labels()[5], IndexLabel::Utf8("50%".into()));
+        assert_eq!(result.index().labels()[6], IndexLabel::Utf8("90%".into()));
+        assert_eq!(result.values()[5], Scalar::Float64(30.0)); // 50% = median
+    }
+
+    // ── DataFrame.to_csv_options ────────────────────────────────
+
+    #[test]
+    fn dataframe_to_csv_options_na_rep() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_options(',', false, "NA", None).unwrap();
+        assert!(csv.contains("NA"));
+        assert!(csv.contains("1,2"));
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_column_subset() {
+        let df = DataFrame::from_dict(
+            &["x", "y", "z"],
+            vec![
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("y", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("z", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_options(',', false, "", Some(&["x", "z"])).unwrap();
+        let lines: Vec<&str> = csv.trim().lines().collect();
+        assert_eq!(lines[0], "x,z");
+        assert_eq!(lines[1], "1,100");
+        assert_eq!(lines[2], "2,200");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_invalid_column() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let result = df.to_csv_options(',', false, "", Some(&["missing"]));
+        assert!(result.is_err());
     }
 }

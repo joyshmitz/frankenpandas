@@ -1373,6 +1373,32 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// Fill missing values with `fill_value`, filling at most `limit`
+    /// consecutive NaN positions.
+    ///
+    /// Matches `series.fillna(value, limit=N)`.
+    pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
+        let vals = self.column.values();
+        let mut out = Vec::with_capacity(vals.len());
+        let mut consecutive_fills: usize = 0;
+
+        for val in vals {
+            if val.is_missing() {
+                consecutive_fills += 1;
+                if consecutive_fills <= limit {
+                    out.push(fill_value.clone());
+                } else {
+                    out.push(val.clone());
+                }
+            } else {
+                consecutive_fills = 0;
+                out.push(val.clone());
+            }
+        }
+
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Forward-fill missing values (propagate last valid observation forward).
     ///
     /// Matches `pd.Series.ffill()` / `pd.Series.fillna(method='ffill')`.
@@ -2526,6 +2552,74 @@ impl Series {
                 Scalar::Bool(false) => fill.clone(),
                 Scalar::Null(_) => Scalar::Null(NullKind::NaN),
                 _ => fill.clone(),
+            })
+            .collect();
+
+        Self::from_values(
+            self.name.clone(),
+            plan.union_index.labels().to_vec(),
+            values,
+        )
+    }
+
+    /// Keep values where `cond` is True, replacing False positions with
+    /// corresponding values from `other` Series.
+    ///
+    /// Matches `series.where(cond, other=series)`.
+    pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let plan = align_union(&self.index, &cond.index);
+        validate_alignment_plan(&plan)?;
+
+        let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
+        let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
+
+        let other_plan = align_union(&plan.union_index, &other.index);
+        validate_alignment_plan(&other_plan)?;
+        let aligned_other = other.column.reindex_by_positions(&other_plan.right_positions)?;
+
+        let values: Vec<Scalar> = aligned_data
+            .values()
+            .iter()
+            .zip(aligned_cond.values())
+            .enumerate()
+            .map(|(i, (val, c))| match c {
+                Scalar::Bool(true) => val.clone(),
+                Scalar::Bool(false) => aligned_other.values().get(i).cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+
+        Self::from_values(
+            self.name.clone(),
+            plan.union_index.labels().to_vec(),
+            values,
+        )
+    }
+
+    /// Replace values where `cond` is True with corresponding values from
+    /// `other` Series.
+    ///
+    /// Matches `series.mask(cond, other=series)`.
+    pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let plan = align_union(&self.index, &cond.index);
+        validate_alignment_plan(&plan)?;
+
+        let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
+        let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
+
+        let other_plan = align_union(&plan.union_index, &other.index);
+        validate_alignment_plan(&other_plan)?;
+        let aligned_other = other.column.reindex_by_positions(&other_plan.right_positions)?;
+
+        let values: Vec<Scalar> = aligned_data
+            .values()
+            .iter()
+            .zip(aligned_cond.values())
+            .enumerate()
+            .map(|(i, (val, c))| match c {
+                Scalar::Bool(true) => aligned_other.values().get(i).cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+                Scalar::Bool(false) => val.clone(),
+                _ => Scalar::Null(NullKind::NaN),
             })
             .collect();
 
@@ -9316,6 +9410,14 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
     }
 
+    /// Fill missing values with `fill_value`, filling at most `limit`
+    /// consecutive NaN positions per column.
+    ///
+    /// Matches `df.fillna(value, limit=N)`.
+    pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.fillna_limit(fill_value, limit))
+    }
+
     /// Fill missing values with per-column values.
     ///
     /// Matches `df.fillna({'col1': val1, 'col2': val2})`.
@@ -10961,6 +11063,78 @@ impl DataFrame {
                     Scalar::Bool(false) => val.clone(),
                     Scalar::Null(_) => Scalar::Null(NullKind::NaN),
                     _ => val.clone(),
+                })
+                .collect();
+
+            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+    }
+
+    /// Keep values where `cond` is True, replacing False positions with
+    /// corresponding values from `other` DataFrame.
+    ///
+    /// Matches `df.where(cond, other=df)`.
+    pub fn where_cond_df(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let mut new_columns = BTreeMap::new();
+
+        for col_name in &self.column_order {
+            let data_col = &self.columns[col_name];
+            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "where_cond_df: condition missing column '{col_name}'"
+                ))
+            })?;
+            let other_col = other.columns.get(col_name);
+
+            let values: Vec<Scalar> = data_col
+                .values()
+                .iter()
+                .zip(cond_col.values())
+                .enumerate()
+                .map(|(i, (val, c))| match c {
+                    Scalar::Bool(true) => val.clone(),
+                    Scalar::Bool(false) => other_col
+                        .and_then(|oc| oc.values().get(i).cloned())
+                        .unwrap_or(Scalar::Null(NullKind::NaN)),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+
+            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+    }
+
+    /// Replace values where `cond` is True with corresponding values from
+    /// `other` DataFrame.
+    ///
+    /// Matches `df.mask(cond, other=df)`.
+    pub fn mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let mut new_columns = BTreeMap::new();
+
+        for col_name in &self.column_order {
+            let data_col = &self.columns[col_name];
+            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "mask_df_other: condition missing column '{col_name}'"
+                ))
+            })?;
+            let other_col = other.columns.get(col_name);
+
+            let values: Vec<Scalar> = data_col
+                .values()
+                .iter()
+                .zip(cond_col.values())
+                .enumerate()
+                .map(|(i, (val, c))| match c {
+                    Scalar::Bool(true) => other_col
+                        .and_then(|oc| oc.values().get(i).cloned())
+                        .unwrap_or(Scalar::Null(NullKind::NaN)),
+                    Scalar::Bool(false) => val.clone(),
+                    _ => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
 
@@ -38176,5 +38350,133 @@ mod tests {
         assert_eq!(vc.len(), 2); // x appears 2 times, y 1 time
         // First entry should be "x" with count 2 (sorted by count desc)
         assert_eq!(vc.column().values()[0], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_series_where_cond_series() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(99), Scalar::Int64(88), Scalar::Int64(77)],
+        )
+        .unwrap();
+        let result = s.where_cond_series(&cond, &other).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(10)); // True → keep
+        assert_eq!(result.column().values()[1], Scalar::Int64(88)); // False → other
+        assert_eq!(result.column().values()[2], Scalar::Int64(30)); // True → keep
+    }
+
+    #[test]
+    fn test_series_mask_series() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(99), Scalar::Int64(88), Scalar::Int64(77)],
+        )
+        .unwrap();
+        let result = s.mask_series(&cond, &other).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(10)); // False → keep
+        assert_eq!(result.column().values()[1], Scalar::Int64(88)); // True → other
+        assert_eq!(result.column().values()[2], Scalar::Int64(30)); // False → keep
+    }
+
+    #[test]
+    fn test_series_fillna_limit() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let result = s.fillna_limit(&Scalar::Float64(0.0), 2).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(0.0)); // filled
+        assert_eq!(result.column().values()[2], Scalar::Float64(0.0)); // filled
+        assert!(result.column().values()[3].is_missing()); // limit exceeded
+        assert_eq!(result.column().values()[4], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn test_df_where_cond_df() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let cond = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Bool(false), Scalar::Bool(true)]),
+            ],
+        )
+        .unwrap();
+        let other = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        )
+        .unwrap();
+        let result = df.where_cond_df(&cond, &other).unwrap();
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));  // True → keep
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(20)); // False → other
+        assert_eq!(result.columns["b"].values()[0], Scalar::Int64(30)); // False → other
+        assert_eq!(result.columns["b"].values()[1], Scalar::Int64(4));  // True → keep
+    }
+
+    #[test]
+    fn test_df_fillna_limit() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                ]),
+            ],
+        )
+        .unwrap();
+        let result = df.fillna_limit(&Scalar::Float64(0.0), 1).unwrap();
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(0.0)); // filled
+        assert!(result.columns["a"].values()[2].is_missing()); // limit exceeded
+        assert!(result.columns["a"].values()[3].is_missing()); // limit exceeded
     }
 }

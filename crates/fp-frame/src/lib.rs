@@ -37097,14 +37097,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let skew = s.expanding(1).skew().unwrap();
+        let skew = s.expanding(Some(1)).skew().unwrap();
         // First 2 elements have < 3 values → NaN
         assert!(skew.column().values()[0].is_missing());
         assert!(skew.column().values()[1].is_missing());
         // [1,2,5] should have positive skew
         let v = skew.column().values()[2].to_f64().unwrap();
         assert!(v > 0.0);
-        let kurt = s.expanding(1).kurt().unwrap();
+        let kurt = s.expanding(Some(1)).kurt().unwrap();
         // First 3 elements have < 4 values → NaN
         assert!(kurt.column().values()[2].is_missing());
         let k = kurt.column().values()[3].to_f64().unwrap();

@@ -5885,6 +5885,72 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Extract capture groups from a regex, returning a DataFrame.
+    ///
+    /// Analogous to `pandas.Series.str.extract(pat, expand=True)`. Returns
+    /// a DataFrame where each column corresponds to a capture group. If the
+    /// pattern has named groups `(?P<name>...)`, those names become column
+    /// names; otherwise columns are numbered "0", "1", etc. Non-matching
+    /// rows produce NaN in every group column.
+    pub fn extract_to_frame(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let num_groups = re.captures_len() - 1;
+        if num_groups == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "extract_to_frame requires at least one capture group".into(),
+            ));
+        }
+
+        // Determine column names from named groups or fallback to "0", "1", ...
+        let group_names: Vec<String> = re
+            .capture_names()
+            .skip(1) // skip group 0
+            .enumerate()
+            .map(|(i, name)| name.unwrap_or(&i.to_string()).to_string())
+            .collect();
+
+        let mut col_vecs: Vec<Vec<Scalar>> = (0..num_groups).map(|_| Vec::new()).collect();
+
+        for val in self.series.column().values() {
+            match val {
+                Scalar::Utf8(s) => match re.captures(s) {
+                    Some(caps) => {
+                        for (g, col_vec) in col_vecs.iter_mut().enumerate() {
+                            match caps.get(g + 1) {
+                                Some(m) => col_vec.push(Scalar::Utf8(m.as_str().to_string())),
+                                None => col_vec.push(Scalar::Null(NullKind::NaN)),
+                            }
+                        }
+                    }
+                    None => {
+                        for col_vec in &mut col_vecs {
+                            col_vec.push(Scalar::Null(NullKind::NaN));
+                        }
+                    }
+                },
+                _ => {
+                    for col_vec in &mut col_vecs {
+                        col_vec.push(Scalar::Null(NullKind::NaN));
+                    }
+                }
+            }
+        }
+
+        let mut data: Vec<(&str, Vec<Scalar>)> = Vec::new();
+        let col_order: Vec<&str> = group_names.iter().map(|s| s.as_str()).collect();
+        for (i, name) in group_names.iter().enumerate() {
+            data.push((name.as_str(), std::mem::take(&mut col_vecs[i])));
+        }
+        let df = DataFrame::from_dict(&col_order, data)?;
+        Ok(DataFrame {
+            columns: df.columns,
+            column_order: df.column_order,
+            index: self.series.index().clone(),
+        })
+    }
+
     /// Extract all matches of a regex capture group, returning a DataFrame.
     ///
     /// Analogous to `pandas.Series.str.extractall(pat)`. Returns a DataFrame
@@ -10837,6 +10903,108 @@ impl DataFrame {
         })
     }
 
+    /// Pivot table with margins and a customizable margin label.
+    ///
+    /// Like `pivot_table_with_margins` but allows specifying the label used
+    /// for the margin row/column (default is "All" in pandas).
+    pub fn pivot_table_with_margins_name(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        margins: bool,
+        margins_name: &str,
+    ) -> Result<Self, FrameError> {
+        let base = self.pivot_table(values, index_col, columns_col, aggfunc)?;
+        if !margins {
+            return Ok(base);
+        }
+
+        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
+            "sum" => |vals: &[f64]| vals.iter().sum(),
+            "mean" => |vals: &[f64]| {
+                if vals.is_empty() {
+                    f64::NAN
+                } else {
+                    vals.iter().sum::<f64>() / vals.len() as f64
+                }
+            },
+            "count" => |vals: &[f64]| vals.len() as f64,
+            "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
+            "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "pivot_table aggfunc '{aggfunc}' not supported for margins"
+                )));
+            }
+        };
+
+        let n_rows = base.len();
+        let col_names = base.column_order.clone();
+
+        // margin-label column: row-wise aggregation
+        let mut all_col_vals = Vec::with_capacity(n_rows);
+        for row in 0..n_rows {
+            let mut row_vals = Vec::new();
+            for name in &col_names {
+                if let Some(col) = base.columns.get(name) && let Ok(v) = col.values()[row].to_f64() {
+                    row_vals.push(v);
+                }
+            }
+            if row_vals.is_empty() {
+                all_col_vals.push(Scalar::Null(NullKind::NaN));
+            } else {
+                all_col_vals.push(Scalar::Float64(agg_fn(&row_vals)));
+            }
+        }
+
+        // margin-label row: column-wise aggregation
+        let mut new_cols = BTreeMap::new();
+        let mut new_col_order = col_names.clone();
+        let mut all_row_vals_for_all_col = Vec::new();
+
+        for name in &col_names {
+            let col = &base.columns[name];
+            let mut col_vals: Vec<Scalar> = col.values().to_vec();
+            let nums: Vec<f64> = col
+                .values()
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .collect();
+            let margin = if nums.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(agg_fn(&nums))
+            };
+            if let Ok(v) = margin.to_f64() {
+                all_row_vals_for_all_col.push(v);
+            }
+            col_vals.push(margin);
+            new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
+        }
+
+        all_col_vals.push(if all_row_vals_for_all_col.is_empty() {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(agg_fn(&all_row_vals_for_all_col))
+        });
+        new_cols.insert(
+            margins_name.to_owned(),
+            Column::new(DType::Float64, all_col_vals)?,
+        );
+        new_col_order.push(margins_name.to_owned());
+
+        let mut new_labels = base.index.labels().to_vec();
+        new_labels.push(IndexLabel::Utf8(margins_name.to_owned()));
+
+        Ok(Self {
+            columns: new_cols,
+            column_order: new_col_order,
+            index: Index::new(new_labels),
+        })
+    }
+
     /// Aggregate using one or more operations over the specified axis.
     ///
     /// `funcs`: mapping of column_name → list of aggregation function names.
@@ -14038,6 +14206,98 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mod(other)`.
     pub fn mod_df(&self, other: &Self) -> Result<Self, FrameError> {
         self.binary_df_op(other, |a, b| a % b, "mod")
+    }
+
+    /// Internal: element-wise binary operation between two DataFrames with fill_value.
+    ///
+    /// When one operand is NaN/missing and the other is not, the missing operand
+    /// is replaced by `fill_value` before applying `op`. When both are missing,
+    /// the result is NaN.
+    fn binary_df_op_fill<F>(
+        &self,
+        other: &Self,
+        op: F,
+        fill_value: f64,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
+        let mut result_cols = BTreeMap::new();
+        for col_name in &left.column_order {
+            let lc = &left.columns[col_name];
+            let rc = &right.columns[col_name];
+            let left_numlike = matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
+            let right_numlike = matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
+            if left_numlike && right_numlike {
+                let vals: Vec<Scalar> = lc
+                    .values()
+                    .iter()
+                    .zip(rc.values())
+                    .map(|(lv, rv)| {
+                        let l_miss = lv.is_missing();
+                        let r_miss = rv.is_missing();
+                        if l_miss && r_miss {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            let l = if l_miss {
+                                fill_value
+                            } else {
+                                match lv.to_f64() {
+                                    Ok(v) => v,
+                                    Err(_) => return Scalar::Null(NullKind::NaN),
+                                }
+                            };
+                            let r = if r_miss {
+                                fill_value
+                            } else {
+                                match rv.to_f64() {
+                                    Ok(v) => v,
+                                    Err(_) => return Scalar::Null(NullKind::NaN),
+                                }
+                            };
+                            Scalar::Float64(op(l, r))
+                        }
+                    })
+                    .collect();
+                result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            } else {
+                result_cols.insert(col_name.clone(), lc.clone());
+            }
+        }
+        Ok(Self {
+            columns: result_cols,
+            column_order: left.column_order.clone(),
+            index: left.index.clone(),
+        })
+    }
+
+    /// Add another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.add(other, fill_value=X)`.
+    pub fn add_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(other, |a, b| a + b, fill_value)
+    }
+
+    /// Subtract another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.sub(other, fill_value=X)`.
+    pub fn sub_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(other, |a, b| a - b, fill_value)
+    }
+
+    /// Multiply another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.mul(other, fill_value=X)`.
+    pub fn mul_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(other, |a, b| a * b, fill_value)
+    }
+
+    /// Divide by another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.div(other, fill_value=X)`.
+    pub fn div_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(other, |a, b| if b == 0.0 { f64::NAN } else { a / b }, fill_value)
     }
 
     /// Floor-divide all numeric columns by a scalar.
@@ -36388,5 +36648,148 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Utf8("one".into()));
         assert_eq!(result.values()[1], Scalar::Utf8("two".into()));
         assert_eq!(result.values()[2], Scalar::Utf8("other".into()));
+    }
+
+    #[test]
+    fn test_add_df_fill() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        )
+        .unwrap();
+        let result = df1.add_df_fill(&df2, 0.0).unwrap();
+        // col a: [1+10=11, 0+20=20(fill left)]
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(11.0));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(20.0));
+        // col b: [3+0=3(fill right), 4+0=4(fill right)]
+        assert_eq!(result.columns["b"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(result.columns["b"].values()[1], Scalar::Float64(4.0));
+        // col c: [0+100=100(fill left), 0+200=200(fill left)]
+        assert_eq!(result.columns["c"].values()[0], Scalar::Float64(100.0));
+        assert_eq!(result.columns["c"].values()[1], Scalar::Float64(200.0));
+    }
+
+    #[test]
+    fn test_sub_div_df_fill() {
+        let df1 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)])],
+        )
+        .unwrap();
+        // sub_df_fill with fill=1: [10-1=9, 1-5=-4]
+        let sub = df1.sub_df_fill(&df2, 1.0).unwrap();
+        assert_eq!(sub.columns["x"].values()[0], Scalar::Float64(9.0));
+        assert_eq!(sub.columns["x"].values()[1], Scalar::Float64(-4.0));
+        // div_df_fill with fill=1: [10/1=10, 1/5=0.2]
+        let div = df1.div_df_fill(&df2, 1.0).unwrap();
+        assert_eq!(div.columns["x"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(div.columns["x"].values()[1], Scalar::Float64(0.2));
+    }
+
+    #[test]
+    fn test_extract_to_frame() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("John 25".into()),
+                Scalar::Utf8("Jane 30".into()),
+                Scalar::Utf8("Bob".into()),
+            ],
+        )
+        .unwrap();
+        let df = s.str().extract_to_frame(r"(\w+)\s+(\d+)").unwrap();
+        assert_eq!(df.column_names().len(), 2);
+        assert_eq!(df.columns["0"].values()[0], Scalar::Utf8("John".into()));
+        assert_eq!(df.columns["0"].values()[1], Scalar::Utf8("Jane".into()));
+        assert!(df.columns["0"].values()[2].is_missing()); // "Bob" doesn't match
+        assert_eq!(df.columns["1"].values()[0], Scalar::Utf8("25".into()));
+        assert_eq!(df.columns["1"].values()[1], Scalar::Utf8("30".into()));
+    }
+
+    #[test]
+    fn test_extract_to_frame_named_groups() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15".into()),
+                Scalar::Utf8("2024-12-25".into()),
+            ],
+        )
+        .unwrap();
+        let df = s
+            .str()
+            .extract_to_frame(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
+            .unwrap();
+        let col_names: Vec<String> = df.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"year".to_string()));
+        assert!(col_names.contains(&"month".to_string()));
+        assert!(col_names.contains(&"day".to_string()));
+        assert_eq!(df.columns["year"].values()[0], Scalar::Utf8("2024".into()));
+        assert_eq!(df.columns["month"].values()[1], Scalar::Utf8("12".into()));
+    }
+
+    #[test]
+    fn test_pivot_table_with_margins_name() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("East".into()),
+                        Scalar::Utf8("East".into()),
+                        Scalar::Utf8("West".into()),
+                        Scalar::Utf8("West".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df
+            .pivot_table_with_margins_name("sales", "region", "product", "sum", true, "Total")
+            .unwrap();
+        // Check margin column name is "Total" not "All"
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"Total".to_string()));
+        // Check margin row label is "Total"
+        let labels = result.index().labels();
+        let last = &labels[labels.len() - 1];
+        assert_eq!(*last, IndexLabel::Utf8("Total".into()));
     }
 }

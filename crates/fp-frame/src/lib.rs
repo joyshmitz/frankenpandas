@@ -3402,6 +3402,54 @@ impl Series {
         Self::from_values(self.name.clone(), labels, values)
     }
 
+    /// Aggregate using one or more reduction functions.
+    ///
+    /// Matches `pd.Series.agg(["sum", "mean", "std"])`. Returns a Series
+    /// whose index contains the function names and values contain the results.
+    pub fn agg(&self, funcs: &[&str]) -> Result<Self, FrameError> {
+        let mut labels = Vec::with_capacity(funcs.len());
+        let mut values = Vec::with_capacity(funcs.len());
+        for &func_name in funcs {
+            labels.push(IndexLabel::Utf8(func_name.to_string()));
+            let val = match func_name {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                "count" => Scalar::Int64(self.count() as i64),
+                "median" => self.median()?,
+                "prod" => self.prod()?,
+                "sem" => Scalar::Float64(self.sem()?),
+                "skew" => Scalar::Float64(self.skew()?),
+                "kurt" | "kurtosis" => Scalar::Float64(self.kurt()?),
+                "nunique" => Scalar::Int64(self.nunique() as i64),
+                "first" => {
+                    if self.len() > 0 {
+                        self.column.values()[0].clone()
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                }
+                "last" => {
+                    if self.len() > 0 {
+                        self.column.values()[self.len() - 1].clone()
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                }
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "unsupported agg function: '{other}'"
+                    )));
+                }
+            };
+            values.push(val);
+        }
+        Self::from_values(self.name.clone(), labels, values)
+    }
+
     /// Unstack a Series with string-composite index into a DataFrame.
     ///
     /// Matches `pd.Series.unstack()`. Expects index labels in the format
@@ -4448,6 +4496,23 @@ impl Series {
         } else {
             Ok(cov / denom)
         }
+    }
+
+    /// Group the Series by another Series of the same length.
+    ///
+    /// Matches `pd.Series.groupby(by)`. Returns a `SeriesGroupBy` which
+    /// supports aggregation methods (sum, mean, count, min, max, etc.).
+    pub fn groupby<'a>(&'a self, by: &'a Series) -> Result<SeriesGroupBy<'a>, FrameError> {
+        if self.len() != by.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.len(),
+                column_len: by.len(),
+            });
+        }
+        Ok(SeriesGroupBy {
+            series: self,
+            by,
+        })
     }
 
     /// Access string methods on a Utf8 Series (analogous to `pandas.Series.str`).
@@ -5715,6 +5780,178 @@ impl DataFrameResample<'_> {
     /// Resample max across all numeric columns.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
         self.apply_resample(|s, freq| s.resample(freq).max())
+    }
+}
+
+/// GroupBy for Series, grouping by values of another Series.
+///
+/// Created by `Series::groupby(by)`. Supports standard aggregation
+/// methods that return a new Series indexed by group keys.
+pub struct SeriesGroupBy<'a> {
+    series: &'a Series,
+    by: &'a Series,
+}
+
+impl SeriesGroupBy<'_> {
+    /// Build groups as (key_label -> Vec<row_index>).
+    fn build_groups(&self) -> (Vec<IndexLabel>, std::collections::HashMap<String, Vec<usize>>) {
+        let n = self.series.len();
+        let mut order: Vec<IndexLabel> = Vec::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for i in 0..n {
+            let val = &self.by.column.values()[i];
+            let key = format!("{val:?}");
+            if seen.insert(key.clone()) {
+                let lbl = match val {
+                    Scalar::Int64(v) => IndexLabel::Int64(*v),
+                    Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+                    Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.into()),
+                    Scalar::Float64(v) => IndexLabel::Utf8(format!("{v}")),
+                    _ => IndexLabel::Utf8("NaN".into()),
+                };
+                order.push(lbl);
+            }
+            groups.entry(key).or_default().push(i);
+        }
+
+        (order, groups)
+    }
+
+    /// Apply an aggregation that reduces each group to a single f64 value.
+    fn agg_numeric<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        let (order, groups) = self.build_groups();
+        let keys: Vec<String> = order
+            .iter()
+            .map(|lbl| format!("{lbl:?}"))
+            .collect();
+        let mut labels = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+
+        for (i, key) in keys.iter().enumerate() {
+            let indices = &groups[key];
+            let nums: Vec<f64> = indices
+                .iter()
+                .filter_map(|&idx| {
+                    let v = &self.series.column.values()[idx];
+                    if v.is_missing() { None } else { v.to_f64().ok() }
+                })
+                .collect();
+            labels.push(order[i].clone());
+            if nums.is_empty() {
+                values.push(Scalar::Null(NullKind::NaN));
+            } else {
+                values.push(Scalar::Float64(func(&nums)));
+            }
+        }
+        Series::from_values(name, labels, values)
+    }
+
+    /// Sum of each group.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
+    }
+
+    /// Mean of each group.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| nums.iter().sum::<f64>() / nums.len() as f64,
+            self.series.name(),
+        )
+    }
+
+    /// Count of non-null values in each group.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
+        let mut labels = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let indices = &groups[key];
+            let cnt = indices
+                .iter()
+                .filter(|&&idx| !self.series.column.values()[idx].is_missing())
+                .count();
+            labels.push(order[i].clone());
+            values.push(Scalar::Int64(cnt as i64));
+        }
+        Series::from_values(self.series.name(), labels, values)
+    }
+
+    /// Minimum of each group.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
+            self.series.name(),
+        )
+    }
+
+    /// Maximum of each group.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            self.series.name(),
+        )
+    }
+
+    /// Standard deviation of each group (ddof=1).
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| {
+                if nums.len() < 2 { return f64::NAN; }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    / (nums.len() - 1) as f64;
+                var.sqrt()
+            },
+            self.series.name(),
+        )
+    }
+
+    /// First value of each group.
+    pub fn first(&self) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
+        let mut labels = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let indices = &groups[key];
+            labels.push(order[i].clone());
+            values.push(self.series.column.values()[indices[0]].clone());
+        }
+        Series::from_values(self.series.name(), labels, values)
+    }
+
+    /// Last value of each group.
+    pub fn last(&self) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
+        let mut labels = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let indices = &groups[key];
+            labels.push(order[i].clone());
+            values.push(self.series.column.values()[*indices.last().unwrap()].clone());
+        }
+        Series::from_values(self.series.name(), labels, values)
+    }
+
+    /// Number of elements in each group (including nulls).
+    pub fn size(&self) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
+        let mut labels = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            labels.push(order[i].clone());
+            values.push(Scalar::Int64(groups[key].len() as i64));
+        }
+        Series::from_values(self.series.name(), labels, values)
     }
 }
 
@@ -14392,6 +14629,13 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mod(other)`.
     pub fn mod_df(&self, other: &Self) -> Result<Self, FrameError> {
         self.binary_df_op(other, |a, b| a % b, "mod")
+    }
+
+    /// Raise another DataFrame element-wise to the power with index alignment.
+    ///
+    /// Matches `pd.DataFrame.pow(other)` / `df1 ** df2`.
+    pub fn pow_df(&self, other: &Self) -> Result<Self, FrameError> {
+        self.binary_df_op(other, |a, b| a.powf(b), "pow")
     }
 
     /// Internal: element-wise binary operation between two DataFrames with fill_value.
@@ -37152,5 +37396,72 @@ mod tests {
         let md = df1.mod_df_fill(&df2, 1.0).unwrap();
         assert_eq!(md.columns["x"].values()[0], Scalar::Float64(0.0));
         assert_eq!(md.columns["x"].values()[1], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn test_pow_df() {
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)])],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(3.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
+        let result = df1.pow_df(&df2).unwrap();
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(8.0)); // 2^3
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(9.0)); // 3^2
+    }
+
+    #[test]
+    fn test_series_agg() {
+        let s = Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        )
+        .unwrap();
+        let result = s.agg(&["sum", "mean", "count"]).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.column().values()[0], Scalar::Float64(6.0)); // sum
+        assert_eq!(result.column().values()[1], Scalar::Float64(2.0)); // mean
+        assert_eq!(result.column().values()[2], Scalar::Int64(3));     // count
+    }
+
+    #[test]
+    fn test_series_groupby() {
+        let values = Series::from_values(
+            "sales",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "region",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("A".into()),
+                Scalar::Utf8("B".into()),
+                Scalar::Utf8("A".into()),
+                Scalar::Utf8("B".into()),
+            ],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+        let sums = gb.sum().unwrap();
+        assert_eq!(sums.len(), 2);
+        // Group A: 10+30=40, Group B: 20+40=60
+        assert_eq!(sums.column().values()[0], Scalar::Float64(40.0));
+        assert_eq!(sums.column().values()[1], Scalar::Float64(60.0));
+        let counts = gb.count().unwrap();
+        assert_eq!(counts.column().values()[0], Scalar::Int64(2));
+        assert_eq!(counts.column().values()[1], Scalar::Int64(2));
     }
 }

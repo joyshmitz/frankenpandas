@@ -136,6 +136,144 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// Parse an offset string like "3D", "1M", "2Y" into (count, unit).
+fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
+    let offset = offset.trim();
+    if offset.is_empty() {
+        return Err(FrameError::CompatibilityRejected(
+            "empty offset string".into(),
+        ));
+    }
+    let unit = offset.chars().last().unwrap_or('D');
+    let num_str = &offset[..offset.len() - 1];
+    let count: i32 = if num_str.is_empty() {
+        1
+    } else {
+        num_str.parse().map_err(|_| {
+            FrameError::CompatibilityRejected(format!("invalid offset: '{offset}'"))
+        })?
+    };
+    Ok((count, unit.to_ascii_uppercase()))
+}
+
+/// Add an offset to a date-like IndexLabel, returning the cutoff label.
+fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, FrameError> {
+    let date_str = match label {
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Int64(_) => {
+            return Err(FrameError::CompatibilityRejected(
+                "first/last offset requires string (date) index".into(),
+            ));
+        }
+    };
+    let (count, unit) = parse_offset_str(offset)?;
+    let result = shift_date_string(&date_str, count, unit)?;
+    Ok(IndexLabel::Utf8(result))
+}
+
+/// Subtract an offset from a date-like IndexLabel, returning the cutoff label.
+fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, FrameError> {
+    let date_str = match label {
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Int64(_) => {
+            return Err(FrameError::CompatibilityRejected(
+                "first/last offset requires string (date) index".into(),
+            ));
+        }
+    };
+    let (count, unit) = parse_offset_str(offset)?;
+    let result = shift_date_string(&date_str, -count, unit)?;
+    Ok(IndexLabel::Utf8(result))
+}
+
+/// Shift a date string by a given count of days/months/years.
+fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, FrameError> {
+    let date_part = date_str
+        .split('T')
+        .next()
+        .unwrap_or(date_str)
+        .split(' ')
+        .next()
+        .unwrap_or(date_str);
+    let parts: Vec<&str> = date_part.split('-').collect();
+    if parts.len() < 3 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "cannot parse date from '{date_str}'"
+        )));
+    }
+    let year: i32 = parts[0]
+        .parse()
+        .map_err(|_| FrameError::CompatibilityRejected(format!("bad year in '{date_str}'")))?;
+    let month: i32 = parts[1]
+        .parse()
+        .map_err(|_| FrameError::CompatibilityRejected(format!("bad month in '{date_str}'")))?;
+    let day: i32 = parts[2]
+        .parse()
+        .map_err(|_| FrameError::CompatibilityRejected(format!("bad day in '{date_str}'")))?;
+
+    match unit {
+        'D' => {
+            // Simple day arithmetic using a Julian-day-like approach
+            let jdn = date_to_jdn(year, month, day);
+            let (ny, nm, nd) = jdn_to_date(jdn + count);
+            Ok(format!("{ny:04}-{nm:02}-{nd:02}"))
+        }
+        'M' => {
+            let total_months = (year * 12 + (month - 1)) + count;
+            let ny = total_months.div_euclid(12);
+            let nm = total_months.rem_euclid(12) + 1;
+            let nd = day.min(days_in_month(ny, nm));
+            Ok(format!("{ny:04}-{nm:02}-{nd:02}"))
+        }
+        'Y' | 'A' => {
+            let ny = year + count;
+            let nd = day.min(days_in_month(ny, month));
+            Ok(format!("{ny:04}-{month:02}-{nd:02}"))
+        }
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "unsupported offset unit: '{unit}'"
+        ))),
+    }
+}
+
+/// Convert (year, month, day) to Julian Day Number.
+fn date_to_jdn(year: i32, month: i32, day: i32) -> i32 {
+    let a = (14 - month) / 12;
+    let y = year + 4800 - a;
+    let m = month + 12 * a - 3;
+    day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045
+}
+
+/// Convert Julian Day Number to (year, month, day).
+fn jdn_to_date(jdn: i32) -> (i32, i32, i32) {
+    let a = jdn + 32044;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year = 100 * b + d - 4800 + m / 10;
+    (year, month, day)
+}
+
+/// Number of days in a given month.
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
 /// Coerce a single scalar to a target dtype, falling back to NaN on failure.
 fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
     if val.is_missing() {
@@ -2487,6 +2625,75 @@ impl Series {
         Ok(Scalar::Float64(product))
     }
 
+    // ── skipna-aware aggregate variants ─────────────────────────────
+
+    /// Sum with skipna control.
+    ///
+    /// Matches `pd.Series.sum(skipna=True|False)`. When `skipna=False`,
+    /// returns NaN if any value is missing.
+    pub fn sum_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.sum()
+    }
+
+    /// Mean with skipna control.
+    pub fn mean_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.mean()
+    }
+
+    /// Min with skipna control.
+    pub fn min_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.min()
+    }
+
+    /// Max with skipna control.
+    pub fn max_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.max()
+    }
+
+    /// Std with skipna control.
+    pub fn std_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.std()
+    }
+
+    /// Var with skipna control.
+    pub fn var_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.var()
+    }
+
+    /// Median with skipna control.
+    pub fn median_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.median()
+    }
+
+    /// Prod with skipna control.
+    pub fn prod_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        self.prod()
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing
@@ -4184,6 +4391,45 @@ impl Series {
         }
         let new_labels = labels[start..end].to_vec();
         let new_values = self.column.values()[start..end].to_vec();
+        Self::from_values(self.name.clone(), new_labels, new_values)
+    }
+
+    /// Select initial rows from a DatetimeIndex up to an offset.
+    ///
+    /// Matches `pd.Series.first(offset)`.
+    pub fn first_offset(&self, offset: &str) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
+        let first_label = &self.index.labels()[0];
+        let cutoff = add_offset_to_label(first_label, offset)?;
+        let labels = self.index.labels();
+        let end = labels
+            .iter()
+            .rposition(|l| l <= &cutoff)
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        let new_labels = labels[..end].to_vec();
+        let new_values = self.column.values()[..end].to_vec();
+        Self::from_values(self.name.clone(), new_labels, new_values)
+    }
+
+    /// Select final rows from a DatetimeIndex backward by an offset.
+    ///
+    /// Matches `pd.Series.last(offset)`.
+    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
+        let last_label = self.index.labels().last().unwrap();
+        let cutoff = sub_offset_from_label(last_label, offset)?;
+        let labels = self.index.labels();
+        let start = labels
+            .iter()
+            .position(|l| l >= &cutoff)
+            .unwrap_or(labels.len().saturating_sub(1));
+        let new_labels = labels[start..].to_vec();
+        let new_values = self.column.values()[start..].to_vec();
         Self::from_values(self.name.clone(), new_labels, new_values)
     }
 
@@ -15746,6 +15992,64 @@ impl DataFrame {
         Series::from_values(func.to_string(), labels, values)
     }
 
+    /// Internal: reduce each numeric column with skipna control.
+    fn reduce_numeric_skipna(&self, func: &str, skipna: bool) -> Result<Series, FrameError> {
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                continue;
+            }
+            let s = self.column_as_series(name)?;
+            let val = match func {
+                "sum" => s.sum_skipna(skipna)?,
+                "mean" => s.mean_skipna(skipna)?,
+                "min" => s.min_skipna(skipna)?,
+                "max" => s.max_skipna(skipna)?,
+                "std" => s.std_skipna(skipna)?,
+                "var" => s.var_skipna(skipna)?,
+                "median" => s.median_skipna(skipna)?,
+                "prod" => s.prod_skipna(skipna)?,
+                _ => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "unknown reduce function: {func}"
+                    )));
+                }
+            };
+            labels.push(IndexLabel::Utf8(name.clone()));
+            values.push(val);
+        }
+        Series::from_values(func.to_string(), labels, values)
+    }
+
+    /// Sum per column with skipna control.
+    ///
+    /// Matches `pd.DataFrame.sum(skipna=True|False)`.
+    pub fn sum_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        self.reduce_numeric_skipna("sum", skipna)
+    }
+
+    /// Mean per column with skipna control.
+    pub fn mean_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        self.reduce_numeric_skipna("mean", skipna)
+    }
+
+    /// Std per column with skipna control.
+    pub fn std_agg_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        self.reduce_numeric_skipna("std", skipna)
+    }
+
+    /// Var per column with skipna control.
+    pub fn var_agg_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        self.reduce_numeric_skipna("var", skipna)
+    }
+
+    /// Prod per column with skipna control.
+    pub fn prod_agg_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        self.reduce_numeric_skipna("prod", skipna)
+    }
+
     /// Skewness of non-null values per column.
     ///
     /// Matches `pd.DataFrame.skew()`.
@@ -17156,6 +17460,62 @@ impl DataFrame {
             columns.insert(name.clone(), Column::from_values(vals)?);
         }
         Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
+    }
+
+    /// Select rows from the start of a DatetimeIndex up to an offset.
+    ///
+    /// Matches `pd.DataFrame.first(offset)` where offset is a string like
+    /// "3D" (days), "1M" (months), "2Y" (years). Selects all rows whose
+    /// index label falls within the offset from the first index value.
+    pub fn first_offset(&self, offset: &str) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
+        let first_label = &self.index.labels()[0];
+        let cutoff = add_offset_to_label(first_label, offset)?;
+        // Select rows where label <= cutoff
+        let labels = self.index.labels();
+        let end = labels
+            .iter()
+            .rposition(|l| l <= &cutoff)
+            .map(|i| i + 1)
+            .unwrap_or(1); // at least include the first row
+        self.iloc_rows(0, end)
+    }
+
+    /// Select rows from the end of a DatetimeIndex backward by an offset.
+    ///
+    /// Matches `pd.DataFrame.last(offset)` where offset is a string like
+    /// "3D" (days), "1M" (months), "2Y" (years).
+    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
+        let last_label = self.index.labels().last().unwrap();
+        let cutoff = sub_offset_from_label(last_label, offset)?;
+        // Select rows where label >= cutoff
+        let labels = self.index.labels();
+        let start = labels
+            .iter()
+            .position(|l| l >= &cutoff)
+            .unwrap_or(labels.len().saturating_sub(1));
+        self.iloc_rows(start, labels.len())
+    }
+
+    /// Internal: select rows by start..end position range.
+    fn iloc_rows(&self, start: usize, end: usize) -> Result<Self, FrameError> {
+        let labels = &self.index.labels()[start..end];
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            let vals: Vec<Scalar> = col.values()[start..end].to_vec();
+            columns.insert(name.clone(), Column::from_values(vals)?);
+        }
+        Self::new_with_column_order(
+            Index::new(labels.to_vec()),
+            columns,
+            self.column_order.clone(),
+        )
     }
 
     /// Insert a column at a specific position.
@@ -41047,5 +41407,171 @@ mod tests {
         let result = s.astype_safe(DType::Int64, "ignore").unwrap();
         // Should return original since conversion fails
         assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+    }
+
+    // ── skipna aggregate variants ───────────────────────────────────
+
+    #[test]
+    fn series_sum_skipna_true() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.sum_skipna(true).unwrap();
+        assert_eq!(result, Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn series_sum_skipna_false() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.sum_skipna(false).unwrap();
+        // Should be NaN because skipna=false and there's a NaN
+        assert!(result.to_f64().unwrap().is_nan());
+    }
+
+    #[test]
+    fn series_mean_skipna_false() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let result = s.mean_skipna(false).unwrap();
+        assert!(result.to_f64().unwrap().is_nan());
+    }
+
+    #[test]
+    fn df_sum_skipna() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let with = df.sum_skipna(true).unwrap();
+        assert_eq!(with.values()[0], Scalar::Float64(4.0));
+        let without = df.sum_skipna(false).unwrap();
+        assert!(without.values()[0].to_f64().unwrap().is_nan());
+    }
+
+    // ── first_offset / last_offset ──────────────────────────────────
+
+    #[test]
+    fn series_first_offset_days() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01".into(),
+                "2024-01-03".into(),
+                "2024-01-05".into(),
+                "2024-01-10".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.first_offset("3D").unwrap();
+        // 2024-01-01 + 3D = 2024-01-04, so include 01-01 and 01-03
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn series_last_offset_days() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01".into(),
+                "2024-01-03".into(),
+                "2024-01-05".into(),
+                "2024-01-10".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.last_offset("5D").unwrap();
+        // 2024-01-10 - 5D = 2024-01-05, so include 01-05 and 01-10
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn df_first_offset() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+            vec!["2024-01-01".into(), "2024-01-05".into(), "2024-01-15".into()],
+        )
+        .unwrap();
+        let result = df.first_offset("7D").unwrap();
+        // 2024-01-01 + 7D = 2024-01-08, so include 01-01 and 01-05
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn df_last_offset() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+            vec!["2024-01-01".into(), "2024-01-05".into(), "2024-01-15".into()],
+        )
+        .unwrap();
+        let result = df.last_offset("10D").unwrap();
+        // 2024-01-15 - 10D = 2024-01-05, so include 01-05 and 01-15
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn series_first_offset_months() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-15".into(),
+                "2024-02-10".into(),
+                "2024-03-20".into(),
+                "2024-06-01".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.first_offset("2M").unwrap();
+        // 2024-01-15 + 2M = 2024-03-15, include 01-15 and 02-10
+        assert_eq!(result.len(), 2);
     }
 }

@@ -1879,6 +1879,30 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Map values using a lookup table with a default for unmapped keys.
+    ///
+    /// Matches `pd.Series.map(dict, na_action=None)` where unmapped values
+    /// use the provided `default` instead of NaN.
+    pub fn map_with_default(
+        &self,
+        mapping: &[(Scalar, Scalar)],
+        default: &Scalar,
+    ) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let mapped = mapping
+                .iter()
+                .find(|(k, _)| k.semantic_eq(val))
+                .map(|(_, v)| v.clone());
+            out.push(mapped.unwrap_or_else(|| default.clone()));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Replace specific values with substitutions.
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
@@ -11211,6 +11235,83 @@ impl DataFrame {
         }
 
         Series::from_values("corrwith".to_string(), labels, values)
+    }
+
+    /// Compute pairwise correlation with another DataFrame along the given axis.
+    ///
+    /// Matches `df.corrwith(other, axis=...)`.
+    /// - `axis=0` (default): correlate matching columns
+    /// - `axis=1`: correlate matching rows
+    pub fn corrwith_axis(&self, other: &Self, axis: usize) -> Result<Series, FrameError> {
+        match axis {
+            0 => self.corrwith(other),
+            1 => {
+                // Row-wise correlation: for each row index present in both,
+                // compute correlation across numeric columns
+                let shared_cols: Vec<String> = self
+                    .column_order
+                    .iter()
+                    .filter(|name| {
+                        other.columns.contains_key(name.as_str())
+                            && matches!(
+                                self.columns[name.as_str()].dtype(),
+                                DType::Int64 | DType::Float64
+                            )
+                            && matches!(
+                                other.columns[name.as_str()].dtype(),
+                                DType::Int64 | DType::Float64
+                            )
+                    })
+                    .cloned()
+                    .collect();
+
+                if shared_cols.len() < 2 {
+                    return Err(FrameError::CompatibilityRejected(
+                        "corrwith axis=1: need at least 2 shared numeric columns".into(),
+                    ));
+                }
+
+                let mut labels = Vec::new();
+                let mut values = Vec::new();
+
+                for (row_idx, label) in self.index.labels().iter().enumerate() {
+                    // Find matching row in other
+                    if let Some(other_row_idx) = other.index.position(label) {
+                        let mut xs = Vec::new();
+                        let mut ys = Vec::new();
+                        for col_name in &shared_cols {
+                            let xv = self.columns[col_name].values()[row_idx].to_f64();
+                            let yv = other.columns[col_name].values()[other_row_idx].to_f64();
+                            if let (Ok(x), Ok(y)) = (xv, yv) && !x.is_nan() && !y.is_nan() {
+                                xs.push(x);
+                                ys.push(y);
+                            }
+                        }
+
+                        let corr = if xs.len() < 2 {
+                            f64::NAN
+                        } else {
+                            let n = xs.len() as f64;
+                            let mx = xs.iter().sum::<f64>() / n;
+                            let my = ys.iter().sum::<f64>() / n;
+                            let cov: f64 = xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
+                            let vx: f64 = xs.iter().map(|x| (x - mx).powi(2)).sum();
+                            let vy: f64 = ys.iter().map(|y| (y - my).powi(2)).sum();
+                            let denom = (vx * vy).sqrt();
+                            if denom < f64::EPSILON { f64::NAN } else { cov / denom }
+                        };
+
+                        labels.push(label.clone());
+                        values.push(Scalar::Float64(corr));
+                    }
+                }
+
+                Series::from_values("corrwith".to_string(), labels, values)
+            }
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "corrwith: axis must be 0 or 1, got {axis}"
+            ))),
+        }
     }
 
     /// Matrix dot product with another DataFrame.
@@ -36210,5 +36311,82 @@ mod tests {
         let result = df.std_agg_ddof(0).unwrap();
         let std_val = result.values()[0].to_f64().unwrap();
         assert!((std_val - 5.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    // ── DataFrame.corrwith_axis ────────────────────────────────
+
+    #[test]
+    fn dataframe_corrwith_axis0() {
+        let df1 = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("y", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        )
+        .unwrap();
+
+        let df2 = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)]),
+                ("y", vec![Scalar::Float64(8.0), Scalar::Float64(10.0), Scalar::Float64(12.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df1.corrwith_axis(&df2, 0).unwrap();
+        let corr_x = result.values()[0].to_f64().unwrap();
+        assert!((corr_x - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corrwith_axis1() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(10.0)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(30.0)]),
+                ("b", vec![Scalar::Float64(6.0), Scalar::Float64(60.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df1.corrwith_axis(&df2, 1).unwrap();
+        // Each row has perfectly correlated pairs: [1,2] vs [3,6] and [10,20] vs [30,60]
+        let corr_row0 = result.values()[0].to_f64().unwrap();
+        assert!((corr_row0 - 1.0).abs() < 1e-10);
+    }
+
+    // ── Series.map_with_default ────────────────────────────────
+
+    #[test]
+    fn series_map_with_default() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let mapping = vec![
+            (Scalar::Int64(1), Scalar::Utf8("one".into())),
+            (Scalar::Int64(2), Scalar::Utf8("two".into())),
+        ];
+        let result = s
+            .map_with_default(&mapping, &Scalar::Utf8("other".into()))
+            .unwrap();
+
+        assert_eq!(result.values()[0], Scalar::Utf8("one".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("two".into()));
+        assert_eq!(result.values()[2], Scalar::Utf8("other".into()));
     }
 }

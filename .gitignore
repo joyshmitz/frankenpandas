@@ -64,3 +64,25 @@ test_meminfo
 # Accidental shell output (stray numeric/short-name files)
 /[0-9]
 /[0-9][0-9]
+
+# Core dumps and agent config backups
+core.*
+core
+*.mcp.json.*.bak
+cline.mcp.json
+opencode.json
+windsurf.mcp.json
+clippy.txt
+clippy.json
+clippy_results.json
+clippy_unwrap.json
+clippy_unwrap_clean.txt
+check_output.txt
+.next_backup*/
+storage.sqlite3
+storage.sqlite3-shm
+storage.sqlite3-wal
+storage.sqlite3.bak
+storage.sqlite3.corrupt-*
+storage.sqlite3-shm.corrupt-*
+storage.sqlite3-wal.corrupt-*

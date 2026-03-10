@@ -206,7 +206,10 @@ impl Index {
     /// element is used. Panics if the list is empty.
     #[must_use]
     pub fn set_names_list(&self, names: &[Option<&str>]) -> Self {
-        assert!(!names.is_empty(), "set_names_list requires at least one name");
+        assert!(
+            !names.is_empty(),
+            "set_names_list requires at least one name"
+        );
         self.set_names(names[0])
     }
 
@@ -2003,8 +2006,7 @@ mod tests {
 
     #[test]
     fn index_name_propagates_through_unique() {
-        let idx = Index::new(vec![1_i64.into(), 1_i64.into(), 2_i64.into()])
-            .set_name("id");
+        let idx = Index::new(vec![1_i64.into(), 1_i64.into(), 2_i64.into()]).set_name("id");
         let u = idx.unique();
         assert_eq!(u.name(), Some("id"));
         assert_eq!(u.len(), 2);
@@ -2012,24 +2014,21 @@ mod tests {
 
     #[test]
     fn index_name_propagates_through_sort_values() {
-        let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()])
-            .set_name("val");
+        let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()]).set_name("val");
         let sorted = idx.sort_values();
         assert_eq!(sorted.name(), Some("val"));
     }
 
     #[test]
     fn index_name_propagates_through_take_and_slice() {
-        let idx = Index::new(vec!["a".into(), "b".into(), "c".into()])
-            .set_name("letter");
+        let idx = Index::new(vec!["a".into(), "b".into(), "c".into()]).set_name("letter");
         assert_eq!(idx.take(&[0, 2]).name(), Some("letter"));
         assert_eq!(idx.slice(1, 2).name(), Some("letter"));
     }
 
     #[test]
     fn index_name_propagates_through_map() {
-        let idx = Index::new(vec![1_i64.into(), 2_i64.into()])
-            .set_name("x");
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("x");
         let mapped = idx.map(|l| match l {
             IndexLabel::Int64(v) => IndexLabel::Int64(v * 10),
             other => other.clone(),
@@ -2039,8 +2038,7 @@ mod tests {
 
     #[test]
     fn index_name_propagates_through_drop_labels() {
-        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()])
-            .set_name("num");
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]).set_name("num");
         let dropped = idx.drop_labels(&[2_i64.into()]);
         assert_eq!(dropped.name(), Some("num"));
         assert_eq!(dropped.len(), 2);
@@ -2048,11 +2046,9 @@ mod tests {
 
     #[test]
     fn index_name_propagates_through_astype() {
-        let idx = Index::new(vec![1_i64.into(), 2_i64.into()])
-            .set_name("n");
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("n");
         assert_eq!(idx.astype_str().name(), Some("n"));
-        let idx2 = Index::new(vec!["1".into(), "2".into()])
-            .set_name("s");
+        let idx2 = Index::new(vec!["1".into(), "2".into()]).set_name("s");
         assert_eq!(idx2.astype_int().name(), Some("s"));
     }
 

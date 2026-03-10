@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
+use fp_index::Index;
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,9 @@ pub struct SeriesRef(pub String);
 pub enum Expr {
     Series {
         name: SeriesRef,
+    },
+    Local {
+        name: String,
     },
     Add {
         left: Box<Expr>,
@@ -58,6 +62,8 @@ pub enum Expr {
 #[derive(Debug, Clone, Default)]
 pub struct EvalContext {
     series: BTreeMap<String, Series>,
+    locals: BTreeMap<String, Scalar>,
+    anchor_index: Option<Index>,
 }
 
 impl EvalContext {
@@ -65,15 +71,31 @@ impl EvalContext {
     pub fn new() -> Self {
         Self {
             series: BTreeMap::new(),
+            locals: BTreeMap::new(),
+            anchor_index: None,
         }
     }
 
     pub fn insert_series(&mut self, series: Series) {
+        if self.anchor_index.is_none() {
+            self.anchor_index = Some(series.index().clone());
+        }
         self.series.insert(series.name().to_owned(), series);
     }
 
     pub fn from_dataframe(frame: &fp_frame::DataFrame) -> Result<Self, ExprError> {
-        let mut context = Self::new();
+        Self::from_dataframe_with_locals(frame, &BTreeMap::new())
+    }
+
+    pub fn from_dataframe_with_locals(
+        frame: &fp_frame::DataFrame,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<Self, ExprError> {
+        let mut context = Self {
+            series: BTreeMap::new(),
+            locals: locals.clone(),
+            anchor_index: Some(frame.index().clone()),
+        };
         for (name, column) in frame.columns() {
             let series = Series::new(name.clone(), frame.index().clone(), column.clone())?;
             context.insert_series(series);
@@ -85,14 +107,35 @@ impl EvalContext {
     pub fn get_series(&self, name: &str) -> Option<&Series> {
         self.series.get(name)
     }
+
+    pub fn insert_local(&mut self, name: impl Into<String>, value: Scalar) {
+        self.locals.insert(name.into(), value);
+    }
+
+    #[must_use]
+    pub fn get_local(&self, name: &str) -> Option<&Scalar> {
+        self.locals.get(name)
+    }
+
+    fn broadcast_local(&self, name: &str, value: &Scalar) -> Result<Series, ExprError> {
+        let index = self
+            .anchor_index
+            .as_ref()
+            .ok_or_else(|| ExprError::UnanchoredLocal(name.to_owned()))?;
+        Series::broadcast(name, value.clone(), index.labels().to_vec()).map_err(ExprError::from)
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ExprError {
     #[error("unknown series reference: {0}")]
     UnknownSeries(String),
+    #[error("unknown local reference: @{0}")]
+    UnknownLocal(String),
     #[error("cannot evaluate a pure literal expression without an index anchor")]
     UnanchoredLiteral,
+    #[error("cannot evaluate local reference @{0} without an index anchor")]
+    UnanchoredLocal(String),
     #[error("parse error: {0}")]
     ParseError(String),
     #[error(transparent)]
@@ -110,6 +153,12 @@ pub fn evaluate(
             .get_series(&name.0)
             .cloned()
             .ok_or_else(|| ExprError::UnknownSeries(name.0.clone())),
+        Expr::Local { name } => {
+            let value = context
+                .get_local(name)
+                .ok_or_else(|| ExprError::UnknownLocal(name.clone()))?;
+            context.broadcast_local(name, value)
+        }
         Expr::Add { left, right } => {
             let lhs = evaluate(left, context, policy, ledger)?;
             let rhs = evaluate(right, context, policy, ledger)?;
@@ -151,7 +200,14 @@ pub fn evaluate(
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
         }
-        Expr::Literal { .. } => Err(ExprError::UnanchoredLiteral),
+        Expr::Literal { value } => {
+            let index = context
+                .anchor_index
+                .as_ref()
+                .ok_or(ExprError::UnanchoredLiteral)?;
+            Series::broadcast("_literal", value.clone(), index.labels().to_vec())
+                .map_err(ExprError::from)
+        }
     }
 }
 
@@ -162,6 +218,17 @@ pub fn evaluate_on_dataframe(
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
     let context = EvalContext::from_dataframe(frame)?;
+    evaluate(expr, &context, policy, ledger)
+}
+
+pub fn evaluate_on_dataframe_with_locals(
+    expr: &Expr,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
+    let context = EvalContext::from_dataframe_with_locals(frame, locals)?;
     evaluate(expr, &context, policy, ledger)
 }
 
@@ -187,6 +254,29 @@ pub fn filter_dataframe_on_expr(
     frame.filter_rows(&mask).map_err(ExprError::from)
 }
 
+pub fn filter_dataframe_on_expr_with_locals(
+    expr: &Expr,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<fp_frame::DataFrame, ExprError> {
+    let mask = evaluate_on_dataframe_with_locals(expr, frame, locals, policy, ledger)?;
+    if let Some(offending) = mask
+        .values()
+        .iter()
+        .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+    {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "boolean mask required for query-style filter; found dtype {:?}",
+                offending.dtype()
+            ),
+        )));
+    }
+    frame.filter_rows(&mask).map_err(ExprError::from)
+}
+
 /// Evaluate a string expression against a DataFrame and return a Series.
 ///
 /// Analogous to `pandas.DataFrame.eval(expr_str)`. Parses the string
@@ -197,8 +287,18 @@ pub fn eval_str(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
+    eval_str_with_locals(expr_str, frame, &BTreeMap::new(), policy, ledger)
+}
+
+pub fn eval_str_with_locals(
+    expr_str: &str,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
     let expr = parse_expr(expr_str)?;
-    evaluate_on_dataframe(&expr, frame, policy, ledger)
+    evaluate_on_dataframe_with_locals(&expr, frame, locals, policy, ledger)
 }
 
 /// Filter a DataFrame using a string expression.
@@ -211,8 +311,18 @@ pub fn query_str(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<fp_frame::DataFrame, ExprError> {
+    query_str_with_locals(expr_str, frame, &BTreeMap::new(), policy, ledger)
+}
+
+pub fn query_str_with_locals(
+    expr_str: &str,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<fp_frame::DataFrame, ExprError> {
     let expr = parse_expr(expr_str)?;
-    filter_dataframe_on_expr(&expr, frame, policy, ledger)
+    filter_dataframe_on_expr_with_locals(&expr, frame, locals, policy, ledger)
 }
 
 // ── Extension trait for DataFrame eval/query convenience ─────────────
@@ -227,23 +337,53 @@ pub trait DataFrameExprExt {
     /// Matches `pd.DataFrame.eval(expr)`.
     fn eval(&self, expr_str: &str) -> Result<Series, ExprError>;
 
+    /// Matches `pd.DataFrame.eval(expr)` with explicit `@local` scalar bindings.
+    fn eval_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<Series, ExprError>;
+
     /// Filter rows by a boolean expression string.
     ///
     /// Matches `pd.DataFrame.query(expr)`.
     fn query(&self, expr_str: &str) -> Result<fp_frame::DataFrame, ExprError>;
+
+    /// Matches `pd.DataFrame.query(expr)` with explicit `@local` scalar bindings.
+    fn query_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<fp_frame::DataFrame, ExprError>;
 }
 
 impl DataFrameExprExt for fp_frame::DataFrame {
     fn eval(&self, expr_str: &str) -> Result<Series, ExprError> {
+        self.eval_with_locals(expr_str, &BTreeMap::new())
+    }
+
+    fn eval_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<Series, ExprError> {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        eval_str(expr_str, self, &policy, &mut ledger)
+        eval_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 
     fn query(&self, expr_str: &str) -> Result<fp_frame::DataFrame, ExprError> {
+        self.query_with_locals(expr_str, &BTreeMap::new())
+    }
+
+    fn query_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<fp_frame::DataFrame, ExprError> {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        query_str(expr_str, self, &policy, &mut ledger)
+        query_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 }
 
@@ -381,6 +521,7 @@ impl MaterializedView {
             Expr::Series { name } => {
                 series_set.insert(name.0.clone());
             }
+            Expr::Local { .. } => {}
             Expr::Add { left, right }
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
@@ -434,6 +575,14 @@ fn evaluate_delta(
                 Ok(reindexed)
             }
         }
+        Expr::Local { name } => {
+            let value = delta_ctx
+                .get_local(name)
+                .cloned()
+                .ok_or_else(|| ExprError::UnknownLocal(name.clone()))?;
+            Series::broadcast(name.as_str(), value, delta.new_labels.clone())
+                .map_err(ExprError::from)
+        }
         Expr::Add { left, right } => {
             let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
             let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
@@ -475,7 +624,10 @@ fn evaluate_delta(
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
-        Expr::Literal { .. } => Err(ExprError::UnanchoredLiteral),
+        Expr::Literal { value } => {
+            Series::broadcast("_literal", value.clone(), delta.new_labels.clone())
+                .map_err(ExprError::from)
+        }
     }
 }
 
@@ -529,7 +681,7 @@ fn evaluate_delta_comparison(
 ///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr )?
 ///   add_expr   → mul_expr ( ("+" | "-") mul_expr )*
 ///   mul_expr   → atom ( ("*" | "/") atom )*
-///   atom       → NUMBER | STRING | IDENT | "(" expr ")"
+///   atom       → NUMBER | STRING | IDENT | LOCAL | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -546,6 +698,7 @@ pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Ident(String),
+    Local(String),
     Int(i64),
     Float(f64),
     Str(String),
@@ -697,6 +850,20 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 let s: String = chars[start..i].iter().collect();
                 tokens.push(Token::Str(s));
                 i += 1; // skip closing quote
+            }
+            '@' => {
+                i += 1;
+                if i >= chars.len() || !(chars[i].is_alphabetic() || chars[i] == '_') {
+                    return Err(ExprError::ParseError(
+                        "expected identifier after '@'".into(),
+                    ));
+                }
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                tokens.push(Token::Local(word));
             }
             _ if c.is_ascii_digit() => {
                 let start = i;
@@ -884,6 +1051,11 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
                 name: SeriesRef(name),
             })
         }
+        Token::Local(name) => {
+            let name = name.clone();
+            *pos += 1;
+            Ok(Expr::Local { name })
+        }
         Token::LParen => {
             *pos += 1; // skip '('
             let inner = parse_or(tokens, pos)?;
@@ -901,6 +1073,8 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use fp_columnar::ComparisonOp;
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::Scalar;
@@ -2010,6 +2184,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_local_reference() {
+        let expr = super::parse_expr("x > @threshold").unwrap();
+        match expr {
+            Expr::Compare { right, .. } => {
+                assert_eq!(
+                    *right,
+                    Expr::Local {
+                        name: "threshold".into(),
+                    }
+                );
+            }
+            other => panic!("expected Compare, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_error_single_equals() {
         assert!(super::parse_expr("x = 1").is_err());
     }
@@ -2067,6 +2257,89 @@ mod tests {
         let result = super::eval_str("a + b", &frame, &policy, &mut ledger).unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(13));
         assert_eq!(result.values()[1], Scalar::Int64(27));
+    }
+
+    #[test]
+    fn eval_str_with_locals_broadcasts_scalar_bindings() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let locals = BTreeMap::from([("offset".to_owned(), Scalar::Int64(5))]);
+        let result =
+            super::eval_str_with_locals("a + @offset * 2", &frame, &locals, &policy, &mut ledger)
+                .unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(20));
+        assert_eq!(result.values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn query_str_with_locals_filters_rows() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let locals = BTreeMap::from([
+            ("threshold".to_owned(), Scalar::Int64(2)),
+            ("limit".to_owned(), Scalar::Int64(25)),
+        ]);
+        let result = super::query_str_with_locals(
+            "a > @threshold and b < @limit",
+            &frame,
+            &locals,
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
+        assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn eval_str_with_locals_errors_on_unknown_binding() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values("a", vec![0_i64.into()], vec![Scalar::Int64(10)])
+                .unwrap(),
+        ])
+        .unwrap();
+
+        let err = super::eval_str_with_locals(
+            "a > @threshold",
+            &frame,
+            &BTreeMap::new(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExprError::UnknownLocal(name) if name == "threshold"));
     }
 
     #[test]

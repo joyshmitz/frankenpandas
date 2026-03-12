@@ -2,7 +2,12 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
+use chrono::{
+    DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc,
+};
+use chrono_tz::Tz;
 use regex::Regex;
 
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
@@ -7831,6 +7836,37 @@ impl StringAccessor<'_> {
 ///
 /// Extracts datetime components from ISO 8601 / RFC 3339 formatted strings.
 /// Non-string or unparseable values yield NaN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TzAmbiguousPolicy {
+    Raise,
+    Earliest,
+    Latest,
+    NaT,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TzNonexistentPolicy {
+    Raise,
+    ShiftForward,
+    ShiftBackward,
+    NaT,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TzLocalizeOptions {
+    pub ambiguous: TzAmbiguousPolicy,
+    pub nonexistent: TzNonexistentPolicy,
+}
+
+impl Default for TzLocalizeOptions {
+    fn default() -> Self {
+        Self {
+            ambiguous: TzAmbiguousPolicy::Raise,
+            nonexistent: TzNonexistentPolicy::Raise,
+        }
+    }
+}
+
 pub struct DatetimeAccessor<'a> {
     series: &'a Series,
 }
@@ -8642,9 +8678,18 @@ impl DatetimeAccessor<'_> {
     /// info to each naive datetime string. `None` removes timezone info while
     /// keeping the local clock-time representation.
     pub fn tz_localize(&self, tz: Option<&str>) -> Result<Series, FrameError> {
+        self.tz_localize_with_options(tz, TzLocalizeOptions::default())
+    }
+
+    /// Localize tz-naive datetimes with explicit DST ambiguity/nonexistence policy.
+    pub fn tz_localize_with_options(
+        &self,
+        tz: Option<&str>,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
         match tz {
             Some(tz) => {
-                let suffix = tz_to_suffix(tz);
+                let tz_spec = parse_tz_spec(tz)?;
                 self.try_extract_component(
                     |s| {
                         if has_tz_suffix(s) {
@@ -8652,7 +8697,8 @@ impl DatetimeAccessor<'_> {
                                 "Already tz-aware, use tz_convert to convert.".to_owned(),
                             ));
                         }
-                        Ok(Scalar::Utf8(format!("{s}{suffix}")))
+                        let naive = parse_naive_datetime_value(s)?;
+                        localize_scalar_to_timezone(naive, &tz_spec, options)
                     },
                     self.series.name(),
                 )
@@ -8670,8 +8716,7 @@ impl DatetimeAccessor<'_> {
     /// and replaces the timezone suffix. `None` converts through UTC and then
     /// removes timezone information.
     pub fn tz_convert(&self, tz: Option<&str>) -> Result<Series, FrameError> {
-        let target_offset_mins = tz.map_or(0, tz_offset_minutes);
-        let new_suffix = tz.map(tz_to_suffix);
+        let target_tz = tz.map(parse_tz_spec).transpose()?;
         self.try_extract_component(
             |s| {
                 if !has_tz_suffix(s) {
@@ -8680,119 +8725,322 @@ impl DatetimeAccessor<'_> {
                             .to_owned(),
                     ));
                 }
-                let (base, src_offset) = parse_datetime_with_tz(s);
-                if base.is_empty() {
-                    return Ok(Scalar::Null(NullKind::NaN));
+                let parsed = parse_tz_aware_datetime(s)?;
+                let utc = parsed.fixed.with_timezone(&Utc);
+                match &target_tz {
+                    Some(TimeZoneSpec::Fixed(offset)) => Ok(Scalar::Utf8(format_aware_datetime(
+                        utc.with_timezone(offset),
+                        None,
+                    ))),
+                    Some(TimeZoneSpec::Named { zone, name }) => {
+                        let localized = utc.with_timezone(zone);
+                        Ok(Scalar::Utf8(format_aware_datetime(
+                            localized.with_timezone(&localized.offset().fix()),
+                            Some(name),
+                        )))
+                    }
+                    None => Ok(Scalar::Utf8(format_naive_datetime(utc.naive_utc()))),
                 }
-                // Shift by (target - source) offset
-                let shift_mins = target_offset_mins - src_offset;
-                let shifted = shift_datetime_by_minutes(&base, shift_mins);
-                Ok(Scalar::Utf8(match &new_suffix {
-                    Some(suffix) => format!("{shifted}{suffix}"),
-                    None => shifted,
-                }))
             },
             self.series.name(),
         )
     }
 }
 
-/// Parse a timezone string to an offset suffix.
-fn tz_to_suffix(tz: &str) -> String {
-    match tz {
-        "UTC" => "+00:00".to_string(),
-        s if s.starts_with('+') || s.starts_with('-') => s.to_string(),
-        _ => format!("[{tz}]"), // IANA-style: stored as metadata
-    }
+#[derive(Debug, Clone)]
+enum TimeZoneSpec {
+    Fixed(FixedOffset),
+    Named { zone: Tz, name: String },
 }
 
-/// Get UTC offset in minutes for a timezone string.
-fn tz_offset_minutes(tz: &str) -> i32 {
-    match tz {
-        "UTC" => 0,
-        s if (s.starts_with('+') || s.starts_with('-')) && s.len() >= 5 => {
-            let sign = if s.starts_with('-') { -1 } else { 1 };
-            let parts: Vec<&str> = s[1..].split(':').collect();
-            let hours: i32 = parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
-            let mins: i32 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
-            sign * (hours * 60 + mins)
-        }
-        _ => 0, // Unknown timezone treated as UTC
+#[derive(Debug, Clone)]
+struct ParsedAwareDateTime {
+    fixed: DateTime<FixedOffset>,
+}
+
+fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
+    let trimmed = tz.trim();
+    if trimmed.is_empty() {
+        return Err(FrameError::CompatibilityRejected(
+            "timezone cannot be empty".to_owned(),
+        ));
     }
+    if trimmed == "UTC" || trimmed == "Z" || is_fixed_offset_suffix(trimmed) {
+        return Ok(TimeZoneSpec::Fixed(parse_fixed_offset(trimmed)?));
+    }
+    let zone = Tz::from_str(trimmed)
+        .map_err(|_| FrameError::CompatibilityRejected(format!("unknown timezone '{trimmed}'")))?;
+    Ok(TimeZoneSpec::Named {
+        zone,
+        name: trimmed.to_owned(),
+    })
 }
 
 fn has_tz_suffix(s: &str) -> bool {
-    if s.len() > 6 {
-        let tail = &s[s.len() - 6..];
-        if (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':') {
-            return true;
-        }
-    }
-    matches!(
-        s.rfind('['),
-        Some(bracket_start) if s.ends_with(']') && bracket_start < s.len() - 1
-    )
+    let (without_zone, zone_name) = split_zone_annotation(s);
+    zone_name.is_some() || fixed_offset_suffix(without_zone).is_some()
 }
 
 /// Strip timezone suffix from a datetime string.
 fn strip_tz_suffix(s: &str) -> &str {
-    // Strip +HH:MM or -HH:MM or [TZ] suffix
-    if s.len() > 6 {
-        let tail = &s[s.len() - 6..];
-        if (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':') {
-            return &s[..s.len() - 6];
-        }
+    let (without_zone, _) = split_zone_annotation(s);
+    if let Some(suffix) = fixed_offset_suffix(without_zone) {
+        return &without_zone[..without_zone.len() - suffix.len()];
     }
-    if let Some(bracket_start) = s.rfind('[') {
-        return &s[..bracket_start];
-    }
-    s
+    without_zone
 }
 
-/// Parse a datetime string with tz info, returning (base, offset_minutes).
-fn parse_datetime_with_tz(s: &str) -> (String, i32) {
-    let len = s.len();
-    if len > 6 {
-        let tail = &s[len - 6..];
-        if (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':') {
-            let base = s[..len - 6].to_string();
-            let offset = tz_offset_minutes(tail);
-            return (base, offset);
-        }
+fn split_zone_annotation(s: &str) -> (&str, Option<&str>) {
+    if let Some(bracket_start) = s.rfind('[')
+        && s.ends_with(']')
+        && bracket_start < s.len() - 1
+    {
+        return (
+            &s[..bracket_start],
+            Some(&s[bracket_start + 1..s.len() - 1]),
+        );
     }
-    // No tz info found — treat as UTC
-    (strip_tz_suffix(s).to_string(), 0)
+    (s, None)
 }
 
-/// Shift a base datetime string (no tz suffix) by a number of minutes.
-fn shift_datetime_by_minutes(base: &str, shift_mins: i32) -> String {
-    let parts: Vec<&str> = base.split(['T', ' ']).collect();
-    let date_str = parts.first().unwrap_or(&"");
-    let time_str = parts.get(1).unwrap_or(&"00:00:00");
+fn fixed_offset_suffix(s: &str) -> Option<&str> {
+    let trimmed = s.trim();
+    if trimmed.ends_with('Z') {
+        return Some("Z");
+    }
+    if trimmed.len() < 6 {
+        return None;
+    }
+    let tail = &trimmed[trimmed.len() - 6..];
+    if is_fixed_offset_suffix(tail) {
+        Some(tail)
+    } else {
+        None
+    }
+}
 
-    let date_parts: Vec<&str> = date_str.split('-').collect();
-    let time_parts: Vec<&str> = time_str.split(':').collect();
+fn is_fixed_offset_suffix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 6
+        && matches!(bytes[0], b'+' | b'-')
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[3] == b':'
+        && bytes[4].is_ascii_digit()
+        && bytes[5].is_ascii_digit()
+}
 
-    let year: i32 = date_parts
-        .first()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(2000);
-    let month: i32 = date_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1);
-    let day: i32 = date_parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(1);
-    let hour: i32 = time_parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let minute: i32 = time_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
-    let second: i32 = time_parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+fn parse_fixed_offset(offset: &str) -> Result<FixedOffset, FrameError> {
+    if offset == "UTC" || offset == "Z" {
+        return FixedOffset::east_opt(0)
+            .ok_or_else(|| FrameError::CompatibilityRejected("invalid UTC offset".to_owned()));
+    }
+    if !is_fixed_offset_suffix(offset) {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "invalid timezone offset '{offset}'"
+        )));
+    }
+    let sign = if offset.starts_with('-') { -1 } else { 1 };
+    let hours: i32 = offset[1..3].parse().map_err(|_| {
+        FrameError::CompatibilityRejected(format!("invalid timezone offset '{offset}'"))
+    })?;
+    let minutes: i32 = offset[4..6].parse().map_err(|_| {
+        FrameError::CompatibilityRejected(format!("invalid timezone offset '{offset}'"))
+    })?;
+    if hours > 23 || minutes > 59 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "invalid timezone offset '{offset}'"
+        )));
+    }
+    FixedOffset::east_opt(sign * ((hours * 3600) + (minutes * 60))).ok_or_else(|| {
+        FrameError::CompatibilityRejected(format!("invalid timezone offset '{offset}'"))
+    })
+}
 
-    let total_mins = hour * 60 + minute + shift_mins;
-    let extra_days = total_mins.div_euclid(1440);
-    let new_mins = total_mins.rem_euclid(1440);
-    let new_h = new_mins / 60;
-    let new_m = new_mins % 60;
+fn parse_naive_datetime_value(s: &str) -> Result<NaiveDateTime, FrameError> {
+    let trimmed = s.trim();
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
+        if let Ok(value) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(value);
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("invalid datetime value '{trimmed}'"))
+        });
+    }
+    Err(FrameError::CompatibilityRejected(format!(
+        "invalid datetime value '{trimmed}'"
+    )))
+}
 
-    let jdn = date_to_jdn(year, month, day) + extra_days;
-    let (ny, nm, nd) = jdn_to_date(jdn);
+fn parse_fixed_offset_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
+    let trimmed = s.trim();
+    let normalized = if let Some(stripped) = trimmed.strip_suffix('Z') {
+        format!("{stripped}+00:00")
+    } else {
+        trimmed.to_owned()
+    };
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f%:z", "%Y-%m-%dT%H:%M:%S%.f%:z"] {
+        if let Ok(value) = DateTime::parse_from_str(&normalized, fmt) {
+            return Some(value);
+        }
+    }
+    DateTime::parse_from_rfc3339(trimmed).ok()
+}
 
-    format!("{ny:04}-{nm:02}-{nd:02} {new_h:02}:{new_m:02}:{second:02}")
+fn format_naive_datetime(value: NaiveDateTime) -> String {
+    let mut rendered = value.format("%Y-%m-%d %H:%M:%S").to_string();
+    let nanos = value.and_utc().timestamp_subsec_nanos();
+    if nanos != 0 {
+        let mut fractional = format!("{nanos:09}");
+        while fractional.ends_with('0') {
+            fractional.pop();
+        }
+        rendered.push('.');
+        rendered.push_str(&fractional);
+    }
+    rendered
+}
+
+fn format_aware_datetime(value: DateTime<FixedOffset>, zone_name: Option<&str>) -> String {
+    let mut rendered = format!(
+        "{}{}",
+        format_naive_datetime(value.naive_local()),
+        value.format("%:z")
+    );
+    if let Some(zone_name) = zone_name {
+        rendered.push('[');
+        rendered.push_str(zone_name);
+        rendered.push(']');
+    }
+    rendered
+}
+
+fn localize_scalar_to_timezone(
+    naive: NaiveDateTime,
+    tz_spec: &TimeZoneSpec,
+    options: TzLocalizeOptions,
+) -> Result<Scalar, FrameError> {
+    match tz_spec {
+        TimeZoneSpec::Fixed(offset) => {
+            let aware = offset.from_local_datetime(&naive).single().ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "could not localize '{}' to fixed offset {}",
+                    format_naive_datetime(naive),
+                    offset
+                ))
+            })?;
+            Ok(Scalar::Utf8(format_aware_datetime(aware, None)))
+        }
+        TimeZoneSpec::Named { zone, name } => {
+            match resolve_named_local_datetime(naive, *zone, name, options)? {
+                Some(value) => Ok(Scalar::Utf8(format_aware_datetime(value, Some(name)))),
+                None => Ok(Scalar::Null(NullKind::NaN)),
+            }
+        }
+    }
+}
+
+fn resolve_named_local_datetime(
+    naive: NaiveDateTime,
+    zone: Tz,
+    zone_name: &str,
+    options: TzLocalizeOptions,
+) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
+    match zone.from_local_datetime(&naive) {
+        LocalResult::Single(value) => Ok(Some(value.with_timezone(&value.offset().fix()))),
+        LocalResult::Ambiguous(earliest, latest) => match options.ambiguous {
+            TzAmbiguousPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
+                "ambiguous local time '{}' in timezone '{zone_name}'",
+                format_naive_datetime(naive)
+            ))),
+            TzAmbiguousPolicy::Earliest => {
+                Ok(Some(earliest.with_timezone(&earliest.offset().fix())))
+            }
+            TzAmbiguousPolicy::Latest => Ok(Some(latest.with_timezone(&latest.offset().fix()))),
+            TzAmbiguousPolicy::NaT => Ok(None),
+        },
+        LocalResult::None => {
+            resolve_nonexistent_local_datetime(naive, zone, zone_name, options.nonexistent)
+        }
+    }
+}
+
+fn resolve_nonexistent_local_datetime(
+    naive: NaiveDateTime,
+    zone: Tz,
+    zone_name: &str,
+    policy: TzNonexistentPolicy,
+) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
+    match policy {
+        TzNonexistentPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
+            "nonexistent local time '{}' in timezone '{zone_name}'",
+            format_naive_datetime(naive)
+        ))),
+        TzNonexistentPolicy::NaT => Ok(None),
+        TzNonexistentPolicy::ShiftForward | TzNonexistentPolicy::ShiftBackward => {
+            let step = if matches!(policy, TzNonexistentPolicy::ShiftForward) {
+                1_i64
+            } else {
+                -1_i64
+            };
+            let mut candidate = naive;
+            for _ in 0..86_400 {
+                candidate = candidate
+                    .checked_add_signed(Duration::seconds(step))
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!(
+                            "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
+                            format_naive_datetime(naive)
+                        ))
+                    })?;
+                match zone.from_local_datetime(&candidate) {
+                    LocalResult::Single(value) => {
+                        return Ok(Some(value.with_timezone(&value.offset().fix())));
+                    }
+                    LocalResult::Ambiguous(earliest, latest) => {
+                        let chosen = if matches!(policy, TzNonexistentPolicy::ShiftForward) {
+                            earliest
+                        } else {
+                            latest
+                        };
+                        return Ok(Some(chosen.with_timezone(&chosen.offset().fix())));
+                    }
+                    LocalResult::None => {}
+                }
+            }
+            Err(FrameError::CompatibilityRejected(format!(
+                "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
+                format_naive_datetime(naive)
+            )))
+        }
+    }
+}
+
+fn parse_tz_aware_datetime(s: &str) -> Result<ParsedAwareDateTime, FrameError> {
+    let trimmed = s.trim();
+    let (without_zone, zone_name) = split_zone_annotation(trimmed);
+    if let Some(fixed) = parse_fixed_offset_datetime(without_zone) {
+        return Ok(ParsedAwareDateTime { fixed });
+    }
+    if let Some(zone_name) = zone_name {
+        let naive = parse_naive_datetime_value(without_zone)?;
+        let zone = Tz::from_str(zone_name).map_err(|_| {
+            FrameError::CompatibilityRejected(format!("unknown timezone '{zone_name}'"))
+        })?;
+        let fixed =
+            resolve_named_local_datetime(naive, zone, zone_name, TzLocalizeOptions::default())?
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "could not resolve timezone-aware value '{trimmed}'"
+                    ))
+                })?;
+        return Ok(ParsedAwareDateTime { fixed });
+    }
+    Err(FrameError::CompatibilityRejected(format!(
+        "missing timezone information in '{trimmed}'"
+    )))
 }
 
 impl std::fmt::Display for Series {
@@ -20606,7 +20854,8 @@ mod tests {
 
     use super::{
         DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DropNaHow, DuplicateKeep,
-        FrameError, IndexLabel, Series, cut, index_to_frame, index_to_series, qcut, to_numeric,
+        FrameError, IndexLabel, Series, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
+        cut, index_to_frame, index_to_series, qcut, to_numeric,
     };
     use fp_index::Index;
 
@@ -42369,6 +42618,151 @@ mod tests {
         assert_eq!(
             result.values()[0],
             Scalar::Utf8("2024-01-15 05:00:00".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_uses_real_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_localize(Some("Europe/Berlin")).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00+01:00[Europe/Berlin]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_convert_named_zone_tracks_dst_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-06-20 12:00:00+00:00".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_convert(Some("America/New_York")).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-06-20 08:00:00-04:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_rejects_unknown_named_zone() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00".into())],
+        )
+        .unwrap();
+        let err = s.dt().tz_localize(Some("Mars/Base")).unwrap_err();
+        assert!(err.to_string().contains("unknown timezone 'Mars/Base'"));
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_ambiguous_raises_by_default() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-11-03 01:30:00".into())],
+        )
+        .unwrap();
+        let err = s.dt().tz_localize(Some("America/New_York")).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "ambiguous local time '2024-11-03 01:30:00' in timezone 'America/New_York'"
+            )
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_ambiguous_latest_policy() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-11-03 01:30:00".into())],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Latest,
+                    nonexistent: TzNonexistentPolicy::Raise,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-11-03 01:30:00-05:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_nonexistent_shift_forward() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-03-10 02:30:00".into())],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftForward,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-03-10 03:00:00-04:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_nonexistent_shift_backward() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-03-10 02:30:00".into())],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftBackward,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-03-10 01:59:59-05:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_convert_accepts_legacy_zone_annotation_without_offset() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:00[Europe/Berlin]".into())],
+        )
+        .unwrap();
+        let result = s.dt().tz_convert(Some("UTC")).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 09:30:00+00:00".into())
         );
     }
 }

@@ -5,6 +5,8 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 fp-columnar = { path = "../fp-columnar" }
 fp-index = { path = "../fp-index" }
 fp-runtime = { path = "../fp-runtime" }

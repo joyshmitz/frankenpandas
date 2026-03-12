@@ -23,6 +23,8 @@ license-file = "LICENSE"
 arrow = { version = "54.3.0", default-features = false, features = ["prettyprint"] }
 bumpalo = { version = "3.16.0", features = ["collections"] }
 bytes = "1.10.1"
+chrono = { version = "0.4.44", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
 csv = "1.4.0"
 parquet = { version = "54.3.0", default-features = false, features = ["arrow", "snap"] }
 regex = "1.11.1"

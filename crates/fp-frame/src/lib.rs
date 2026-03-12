@@ -7836,23 +7836,45 @@ impl StringAccessor<'_> {
 ///
 /// Extracts datetime components from ISO 8601 / RFC 3339 formatted strings.
 /// Non-string or unparseable values yield NaN.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TzAmbiguousPolicy {
     Raise,
     Earliest,
     Latest,
     NaT,
+    Infer,
+    Mask(Vec<bool>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl TzAmbiguousPolicy {
+    #[must_use]
+    pub fn from_bool(is_dst: bool) -> Self {
+        if is_dst { Self::Earliest } else { Self::Latest }
+    }
+}
+
+impl From<bool> for TzAmbiguousPolicy {
+    fn from(value: bool) -> Self {
+        Self::from_bool(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TzNonexistentPolicy {
     Raise,
     ShiftForward,
     ShiftBackward,
     NaT,
+    ShiftBy(Duration),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl From<Duration> for TzNonexistentPolicy {
+    fn from(value: Duration) -> Self {
+        Self::ShiftBy(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TzLocalizeOptions {
     pub ambiguous: TzAmbiguousPolicy,
     pub nonexistent: TzNonexistentPolicy,
@@ -8690,23 +8712,30 @@ impl DatetimeAccessor<'_> {
         match tz {
             Some(tz) => {
                 let tz_spec = parse_tz_spec(tz)?;
-                self.try_extract_component(
-                    |s| {
-                        if has_tz_suffix(s) {
-                            return Err(FrameError::CompatibilityRejected(
-                                "Already tz-aware, use tz_convert to convert.".to_owned(),
-                            ));
-                        }
-                        let naive = parse_naive_datetime_value(s)?;
-                        localize_scalar_to_timezone(naive, &tz_spec, options)
-                    },
-                    self.series.name(),
+                let localized = localize_series_values(self.series.values(), &tz_spec, &options)?;
+                Series::from_values(
+                    self.series.name().to_owned(),
+                    self.series.index().labels().to_vec(),
+                    localized,
                 )
             }
-            None => self.try_extract_component(
-                |s| Ok(Scalar::Utf8(strip_tz_suffix(s).to_owned())),
-                self.series.name(),
-            ),
+            None => {
+                let values = self
+                    .series
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Utf8(s) => Scalar::Utf8(strip_tz_suffix(s).to_owned()),
+                        _ if value.is_missing() => Scalar::Null(NullKind::NaN),
+                        _ => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect();
+                Series::from_values(
+                    self.series.name().to_owned(),
+                    self.series.index().labels().to_vec(),
+                    values,
+                )
+            }
         }
     }
 
@@ -8758,6 +8787,27 @@ struct ParsedAwareDateTime {
     fixed: DateTime<FixedOffset>,
 }
 
+#[derive(Debug, Clone)]
+enum TzLocalizeInput {
+    PassThrough(Scalar),
+    Naive(NaiveDateTime),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedAmbiguousPolicy {
+    Raise,
+    Earliest,
+    Latest,
+    NaT,
+}
+
+impl ResolvedAmbiguousPolicy {
+    #[must_use]
+    fn from_is_dst(is_dst: bool) -> Self {
+        if is_dst { Self::Earliest } else { Self::Latest }
+    }
+}
+
 fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
     let trimmed = tz.trim();
     if trimmed.is_empty() {
@@ -8774,6 +8824,140 @@ fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
         zone,
         name: trimmed.to_owned(),
     })
+}
+
+fn localize_series_values(
+    values: &[Scalar],
+    tz_spec: &TimeZoneSpec,
+    options: &TzLocalizeOptions,
+) -> Result<Vec<Scalar>, FrameError> {
+    let inputs = values
+        .iter()
+        .map(parse_tz_localize_input)
+        .collect::<Result<Vec<_>, FrameError>>()?;
+
+    let ambiguous_policies = match tz_spec {
+        TimeZoneSpec::Fixed(_) => vec![ResolvedAmbiguousPolicy::Raise; inputs.len()],
+        TimeZoneSpec::Named { zone, .. } => {
+            resolve_series_ambiguous_policies(&inputs, *zone, &options.ambiguous)?
+        }
+    };
+
+    inputs
+        .into_iter()
+        .enumerate()
+        .map(|(idx, input)| match input {
+            TzLocalizeInput::PassThrough(value) => Ok(value),
+            TzLocalizeInput::Naive(naive) => localize_scalar_to_timezone(
+                naive,
+                tz_spec,
+                ambiguous_policies[idx],
+                &options.nonexistent,
+            ),
+        })
+        .collect()
+}
+
+fn parse_tz_localize_input(value: &Scalar) -> Result<TzLocalizeInput, FrameError> {
+    match value {
+        Scalar::Utf8(s) => {
+            if has_tz_suffix(s) {
+                return Err(FrameError::CompatibilityRejected(
+                    "Already tz-aware, use tz_convert to convert.".to_owned(),
+                ));
+            }
+            Ok(TzLocalizeInput::Naive(parse_naive_datetime_value(s)?))
+        }
+        _ if value.is_missing() => Ok(TzLocalizeInput::PassThrough(Scalar::Null(NullKind::NaN))),
+        _ => Ok(TzLocalizeInput::PassThrough(Scalar::Null(NullKind::NaN))),
+    }
+}
+
+fn resolve_series_ambiguous_policies(
+    inputs: &[TzLocalizeInput],
+    zone: Tz,
+    policy: &TzAmbiguousPolicy,
+) -> Result<Vec<ResolvedAmbiguousPolicy>, FrameError> {
+    match policy {
+        TzAmbiguousPolicy::Raise => Ok(vec![ResolvedAmbiguousPolicy::Raise; inputs.len()]),
+        TzAmbiguousPolicy::Earliest => Ok(vec![ResolvedAmbiguousPolicy::Earliest; inputs.len()]),
+        TzAmbiguousPolicy::Latest => Ok(vec![ResolvedAmbiguousPolicy::Latest; inputs.len()]),
+        TzAmbiguousPolicy::NaT => Ok(vec![ResolvedAmbiguousPolicy::NaT; inputs.len()]),
+        TzAmbiguousPolicy::Mask(mask) => {
+            if mask.len() != inputs.len() {
+                return Err(FrameError::CompatibilityRejected(
+                    "Length of ambiguous bool-array must be the same size as vals".to_owned(),
+                ));
+            }
+            Ok(mask
+                .iter()
+                .copied()
+                .map(ResolvedAmbiguousPolicy::from_is_dst)
+                .collect())
+        }
+        TzAmbiguousPolicy::Infer => infer_series_ambiguous_policies(inputs, zone),
+    }
+}
+
+fn infer_series_ambiguous_policies(
+    inputs: &[TzLocalizeInput],
+    zone: Tz,
+) -> Result<Vec<ResolvedAmbiguousPolicy>, FrameError> {
+    let mut resolved = vec![ResolvedAmbiguousPolicy::Raise; inputs.len()];
+    let ambiguous_positions = inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, input)| match input {
+            TzLocalizeInput::Naive(naive)
+                if matches!(
+                    zone.from_local_datetime(naive),
+                    LocalResult::Ambiguous(_, _)
+                ) =>
+            {
+                Some((idx, *naive))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if ambiguous_positions.is_empty() {
+        return Ok(resolved);
+    }
+
+    let mut switch_count = 0_usize;
+    let mut switch_at = None;
+    for (offset, window) in ambiguous_positions.windows(2).enumerate() {
+        if window[1].1 <= window[0].1 {
+            switch_count += 1;
+            if switch_at.is_none() {
+                switch_at = Some(offset + 1);
+            }
+        }
+    }
+
+    if switch_count == 0 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Cannot infer dst time from {}, try using the 'ambiguous' argument",
+            format_naive_datetime(ambiguous_positions[0].1)
+        )));
+    }
+
+    if switch_count > 1 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "There are {switch_count} dst switches when there should only be 1"
+        )));
+    }
+
+    let switch_at = switch_at.expect("dst switch position");
+    for (order, (idx, _)) in ambiguous_positions.iter().enumerate() {
+        resolved[*idx] = if order < switch_at {
+            ResolvedAmbiguousPolicy::Earliest
+        } else {
+            ResolvedAmbiguousPolicy::Latest
+        };
+    }
+
+    Ok(resolved)
 }
 
 fn has_tz_suffix(s: &str) -> bool {
@@ -8920,7 +9104,8 @@ fn format_aware_datetime(value: DateTime<FixedOffset>, zone_name: Option<&str>) 
 fn localize_scalar_to_timezone(
     naive: NaiveDateTime,
     tz_spec: &TimeZoneSpec,
-    options: TzLocalizeOptions,
+    ambiguous_policy: ResolvedAmbiguousPolicy,
+    nonexistent_policy: &TzNonexistentPolicy,
 ) -> Result<Scalar, FrameError> {
     match tz_spec {
         TimeZoneSpec::Fixed(offset) => {
@@ -8934,7 +9119,13 @@ fn localize_scalar_to_timezone(
             Ok(Scalar::Utf8(format_aware_datetime(aware, None)))
         }
         TimeZoneSpec::Named { zone, name } => {
-            match resolve_named_local_datetime(naive, *zone, name, options)? {
+            match resolve_named_local_datetime(
+                naive,
+                *zone,
+                name,
+                ambiguous_policy,
+                nonexistent_policy,
+            )? {
                 Some(value) => Ok(Scalar::Utf8(format_aware_datetime(value, Some(name)))),
                 None => Ok(Scalar::Null(NullKind::NaN)),
             }
@@ -8942,28 +9133,45 @@ fn localize_scalar_to_timezone(
     }
 }
 
+fn resolve_ambiguous_local_datetime(
+    naive: NaiveDateTime,
+    zone_name: &str,
+    earliest: DateTime<Tz>,
+    latest: DateTime<Tz>,
+    policy: ResolvedAmbiguousPolicy,
+) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
+    match policy {
+        ResolvedAmbiguousPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
+            "ambiguous local time '{}' in timezone '{zone_name}'",
+            format_naive_datetime(naive)
+        ))),
+        ResolvedAmbiguousPolicy::Earliest => {
+            Ok(Some(earliest.with_timezone(&earliest.offset().fix())))
+        }
+        ResolvedAmbiguousPolicy::Latest => Ok(Some(latest.with_timezone(&latest.offset().fix()))),
+        ResolvedAmbiguousPolicy::NaT => Ok(None),
+    }
+}
+
 fn resolve_named_local_datetime(
     naive: NaiveDateTime,
     zone: Tz,
     zone_name: &str,
-    options: TzLocalizeOptions,
+    ambiguous_policy: ResolvedAmbiguousPolicy,
+    nonexistent_policy: &TzNonexistentPolicy,
 ) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
     match zone.from_local_datetime(&naive) {
         LocalResult::Single(value) => Ok(Some(value.with_timezone(&value.offset().fix()))),
-        LocalResult::Ambiguous(earliest, latest) => match options.ambiguous {
-            TzAmbiguousPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
-                "ambiguous local time '{}' in timezone '{zone_name}'",
-                format_naive_datetime(naive)
-            ))),
-            TzAmbiguousPolicy::Earliest => {
-                Ok(Some(earliest.with_timezone(&earliest.offset().fix())))
-            }
-            TzAmbiguousPolicy::Latest => Ok(Some(latest.with_timezone(&latest.offset().fix()))),
-            TzAmbiguousPolicy::NaT => Ok(None),
-        },
-        LocalResult::None => {
-            resolve_nonexistent_local_datetime(naive, zone, zone_name, options.nonexistent)
+        LocalResult::Ambiguous(earliest, latest) => {
+            resolve_ambiguous_local_datetime(naive, zone_name, earliest, latest, ambiguous_policy)
         }
+        LocalResult::None => resolve_nonexistent_local_datetime(
+            naive,
+            zone,
+            zone_name,
+            ambiguous_policy,
+            nonexistent_policy,
+        ),
     }
 }
 
@@ -8971,7 +9179,8 @@ fn resolve_nonexistent_local_datetime(
     naive: NaiveDateTime,
     zone: Tz,
     zone_name: &str,
-    policy: TzNonexistentPolicy,
+    ambiguous_policy: ResolvedAmbiguousPolicy,
+    policy: &TzNonexistentPolicy,
 ) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
     match policy {
         TzNonexistentPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
@@ -9015,6 +9224,27 @@ fn resolve_nonexistent_local_datetime(
                 format_naive_datetime(naive)
             )))
         }
+        TzNonexistentPolicy::ShiftBy(shift) => {
+            let shifted = naive.checked_add_signed(*shift).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
+                    format_naive_datetime(naive)
+                ))
+            })?;
+            match zone.from_local_datetime(&shifted) {
+                LocalResult::Single(value) => Ok(Some(value.with_timezone(&value.offset().fix()))),
+                LocalResult::Ambiguous(earliest, latest) => resolve_ambiguous_local_datetime(
+                    shifted,
+                    zone_name,
+                    earliest,
+                    latest,
+                    ambiguous_policy,
+                ),
+                LocalResult::None => Err(FrameError::CompatibilityRejected(
+                    "The provided timedelta will relocalize on a nonexistent time".to_owned(),
+                )),
+            }
+        }
     }
 }
 
@@ -9029,13 +9259,18 @@ fn parse_tz_aware_datetime(s: &str) -> Result<ParsedAwareDateTime, FrameError> {
         let zone = Tz::from_str(zone_name).map_err(|_| {
             FrameError::CompatibilityRejected(format!("unknown timezone '{zone_name}'"))
         })?;
-        let fixed =
-            resolve_named_local_datetime(naive, zone, zone_name, TzLocalizeOptions::default())?
-                .ok_or_else(|| {
-                    FrameError::CompatibilityRejected(format!(
-                        "could not resolve timezone-aware value '{trimmed}'"
-                    ))
-                })?;
+        let fixed = resolve_named_local_datetime(
+            naive,
+            zone,
+            zone_name,
+            ResolvedAmbiguousPolicy::Raise,
+            &TzNonexistentPolicy::Raise,
+        )?
+        .ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "could not resolve timezone-aware value '{trimmed}'"
+            ))
+        })?;
         return Ok(ParsedAwareDateTime { fixed });
     }
     Err(FrameError::CompatibilityRejected(format!(
@@ -20845,6 +21080,8 @@ impl GroupByResample<'_> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use chrono::Duration;
 
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{DType, NullKind, Scalar};
@@ -42704,6 +42941,137 @@ mod tests {
     }
 
     #[test]
+    fn dt_tz_localize_named_zone_ambiguous_infer_sequence() {
+        let s = Series::from_values(
+            "ts",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("2024-10-27 01:30:00".into()),
+                Scalar::Utf8("2024-10-27 02:00:00".into()),
+                Scalar::Utf8("2024-10-27 02:30:00".into()),
+                Scalar::Utf8("2024-10-27 02:00:00".into()),
+                Scalar::Utf8("2024-10-27 02:30:00".into()),
+                Scalar::Utf8("2024-10-27 03:00:00".into()),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("Europe/Berlin"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Infer,
+                    nonexistent: TzNonexistentPolicy::Raise,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-10-27 01:30:00+02:00[Europe/Berlin]".into()),
+                Scalar::Utf8("2024-10-27 02:00:00+02:00[Europe/Berlin]".into()),
+                Scalar::Utf8("2024-10-27 02:30:00+02:00[Europe/Berlin]".into()),
+                Scalar::Utf8("2024-10-27 02:00:00+01:00[Europe/Berlin]".into()),
+                Scalar::Utf8("2024-10-27 02:30:00+01:00[Europe/Berlin]".into()),
+                Scalar::Utf8("2024-10-27 03:00:00+01:00[Europe/Berlin]".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_ambiguous_infer_rejects_non_repeated_sequence() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-11-03 00:00:00".into()),
+                Scalar::Utf8("2024-11-03 01:00:00".into()),
+                Scalar::Utf8("2024-11-03 02:00:00".into()),
+                Scalar::Utf8("2024-11-03 03:00:00".into()),
+            ],
+        )
+        .unwrap();
+        let err = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Infer,
+                    nonexistent: TzNonexistentPolicy::Raise,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot infer dst time from 2024-11-03 01:00:00")
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_ambiguous_mask_policy() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-11-03 01:00:03".into()),
+                Scalar::Utf8("2024-11-03 01:00:03".into()),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Mask(vec![true, false]),
+                    nonexistent: TzNonexistentPolicy::Raise,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-11-03 01:00:03-04:00[America/New_York]".into()),
+                Scalar::Utf8("2024-11-03 01:00:03-05:00[America/New_York]".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_ambiguous_mask_requires_full_length() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-11-03 01:00:03".into()),
+                Scalar::Utf8("2024-11-03 01:00:03".into()),
+            ],
+        )
+        .unwrap();
+        let err = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Mask(vec![true]),
+                    nonexistent: TzNonexistentPolicy::Raise,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Length of ambiguous bool-array must be the same size as vals")
+        );
+    }
+
+    #[test]
     fn dt_tz_localize_named_zone_nonexistent_shift_forward() {
         let s = Series::from_values(
             "ts",
@@ -42748,6 +43116,84 @@ mod tests {
         assert_eq!(
             result.values()[0],
             Scalar::Utf8("2024-03-10 01:59:59-05:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_nonexistent_shift_by_duration() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-10 02:30:00".into()),
+                Scalar::Utf8("2024-03-10 03:30:00".into()),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftBy(Duration::hours(1)),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-03-10 03:30:00-04:00[America/New_York]".into()),
+                Scalar::Utf8("2024-03-10 03:30:00-04:00[America/New_York]".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_nonexistent_shift_by_negative_duration() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-03-10 02:20:00".into())],
+        )
+        .unwrap();
+        let result = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftBy(Duration::hours(-1)),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-03-10 01:20:00-05:00[America/New_York]".into())
+        );
+    }
+
+    #[test]
+    fn dt_tz_localize_named_zone_nonexistent_shift_by_invalid_duration() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-03-10 02:20:00".into())],
+        )
+        .unwrap();
+        let err = s
+            .dt()
+            .tz_localize_with_options(
+                Some("America/New_York"),
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftBy(Duration::seconds(1)),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("The provided timedelta will relocalize on a nonexistent time")
         );
     }
 

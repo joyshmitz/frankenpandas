@@ -48,6 +48,7 @@ pub enum JsonOrient {
     Columns,
     Index,
     Split,
+    Values,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +391,13 @@ fn json_value_to_index_label(value: &serde_json::Value) -> IndexLabel {
     }
 }
 
+fn json_key_to_index_label(value: &str) -> IndexLabel {
+    value
+        .parse::<i64>()
+        .map(IndexLabel::Int64)
+        .unwrap_or_else(|_| IndexLabel::Utf8(value.to_owned()))
+}
+
 fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
     match label {
         IndexLabel::Int64(v) => serde_json::json!(*v),
@@ -452,30 +460,55 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .as_object()
                 .ok_or_else(|| IoError::JsonFormat("expected object for columns orient".into()))?;
 
-            let mut out = BTreeMap::new();
-            let mut row_count = 0_i64;
-
-            for (col_name, col_data) in obj {
-                let col_obj = col_data
-                    .as_object()
-                    .ok_or_else(|| IoError::JsonFormat("column data must be {idx: val}".into()))?;
-                let mut values: Vec<(i64, Scalar)> = Vec::with_capacity(col_obj.len());
-                for (idx_str, val) in col_obj {
-                    let idx: i64 = idx_str.parse().map_err(|_| {
-                        IoError::JsonFormat(format!("non-integer index: {idx_str}"))
-                    })?;
-                    values.push((idx, json_value_to_scalar(val)));
-                }
-                values.sort_by_key(|(idx, _)| *idx);
-                let scalars: Vec<Scalar> = values.into_iter().map(|(_, v)| v).collect();
-                if scalars.len() as i64 > row_count {
-                    row_count = scalars.len() as i64;
-                }
-                out.insert(col_name.clone(), Column::from_values(scalars)?);
+            if obj.is_empty() {
+                return Ok(DataFrame::new(Index::new(Vec::new()), BTreeMap::new())?);
             }
 
-            let index = Index::from_i64((0..row_count).collect());
-            Ok(DataFrame::new(index, out)?)
+            let mut raw_columns: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(obj.len());
+            let mut index_labels = Vec::new();
+            let mut index_lookup = BTreeMap::new();
+            for (col_name, col_data) in obj {
+                let col_obj = col_data.as_object().ok_or_else(|| {
+                    IoError::JsonFormat("column data must be {index: val}".into())
+                })?;
+                let mut values = vec![Scalar::Null(NullKind::Null); index_labels.len()];
+                for (label_key, val) in col_obj {
+                    let label = json_key_to_index_label(label_key);
+                    let row_idx = if let Some(&existing_idx) = index_lookup.get(&label) {
+                        existing_idx
+                    } else {
+                        let next_idx = index_labels.len();
+                        index_labels.push(label.clone());
+                        index_lookup.insert(label, next_idx);
+                        for existing_values in raw_columns.values_mut() {
+                            existing_values.push(Scalar::Null(NullKind::Null));
+                        }
+                        values.push(Scalar::Null(NullKind::Null));
+                        next_idx
+                    };
+                    if row_idx >= values.len() {
+                        values.resize(index_labels.len(), Scalar::Null(NullKind::Null));
+                    }
+                    values[row_idx] = json_value_to_scalar(val);
+                }
+                if values.len() < index_labels.len() {
+                    values.resize(index_labels.len(), Scalar::Null(NullKind::Null));
+                }
+                raw_columns.insert(col_name.clone(), values);
+                column_order.push(col_name.clone());
+            }
+
+            let mut out = BTreeMap::new();
+            for (name, vals) in raw_columns {
+                out.insert(name, Column::from_values(vals)?);
+            }
+
+            Ok(DataFrame::new_with_column_order(
+                Index::new(index_labels),
+                out,
+                column_order,
+            )?)
         }
         JsonOrient::Index => {
             let obj = parsed
@@ -595,6 +628,50 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             };
             Ok(DataFrame::new_with_column_order(index, out, col_names)?)
         }
+        JsonOrient::Values => {
+            let rows = parsed
+                .as_array()
+                .ok_or_else(|| IoError::JsonFormat("expected array for values orient".into()))?;
+
+            if rows.is_empty() {
+                return Ok(DataFrame::new(Index::new(Vec::new()), BTreeMap::new())?);
+            }
+
+            let mut width = 0usize;
+            for row in rows {
+                let arr = row.as_array().ok_or_else(|| {
+                    IoError::JsonFormat("each values row must be an array".into())
+                })?;
+                width = width.max(arr.len());
+            }
+
+            let column_order: Vec<String> = (0..width).map(|idx| idx.to_string()).collect();
+            let mut columns: BTreeMap<String, Vec<Scalar>> = column_order
+                .iter()
+                .cloned()
+                .map(|name| (name, Vec::with_capacity(rows.len())))
+                .collect();
+
+            for row in rows {
+                let arr = row.as_array().ok_or_else(|| {
+                    IoError::JsonFormat("each values row must be an array".into())
+                })?;
+                for (col_idx, name) in column_order.iter().enumerate() {
+                    let val = arr.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    columns
+                        .get_mut(name)
+                        .expect("column initialized above")
+                        .push(json_value_to_scalar(val));
+                }
+            }
+
+            let mut out = BTreeMap::new();
+            for (name, vals) in columns {
+                out.insert(name, Column::from_values(vals)?);
+            }
+            let index = Index::from_i64((0..rows.len() as i64).collect());
+            Ok(DataFrame::new_with_column_order(index, out, column_order)?)
+        }
     }
 }
 
@@ -624,8 +701,13 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             for name in &headers {
                 let mut col_obj = serde_json::Map::new();
                 if let Some(col) = frame.column(name) {
-                    for (i, val) in col.values().iter().enumerate() {
-                        col_obj.insert(i.to_string(), scalar_to_json(val));
+                    for (label, val) in frame.index().labels().iter().zip(col.values()) {
+                        let key = label.to_string();
+                        if col_obj.insert(key.clone(), scalar_to_json(val)).is_some() {
+                            return Err(IoError::JsonFormat(format!(
+                                "columns orient cannot encode duplicate index label key: {key}"
+                            )));
+                        }
                     }
                 }
                 outer.insert(name.clone(), serde_json::Value::Object(col_obj));
@@ -689,6 +771,23 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             obj.insert("index".into(), serde_json::Value::Array(index_array));
             obj.insert("data".into(), serde_json::Value::Array(data));
             Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
+        }
+        JsonOrient::Values => {
+            let mut data = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name)
+                            .and_then(|c| c.value(row_idx))
+                            .map(scalar_to_json)
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+            Ok(serde_json::to_string(&serde_json::Value::Array(data))?)
         }
     }
 }
@@ -1454,13 +1553,32 @@ mod tests {
 
     #[test]
     fn json_columns_read_write_roundtrip() {
-        let input = r#"{"name":{"0":"Alice","1":"Bob"},"age":{"0":30,"1":25}}"#;
+        let input = r#"{"name":{"row_a":"Alice","row_b":"Bob"},"age":{"row_a":30,"row_b":25}}"#;
         let frame = read_json_str(input, JsonOrient::Columns).expect("read json columns");
         assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.index().labels()[0], IndexLabel::Utf8("row_a".into()));
 
         let output = write_json_string(&frame, JsonOrient::Columns).expect("write");
         let frame2 = read_json_str(&output, JsonOrient::Columns).expect("re-read");
-        assert_eq!(frame2.index().len(), 2);
+        assert_eq!(frame2.index().labels(), frame.index().labels());
+    }
+
+    #[test]
+    fn json_columns_write_duplicate_index_rejects() {
+        let index = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Utf8("1".into())]);
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".into(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).expect("col"),
+        );
+        let frame = DataFrame::new(index, columns).expect("frame");
+
+        let err = write_json_string(&frame, JsonOrient::Columns)
+            .expect_err("duplicate JSON object keys should reject");
+        assert!(
+            matches!(&err, IoError::JsonFormat(msg) if msg.contains("duplicate index label key")),
+            "expected duplicate-index-key JsonFormat, got {err:?}"
+        );
     }
 
     #[test]
@@ -1556,6 +1674,32 @@ mod tests {
         assert!(
             matches!(&err, IoError::JsonFormat(msg) if msg.contains("rows must be objects")),
             "expected row-object error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn json_values_read_write_roundtrip() {
+        let input = r#"[[1,"Alice"],[null,"Bob"]]"#;
+        let frame = read_json_str(input, JsonOrient::Values).expect("read json values");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column_names(), vec!["0", "1"]);
+        assert_eq!(frame.column("0").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(
+            frame.column("1").unwrap().values()[1],
+            Scalar::Utf8("Bob".into())
+        );
+
+        let output = write_json_string(&frame, JsonOrient::Values).expect("write");
+        let frame2 = read_json_str(&output, JsonOrient::Values).expect("re-read");
+        assert_eq!(frame2.index().len(), 2);
+        assert_eq!(frame2.column_names(), frame.column_names());
+        assert_eq!(
+            frame2.column("0").unwrap().values(),
+            frame.column("0").unwrap().values()
+        );
+        assert_eq!(
+            frame2.column("1").unwrap().values(),
+            frame.column("1").unwrap().values()
         );
     }
 

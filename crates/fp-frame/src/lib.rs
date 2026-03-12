@@ -18,6 +18,7 @@ use fp_index::{
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
 use fp_types::{DType, NullKind, Scalar};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -139,6 +140,38 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Int64(v) => Scalar::Utf8(v.to_string()),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
     }
+}
+
+fn scalar_to_json_value(value: &Scalar) -> Value {
+    match value {
+        Scalar::Null(_) => Value::Null,
+        Scalar::Bool(v) => Value::Bool(*v),
+        Scalar::Int64(v) => Value::from(*v),
+        Scalar::Float64(v) => serde_json::Number::from_f64(*v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Scalar::Utf8(v) => Value::String(v.clone()),
+    }
+}
+
+fn index_label_to_json_value(label: &IndexLabel) -> Value {
+    match label {
+        IndexLabel::Int64(v) => Value::from(*v),
+        IndexLabel::Utf8(v) => Value::String(v.clone()),
+    }
+}
+
+fn index_label_to_json_key(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(v) => v.clone(),
+    }
+}
+
+fn serialize_json_value(value: &Value) -> Result<String, FrameError> {
+    serde_json::to_string(value).map_err(|err| {
+        FrameError::CompatibilityRejected(format!("failed to serialize JSON output: {err}"))
+    })
 }
 
 /// Parse an offset string like "3D", "1M", "2Y" into (count, unit).
@@ -15396,72 +15429,96 @@ impl DataFrame {
         Ok(out)
     }
 
-    /// Export DataFrame to JSON string in records orientation.
+    /// Export DataFrame to JSON string.
     ///
-    /// Matches `df.to_json(orient='records')` returning a JSON array of objects.
+    /// Matches `pd.DataFrame.to_json(orient=...)`.
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
         match orient {
             "records" => {
-                let mut rows = Vec::new();
+                let mut rows = Vec::with_capacity(self.len());
                 for row_idx in 0..self.len() {
-                    let mut obj_parts = Vec::new();
+                    let mut row = Map::new();
                     for name in &self.column_order {
-                        let val = &self.columns[name].values()[row_idx];
-                        let json_val = match val {
-                            Scalar::Null(_) => "null".to_string(),
-                            Scalar::Bool(b) => b.to_string(),
-                            Scalar::Int64(v) => v.to_string(),
-                            Scalar::Float64(v) => {
-                                if v.is_nan() {
-                                    "null".to_string()
-                                } else {
-                                    v.to_string()
-                                }
-                            }
-                            Scalar::Utf8(s) => {
-                                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-                            }
-                        };
-                        obj_parts.push(format!("\"{}\":{}", name.replace('"', "\\\""), json_val));
+                        row.insert(
+                            name.clone(),
+                            scalar_to_json_value(&self.columns[name].values()[row_idx]),
+                        );
                     }
-                    rows.push(format!("{{{}}}", obj_parts.join(",")));
+                    rows.push(Value::Object(row));
                 }
-                Ok(format!("[{}]", rows.join(",")))
+                serialize_json_value(&Value::Array(rows))
             }
             "columns" => {
-                let mut col_parts = Vec::new();
+                let mut columns = Map::new();
                 for name in &self.column_order {
                     let col = &self.columns[name];
-                    let vals: Vec<String> = col
-                        .values()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, val)| {
-                            let json_val = match val {
-                                Scalar::Null(_) => "null".to_string(),
-                                Scalar::Bool(b) => b.to_string(),
-                                Scalar::Int64(v) => v.to_string(),
-                                Scalar::Float64(v) => {
-                                    if v.is_nan() {
-                                        "null".to_string()
-                                    } else {
-                                        v.to_string()
-                                    }
-                                }
-                                Scalar::Utf8(s) => {
-                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-                                }
-                            };
-                            format!("\"{}\":{}", i, json_val)
-                        })
-                        .collect();
-                    col_parts.push(format!(
-                        "\"{}\":{{{}}}",
-                        name.replace('"', "\\\""),
-                        vals.join(",")
-                    ));
+                    let mut values = Map::new();
+                    for (label, value) in self.index.labels().iter().zip(col.values()) {
+                        values.insert(index_label_to_json_key(label), scalar_to_json_value(value));
+                    }
+                    columns.insert(name.clone(), Value::Object(values));
                 }
-                Ok(format!("{{{}}}", col_parts.join(",")))
+                serialize_json_value(&Value::Object(columns))
+            }
+            "index" => {
+                let mut rows = Map::new();
+                for (row_idx, label) in self.index.labels().iter().enumerate() {
+                    let mut row = Map::new();
+                    for name in &self.column_order {
+                        row.insert(
+                            name.clone(),
+                            scalar_to_json_value(&self.columns[name].values()[row_idx]),
+                        );
+                    }
+                    rows.insert(index_label_to_json_key(label), Value::Object(row));
+                }
+                serialize_json_value(&Value::Object(rows))
+            }
+            "split" => {
+                let index = self
+                    .index
+                    .labels()
+                    .iter()
+                    .map(index_label_to_json_value)
+                    .collect();
+                let columns = self
+                    .column_order
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect();
+                let data = (0..self.len())
+                    .map(|row_idx| {
+                        Value::Array(
+                            self.column_order
+                                .iter()
+                                .map(|name| {
+                                    scalar_to_json_value(&self.columns[name].values()[row_idx])
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                serialize_json_value(&Value::Object(Map::from_iter([
+                    ("columns".to_owned(), Value::Array(columns)),
+                    ("index".to_owned(), Value::Array(index)),
+                    ("data".to_owned(), Value::Array(data)),
+                ])))
+            }
+            "values" => {
+                let data = (0..self.len())
+                    .map(|row_idx| {
+                        Value::Array(
+                            self.column_order
+                                .iter()
+                                .map(|name| {
+                                    scalar_to_json_value(&self.columns[name].values()[row_idx])
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                serialize_json_value(&Value::Array(data))
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported to_json orient: {other:?}"
@@ -21082,6 +21139,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Duration;
+    use serde_json::Value;
 
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{DType, NullKind, Scalar};
@@ -32985,14 +33043,98 @@ mod tests {
 
     #[test]
     fn dataframe_to_json_columns() {
-        let df = DataFrame::from_dict(
-            &["x"],
+        let df = DataFrame::from_dict_with_index(
             vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec!["row0".into(), "row1".into()],
+        )
+        .unwrap();
+        let json = df.to_json("columns").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "x": {
+                    "row0": 10,
+                    "row1": 20
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn dataframe_to_json_index() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("x", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "y",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+                ),
+            ],
+            vec!["row0".into(), "row1".into()],
         )
         .unwrap();
 
-        let json = df.to_json("columns").unwrap();
-        assert!(json.contains("\"x\":{"));
+        let json = df.to_json("index").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "row0": {
+                    "x": 10,
+                    "y": "a"
+                },
+                "row1": {
+                    "x": 20,
+                    "y": "b"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn dataframe_to_json_split() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("x", vec![Scalar::Int64(10), Scalar::Null(NullKind::Null)]),
+                (
+                    "y",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+                ),
+            ],
+            vec![10_i64.into(), 20_i64.into()],
+        )
+        .unwrap();
+
+        let json = df.to_json("split").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "columns": ["x", "y"],
+                "index": [10, 20],
+                "data": [
+                    [10, "a"],
+                    [null, "b"]
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn dataframe_to_json_values() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Int64(10), Scalar::Float64(f64::NAN)]),
+                ("y", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+
+        let json = df.to_json("values").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!([[10.0, true], [null, false]]));
     }
 
     // --- Series.explode tests ---

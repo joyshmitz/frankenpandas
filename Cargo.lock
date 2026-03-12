@@ -590,6 +590,7 @@ dependencies = [
  "fp-types",
  "regex",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

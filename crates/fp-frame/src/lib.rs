@@ -35,11 +35,29 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
+/// Metadata for categorical (factor) data.
+///
+/// Stores the unique category values and an ordered flag. The underlying
+/// Series column contains integer codes (indices into `categories`).
+/// This design avoids adding a DType variant while providing full
+/// pandas Categorical semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategoricalMetadata {
+    /// The unique category values, in order.
+    pub categories: Vec<Scalar>,
+    /// Whether the categories have a meaningful total ordering.
+    pub ordered: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Series {
     name: String,
     index: Index,
     column: Column,
+    /// Optional categorical metadata. When present, `column` stores
+    /// Int64 codes indexing into `categorical.categories`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    categorical: Option<CategoricalMetadata>,
 }
 
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
@@ -485,6 +503,7 @@ impl Series {
             name: name.into(),
             index,
             column,
+            categorical: None,
         })
     }
 
@@ -5064,6 +5083,101 @@ impl Series {
         DatetimeAccessor { series: self }
     }
 
+    /// Access categorical methods on this Series.
+    ///
+    /// Matches `pd.Series.cat`. Returns `None` if the Series is not categorical.
+    #[must_use]
+    pub fn cat(&self) -> Option<CategoricalAccessor<'_>> {
+        self.categorical.as_ref().map(|meta| CategoricalAccessor {
+            series: self,
+            meta,
+        })
+    }
+
+    /// Returns `true` if this Series has categorical metadata.
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        self.categorical.is_some()
+    }
+
+    /// Create a categorical Series from values.
+    ///
+    /// Matches `pd.Categorical(values)`. Infers categories from unique values.
+    /// Stores integer codes as the column data.
+    pub fn from_categorical(
+        name: impl Into<String>,
+        values: Vec<Scalar>,
+        ordered: bool,
+    ) -> Result<Self, FrameError> {
+        // Build unique categories preserving first-seen order.
+        let mut categories: Vec<Scalar> = Vec::new();
+        let mut cat_positions: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+
+        let mut codes: Vec<Scalar> = Vec::with_capacity(values.len());
+        let index_labels: Vec<IndexLabel> = (0..values.len() as i64)
+            .map(IndexLabel::Int64)
+            .collect();
+
+        for val in &values {
+            if val.is_missing() {
+                codes.push(Scalar::Int64(-1));
+                continue;
+            }
+            let key = format!("{val:?}");
+            let code = if let Some(&pos) = cat_positions.get(&key) {
+                pos
+            } else {
+                let pos = categories.len() as i64;
+                cat_positions.insert(key, pos);
+                categories.push(val.clone());
+                pos
+            };
+            codes.push(Scalar::Int64(code));
+        }
+
+        let column = Column::from_values(codes)?;
+        let index = Index::new(index_labels);
+
+        Ok(Self {
+            name: name.into(),
+            index,
+            column,
+            categorical: Some(CategoricalMetadata {
+                categories,
+                ordered,
+            }),
+        })
+    }
+
+    /// Create a categorical Series from explicit codes and categories.
+    ///
+    /// Matches `pd.Categorical.from_codes(codes, categories)`.
+    pub fn from_categorical_codes(
+        name: impl Into<String>,
+        codes: Vec<i64>,
+        categories: Vec<Scalar>,
+        ordered: bool,
+    ) -> Result<Self, FrameError> {
+        let index_labels: Vec<IndexLabel> = (0..codes.len() as i64)
+            .map(IndexLabel::Int64)
+            .collect();
+
+        let code_scalars: Vec<Scalar> = codes.into_iter().map(Scalar::Int64).collect();
+        let column = Column::from_values(code_scalars)?;
+        let index = Index::new(index_labels);
+
+        Ok(Self {
+            name: name.into(),
+            index,
+            column,
+            categorical: Some(CategoricalMetadata {
+                categories,
+                ordered,
+            }),
+        })
+    }
+
     /// Apply a closure element-wise to produce a new Series.
     pub fn apply_fn<F>(&self, func: F) -> Result<Self, FrameError>
     where
@@ -6762,7 +6876,244 @@ impl SeriesGroupBy<'_> {
     }
 }
 
-/// String accessor for Series containing Utf8 data.
+// ── CategoricalAccessor ─────────────────────────────────────────────────
+
+/// Accessor for categorical operations on a Series.
+///
+/// Created by `Series::cat()`. Provides category manipulation methods
+/// analogous to pandas `Series.cat` namespace.
+pub struct CategoricalAccessor<'a> {
+    series: &'a Series,
+    meta: &'a CategoricalMetadata,
+}
+
+impl CategoricalAccessor<'_> {
+    /// Returns the categories of this categorical Series.
+    ///
+    /// Matches `pd.Series.cat.categories`.
+    #[must_use]
+    pub fn categories(&self) -> &[Scalar] {
+        &self.meta.categories
+    }
+
+    /// Returns whether the categories are ordered.
+    ///
+    /// Matches `pd.Series.cat.ordered`.
+    #[must_use]
+    pub fn ordered(&self) -> bool {
+        self.meta.ordered
+    }
+
+    /// Returns the integer codes for this categorical Series.
+    ///
+    /// Matches `pd.Series.cat.codes`. Returns a Series of Int64 values
+    /// where -1 indicates missing/NaN.
+    pub fn codes(&self) -> Result<Series, FrameError> {
+        Ok(Series {
+            name: format!("{}_codes", self.series.name),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: None,
+        })
+    }
+
+    /// Rename categories.
+    ///
+    /// Matches `pd.Series.cat.rename_categories(new_categories)`.
+    /// The new_categories must have the same length as the current categories.
+    pub fn rename_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
+        if new_categories.len() != self.meta.categories.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rename_categories: new_categories length ({}) must match current ({})",
+                new_categories.len(),
+                self.meta.categories.len()
+            )));
+        }
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: Some(CategoricalMetadata {
+                categories: new_categories,
+                ordered: self.meta.ordered,
+            }),
+        })
+    }
+
+    /// Add new categories.
+    ///
+    /// Matches `pd.Series.cat.add_categories(new_categories)`.
+    pub fn add_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
+        let mut cats = self.meta.categories.clone();
+        cats.extend(new_categories);
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: Some(CategoricalMetadata {
+                categories: cats,
+                ordered: self.meta.ordered,
+            }),
+        })
+    }
+
+    /// Remove unused categories (categories not referenced by any code).
+    ///
+    /// Matches `pd.Series.cat.remove_unused_categories()`.
+    pub fn remove_unused_categories(&self) -> Result<Series, FrameError> {
+        // Collect which category codes are actually used.
+        let mut used = vec![false; self.meta.categories.len()];
+        for val in self.series.column.values() {
+            if let Scalar::Int64(code) = val
+                && *code >= 0
+                && (*code as usize) < used.len()
+            {
+                used[*code as usize] = true;
+            }
+        }
+
+        // Build new categories (only used ones) and a code remapping.
+        let mut new_categories = Vec::new();
+        let mut remap: Vec<i64> = vec![-1; self.meta.categories.len()];
+        for (old_code, (cat, &is_used)) in
+            self.meta.categories.iter().zip(used.iter()).enumerate()
+        {
+            if is_used {
+                remap[old_code] = new_categories.len() as i64;
+                new_categories.push(cat.clone());
+            }
+        }
+
+        // Remap codes.
+        let new_codes: Vec<Scalar> = self
+            .series
+            .column
+            .values()
+            .iter()
+            .map(|val| match val {
+                Scalar::Int64(code) if *code >= 0 && (*code as usize) < remap.len() => {
+                    Scalar::Int64(remap[*code as usize])
+                }
+                _ => val.clone(),
+            })
+            .collect();
+
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: Column::from_values(new_codes)?,
+            categorical: Some(CategoricalMetadata {
+                categories: new_categories,
+                ordered: self.meta.ordered,
+            }),
+        })
+    }
+
+    /// Set the categories to a new list, remapping codes accordingly.
+    ///
+    /// Matches `pd.Series.cat.set_categories(new_categories)`.
+    /// Values not in new_categories become missing (-1).
+    pub fn set_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
+        // Build old-value -> new-code mapping.
+        let mut new_code_map: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        for (i, cat) in new_categories.iter().enumerate() {
+            new_code_map.insert(format!("{cat:?}"), i as i64);
+        }
+
+        // Remap each old code through: old_code -> old_category -> new_code.
+        let new_codes: Vec<Scalar> = self
+            .series
+            .column
+            .values()
+            .iter()
+            .map(|val| {
+                if let Scalar::Int64(code) = val
+                    && *code >= 0
+                    && (*code as usize) < self.meta.categories.len()
+                {
+                    let old_cat = &self.meta.categories[*code as usize];
+                    let key = format!("{old_cat:?}");
+                    Scalar::Int64(*new_code_map.get(&key).unwrap_or(&-1))
+                } else {
+                    Scalar::Int64(-1)
+                }
+            })
+            .collect();
+
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: Column::from_values(new_codes)?,
+            categorical: Some(CategoricalMetadata {
+                categories: new_categories,
+                ordered: self.meta.ordered,
+            }),
+        })
+    }
+
+    /// Mark this categorical as ordered.
+    ///
+    /// Matches `pd.Series.cat.as_ordered()`.
+    pub fn as_ordered(&self) -> Series {
+        Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: Some(CategoricalMetadata {
+                categories: self.meta.categories.clone(),
+                ordered: true,
+            }),
+        }
+    }
+
+    /// Mark this categorical as unordered.
+    ///
+    /// Matches `pd.Series.cat.as_unordered()`.
+    pub fn as_unordered(&self) -> Series {
+        Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: Some(CategoricalMetadata {
+                categories: self.meta.categories.clone(),
+                ordered: false,
+            }),
+        }
+    }
+
+    /// Materialize the categorical back to the original values.
+    ///
+    /// Replaces each code with the corresponding category value.
+    /// Missing codes (-1) become `Scalar::Null(NullKind::Null)`.
+    pub fn to_values(&self) -> Result<Series, FrameError> {
+        let values: Vec<Scalar> = self
+            .series
+            .column
+            .values()
+            .iter()
+            .map(|val| {
+                if let Scalar::Int64(code) = val
+                    && *code >= 0
+                    && (*code as usize) < self.meta.categories.len()
+                {
+                    self.meta.categories[*code as usize].clone()
+                } else {
+                    Scalar::Null(NullKind::Null)
+                }
+            })
+            .collect();
+
+        Series::from_values(
+            self.series.name.clone(),
+            self.series.index.labels().to_vec(),
+            values,
+        )
+    }
+}
+
+// ── StringAccessor ──────────────────────────────────────────────────────
+
 ///
 /// Created by `Series::str()`. Provides string manipulation methods
 /// analogous to pandas `Series.str` namespace.
@@ -43352,5 +43703,259 @@ mod tests {
             result.values()[0],
             Scalar::Utf8("2024-01-15 09:30:00+00:00".into())
         );
+    }
+
+    // ── Categorical tests ──
+
+    #[test]
+    fn categorical_from_values() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("red".into()),
+                Scalar::Utf8("blue".into()),
+                Scalar::Utf8("red".into()),
+                Scalar::Utf8("green".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        assert!(s.is_categorical());
+        let cat = s.cat().unwrap();
+        assert_eq!(cat.categories().len(), 3);
+        assert!(!cat.ordered());
+
+        // Codes should map: red=0, blue=1, green=2
+        assert_eq!(s.column().values()[0], Scalar::Int64(0));
+        assert_eq!(s.column().values()[1], Scalar::Int64(1));
+        assert_eq!(s.column().values()[2], Scalar::Int64(0));
+        assert_eq!(s.column().values()[3], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn categorical_from_codes() {
+        let categories = vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("medium".into()),
+            Scalar::Utf8("high".into()),
+        ];
+        let s = Series::from_categorical_codes("rating", vec![0, 2, 1, 0], categories, true).unwrap();
+
+        assert!(s.is_categorical());
+        let cat = s.cat().unwrap();
+        assert_eq!(cat.categories().len(), 3);
+        assert!(cat.ordered());
+    }
+
+    #[test]
+    fn categorical_to_values() {
+        let s = Series::from_categorical(
+            "x",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let materialized = s.cat().unwrap().to_values().unwrap();
+        assert!(!materialized.is_categorical());
+        assert_eq!(materialized.values()[0], Scalar::Utf8("a".into()));
+        assert_eq!(materialized.values()[1], Scalar::Utf8("b".into()));
+        assert_eq!(materialized.values()[2], Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn categorical_with_missing() {
+        let s = Series::from_categorical(
+            "x",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        // Missing values get code -1
+        assert_eq!(s.column().values()[1], Scalar::Int64(-1));
+
+        // Materializing back: -1 becomes Null
+        let vals = s.cat().unwrap().to_values().unwrap();
+        assert!(vals.values()[1].is_missing());
+        assert_eq!(vals.values()[0], Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn categorical_rename_categories() {
+        let s = Series::from_categorical(
+            "x",
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            false,
+        )
+        .unwrap();
+
+        let renamed = s
+            .cat()
+            .unwrap()
+            .rename_categories(vec![Scalar::Utf8("alpha".into()), Scalar::Utf8("beta".into())])
+            .unwrap();
+
+        let vals = renamed.cat().unwrap().to_values().unwrap();
+        assert_eq!(vals.values()[0], Scalar::Utf8("alpha".into()));
+        assert_eq!(vals.values()[1], Scalar::Utf8("beta".into()));
+    }
+
+    #[test]
+    fn categorical_rename_wrong_length_errors() {
+        let s = Series::from_categorical(
+            "x",
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            false,
+        )
+        .unwrap();
+
+        let err = s
+            .cat()
+            .unwrap()
+            .rename_categories(vec![Scalar::Utf8("only_one".into())]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn categorical_add_categories() {
+        let s = Series::from_categorical(
+            "x",
+            vec![Scalar::Utf8("a".into())],
+            false,
+        )
+        .unwrap();
+
+        let extended = s
+            .cat()
+            .unwrap()
+            .add_categories(vec![Scalar::Utf8("b".into()), Scalar::Utf8("c".into())])
+            .unwrap();
+
+        assert_eq!(extended.cat().unwrap().categories().len(), 3);
+    }
+
+    #[test]
+    fn categorical_remove_unused() {
+        let s = Series::from_categorical_codes(
+            "x",
+            vec![0, 0, 2], // only codes 0 and 2 used, 1 unused
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let cleaned = s.cat().unwrap().remove_unused_categories().unwrap();
+        let cat = cleaned.cat().unwrap();
+        assert_eq!(cat.categories().len(), 2);
+        assert_eq!(cat.categories()[0], Scalar::Utf8("a".into()));
+        assert_eq!(cat.categories()[1], Scalar::Utf8("c".into()));
+
+        // Codes should be remapped: old 0->new 0, old 2->new 1
+        let vals = cleaned.cat().unwrap().to_values().unwrap();
+        assert_eq!(vals.values()[0], Scalar::Utf8("a".into()));
+        assert_eq!(vals.values()[2], Scalar::Utf8("c".into()));
+    }
+
+    #[test]
+    fn categorical_set_categories() {
+        let s = Series::from_categorical(
+            "x",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        // Set to only ["b", "d"] - "a" and "c" become missing, "d" is new
+        let result = s
+            .cat()
+            .unwrap()
+            .set_categories(vec![Scalar::Utf8("b".into()), Scalar::Utf8("d".into())])
+            .unwrap();
+
+        let vals = result.cat().unwrap().to_values().unwrap();
+        assert!(vals.values()[0].is_missing()); // "a" not in new categories
+        assert_eq!(vals.values()[1], Scalar::Utf8("b".into()));
+        assert!(vals.values()[2].is_missing()); // "c" not in new categories
+    }
+
+    #[test]
+    fn categorical_ordered_unordered() {
+        let s = Series::from_categorical("x", vec![Scalar::Int64(1)], false).unwrap();
+        assert!(!s.cat().unwrap().ordered());
+
+        let ordered = s.cat().unwrap().as_ordered();
+        assert!(ordered.cat().unwrap().ordered());
+
+        let unordered = ordered.cat().unwrap().as_unordered();
+        assert!(!unordered.cat().unwrap().ordered());
+    }
+
+    #[test]
+    fn categorical_codes_accessor() {
+        let s = Series::from_categorical(
+            "x",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let codes = s.cat().unwrap().codes().unwrap();
+        assert!(!codes.is_categorical());
+        assert_eq!(codes.values()[0], Scalar::Int64(0));
+        assert_eq!(codes.values()[1], Scalar::Int64(1));
+        assert_eq!(codes.values()[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn non_categorical_series_cat_returns_none() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(42)],
+        )
+        .unwrap();
+        assert!(!s.is_categorical());
+        assert!(s.cat().is_none());
+    }
+
+    #[test]
+    fn categorical_numeric_values() {
+        let s = Series::from_categorical(
+            "x",
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
+            true,
+        )
+        .unwrap();
+
+        let cat = s.cat().unwrap();
+        assert_eq!(cat.categories().len(), 2);
+        assert!(cat.ordered());
+
+        let vals = cat.to_values().unwrap();
+        assert_eq!(vals.values()[0], Scalar::Int64(10));
+        assert_eq!(vals.values()[1], Scalar::Int64(20));
+        assert_eq!(vals.values()[2], Scalar::Int64(10));
     }
 }

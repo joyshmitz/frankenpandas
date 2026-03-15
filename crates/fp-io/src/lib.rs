@@ -28,6 +28,8 @@ pub enum IoError {
     JsonFormat(String),
     #[error("parquet error: {0}")]
     Parquet(String),
+    #[error("excel error: {0}")]
+    Excel(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -1081,6 +1083,317 @@ pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
     read_parquet_bytes(&data)
 }
 
+// ── Excel (xlsx) I/O ────────────────────────────────────────────────────
+
+/// Options for reading Excel files.
+#[derive(Debug, Clone)]
+pub struct ExcelReadOptions {
+    /// Sheet name to read. If `None`, reads the first sheet.
+    pub sheet_name: Option<String>,
+    /// Whether the first row contains column headers.
+    pub has_headers: bool,
+    /// Optional column to use as the DataFrame index.
+    pub index_col: Option<String>,
+    /// Number of initial rows to skip before reading headers/data.
+    pub skip_rows: usize,
+}
+
+impl Default for ExcelReadOptions {
+    fn default() -> Self {
+        Self {
+            sheet_name: None,
+            has_headers: true,
+            index_col: None,
+            skip_rows: 0,
+        }
+    }
+}
+
+/// Convert a calamine `Data` cell value to a `Scalar`.
+fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
+    match cell {
+        calamine::Data::Int(v) => Scalar::Int64(*v),
+        calamine::Data::Float(v) => {
+            if v.is_nan() {
+                Scalar::Null(NullKind::NaN)
+            } else if v.fract() == 0.0 && *v >= i64::MIN as f64 && *v <= i64::MAX as f64 {
+                // Excel stores integers as floats; recover Int64 for whole numbers.
+                Scalar::Int64(*v as i64)
+            } else {
+                Scalar::Float64(*v)
+            }
+        }
+        calamine::Data::String(s) => {
+            if s.is_empty() {
+                Scalar::Null(NullKind::Null)
+            } else {
+                Scalar::Utf8(s.clone())
+            }
+        }
+        calamine::Data::Bool(b) => Scalar::Bool(*b),
+        calamine::Data::Empty => Scalar::Null(NullKind::Null),
+        calamine::Data::DateTime(dt) => {
+            // Convert ExcelDateTime to string representation for now.
+            Scalar::Utf8(format!("{dt}"))
+        }
+        calamine::Data::DateTimeIso(s) => Scalar::Utf8(s.clone()),
+        calamine::Data::DurationIso(s) => Scalar::Utf8(s.clone()),
+        calamine::Data::Error(e) => Scalar::Utf8(format!("#ERROR:{e:?}")),
+    }
+}
+
+/// Read an Excel (.xlsx/.xls/.xlsb/.ods) file into a DataFrame.
+///
+/// Matches `pd.read_excel(path)` for basic usage.
+pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
+    use calamine::{Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
+
+    // Select sheet by name or use the first one.
+    let sheet_name = if let Some(ref name) = options.sheet_name {
+        name.clone()
+    } else {
+        let names = workbook.sheet_names();
+        if names.is_empty() {
+            return Err(IoError::Excel("workbook contains no sheets".into()));
+        }
+        names[0].clone()
+    };
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
+
+    let rows: Vec<Vec<calamine::Data>> = range
+        .rows()
+        .skip(options.skip_rows)
+        .map(|r| r.to_vec())
+        .collect();
+
+    if rows.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
+            .map_err(IoError::Frame);
+    }
+
+    // Extract headers.
+    let (headers, data_rows) = if options.has_headers {
+        let header_row = &rows[0];
+        let headers: Vec<String> = header_row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| match cell {
+                calamine::Data::String(s) if !s.is_empty() => s.clone(),
+                _ => format!("column_{i}"),
+            })
+            .collect();
+        (headers, &rows[1..])
+    } else {
+        let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
+        (headers, rows.as_slice())
+    };
+
+    let ncols = headers.len();
+
+    // Accumulate columns.
+    let mut columns: Vec<Vec<Scalar>> = (0..ncols).map(|_| Vec::with_capacity(data_rows.len())).collect();
+
+    for row in data_rows {
+        for (col_idx, col_vec) in columns.iter_mut().enumerate() {
+            let cell = row.get(col_idx).unwrap_or(&calamine::Data::Empty);
+            col_vec.push(excel_cell_to_scalar(cell));
+        }
+    }
+
+    // Handle index_col if specified.
+    let index_col_idx = if let Some(ref idx_name) = options.index_col {
+        let pos = headers.iter().position(|h| h == idx_name);
+        if pos.is_none() {
+            return Err(IoError::MissingIndexColumn(idx_name.clone()));
+        }
+        pos
+    } else {
+        None
+    };
+
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for (idx, (name, values)) in headers.into_iter().zip(columns.into_iter()).enumerate() {
+        if Some(idx) == index_col_idx {
+            continue; // skip index column from data columns
+        }
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
+    }
+
+    let index = if let Some(idx_pos) = index_col_idx {
+        // Re-read the index column values from the range.
+        let idx_labels: Vec<IndexLabel> = data_rows
+            .iter()
+            .map(|row| {
+                let cell = row.get(idx_pos).unwrap_or(&calamine::Data::Empty);
+                match excel_cell_to_scalar(cell) {
+                    Scalar::Int64(v) => IndexLabel::Int64(v),
+                    Scalar::Utf8(s) => IndexLabel::Utf8(s),
+                    Scalar::Float64(v) => IndexLabel::Int64(v as i64),
+                    Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+                    _ => IndexLabel::Utf8(String::new()),
+                }
+            })
+            .collect();
+        Index::new(idx_labels)
+    } else {
+        Index::from_i64((0..data_rows.len() as i64).collect())
+    };
+
+    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+}
+
+/// Read Excel from in-memory bytes.
+pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
+    use calamine::{Reader, open_workbook_auto_from_rs};
+
+    let cursor = std::io::Cursor::new(data);
+    let mut workbook = open_workbook_auto_from_rs(cursor)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
+
+    let sheet_name = if let Some(ref name) = options.sheet_name {
+        name.clone()
+    } else {
+        let names = workbook.sheet_names();
+        if names.is_empty() {
+            return Err(IoError::Excel("workbook contains no sheets".into()));
+        }
+        names[0].clone()
+    };
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
+
+    let rows: Vec<Vec<calamine::Data>> = range
+        .rows()
+        .skip(options.skip_rows)
+        .map(|r| r.to_vec())
+        .collect();
+
+    if rows.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
+            .map_err(IoError::Frame);
+    }
+
+    let (headers, data_rows) = if options.has_headers {
+        let header_row = &rows[0];
+        let headers: Vec<String> = header_row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| match cell {
+                calamine::Data::String(s) if !s.is_empty() => s.clone(),
+                _ => format!("column_{i}"),
+            })
+            .collect();
+        (headers, &rows[1..])
+    } else {
+        let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
+        (headers, rows.as_slice())
+    };
+
+    let ncols = headers.len();
+    let mut columns: Vec<Vec<Scalar>> = (0..ncols).map(|_| Vec::with_capacity(data_rows.len())).collect();
+
+    for row in data_rows {
+        for (col_idx, col_vec) in columns.iter_mut().enumerate() {
+            let cell = row.get(col_idx).unwrap_or(&calamine::Data::Empty);
+            col_vec.push(excel_cell_to_scalar(cell));
+        }
+    }
+
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for (name, values) in headers.into_iter().zip(columns.into_iter()) {
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..data_rows.len() as i64).collect());
+    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+}
+
+/// Write a DataFrame to an Excel (.xlsx) file.
+///
+/// Matches `pd.DataFrame.to_excel(path)`.
+pub fn write_excel(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let bytes = write_excel_bytes(frame)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Write a DataFrame to Excel (.xlsx) bytes in memory.
+pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    use rust_xlsxwriter::Workbook;
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+
+    let col_names = frame.column_names();
+
+    // Write headers.
+    for (col_idx, name) in col_names.iter().enumerate() {
+        worksheet
+            .write_string(0, col_idx as u16, name.as_str())
+            .map_err(|e| IoError::Excel(format!("write header: {e}")))?;
+    }
+
+    // Write data rows.
+    let nrows = frame.index().len();
+    for row_idx in 0..nrows {
+        let excel_row = (row_idx + 1) as u32; // +1 for header row
+        for (col_idx, name) in col_names.iter().enumerate() {
+            if let Some(col) = frame.column(name)
+                && let Some(scalar) = col.value(row_idx)
+            {
+                let excel_col = col_idx as u16;
+                match scalar {
+                    Scalar::Int64(v) => {
+                        worksheet
+                            .write_number(excel_row, excel_col, *v as f64)
+                            .map_err(|e| IoError::Excel(format!("write int: {e}")))?;
+                    }
+                    Scalar::Float64(v) if !v.is_nan() => {
+                        worksheet
+                            .write_number(excel_row, excel_col, *v)
+                            .map_err(|e| IoError::Excel(format!("write float: {e}")))?;
+                    }
+                    Scalar::Bool(b) => {
+                        worksheet
+                            .write_boolean(excel_row, excel_col, *b)
+                            .map_err(|e| IoError::Excel(format!("write bool: {e}")))?;
+                    }
+                    Scalar::Utf8(s) => {
+                        worksheet
+                            .write_string(excel_row, excel_col, s.as_str())
+                            .map_err(|e| IoError::Excel(format!("write string: {e}")))?;
+                    }
+                    Scalar::Float64(_) | Scalar::Null(_) => {
+                        // Leave NaN and null cells empty (Excel convention).
+                    }
+                }
+            }
+        }
+    }
+
+    let buf = workbook
+        .save_to_buffer()
+        .map_err(|e| IoError::Excel(format!("save workbook: {e}")))?;
+
+    Ok(buf)
+}
+
 // ── Extension trait for DataFrame IO convenience methods ─────────────
 
 /// Extension trait that adds IO convenience methods to `DataFrame`.
@@ -1107,6 +1420,14 @@ pub trait DataFrameIoExt {
     ///
     /// Matches `pd.DataFrame.to_json(path)`.
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an Excel (.xlsx) file.
+    ///
+    /// Matches `pd.DataFrame.to_excel(path)`.
+    fn to_excel_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
+    fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
 }
 
 impl DataFrameIoExt for DataFrame {
@@ -1124,6 +1445,14 @@ impl DataFrameIoExt for DataFrame {
 
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
         write_json(self, path, orient)
+    }
+
+    fn to_excel_file(&self, path: &Path) -> Result<(), IoError> {
+        write_excel(self, path)
+    }
+
+    fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_excel_bytes(self)
     }
 }
 
@@ -2005,5 +2334,193 @@ mod tests {
 
         let result = super::write_parquet_bytes(&frame);
         assert!(result.is_err());
+    }
+
+    // ── Excel I/O tests ──────────────────────────────────────────────
+
+    #[test]
+    fn excel_bytes_roundtrip() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes(&frame).expect("write excel");
+        assert!(!bytes.is_empty());
+
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read excel");
+        assert_eq!(frame2.index().len(), 3);
+        // Excel preserves the write-time column order (ints, floats, names).
+        assert_eq!(
+            frame2
+                .column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ints", "floats", "names"]
+        );
+
+        // Int values survive round-trip (Excel stores as f64, we recover Int64).
+        let ints = frame2.column("ints").unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(10));
+        assert_eq!(ints.values()[1], Scalar::Int64(20));
+        assert_eq!(ints.values()[2], Scalar::Int64(30));
+
+        // Float values survive round-trip.
+        let floats = frame2.column("floats").unwrap();
+        assert_eq!(floats.values()[0], Scalar::Float64(1.5));
+        assert_eq!(floats.values()[1], Scalar::Float64(2.5));
+        assert_eq!(floats.values()[2], Scalar::Float64(3.5));
+
+        // String values survive round-trip.
+        let names = frame2.column("names").unwrap();
+        assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
+        assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
+        assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn excel_file_roundtrip() {
+        let frame = make_test_dataframe();
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_excel_roundtrip.xlsx");
+
+        super::write_excel(&frame, &path).expect("write excel file");
+        let frame2 =
+            super::read_excel(&path, &super::ExcelReadOptions::default()).expect("read excel file");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(
+            frame2.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn excel_with_nulls() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_excel_bytes(&frame).expect("write");
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+
+        // Non-null values round-trip.
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+        // NaN written as empty cell, read back as Null.
+        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[2],
+            Scalar::Int64(3)
+        );
+    }
+
+    #[test]
+    fn excel_bool_column() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flags".to_string(),
+            Column::new(
+                DType::Bool,
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["flags".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_excel_bytes(&frame).expect("write");
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[0],
+            Scalar::Bool(true)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[1],
+            Scalar::Bool(false)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[2],
+            Scalar::Bool(true)
+        );
+    }
+
+    #[test]
+    fn excel_skip_rows() {
+        // Build an xlsx with 5 data rows, then read with skip_rows=2 to skip
+        // 2 rows before the header.
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_string(),
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        );
+        let labels = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["x".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_excel_bytes(&frame).expect("write");
+        let frame2 = super::read_excel_bytes(
+            &bytes,
+            &super::ExcelReadOptions {
+                skip_rows: 1,
+                has_headers: false,
+                ..Default::default()
+            },
+        )
+        .expect("read with skip");
+
+        // Skipped the header row, so first data row becomes first row.
+        // With has_headers=false, column names are auto-generated.
+        assert_eq!(frame2.index().len(), 2);
+        assert!(frame2.column("column_0").is_some());
     }
 }

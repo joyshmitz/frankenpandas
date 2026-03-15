@@ -757,3 +757,543 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: DType coercion invariants (frankenpandas-x2n)
+// ---------------------------------------------------------------------------
+
+/// Generate an arbitrary DType.
+fn arb_dtype() -> impl Strategy<Value = fp_types::DType> {
+    prop_oneof![
+        Just(fp_types::DType::Null),
+        Just(fp_types::DType::Bool),
+        Just(fp_types::DType::Int64),
+        Just(fp_types::DType::Float64),
+        Just(fp_types::DType::Utf8),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// common_dtype is symmetric: common_dtype(a, b) == common_dtype(b, a).
+    #[test]
+    fn prop_common_dtype_symmetric(a in arb_dtype(), b in arb_dtype()) {
+        let ab = fp_types::common_dtype(a, b);
+        let ba = fp_types::common_dtype(b, a);
+        match (ab, ba) {
+            (Ok(ab_dt), Ok(ba_dt)) => {
+                prop_assert_eq!(ab_dt, ba_dt,
+                    "common_dtype must be symmetric: ({:?},{:?}) -> {:?} vs {:?}", a, b, ab_dt, ba_dt);
+            }
+            (Err(_), Err(_)) => { /* both incompatible: ok */ }
+            _ => {
+                prop_assert!(false,
+                    "common_dtype symmetry broken: ({:?},{:?}) one Ok, one Err", a, b);
+            }
+        }
+    }
+
+    /// common_dtype is reflexive: common_dtype(a, a) == Ok(a).
+    #[test]
+    fn prop_common_dtype_reflexive(a in arb_dtype()) {
+        let result = fp_types::common_dtype(a, a);
+        prop_assert_eq!(result, Ok(a), "common_dtype({:?}, {:?}) must be {:?}", a, a, a);
+    }
+
+    /// common_dtype with Null is identity: common_dtype(Null, x) == Ok(x).
+    #[test]
+    fn prop_common_dtype_null_identity(x in arb_dtype()) {
+        let result = fp_types::common_dtype(fp_types::DType::Null, x);
+        prop_assert_eq!(result, Ok(x), "Null is the identity element for common_dtype");
+    }
+
+    /// common_dtype is transitive for compatible triples:
+    /// If common_dtype(a, b) = Ok(ab) and common_dtype(ab, c) = Ok(abc),
+    /// then common_dtype(a, common_dtype(b, c)) should also be Ok(abc).
+    #[test]
+    fn prop_common_dtype_transitive(a in arb_dtype(), b in arb_dtype(), c in arb_dtype()) {
+        let ab = fp_types::common_dtype(a, b);
+        let bc = fp_types::common_dtype(b, c);
+
+        // Only test transitivity when both intermediate steps succeed.
+        if let (Ok(ab_dt), Ok(bc_dt)) = (ab, bc) {
+            let ab_c = fp_types::common_dtype(ab_dt, c);
+            let a_bc = fp_types::common_dtype(a, bc_dt);
+
+            match (ab_c, a_bc) {
+                (Ok(left), Ok(right)) => {
+                    prop_assert_eq!(left, right,
+                        "common_dtype transitivity: ({:?},{:?},{:?}) -> {:?} vs {:?}",
+                        a, b, c, left, right);
+                }
+                (Err(_), Err(_)) => { /* both fail: ok */ }
+                _ => {
+                    prop_assert!(false,
+                        "common_dtype transitivity inconsistency for ({:?},{:?},{:?})", a, b, c);
+                }
+            }
+        }
+    }
+
+    /// infer_dtype is consistent with common_dtype: infer_dtype on a
+    /// homogeneous slice returns the dtype of the elements.
+    #[test]
+    fn prop_infer_dtype_homogeneous(scalar in arb_numeric_scalar()) {
+        if scalar.is_missing() {
+            return Ok(());
+        }
+        let values = vec![scalar.clone(), scalar.clone()];
+        let inferred = fp_types::infer_dtype(&values);
+        prop_assert_eq!(inferred, Ok(scalar.dtype()),
+            "infer_dtype on homogeneous slice should return element dtype");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: Scalar cast safety (frankenpandas-x2n)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// Casting a scalar to its own dtype always succeeds and returns
+    /// a semantically equal value (identity cast, AG-03).
+    /// Note: Null scalars normalize to the canonical missing form for DType::Null
+    /// (i.e., Null(NaN) -> Null(Null)), which is correct behavior.
+    #[test]
+    fn prop_cast_identity(scalar in arb_numeric_scalar()) {
+        let target = scalar.dtype();
+        let result = fp_types::cast_scalar(&scalar, target);
+        match result {
+            Ok(casted) => {
+                if scalar.is_missing() {
+                    // Missing values normalize to canonical missing for the dtype.
+                    prop_assert!(casted.is_missing(),
+                        "identity cast of missing must produce missing: {:?} -> {:?}", scalar, casted);
+                } else {
+                    prop_assert!(casted.semantic_eq(&scalar),
+                        "identity cast must preserve value: {:?} -> {:?}", scalar, casted);
+                }
+            }
+            Err(e) => {
+                prop_assert!(false, "identity cast must not fail: {:?} -> {:?}", scalar, e);
+            }
+        }
+    }
+
+    /// Casting a missing scalar to any dtype produces a missing scalar.
+    #[test]
+    fn prop_cast_missing_stays_missing(
+        kind in prop_oneof![Just(NullKind::Null), Just(NullKind::NaN), Just(NullKind::NaT)],
+        target in arb_dtype(),
+    ) {
+        let scalar = Scalar::Null(kind);
+        let result = fp_types::cast_scalar(&scalar, target);
+        match result {
+            Ok(casted) => {
+                prop_assert!(casted.is_missing(),
+                    "casting Null({:?}) to {:?} must produce missing, got {:?}", kind, target, casted);
+            }
+            Err(_) => {
+                // Some casts may legitimately fail (e.g., NaT to Utf8 in some configs).
+                // That's acceptable; the important thing is it doesn't panic.
+            }
+        }
+    }
+
+    /// Casting Int64 to Float64 never loses the integer value (within i64 range
+    /// that fits exactly in f64).
+    #[test]
+    fn prop_cast_int64_to_float64_preserves(v in -1_000_000_000i64..1_000_000_000i64) {
+        let scalar = Scalar::Int64(v);
+        let result = fp_types::cast_scalar(&scalar, fp_types::DType::Float64);
+        match result {
+            Ok(Scalar::Float64(fv)) => {
+                prop_assert_eq!(fv as i64, v,
+                    "Int64->Float64 must preserve: {} -> {}", v, fv);
+            }
+            other => {
+                prop_assert!(false, "unexpected cast result: {:?}", other);
+            }
+        }
+    }
+
+    /// Casting Bool to Int64 produces 0 or 1.
+    #[test]
+    fn prop_cast_bool_to_int64(b in proptest::bool::ANY) {
+        let scalar = Scalar::Bool(b);
+        let result = fp_types::cast_scalar(&scalar, fp_types::DType::Int64);
+        let expected = if b { 1i64 } else { 0i64 };
+        prop_assert_eq!(result, Ok(Scalar::Int64(expected)));
+    }
+
+    /// Casting compatible types via common_dtype then cast_scalar round-trips:
+    /// if common_dtype(a.dtype(), b.dtype()) = Ok(target), then
+    /// cast_scalar(a, target) and cast_scalar(b, target) both succeed.
+    #[test]
+    fn prop_cast_to_common_dtype_succeeds(
+        a in arb_numeric_scalar(),
+        b in arb_numeric_scalar(),
+    ) {
+        let dt_a = a.dtype();
+        let dt_b = b.dtype();
+        if let Ok(target) = fp_types::common_dtype(dt_a, dt_b) {
+            let cast_a = fp_types::cast_scalar(&a, target);
+            let cast_b = fp_types::cast_scalar(&b, target);
+            prop_assert!(cast_a.is_ok(),
+                "cast {:?} ({:?}) to {:?} must succeed", a, dt_a, target);
+            prop_assert!(cast_b.is_ok(),
+                "cast {:?} ({:?}) to {:?} must succeed", b, dt_b, target);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: CSV round-trip invariants (frankenpandas-x2n)
+// ---------------------------------------------------------------------------
+
+/// Generate a DataFrame-safe string that CANNOT be parsed as a number or bool.
+/// This ensures CSV round-trip doesn't change Utf8 -> Int64/Float64/Bool.
+fn arb_safe_string() -> impl Strategy<Value = String> {
+    "[a-z]{2}[a-z0-9_]{0,8}"
+}
+
+/// Generate a column name (valid, non-empty, no special characters).
+fn arb_column_name() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9_]{0,5}"
+}
+
+/// Generate a homogeneous column of CSV-safe scalars (all same type per column).
+/// This is required because CSV round-trip does per-cell type inference,
+/// so mixed-type columns would break on re-parse.
+fn arb_csv_column(nrows: usize) -> impl Strategy<Value = Vec<Scalar>> {
+    prop_oneof![
+        3 => proptest::collection::vec(
+            (-1_000_000i64..1_000_000i64).prop_map(Scalar::Int64), nrows
+        ),
+        2 => proptest::collection::vec(
+            arb_safe_string().prop_map(Scalar::Utf8), nrows
+        ),
+    ]
+}
+
+/// Generate a small DataFrame with N rows and M columns of CSV-safe scalars.
+/// Each column is homogeneous (all same type) for CSV round-trip safety.
+fn arb_csv_dataframe(
+    max_rows: usize,
+    max_cols: usize,
+) -> impl Strategy<Value = fp_frame::DataFrame> {
+    (1..=max_rows, 1..=max_cols).prop_flat_map(|(nrows, ncols)| {
+        let col_names = proptest::collection::vec(arb_column_name(), ncols);
+        let columns = proptest::collection::vec(arb_csv_column(nrows), ncols);
+        (col_names, columns).prop_filter_map(
+            "dataframe construction must succeed",
+            move |(names, cols)| {
+                // Ensure unique column names
+                let mut seen = std::collections::HashSet::new();
+                let mut unique_names = Vec::new();
+                for name in &names {
+                    let mut candidate = name.clone();
+                    let mut suffix = 0;
+                    while seen.contains(&candidate) {
+                        suffix += 1;
+                        candidate = format!("{name}{suffix}");
+                    }
+                    seen.insert(candidate.clone());
+                    unique_names.push(candidate);
+                }
+
+                let col_order: Vec<&str> = unique_names.iter().map(String::as_str).collect();
+                let data: Vec<(&str, Vec<Scalar>)> = unique_names
+                    .iter()
+                    .zip(cols.iter())
+                    .map(|(n, v)| (n.as_str(), v.clone()))
+                    .collect();
+
+                fp_frame::DataFrame::from_dict(&col_order, data).ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// CSV round-trip preserves DataFrame shape (rows x columns).
+    #[test]
+    fn prop_csv_round_trip_preserves_shape(df in arb_csv_dataframe(8, 4)) {
+        let csv_text = fp_io::write_csv_string(&df);
+        prop_assert!(csv_text.is_ok(), "CSV write must succeed");
+        let csv_text = csv_text.unwrap();
+
+        let parsed = fp_io::read_csv_str(&csv_text);
+        prop_assert!(parsed.is_ok(), "CSV parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(
+            parsed.index().len(), df.index().len(),
+            "CSV round-trip must preserve row count"
+        );
+        prop_assert_eq!(
+            parsed.column_names().len(), df.column_names().len(),
+            "CSV round-trip must preserve column count"
+        );
+    }
+
+    /// CSV round-trip preserves column names (order may be preserved by BTreeMap).
+    #[test]
+    fn prop_csv_round_trip_preserves_column_names(df in arb_csv_dataframe(5, 3)) {
+        let csv_text = fp_io::write_csv_string(&df).unwrap();
+        let parsed = fp_io::read_csv_str(&csv_text).unwrap();
+
+        let orig_names: Vec<&String> = df.column_names();
+        let parsed_names: Vec<&String> = parsed.column_names();
+        prop_assert_eq!(orig_names, parsed_names, "column names must survive CSV round-trip");
+    }
+
+    /// CSV round-trip for Int64-only DataFrames preserves values exactly.
+    #[test]
+    fn prop_csv_round_trip_int64_exact(
+        values in proptest::collection::vec(-100_000i64..100_000i64, 1..10),
+        col_name in arb_column_name(),
+    ) {
+        let scalars: Vec<Scalar> = values.iter().map(|&v| Scalar::Int64(v)).collect();
+        let df = fp_frame::DataFrame::from_dict(
+            &[col_name.as_str()],
+            vec![(col_name.as_str(), scalars.clone())],
+        );
+        prop_assert!(df.is_ok());
+        let df = df.unwrap();
+
+        let csv_text = fp_io::write_csv_string(&df).unwrap();
+        let parsed = fp_io::read_csv_str(&csv_text).unwrap();
+
+        let orig_col = df.column(&col_name).unwrap();
+        let parsed_col = parsed.column(&col_name).unwrap();
+        prop_assert_eq!(
+            orig_col.values(), parsed_col.values(),
+            "Int64 values must survive CSV round-trip exactly"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: JSON round-trip invariants (frankenpandas-x2n)
+// ---------------------------------------------------------------------------
+
+/// Generate a small DataFrame suitable for JSON round-trip testing.
+/// Uses only non-null scalars since JSON null handling varies by orient.
+fn arb_json_dataframe(
+    max_rows: usize,
+    max_cols: usize,
+) -> impl Strategy<Value = fp_frame::DataFrame> {
+    (1..=max_rows, 1..=max_cols).prop_flat_map(|(nrows, ncols)| {
+        let col_names = proptest::collection::vec(arb_column_name(), ncols);
+        let columns = proptest::collection::vec(
+            proptest::collection::vec(
+                prop_oneof![
+                    3 => (-100_000i64..100_000i64).prop_map(Scalar::Int64),
+                    2 => arb_safe_string().prop_map(Scalar::Utf8),
+                ],
+                nrows,
+            ),
+            ncols,
+        );
+        (col_names, columns).prop_filter_map(
+            "json dataframe must construct",
+            move |(names, cols)| {
+                let mut seen = std::collections::HashSet::new();
+                let mut unique_names = Vec::new();
+                for name in &names {
+                    let mut candidate = name.clone();
+                    let mut suffix = 0;
+                    while seen.contains(&candidate) {
+                        suffix += 1;
+                        candidate = format!("{name}{suffix}");
+                    }
+                    seen.insert(candidate.clone());
+                    unique_names.push(candidate);
+                }
+
+                // Ensure homogeneous columns (all same type per column)
+                // so JSON round-trip doesn't lose type info.
+                let mut homo_cols = Vec::new();
+                for col in &cols {
+                    if col.is_empty() {
+                        homo_cols.push(col.clone());
+                        continue;
+                    }
+                    let first_dtype = col[0].dtype();
+                    if col.iter().all(|s| s.dtype() == first_dtype) {
+                        homo_cols.push(col.clone());
+                    } else {
+                        // Force all to Int64 for homogeneity
+                        homo_cols.push(
+                            col.iter()
+                                .map(|s| match s {
+                                    Scalar::Int64(v) => Scalar::Int64(*v),
+                                    _ => Scalar::Int64(0),
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+
+                let col_order: Vec<&str> = unique_names.iter().map(String::as_str).collect();
+                let data: Vec<(&str, Vec<Scalar>)> = unique_names
+                    .iter()
+                    .zip(homo_cols.iter())
+                    .map(|(n, v)| (n.as_str(), v.clone()))
+                    .collect();
+
+                fp_frame::DataFrame::from_dict(&col_order, data).ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    /// JSON Records orient round-trip preserves shape.
+    #[test]
+    fn prop_json_records_round_trip_shape(df in arb_json_dataframe(5, 3)) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Records);
+        prop_assert!(json.is_ok(), "JSON Records write must succeed");
+        let json = json.unwrap();
+
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Records);
+        prop_assert!(parsed.is_ok(), "JSON Records parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Records round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "Records round-trip must preserve column count");
+    }
+
+    /// JSON Columns orient round-trip preserves shape.
+    #[test]
+    fn prop_json_columns_round_trip_shape(df in arb_json_dataframe(5, 3)) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Columns);
+        prop_assert!(json.is_ok(), "JSON Columns write must succeed");
+        let json = json.unwrap();
+
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Columns);
+        prop_assert!(parsed.is_ok(), "JSON Columns parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Columns round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "Columns round-trip must preserve column count");
+    }
+
+    /// JSON Split orient round-trip preserves shape.
+    #[test]
+    fn prop_json_split_round_trip_shape(df in arb_json_dataframe(5, 3)) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Split);
+        prop_assert!(json.is_ok(), "JSON Split write must succeed");
+        let json = json.unwrap();
+
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Split);
+        prop_assert!(parsed.is_ok(), "JSON Split parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Split round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "Split round-trip must preserve column count");
+    }
+
+    /// JSON Values orient round-trip preserves row count.
+    /// (Values orient loses column names, so we only check shape.)
+    #[test]
+    fn prop_json_values_round_trip_row_count(df in arb_json_dataframe(5, 3)) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Values);
+        prop_assert!(json.is_ok(), "JSON Values write must succeed");
+        let json = json.unwrap();
+
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Values);
+        prop_assert!(parsed.is_ok(), "JSON Values parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Values round-trip must preserve row count");
+    }
+
+    /// JSON Records orient round-trip preserves column names.
+    #[test]
+    fn prop_json_records_round_trip_column_names(df in arb_json_dataframe(3, 4)) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Records).unwrap();
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Records).unwrap();
+
+        let mut orig: Vec<String> = df.column_names().into_iter().cloned().collect();
+        let mut parsed_names: Vec<String> = parsed.column_names().into_iter().cloned().collect();
+        orig.sort();
+        parsed_names.sort();
+        prop_assert_eq!(orig, parsed_names, "column names must survive JSON Records round-trip");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: ValidityMask algebra invariants (frankenpandas-x2n)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// not_mask is involutory: not(not(mask)) == mask.
+    #[test]
+    fn prop_bitvec_not_involution(bools in proptest::collection::vec(proptest::bool::ANY, 0..256)) {
+        let values: Vec<Scalar> = bools.iter().map(|&b| {
+            if b { Scalar::Int64(1) } else { Scalar::Null(fp_types::NullKind::Null) }
+        }).collect();
+        let mask = fp_columnar::ValidityMask::from_values(&values);
+        let double_not: Vec<bool> = mask.not_mask().not_mask().bits().collect();
+        let original: Vec<bool> = mask.bits().collect();
+        prop_assert_eq!(original, double_not, "not(not(mask)) must equal mask");
+    }
+
+    /// or_mask is commutative: a OR b == b OR a.
+    #[test]
+    fn prop_bitvec_or_commutative(
+        bools_a in proptest::collection::vec(proptest::bool::ANY, 0..256),
+        bools_b in proptest::collection::vec(proptest::bool::ANY, 0..256),
+    ) {
+        let len = bools_a.len().min(bools_b.len());
+        let vals_a: Vec<Scalar> = bools_a[..len].iter().map(|&b| {
+            if b { Scalar::Int64(1) } else { Scalar::Null(fp_types::NullKind::Null) }
+        }).collect();
+        let vals_b: Vec<Scalar> = bools_b[..len].iter().map(|&b| {
+            if b { Scalar::Int64(1) } else { Scalar::Null(fp_types::NullKind::Null) }
+        }).collect();
+        let a = fp_columnar::ValidityMask::from_values(&vals_a);
+        let b = fp_columnar::ValidityMask::from_values(&vals_b);
+        let ab: Vec<bool> = a.or_mask(&b).bits().collect();
+        let ba: Vec<bool> = b.or_mask(&a).bits().collect();
+        prop_assert_eq!(ab, ba, "or_mask must be commutative");
+    }
+
+    /// De Morgan's law: not(a AND b) == not(a) OR not(b).
+    #[test]
+    fn prop_bitvec_de_morgan(
+        bools_a in proptest::collection::vec(proptest::bool::ANY, 1..128),
+        bools_b in proptest::collection::vec(proptest::bool::ANY, 1..128),
+    ) {
+        let len = bools_a.len().min(bools_b.len());
+        let vals_a: Vec<Scalar> = bools_a[..len].iter().map(|&b| {
+            if b { Scalar::Int64(1) } else { Scalar::Null(fp_types::NullKind::Null) }
+        }).collect();
+        let vals_b: Vec<Scalar> = bools_b[..len].iter().map(|&b| {
+            if b { Scalar::Int64(1) } else { Scalar::Null(fp_types::NullKind::Null) }
+        }).collect();
+        let a = fp_columnar::ValidityMask::from_values(&vals_a);
+        let b = fp_columnar::ValidityMask::from_values(&vals_b);
+
+        let not_and: Vec<bool> = a.and_mask(&b).not_mask().bits().collect();
+        let or_not: Vec<bool> = a.not_mask().or_mask(&b.not_mask()).bits().collect();
+        prop_assert_eq!(not_and, or_not, "De Morgan: not(a AND b) == not(a) OR not(b)");
+    }
+}

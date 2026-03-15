@@ -11878,6 +11878,104 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, column_order)
     }
 
+    /// Set the index from multiple columns, creating a composite index.
+    ///
+    /// Matches `df.set_index([col1, col2, ...])` in pandas. The composite
+    /// index labels are created by joining column values with a separator.
+    /// A `MultiIndex` can be recovered via `to_multi_index()`.
+    pub fn set_index_multi(
+        &self,
+        columns: &[&str],
+        drop: bool,
+        sep: &str,
+    ) -> Result<Self, FrameError> {
+        if columns.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "set_index_multi requires at least one column".into(),
+            ));
+        }
+
+        // Single column: delegate to existing set_index.
+        if columns.len() == 1 {
+            return self.set_index(columns[0], drop);
+        }
+
+        // Validate all columns exist.
+        for &col in columns {
+            if !self.columns.contains_key(col) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{col}' not found"
+                )));
+            }
+        }
+
+        // Build composite index labels by joining column values.
+        let nrows = self.index.len();
+        let labels: Vec<IndexLabel> = (0..nrows)
+            .map(|row_idx| {
+                let parts: Vec<String> = columns
+                    .iter()
+                    .map(|&col_name| {
+                        self.columns[col_name]
+                            .value(row_idx)
+                            .map_or_else(String::new, |s| s.to_string())
+                    })
+                    .collect();
+                IndexLabel::Utf8(parts.join(sep))
+            })
+            .collect();
+
+        let new_name_parts: Vec<String> = columns.iter().map(|c| (*c).to_owned()).collect();
+        let index = Index::new(labels).set_name(&new_name_parts.join(sep));
+
+        let mut out_columns = self.columns.clone();
+        let mut out_order = self.column_order.clone();
+
+        if drop {
+            for &col in columns {
+                out_columns.remove(col);
+                out_order.retain(|n| n != col);
+            }
+        }
+
+        Self::new_with_column_order(index, out_columns, out_order)
+    }
+
+    /// Extract a `MultiIndex` from the specified columns.
+    ///
+    /// Does NOT modify the DataFrame. Returns a standalone `MultiIndex`
+    /// that can be used for hierarchical indexing operations.
+    pub fn to_multi_index(&self, columns: &[&str]) -> Result<fp_index::MultiIndex, FrameError> {
+        let nrows = self.index.len();
+        let mut levels: Vec<Vec<IndexLabel>> = Vec::with_capacity(columns.len());
+
+        for &col_name in columns {
+            let col = self.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{col_name}' not found"))
+            })?;
+            let level_labels: Vec<IndexLabel> = (0..nrows)
+                .map(|i| {
+                    col.value(i)
+                        .map(|s| match scalar_to_index_label(s) {
+                            Ok(label) => label,
+                            Err(_) => IndexLabel::Utf8(String::new()),
+                        })
+                        .unwrap_or(IndexLabel::Utf8(String::new()))
+                })
+                .collect();
+            levels.push(level_labels);
+        }
+
+        let names: Vec<Option<String>> = columns
+            .iter()
+            .map(|&c| Some(c.to_owned()))
+            .collect();
+
+        fp_index::MultiIndex::from_arrays(levels)
+            .map(|mi| mi.set_names(names))
+            .map_err(FrameError::Index)
+    }
+
     /// Reset the index to a default RangeIndex.
     ///
     /// Matches `df.reset_index(drop=...)` for the single-index DataFrame model.
@@ -43957,5 +44055,116 @@ mod tests {
         assert_eq!(vals.values()[0], Scalar::Int64(10));
         assert_eq!(vals.values()[1], Scalar::Int64(20));
         assert_eq!(vals.values()[2], Scalar::Int64(10));
+    }
+
+    // ── MultiIndex integration tests ──
+
+    #[test]
+    fn df_set_index_multi() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into()), Scalar::Utf8("east".into())]),
+                ("product", vec![Scalar::Utf8("A".into()), Scalar::Utf8("B".into()), Scalar::Utf8("A".into())]),
+                ("sales", vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)]),
+            ],
+        )
+        .unwrap();
+
+        let indexed = df.set_index_multi(&["region", "product"], true, "_").unwrap();
+        assert_eq!(indexed.index().len(), 3);
+        // Composite index labels: "east_A", "west_B", "east_A"
+        assert_eq!(indexed.index().labels()[0], IndexLabel::Utf8("east_A".into()));
+        assert_eq!(indexed.index().labels()[1], IndexLabel::Utf8("west_B".into()));
+        assert_eq!(indexed.index().labels()[2], IndexLabel::Utf8("east_A".into()));
+        // Only "sales" column remains when drop=true
+        assert_eq!(indexed.column_names().len(), 1);
+        assert!(indexed.column("sales").is_some());
+    }
+
+    #[test]
+    fn df_set_index_multi_no_drop() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "v"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+                ("v", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+
+        let indexed = df.set_index_multi(&["a", "b"], false, "|").unwrap();
+        assert_eq!(indexed.index().labels()[0], IndexLabel::Utf8("1|x".into()));
+        // All columns kept when drop=false
+        assert_eq!(indexed.column_names().len(), 3);
+    }
+
+    #[test]
+    fn df_to_multi_index() {
+        let df = DataFrame::from_dict(
+            &["region", "year", "value"],
+            vec![
+                ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())]),
+                ("year", vec![Scalar::Int64(2024), Scalar::Int64(2025)]),
+                ("value", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+            ],
+        )
+        .unwrap();
+
+        let mi = df.to_multi_index(&["region", "year"]).unwrap();
+        assert_eq!(mi.nlevels(), 2);
+        assert_eq!(mi.len(), 2);
+        assert_eq!(mi.names(), &[Some("region".into()), Some("year".into())]);
+
+        // Check level values.
+        let level0 = mi.get_level_values(0).unwrap();
+        assert_eq!(level0.labels()[0], IndexLabel::Utf8("east".into()));
+        assert_eq!(level0.labels()[1], IndexLabel::Utf8("west".into()));
+
+        let level1 = mi.get_level_values(1).unwrap();
+        assert_eq!(level1.labels()[0], IndexLabel::Int64(2024));
+        assert_eq!(level1.labels()[1], IndexLabel::Int64(2025));
+    }
+
+    #[test]
+    fn df_set_index_multi_single_col_delegates() {
+        let df = DataFrame::from_dict(
+            &["id", "val"],
+            vec![
+                ("id", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        // Single column delegates to set_index (no composite label).
+        let indexed = df.set_index_multi(&["id"], true, "_").unwrap();
+        assert_eq!(indexed.index().labels()[0], IndexLabel::Utf8("a".into()));
+        assert_eq!(indexed.column_names().len(), 1);
+    }
+
+    #[test]
+    fn df_set_index_multi_missing_column_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df.set_index_multi(&["a", "nonexistent"], true, "_");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn df_to_multi_index_missing_column_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df.to_multi_index(&["a", "nonexistent"]);
+        assert!(err.is_err());
     }
 }

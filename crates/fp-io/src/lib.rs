@@ -30,6 +30,8 @@ pub enum IoError {
     Parquet(String),
     #[error("excel error: {0}")]
     Excel(String),
+    #[error("arrow ipc error: {0}")]
+    Arrow(String),
     #[error("sql error: {0}")]
     Sql(String),
     #[error(transparent)]
@@ -1369,6 +1371,131 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     Ok(buf)
 }
 
+// ── Arrow IPC / Feather I/O ──────────────────────────────────────────────
+
+/// Write a DataFrame to Arrow IPC (Feather v2) bytes in memory.
+///
+/// Matches `pd.DataFrame.to_feather()`. Feather v2 is the Arrow IPC file format
+/// — the fastest columnar interchange format, recommended by pandas over HDF5.
+pub fn write_feather_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    use arrow::ipc::writer::FileWriter;
+
+    let batch = dataframe_to_record_batch(frame)?;
+    let schema = batch.schema();
+
+    let mut buf = Vec::new();
+    let mut writer = FileWriter::try_new(&mut buf, &schema)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer
+        .finish()
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    Ok(buf)
+}
+
+/// Read a DataFrame from Arrow IPC (Feather v2) bytes in memory.
+///
+/// Matches `pd.read_feather()`.
+pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
+    use arrow::ipc::reader::FileReader;
+
+    let cursor = std::io::Cursor::new(data);
+    let reader = FileReader::try_new(cursor, None)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+
+    let mut all_frames: Vec<DataFrame> = Vec::new();
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| IoError::Arrow(e.to_string()))?;
+        all_frames.push(record_batch_to_dataframe(&batch)?);
+    }
+
+    if all_frames.is_empty() {
+        return Ok(DataFrame::new_with_column_order(
+            Index::new(vec![]),
+            BTreeMap::new(),
+            vec![],
+        )?);
+    }
+
+    if all_frames.len() == 1 {
+        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+    }
+
+    let refs: Vec<&DataFrame> = all_frames.iter().collect();
+    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+}
+
+/// Write a DataFrame to an Arrow IPC (Feather v2) file.
+///
+/// Matches `pd.DataFrame.to_feather(path)`.
+pub fn write_feather(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let bytes = write_feather_bytes(frame)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Read a DataFrame from an Arrow IPC (Feather v2) file.
+///
+/// Matches `pd.read_feather(path)`.
+pub fn read_feather(path: &Path) -> Result<DataFrame, IoError> {
+    let data = std::fs::read(path)?;
+    read_feather_bytes(&data)
+}
+
+/// Write a DataFrame to Arrow IPC stream bytes (streaming format, no random access).
+///
+/// Unlike Feather (file format), the stream format has no footer and supports
+/// streaming reads without seeking. Used for inter-process communication.
+pub fn write_ipc_stream_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    use arrow::ipc::writer::StreamWriter;
+
+    let batch = dataframe_to_record_batch(frame)?;
+    let schema = batch.schema();
+
+    let mut buf = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut buf, &schema)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer
+        .finish()
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    Ok(buf)
+}
+
+/// Read a DataFrame from Arrow IPC stream bytes (streaming format).
+pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
+    use arrow::ipc::reader::StreamReader;
+
+    let cursor = std::io::Cursor::new(data);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| IoError::Arrow(e.to_string()))?;
+
+    let mut all_frames: Vec<DataFrame> = Vec::new();
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| IoError::Arrow(e.to_string()))?;
+        all_frames.push(record_batch_to_dataframe(&batch)?);
+    }
+
+    if all_frames.is_empty() {
+        return Ok(DataFrame::new_with_column_order(
+            Index::new(vec![]),
+            BTreeMap::new(),
+            vec![],
+        )?);
+    }
+
+    if all_frames.len() == 1 {
+        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+    }
+
+    let refs: Vec<&DataFrame> = all_frames.iter().collect();
+    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+}
+
 // ── SQL (SQLite) I/O ────────────────────────────────────────────────────
 
 /// Options for writing a DataFrame to SQL.
@@ -1619,6 +1746,14 @@ pub trait DataFrameIoExt {
     /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
 
+    /// Write this DataFrame to an Arrow IPC (Feather v2) file.
+    ///
+    /// Matches `pd.DataFrame.to_feather(path)`.
+    fn to_feather_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to Arrow IPC (Feather v2) bytes.
+    fn to_feather_bytes(&self) -> Result<Vec<u8>, IoError>;
+
     /// Write this DataFrame to a SQLite table.
     ///
     /// Matches `pd.DataFrame.to_sql(name, con)`.
@@ -1653,6 +1788,14 @@ impl DataFrameIoExt for DataFrame {
 
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
         write_excel_bytes(self)
+    }
+
+    fn to_feather_file(&self, path: &Path) -> Result<(), IoError> {
+        write_feather(self, path)
+    }
+
+    fn to_feather_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_feather_bytes(self)
     }
 
     fn to_sql(

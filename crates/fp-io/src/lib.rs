@@ -1579,13 +1579,14 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
 ///
 /// Matches `pd.read_sql_table(table_name, con)`.
 pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<DataFrame, IoError> {
-    // Validate table name to prevent SQL injection (only allow alphanumeric + underscore).
-    if !table_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
+    // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
+    if table_name.is_empty()
+        || !table_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_')
     {
         return Err(IoError::Sql(format!(
-            "invalid table name: '{table_name}' (only alphanumeric and underscore allowed)"
+            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
     }
     read_sql(conn, &format!("SELECT * FROM \"{table_name}\""))
@@ -1600,13 +1601,14 @@ pub fn write_sql(
     table_name: &str,
     if_exists: SqlIfExists,
 ) -> Result<(), IoError> {
-    // Validate table name to prevent SQL injection.
-    if !table_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
+    // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
+    if table_name.is_empty()
+        || !table_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_')
     {
         return Err(IoError::Sql(format!(
-            "invalid table name: '{table_name}' (only alphanumeric and underscore allowed)"
+            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
     }
 
@@ -3062,6 +3064,20 @@ mod tests {
         assert!(
             matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("invalid table name")),
         );
+    }
+
+    #[test]
+    fn sql_empty_table_name_rejected() {
+        let conn = make_sql_test_conn();
+        let err = read_sql_table(&conn, "");
+        assert!(err.is_err());
+        assert!(
+            matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("invalid table name")),
+        );
+
+        let frame = make_test_dataframe();
+        let err = write_sql(&frame, &conn, "", SqlIfExists::Fail);
+        assert!(err.is_err());
     }
 
     #[test]

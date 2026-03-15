@@ -955,8 +955,10 @@ proptest! {
 
 /// Generate a DataFrame-safe string that CANNOT be parsed as a number or bool.
 /// This ensures CSV round-trip doesn't change Utf8 -> Int64/Float64/Bool.
+/// The mandatory underscore after the first two letters prevents generating
+/// "true" or "false" (which would parse as Bool).
 fn arb_safe_string() -> impl Strategy<Value = String> {
-    "[a-z]{2}[a-z0-9_]{0,8}"
+    "[a-z]{2}_[a-z0-9]{0,7}"
 }
 
 /// Generate a column name (valid, non-empty, no special characters).

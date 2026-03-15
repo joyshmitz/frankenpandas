@@ -1142,36 +1142,25 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
     }
 }
 
-/// Read an Excel (.xlsx/.xls/.xlsb/.ods) file into a DataFrame.
-///
-/// Matches `pd.read_excel(path)` for basic usage.
-pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
-    use calamine::{Reader, open_workbook_auto};
-
-    let mut workbook = open_workbook_auto(path)
-        .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
-
-    // Select sheet by name or use the first one.
-    let sheet_name = if let Some(ref name) = options.sheet_name {
-        name.clone()
-    } else {
-        let names = workbook.sheet_names();
-        if names.is_empty() {
-            return Err(IoError::Excel("workbook contains no sheets".into()));
+/// Convert a Scalar to an IndexLabel, handling float precision correctly.
+fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
+    match scalar {
+        Scalar::Int64(v) => IndexLabel::Int64(v),
+        Scalar::Utf8(s) => IndexLabel::Utf8(s),
+        Scalar::Float64(v) if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 => {
+            IndexLabel::Int64(v as i64)
         }
-        names[0].clone()
-    };
+        Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+        Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+        _ => IndexLabel::Utf8(String::new()),
+    }
+}
 
-    let range = workbook
-        .worksheet_range(&sheet_name)
-        .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
-
-    let rows: Vec<Vec<calamine::Data>> = range
-        .rows()
-        .skip(options.skip_rows)
-        .map(|r| r.to_vec())
-        .collect();
-
+/// Shared parsing logic for Excel data after extracting rows from a workbook.
+fn parse_excel_rows(
+    rows: Vec<Vec<calamine::Data>>,
+    options: &ExcelReadOptions,
+) -> Result<DataFrame, IoError> {
     if rows.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
             .map_err(IoError::Frame);
@@ -1230,18 +1219,11 @@ pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, 
     }
 
     let index = if let Some(idx_pos) = index_col_idx {
-        // Re-read the index column values from the range.
         let idx_labels: Vec<IndexLabel> = data_rows
             .iter()
             .map(|row| {
                 let cell = row.get(idx_pos).unwrap_or(&calamine::Data::Empty);
-                match excel_cell_to_scalar(cell) {
-                    Scalar::Int64(v) => IndexLabel::Int64(v),
-                    Scalar::Utf8(s) => IndexLabel::Utf8(s),
-                    Scalar::Float64(v) => IndexLabel::Int64(v as i64),
-                    Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
-                    _ => IndexLabel::Utf8(String::new()),
-                }
+                scalar_to_index_label(excel_cell_to_scalar(cell))
             })
             .collect();
         Index::new(idx_labels)
@@ -1250,6 +1232,38 @@ pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, 
     };
 
     Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+}
+
+/// Read an Excel (.xlsx/.xls/.xlsb/.ods) file into a DataFrame.
+///
+/// Matches `pd.read_excel(path)` for basic usage.
+pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
+    use calamine::{Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
+
+    let sheet_name = if let Some(ref name) = options.sheet_name {
+        name.clone()
+    } else {
+        let names = workbook.sheet_names();
+        if names.is_empty() {
+            return Err(IoError::Excel("workbook contains no sheets".into()));
+        }
+        names[0].clone()
+    };
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
+
+    let rows: Vec<Vec<calamine::Data>> = range
+        .rows()
+        .skip(options.skip_rows)
+        .map(|r| r.to_vec())
+        .collect();
+
+    parse_excel_rows(rows, options)
 }
 
 /// Read Excel from in-memory bytes.
@@ -1280,48 +1294,7 @@ pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataF
         .map(|r| r.to_vec())
         .collect();
 
-    if rows.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
-            .map_err(IoError::Frame);
-    }
-
-    let (headers, data_rows) = if options.has_headers {
-        let header_row = &rows[0];
-        let headers: Vec<String> = header_row
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| match cell {
-                calamine::Data::String(s) if !s.is_empty() => s.clone(),
-                _ => format!("column_{i}"),
-            })
-            .collect();
-        (headers, &rows[1..])
-    } else {
-        let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
-        (headers, rows.as_slice())
-    };
-
-    let ncols = headers.len();
-    let mut columns: Vec<Vec<Scalar>> = (0..ncols).map(|_| Vec::with_capacity(data_rows.len())).collect();
-
-    for row in data_rows {
-        for (col_idx, col_vec) in columns.iter_mut().enumerate() {
-            let cell = row.get(col_idx).unwrap_or(&calamine::Data::Empty);
-            col_vec.push(excel_cell_to_scalar(cell));
-        }
-    }
-
-    let mut out_columns = BTreeMap::new();
-    let mut column_order = Vec::new();
-
-    for (name, values) in headers.into_iter().zip(columns.into_iter()) {
-        out_columns.insert(name.clone(), Column::from_values(values)?);
-        column_order.push(name);
-    }
-
-    let index = Index::from_i64((0..data_rows.len() as i64).collect());
-    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+    parse_excel_rows(rows, options)
 }
 
 /// Write a DataFrame to an Excel (.xlsx) file.

@@ -1604,7 +1604,7 @@ proptest! {
             let parsed_col = parsed.column(name).unwrap();
             prop_assert_eq!(
                 orig_col.values(), parsed_col.values(),
-                "Int64 values must survive Feather round-trip for column {name}"
+                "Int64 values must survive Feather round-trip for column {}", name
             );
         }
     }
@@ -1658,7 +1658,7 @@ proptest! {
             let parsed_col = parsed.column(name).unwrap();
             prop_assert_eq!(
                 orig_col.values(), parsed_col.values(),
-                "Int64 values must survive SQL round-trip for column {name}"
+                "Int64 values must survive SQL round-trip for column {}", name
             );
         }
     }
@@ -1714,7 +1714,7 @@ proptest! {
             let parsed_col = parsed.column(name).unwrap();
             prop_assert_eq!(
                 orig_col.values(), parsed_col.values(),
-                "Int64 values must survive Excel round-trip for column {name}"
+                "Int64 values must survive Excel round-trip for column {}", name
             );
         }
     }

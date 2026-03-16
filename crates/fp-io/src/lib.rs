@@ -228,7 +228,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     let skip = options.skiprows;
 
     let mut row_count: i64 = 0;
-    let (headers, mut columns) = if options.has_headers {
+    let (headers, columns) = if options.has_headers {
         let headers_record = reader.headers().cloned().map_err(IoError::from)?;
         if headers_record.is_empty() {
             return Err(IoError::MissingHeaders);
@@ -314,11 +314,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         )
     };
     // Apply usecols filter: keep only selected columns.
-    let (mut headers, mut columns) = if let Some(ref usecols) = options.usecols {
+    let (headers, mut columns) = if let Some(ref usecols) = options.usecols {
         let mut fh = Vec::new();
         let mut fc = Vec::new();
         for (h, c) in headers.into_iter().zip(columns) {
-            if usecols.iter().any(|u| *u == h) {
+            if usecols.contains(&h) {
                 fh.push(h);
                 fc.push(c);
             }

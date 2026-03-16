@@ -10008,6 +10008,8 @@ fn parse_pandas_timedelta(s: &str) -> Option<f64> {
 }
 
 /// Parse "HH:MM:SS" or "MM:SS" format to total seconds.
+/// If the first component is negative (e.g., "-01:30:00"), the sign
+/// applies to the entire duration (result = -(1*3600 + 30*60)).
 fn parse_hms(s: &str) -> Option<f64> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
@@ -10015,12 +10017,14 @@ fn parse_hms(s: &str) -> Option<f64> {
             let h: f64 = parts[0].trim().parse().ok()?;
             let m: f64 = parts[1].trim().parse().ok()?;
             let sec: f64 = parts[2].trim().parse().ok()?;
-            Some(h * 3600.0 + m * 60.0 + sec)
+            let abs_total = h.abs() * 3600.0 + m * 60.0 + sec;
+            Some(if h < 0.0 { -abs_total } else { abs_total })
         }
         2 => {
             let m: f64 = parts[0].trim().parse().ok()?;
             let sec: f64 = parts[1].trim().parse().ok()?;
-            Some(m * 60.0 + sec)
+            let abs_total = m.abs() * 60.0 + sec;
+            Some(if m < 0.0 { -abs_total } else { abs_total })
         }
         _ => None,
     }
@@ -44739,6 +44743,22 @@ mod tests {
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("1 days 01:01:01".into()));
+    }
+
+    #[test]
+    fn to_timedelta_negative_seconds() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(-3661)], // -(1h 1m 1s)
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("-01:01:01".into()));
+
+        // Round-trip: total_seconds should give back -3661
+        let total = super::timedelta_total_seconds(&result).unwrap();
+        assert_eq!(total.values()[0], Scalar::Float64(-3661.0));
     }
 
     #[test]

@@ -63,6 +63,18 @@ pub struct CsvReadOptions {
     pub has_headers: bool,
     pub na_values: Vec<String>,
     pub index_col: Option<String>,
+    /// Read only these columns (by name). `None` means read all.
+    /// Matches pandas `usecols` parameter.
+    pub usecols: Option<Vec<String>>,
+    /// Maximum number of data rows to read. `None` means read all.
+    /// Matches pandas `nrows` parameter.
+    pub nrows: Option<usize>,
+    /// Number of initial data rows to skip (after the header).
+    /// Matches pandas `skiprows` parameter (when given as int).
+    pub skiprows: usize,
+    /// Force specific dtypes for columns. Map of column name -> DType.
+    /// Matches pandas `dtype` parameter.
+    pub dtype: Option<std::collections::HashMap<String, DType>>,
 }
 
 impl Default for CsvReadOptions {
@@ -72,6 +84,10 @@ impl Default for CsvReadOptions {
             has_headers: true,
             na_values: Vec::new(),
             index_col: None,
+            usecols: None,
+            nrows: None,
+            skiprows: 0,
+            dtype: None,
         }
     }
 }
@@ -208,6 +224,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         .delimiter(options.delimiter)
         .from_reader(input.as_bytes());
 
+    let max_rows = options.nrows.unwrap_or(usize::MAX);
+    let skip = options.skiprows;
+
     let mut row_count: i64 = 0;
     let (headers, mut columns) = if options.has_headers {
         let headers_record = reader.headers().cloned().map_err(IoError::from)?;
@@ -221,13 +240,22 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
 
+        let mut rows_seen: usize = 0;
         for row in reader.records() {
             let record = row?;
+            if rows_seen < skip {
+                rows_seen += 1;
+                continue;
+            }
+            if (row_count as usize) >= max_rows {
+                break;
+            }
             for (idx, col) in columns.iter_mut().enumerate() {
                 let field = record.get(idx).unwrap_or_default();
                 col.push(parse_scalar_with_na(field, &options.na_values));
             }
             row_count += 1;
+            rows_seen += 1;
         }
 
         (
@@ -250,19 +278,32 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
 
-        for (idx, col) in columns.iter_mut().enumerate() {
-            let field = first_record.get(idx).unwrap_or_default();
-            col.push(parse_scalar_with_na(field, &options.na_values));
+        // First record is data row 0 (no headers mode).
+        let mut rows_seen: usize = 0;
+        if rows_seen >= skip && (row_count as usize) < max_rows {
+            for (idx, col) in columns.iter_mut().enumerate() {
+                let field = first_record.get(idx).unwrap_or_default();
+                col.push(parse_scalar_with_na(field, &options.na_values));
+            }
+            row_count += 1;
         }
-        row_count += 1;
+        rows_seen += 1;
 
         for row in rows {
             let record = row?;
+            if rows_seen < skip {
+                rows_seen += 1;
+                continue;
+            }
+            if (row_count as usize) >= max_rows {
+                break;
+            }
             for (idx, col) in columns.iter_mut().enumerate() {
                 let field = record.get(idx).unwrap_or_default();
                 col.push(parse_scalar_with_na(field, &options.na_values));
             }
             row_count += 1;
+            rows_seen += 1;
         }
 
         (
@@ -272,6 +313,33 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             columns,
         )
     };
+    // Apply usecols filter: keep only selected columns.
+    let (mut headers, mut columns) = if let Some(ref usecols) = options.usecols {
+        let mut fh = Vec::new();
+        let mut fc = Vec::new();
+        for (h, c) in headers.into_iter().zip(columns) {
+            if usecols.iter().any(|u| *u == h) {
+                fh.push(h);
+                fc.push(c);
+            }
+        }
+        (fh, fc)
+    } else {
+        (headers, columns)
+    };
+
+    // Apply dtype coercion if specified.
+    if let Some(ref dtype_map) = options.dtype {
+        for (i, name) in headers.iter().enumerate() {
+            if let Some(&target_dt) = dtype_map.get(name) {
+                columns[i] = columns[i]
+                    .iter()
+                    .map(|v| fp_types::cast_scalar(v, target_dt).unwrap_or_else(|_| v.clone()))
+                    .collect();
+            }
+        }
+    }
+
     let header_count = headers.len();
 
     // If index_col is set, extract that column as the index
@@ -3277,6 +3345,122 @@ mod tests {
     }
 
     // ── Adversarial parser tests (frankenpandas-yby) ─────────────────
+
+    // ── CsvReadOptions extended params tests (frankenpandas-qoz) ────
+
+    #[test]
+    fn csv_nrows_limits_rows() {
+        let input = "x\n1\n2\n3\n4\n5\n";
+        let opts = CsvReadOptions {
+            nrows: Some(3),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(frame.column("x").unwrap().values()[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn csv_skiprows_skips_data_rows() {
+        let input = "x\n1\n2\n3\n4\n5\n";
+        let opts = CsvReadOptions {
+            skiprows: 2,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 3); // skipped rows 1,2; read 3,4,5
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn csv_skiprows_and_nrows_combined() {
+        let input = "x\n1\n2\n3\n4\n5\n";
+        let opts = CsvReadOptions {
+            skiprows: 1,
+            nrows: Some(2),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 2); // skipped 1; read 2,3
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("x").unwrap().values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn csv_usecols_selects_columns() {
+        let input = "a,b,c\n1,2,3\n4,5,6\n";
+        let opts = CsvReadOptions {
+            usecols: Some(vec!["a".into(), "c".into()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.column_names().len(), 2);
+        assert!(frame.column("a").is_some());
+        assert!(frame.column("b").is_none());
+        assert!(frame.column("c").is_some());
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("c").unwrap().values()[1], Scalar::Int64(6));
+    }
+
+    #[test]
+    fn csv_usecols_nonexistent_column_silently_skipped() {
+        let input = "a,b\n1,2\n";
+        let opts = CsvReadOptions {
+            usecols: Some(vec!["a".into(), "nonexistent".into()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.column_names().len(), 1);
+        assert!(frame.column("a").is_some());
+    }
+
+    #[test]
+    fn csv_dtype_coercion() {
+        let input = "id,score\n1,95\n2,87\n";
+        let mut dtype_map = std::collections::HashMap::new();
+        dtype_map.insert("score".to_owned(), fp_types::DType::Float64);
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        // score column should be Float64, not Int64
+        assert_eq!(
+            frame.column("score").unwrap().values()[0],
+            Scalar::Float64(95.0)
+        );
+        assert_eq!(
+            frame.column("score").unwrap().values()[1],
+            Scalar::Float64(87.0)
+        );
+        // id column should remain Int64 (not in dtype map)
+        assert_eq!(
+            frame.column("id").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+    }
+
+    #[test]
+    fn csv_skiprows_beyond_data_returns_empty() {
+        let input = "x\n1\n2\n";
+        let opts = CsvReadOptions {
+            skiprows: 100,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 0);
+    }
+
+    #[test]
+    fn csv_nrows_zero_returns_empty() {
+        let input = "x\n1\n2\n3\n";
+        let opts = CsvReadOptions {
+            nrows: Some(0),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 0);
+    }
 
     #[test]
     fn adversarial_csv_very_long_field() {

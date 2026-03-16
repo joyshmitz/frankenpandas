@@ -3436,9 +3436,9 @@ mod tests {
     }
 
     #[test]
-    fn adversarial_sql_column_name_with_spaces_rejected() {
-        // Column names with spaces are valid in SQL (quoted) but table names aren't
-        // in our validation. Column names go through quoting in INSERT/CREATE.
+    fn adversarial_sql_column_name_with_spaces_accepted() {
+        // Column names with spaces are valid in SQL (quoted identifiers).
+        // Table names are restricted, but column names go through quoting.
         let df = fp_frame::DataFrame::from_dict(
             &["has space"],
             vec![("has space", vec![Scalar::Int64(1)])],

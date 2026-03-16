@@ -25,7 +25,9 @@ sha2 = "0.10.9"
 thiserror = { workspace = true }
 
 [dev-dependencies]
+fp-expr = { path = "../fp-expr" }
 fp-io = { path = "../fp-io" }
+fp-join = { path = "../fp-join" }
 proptest = "1.10.0"
 rusqlite = { workspace = true }
 tempfile = "3.14.0"

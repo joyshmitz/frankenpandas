@@ -1513,3 +1513,209 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: Feather (Arrow IPC) round-trip invariants (frankenpandas-44y)
+// ---------------------------------------------------------------------------
+
+/// Generate a DataFrame for Feather/SQL round-trip testing.
+/// Uses Int64-only columns to avoid type inference ambiguity during read-back.
+fn arb_int64_dataframe(
+    max_rows: usize,
+    max_cols: usize,
+) -> impl Strategy<Value = fp_frame::DataFrame> {
+    (1..=max_rows, 1..=max_cols).prop_flat_map(|(nrows, ncols)| {
+        let col_names = proptest::collection::vec(arb_column_name(), ncols);
+        let columns = proptest::collection::vec(
+            proptest::collection::vec(
+                (-100_000i64..100_000i64).prop_map(Scalar::Int64),
+                nrows,
+            ),
+            ncols,
+        );
+        (col_names, columns).prop_filter_map(
+            "dataframe construction must succeed",
+            move |(names, cols)| {
+                let mut seen = std::collections::HashSet::new();
+                let mut unique_names = Vec::new();
+                for name in &names {
+                    let mut candidate = name.clone();
+                    let mut suffix = 0;
+                    while seen.contains(&candidate) {
+                        suffix += 1;
+                        candidate = format!("{name}{suffix}");
+                    }
+                    seen.insert(candidate.clone());
+                    unique_names.push(candidate);
+                }
+
+                let col_order: Vec<&str> = unique_names.iter().map(String::as_str).collect();
+                let data: Vec<(&str, Vec<Scalar>)> = unique_names
+                    .iter()
+                    .zip(cols.iter())
+                    .map(|(n, v)| (n.as_str(), v.clone()))
+                    .collect();
+
+                fp_frame::DataFrame::from_dict(&col_order, data).ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    /// Feather round-trip preserves DataFrame shape.
+    #[test]
+    fn prop_feather_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
+        let bytes = fp_io::write_feather_bytes(&df);
+        prop_assert!(bytes.is_ok(), "Feather write must succeed");
+        let bytes = bytes.unwrap();
+
+        let parsed = fp_io::read_feather_bytes(&bytes);
+        prop_assert!(parsed.is_ok(), "Feather parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Feather round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "Feather round-trip must preserve column count");
+    }
+
+    /// Feather round-trip preserves column names.
+    #[test]
+    fn prop_feather_round_trip_preserves_column_names(df in arb_int64_dataframe(5, 3)) {
+        let bytes = fp_io::write_feather_bytes(&df).unwrap();
+        let parsed = fp_io::read_feather_bytes(&bytes).unwrap();
+
+        let orig: Vec<&String> = df.column_names();
+        let back: Vec<&String> = parsed.column_names();
+        prop_assert_eq!(orig, back, "column names must survive Feather round-trip");
+    }
+
+    /// Feather round-trip preserves Int64 values exactly.
+    #[test]
+    fn prop_feather_round_trip_int64_exact(df in arb_int64_dataframe(8, 3)) {
+        let bytes = fp_io::write_feather_bytes(&df).unwrap();
+        let parsed = fp_io::read_feather_bytes(&bytes).unwrap();
+
+        for name in df.column_names() {
+            let orig_col = df.column(name).unwrap();
+            let parsed_col = parsed.column(name).unwrap();
+            prop_assert_eq!(
+                orig_col.values(), parsed_col.values(),
+                "Int64 values must survive Feather round-trip for column {name}"
+            );
+        }
+    }
+
+    /// IPC stream round-trip preserves shape.
+    #[test]
+    fn prop_ipc_stream_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
+        let bytes = fp_io::write_ipc_stream_bytes(&df).unwrap();
+        let parsed = fp_io::read_ipc_stream_bytes(&bytes).unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "IPC stream round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "IPC stream round-trip must preserve column count");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: SQL round-trip invariants (frankenpandas-44y)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(30))]
+
+    /// SQL round-trip preserves DataFrame shape.
+    #[test]
+    fn prop_sql_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let write_result = fp_io::write_sql(&df, &conn, "test_prop", fp_io::SqlIfExists::Replace);
+        prop_assert!(write_result.is_ok(), "SQL write must succeed: {:?}", write_result.err());
+
+        let parsed = fp_io::read_sql_table(&conn, "test_prop");
+        prop_assert!(parsed.is_ok(), "SQL read must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "SQL round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "SQL round-trip must preserve column count");
+    }
+
+    /// SQL round-trip preserves Int64 values exactly.
+    #[test]
+    fn prop_sql_round_trip_int64_exact(df in arb_int64_dataframe(8, 3)) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fp_io::write_sql(&df, &conn, "test_vals", fp_io::SqlIfExists::Replace).unwrap();
+        let parsed = fp_io::read_sql_table(&conn, "test_vals").unwrap();
+
+        for name in df.column_names() {
+            let orig_col = df.column(name).unwrap();
+            let parsed_col = parsed.column(name).unwrap();
+            prop_assert_eq!(
+                orig_col.values(), parsed_col.values(),
+                "Int64 values must survive SQL round-trip for column {name}"
+            );
+        }
+    }
+
+    /// SQL round-trip preserves column names (sorted, since SQL has no order guarantee).
+    #[test]
+    fn prop_sql_round_trip_preserves_column_names(df in arb_int64_dataframe(5, 3)) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fp_io::write_sql(&df, &conn, "test_names", fp_io::SqlIfExists::Replace).unwrap();
+        let parsed = fp_io::read_sql_table(&conn, "test_names").unwrap();
+
+        let mut orig: Vec<String> = df.column_names().into_iter().cloned().collect();
+        let mut back: Vec<String> = parsed.column_names().into_iter().cloned().collect();
+        orig.sort();
+        back.sort();
+        prop_assert_eq!(orig, back, "column names must survive SQL round-trip");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: Excel round-trip invariants (frankenpandas-44y)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(30))]
+
+    /// Excel round-trip preserves DataFrame shape.
+    #[test]
+    fn prop_excel_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
+        let bytes = fp_io::write_excel_bytes(&df);
+        prop_assert!(bytes.is_ok(), "Excel write must succeed");
+        let bytes = bytes.unwrap();
+
+        let parsed = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default());
+        prop_assert!(parsed.is_ok(), "Excel parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Excel round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
+            "Excel round-trip must preserve column count");
+    }
+
+    /// Excel round-trip preserves Int64 values exactly.
+    /// (Excel stores integers as f64; our reader recovers Int64 for whole numbers.)
+    #[test]
+    fn prop_excel_round_trip_int64_exact(df in arb_int64_dataframe(8, 3)) {
+        let bytes = fp_io::write_excel_bytes(&df).unwrap();
+        let parsed = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default()).unwrap();
+
+        for name in df.column_names() {
+            let orig_col = df.column(name).unwrap();
+            let parsed_col = parsed.column(name).unwrap();
+            prop_assert_eq!(
+                orig_col.values(), parsed_col.values(),
+                "Int64 values must survive Excel round-trip for column {name}"
+            );
+        }
+    }
+}

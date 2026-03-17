@@ -426,6 +426,199 @@ The `.str()` accessor provides 50+ string operations matching pandas `Series.str
 
 `merge_asof` is particularly useful for time-series data — joining trades with quotes at the nearest preceding timestamp, for example.
 
+### Window Operations
+
+Full rolling, expanding, and exponentially-weighted window support on both Series and DataFrame:
+
+```rust
+// Rolling window (like df["col"].rolling(30).mean())
+let ma_30 = series.rolling(30, None).mean()?;
+let vol   = series.rolling(252, Some(20)).std()?;
+
+// Expanding window (cumulative)
+let cum_max = series.expanding(None).max()?;
+
+// Exponentially weighted moving average
+let ewma = series.ewm(Some(20.0), None).mean()?;
+
+// Time-based resampling
+let monthly = series.resample("M").sum()?;
+```
+
+| Window Type | Series Methods | DataFrame Methods |
+|-------------|---------------|-------------------|
+| **Rolling** | `sum`, `mean`, `min`, `max`, `std`, `var`, `count`, `median`, `quantile`, `apply` | `sum`, `mean`, `min`, `max`, `std`, `var`, `count`, `median`, `quantile` |
+| **Expanding** | `sum`, `mean`, `min`, `max`, `std`, `var`, `median`, `apply` | `sum`, `mean`, `min`, `max`, `std`, `var`, `median` |
+| **EWM** | `mean`, `std`, `var` | `mean`, `std`, `var` |
+| **Resample** | `sum`, `mean`, `count`, `min`, `max`, `first`, `last` | `sum`, `mean`, `count`, `min`, `max`, `first`, `last` |
+
+GroupBy also supports `rolling()` and `resample()` for within-group window operations.
+
+### Reshaping
+
+All major pandas reshaping operations are implemented:
+
+```rust
+// Long → Wide
+let pivoted = df.pivot_table("revenue", "region", "product", "sum")?;
+
+// Wide → Long
+let melted = df.melt(&["id"], &["q1", "q2", "q3"], "quarter", "sales")?;
+
+// Stack/Unstack (with composite key round-trip)
+let stacked = df.stack()?;
+let unstacked = stacked.unstack()?;
+
+// Contingency tables
+let ct = df.crosstab("gender", "department")?;
+let ct_norm = df.crosstab_normalize("gender", "department", "all")?;
+
+// One-hot encoding
+let dummies = df.get_dummies(&["color", "size"])?;
+
+// Cross-section selection
+let row = df.xs("2024-01-15")?;
+```
+
+### DataFrame Output Formats
+
+17 output methods for different consumption contexts:
+
+| Method | pandas Equivalent | Format |
+|--------|-------------------|--------|
+| `to_csv(sep, include_index)` | `df.to_csv()` | Comma/tab-separated values |
+| `to_json(orient)` | `df.to_json()` | JSON with 5 orients |
+| `to_string_table(include_index)` | `df.to_string()` | Aligned ASCII table |
+| `to_string_truncated(idx, rows, cols)` | `df.to_string(max_rows=)` | Truncated with head/tail + "..." |
+| `to_html(include_index)` | `df.to_html()` | HTML `<table>` |
+| `to_latex(include_index)` | `df.to_latex()` | LaTeX `tabular` |
+| `to_markdown(include_index)` | `df.to_markdown()` | GitHub-flavored markdown table |
+| `to_dict(orient)` | `df.to_dict()` | dict/list/records/index/split/tight |
+| `to_series_dict()` | `df.to_dict('series')` | `BTreeMap<String, Series>` |
+| `to_records()` | `df.to_records()` | Vec of row vectors |
+| `to_numpy_2d()` | `df.to_numpy()` | `Vec<Vec<f64>>` |
+| `Display` trait | `print(df)` | Column-aligned with shape footer |
+
+### GroupBy: Complete Aggregation Matrix
+
+14 aggregation functions available through string dispatch:
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `sum` | Float64 | Null-skipping |
+| `mean` | Float64 | Null-skipping |
+| `count` | Int64 | Non-null count |
+| `min` | Same as input | Null-skipping |
+| `max` | Same as input | Null-skipping |
+| `std` | Float64 | Sample standard deviation (ddof=1) |
+| `var` | Float64 | Sample variance (ddof=1) |
+| `median` | Float64 | Middle value |
+| `first` | Same as input | First non-null |
+| `last` | Same as input | Last non-null |
+| `prod` | Float64 | Product of values |
+| `sem` | Float64 | Standard error of mean |
+| `skew` | Float64 | Fisher's skewness |
+| `kurt`/`kurtosis` | Float64 | Excess kurtosis |
+
+Plus group-level operations: `cumsum`, `cumprod`, `cummax`, `cummin`, `rank`, `shift`, `diff`, `nth`, `head`, `tail`, `pct_change`, `value_counts`, `describe`, `get_group`, `cumcount`, `ngroup`, `pipe`, `ohlc`.
+
+### Datetime Parsing and Accessors
+
+`to_datetime()` auto-detects common formats and normalizes to ISO 8601:
+
+| Input Format | Example | Auto-Detected? |
+|--------------|---------|----------------|
+| ISO 8601 date | `2024-01-15` | Yes |
+| ISO 8601 datetime | `2024-01-15T10:30:00` | Yes |
+| Space-separated | `2024-01-15 10:30:00` | Yes |
+| Slash date | `2024/01/15` | Yes |
+| US date (MM/DD/YYYY) | `01/15/2024` | Yes |
+| Epoch seconds (Int64) | `1705312200` | Yes |
+| Epoch milliseconds | `1705312200000` | Yes (auto-detected from magnitude > 10^11) |
+| Custom format | `15-Jan-2024` | Via `to_datetime_with_format(s, Some("%d-%b-%Y"))` |
+
+The `.dt` accessor provides 20+ component extraction methods:
+
+```rust
+let years   = series.dt().year()?;     // Extract year
+let months  = series.dt().month()?;    // 1-12
+let dow     = series.dt().dayofweek()?; // Mon=0..Sun=6
+let quarter = series.dt().quarter()?;  // 1-4
+let woy     = series.dt().weekofyear()?; // ISO week 1-53
+let fmt     = series.dt().strftime("%Y-%m-%d")?; // Custom format
+```
+
+Timezone support: `tz_localize(tz)`, `tz_convert(tz)` with chrono-tz for IANA timezone names.
+
+`to_timedelta()` parses duration strings with similar flexibility:
+
+```rust
+// All of these work:
+// "02:30:45"          → HH:MM:SS
+// "3 days 04:15:30"   → pandas-style timedelta
+// "5 days"            → day-only
+// "3 hours"           → natural language
+// Int64(3661)         → seconds (→ "01:01:01")
+```
+
+### Describe: Statistical Summary
+
+`DataFrame.describe()` generates the same 8-row statistical summary as pandas:
+
+```
+         price      volume
+count     8.0         8.0
+mean    183.9       862.5
+std       3.2       261.1
+min     140.3       500.0
+25%     141.4       575.0
+50%     185.8       850.0
+75%     186.3      1075.0
+max     187.3      1200.0
+```
+
+Supports custom percentiles (`describe_with_percentiles(&[0.1, 0.5, 0.9])`) and dtype-filtered describe (`describe_dtypes(&["number"], &[])` for numeric only, or include `"object"` for string columns which produce count/unique/top/freq).
+
+### Correlation and Covariance
+
+Pairwise correlation and covariance matrices:
+
+```rust
+let pearson  = df.corr()?;               // Pearson (default)
+let spearman = df.corr_method("spearman")?; // Rank correlation
+let kendall  = df.corr_method("kendall")?;  // Kendall tau
+let cov_mat  = df.cov()?;               // Covariance matrix
+let corr_w   = df.corrwith(&other_df)?;  // Column-wise correlation
+```
+
+Series-level: `series.corr(&other)`, `series.cov_with(&other)`, `series.autocorr(lag)`.
+
+### Apply and Transform
+
+Multiple ways to apply custom logic:
+
+```rust
+// Element-wise on each column
+let transformed = df.applymap(|scalar| { /* transform */ })?;
+
+// Row-wise with full row access
+let result = df.apply_row(|row_values| { /* produce scalar */ })?;
+
+// Shape-preserving transform (output same shape as input)
+let normed = df.transform("zscore")?;
+
+// Column assignment with closures (pandas df.assign(new_col=lambda df: ...))
+let df2 = df.assign_fn(vec![
+    ("ratio", Box::new(|df| {
+        // Compute new column from existing DataFrame
+        Ok(compute_ratio_column(df))
+    })),
+])?;
+
+// Pipe for method chaining
+let result = df.pipe(|d| d.query("x > 0"))?.pipe(|d| d.sort_values("x", true))?;
+```
+
 ### Module-Level Functions
 
 Functions matching pandas top-level API:
@@ -465,6 +658,55 @@ Five optimization rounds with formal evidence:
 
 Performance baselines tracked for join (inner/left/right/outer), filter (boolean mask, head/tail), and DataFrame arithmetic at 10K-100K row scales. Benchmarks run via `cargo test -p fp-conformance --test perf_baselines -- --ignored --nocapture`.
 
+## DType System and Coercion Rules
+
+The type hierarchy determines how values are promoted when columns with different types interact:
+
+```
+Null (bottom type — promotes to anything)
+ │
+ ├── Bool
+ │     └── Int64
+ │           └── Float64
+ │
+ └── Utf8 (incompatible with numeric branch)
+```
+
+**Coercion rules** (matching pandas exactly):
+
+| Left | Right | Result | Example |
+|------|-------|--------|---------|
+| Null | Any | That type | `Null + Int64 → Int64` |
+| Bool | Int64 | Int64 | `True + 3 → 4` |
+| Bool | Float64 | Float64 | `True + 1.5 → 2.5` |
+| Int64 | Float64 | Float64 | `3 + 1.5 → 4.5` |
+| Utf8 | Int64 | **Error** | Incompatible — fails closed |
+| Utf8 | Float64 | **Error** | Incompatible — fails closed |
+| Same | Same | Same | Identity — no coercion needed (AG-03 fast path) |
+
+The identity-cast optimization (AG-03) detects when source dtype already matches target dtype and skips the clone entirely, which matters when `cast_scalar_owned()` is called millions of times during column coercion.
+
+`infer_dtype(values)` folds `common_dtype()` across all elements to find the narrowest type that fits. This is used during CSV/JSON parsing where cell types are inferred individually and then unified per-column.
+
+## Null Propagation Semantics
+
+FrankenPandas distinguishes three kinds of missing values, exactly matching pandas:
+
+| Kind | Meaning | Created By | `is_missing()` |
+|------|---------|------------|-----------------|
+| `Null` | Generic absence | Missing CSV cells, JSON `null`, outer join mismatches | `true` |
+| `NaN` | Float not-a-number | `0.0 / 0.0`, explicit `f64::NAN`, Float64 column nulls | `true` |
+| `NaT` | Not-a-time | Failed datetime parse, timedelta overflow | `true` |
+
+**Propagation rules:**
+- Arithmetic with missing: `5 + NaN → NaN`, `NaN + NaN → NaN`
+- Comparison with missing: `NaN == NaN → false` (IEEE 754), `NaN != NaN → true`
+- But `semantic_eq(NaN, NaN) → true` for index dedup and testing
+- Aggregation skips nulls by default: `nansum([1, NaN, 3]) → 4`
+- GroupBy with `dropna=true` excludes null group keys
+
+The `ValidityMask` makes null checking O(1) per element (single bit test) and O(n/64) for bulk operations (word-level popcount).
+
 ## Testing
 
 **1,500+ tests** across the workspace:
@@ -488,6 +730,117 @@ Performance baselines tracked for join (inner/left/right/outer), filter (boolean
 ```
 
 Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 20+ packet suites covering alignment, join, groupby, concat, filter, CSV, dtype, null semantics, and more.
+
+## Recipes
+
+### Financial Data Pipeline
+
+```rust
+use frankenpandas::prelude::*;
+
+// Load trade data
+let trades = read_csv_str(
+    "date,ticker,price,volume\n\
+     2024-01-15,AAPL,185.50,1000\n\
+     2024-01-15,GOOG,140.25,500\n\
+     2024-01-16,AAPL,186.00,1200\n\
+     2024-01-16,GOOG,141.00,800"
+)?;
+
+// Parse dates
+let date_series = Series::new("date", trades.index().clone(),
+    trades.column("date").unwrap().clone())?;
+let parsed_dates = to_datetime(&date_series)?;
+
+// Daily VWAP per ticker
+let vwap = trades.groupby(&["ticker"])?.agg_named(&[
+    ("total_value", "price", "sum"),   // Simplified; real VWAP needs price*vol
+    ("total_vol", "volume", "sum"),
+    ("trade_count", "volume", "count"),
+])?;
+
+// Export for downstream consumption
+write_jsonl(&vwap, Path::new("daily_vwap.jsonl"))?;
+```
+
+### Merge-Asof for Time Series Alignment
+
+```rust
+// Join trades with quotes at the nearest preceding timestamp
+let result = merge_asof(
+    &trades, &quotes, "timestamp", AsofDirection::Backward
+)?;
+// Each trade row now has the most recent quote as of that trade time
+```
+
+### Categorical Analysis
+
+```rust
+// Create categorical with explicit ordering
+let ratings = Series::from_categorical(
+    "satisfaction",
+    vec![
+        Scalar::Utf8("good".into()),
+        Scalar::Utf8("poor".into()),
+        Scalar::Utf8("excellent".into()),
+        Scalar::Utf8("good".into()),
+    ],
+    true, // ordered
+)?;
+
+// Access category operations
+let cat = ratings.cat().unwrap();
+println!("Categories: {:?}", cat.categories());  // [good, poor, excellent]
+println!("Codes: {:?}", cat.codes()?.values());   // [0, 1, 2, 0]
+
+// Rename categories
+let renamed = cat.rename_categories(vec![
+    Scalar::Utf8("Good".into()),
+    Scalar::Utf8("Poor".into()),
+    Scalar::Utf8("Excellent".into()),
+])?;
+
+// Materialize back to values
+let values = renamed.cat().unwrap().to_values()?;
+```
+
+### MultiIndex Operations
+
+```rust
+// Create from product (Cartesian)
+let mi = MultiIndex::from_product(vec![
+    vec!["east".into(), "west".into()],
+    vec![2023i64.into(), 2024i64.into()],
+])?
+.set_names(vec![Some("region".into()), Some("year".into())]);
+
+// Extract a level
+let regions = mi.get_level_values(0)?;
+
+// Flatten to single index
+let flat = mi.to_flat_index("_");  // "east_2023", "east_2024", ...
+
+// From DataFrame columns
+let mi = df.to_multi_index(&["region", "year"])?;
+```
+
+### Expression-Driven Analysis
+
+```rust
+use std::collections::BTreeMap;
+
+// Compute new columns with eval
+let profit = df.eval("revenue - cost")?;
+
+// Filter with compound conditions
+let hot_deals = df.query("price < 50 and rating > 4.0")?;
+
+// Use local variables in expressions
+let locals = BTreeMap::from([
+    ("threshold".to_owned(), Scalar::Float64(100.0)),
+]);
+let above = df.query_with_locals("value > @threshold", &locals)?;
+```
 
 ## Conformance Testing in Depth
 
@@ -581,6 +934,55 @@ A: Comparable for numeric data. `ValidityMask` uses 1 bit per element (vs pandas
 
 **Q: Can I use this for production ETL pipelines?**
 A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (1,500+ tests including adversarial inputs and property-based fuzzing). This is pre-1.0 software — API stability is not yet guaranteed, but the correctness bar is high.
+
+## Selection and Indexing
+
+Full pandas-style selection API:
+
+```rust
+// Label-based (like df.loc[])
+let row = df.loc("row_label")?;           // Single row by label
+let subset = df.loc_rows(&["a", "b"])?;   // Multiple rows
+
+// Position-based (like df.iloc[])
+let row = df.iloc(0)?;                     // First row
+let last = df.iloc(-1)?;                   // Last row (negative indexing)
+let slice = df.head(10);                   // First 10 rows
+let tail = df.tail(5);                     // Last 5 (supports negative n)
+
+// Column selection
+let col = df.column("price")?;             // Single column as &Column
+let subset = df.select_columns(&["price", "volume"])?;
+let numeric = df.select_dtypes(&["int64", "float64"], &[])?;
+
+// Boolean masking
+let mask = df.query("price > 100")?;
+let filtered = df.filter_rows(&bool_series)?;
+
+// Conditional replacement
+let filled = df.where_mask_df(&cond_df, &other_df)?;
+let masked = df.mask_df(&cond_df, &other_df)?;
+
+// Index operations
+let reindexed = df.set_index("date", true)?;  // Column → index
+let reset = df.reset_index(false)?;            // Index → column
+let sorted = df.sort_index(true)?;             // Sort by index
+let deduped = df.drop_duplicates()?;           // Remove duplicate rows
+```
+
+## Roadmap
+
+| Priority | Feature | Status |
+|----------|---------|--------|
+| High | PyO3 Python bindings | Planned — would enable `import frankenpandas as fpd` from Python |
+| High | Native Datetime DType | Design phase — would replace Utf8 ISO 8601 string representation |
+| High | Full MultiIndex ↔ DataFrame integration | Foundation exists — need integration with groupby output, stack/unstack |
+| Medium | Parallel execution (rayon) | Not started — architecture supports it (columns are independent) |
+| Medium | DataFrame.plot() via plotters crate | Not started — would enable terminal/SVG chart output |
+| Medium | Lazy evaluation / query planning | Not started — would enable optimization across chained operations |
+| Low | HDF5 IO | Needs system library (libhdf5) |
+| Low | Clipboard IO | Needs system clipboard access |
+| Low | DataFrame.style for HTML formatting | Decorative; low priority vs correctness work |
 
 ## Key Documents
 

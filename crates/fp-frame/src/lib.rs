@@ -20378,7 +20378,13 @@ impl DataFrameGroupBy<'_> {
         let mut col_order = Vec::new();
 
         for &(output_name, input_col, func_name) in specs {
-            if self.by.contains(&input_col.to_owned()) {
+            if result_cols.contains_key(output_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "agg_named: duplicate output name '{output_name}'"
+                )));
+            }
+
+            if self.by.iter().any(|b| b == input_col) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "agg_named: cannot aggregate group-by key column '{input_col}'"
                 )));
@@ -45073,10 +45079,45 @@ mod tests {
             ])
             .unwrap();
 
-        // Group "a": sum=30, count=2. Group "b": sum=30, count=1.
         assert_eq!(result.index().len(), 2);
-        assert!(result.column("v_sum").is_some());
-        assert!(result.column("v_count").is_some());
+
+        // Verify actual aggregated values.
+        let sums = result.column("v_sum").unwrap();
+        let counts = result.column("v_count").unwrap();
+
+        // Find which group index is "a" vs "b" (order may vary).
+        let idx_a = result.index().labels().iter().position(|l| {
+            matches!(l, IndexLabel::Utf8(s) if s == "a")
+        }).expect("group 'a' must exist");
+        let idx_b = result.index().labels().iter().position(|l| {
+            matches!(l, IndexLabel::Utf8(s) if s == "b")
+        }).expect("group 'b' must exist");
+
+        // Group "a": sum(10+20)=30, count=2.
+        assert_eq!(sums.values()[idx_a], Scalar::Float64(30.0));
+        assert_eq!(counts.values()[idx_a], Scalar::Int64(2));
+
+        // Group "b": sum(30)=30, count=1.
+        assert_eq!(sums.values()[idx_b], Scalar::Float64(30.0));
+        assert_eq!(counts.values()[idx_b], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn groupby_agg_named_duplicate_output_errors() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                ("g", vec![Scalar::Utf8("a".into())]),
+                ("v", vec![Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .agg_named(&[("out", "v", "sum"), ("out", "v", "mean")]);
+        assert!(err.is_err());
     }
 
     #[test]

@@ -12,6 +12,7 @@ members = [
   "crates/fp-conformance",
   "crates/fp-runtime",
   "crates/fp-frankentui",
+  "crates/frankenpandas",
 ]
 
 [workspace.package]

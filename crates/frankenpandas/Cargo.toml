@@ -1,0 +1,16 @@
+[package]
+name = "frankenpandas"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../LICENSE"
+description = "Clean-room Rust reimplementation of the pandas API"
+
+[dependencies]
+fp-columnar = { path = "../fp-columnar" }
+fp-expr = { path = "../fp-expr" }
+fp-frame = { path = "../fp-frame" }
+fp-index = { path = "../fp-index" }
+fp-io = { path = "../fp-io" }
+fp-join = { path = "../fp-join" }
+fp-runtime = { path = "../fp-runtime" }
+fp-types = { path = "../fp-types" }

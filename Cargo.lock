@@ -820,6 +820,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frankenpandas"
+version = "0.1.0"
+dependencies = [
+ "fp-columnar",
+ "fp-expr",
+ "fp-frame",
+ "fp-index",
+ "fp-io",
+ "fp-join",
+ "fp-runtime",
+ "fp-types",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

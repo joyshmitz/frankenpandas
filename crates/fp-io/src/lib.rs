@@ -931,8 +931,18 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::Frame);
     }
 
-    // Collect column names from first row (preserving insertion order via BTreeMap keys).
-    let col_names: Vec<String> = all_rows[0].keys().cloned().collect();
+    // Collect column names as the UNION of all keys across all rows.
+    // This matches pandas behavior: missing keys in a row become null.
+    let mut col_name_set = std::collections::BTreeSet::new();
+    let mut col_names_ordered: Vec<String> = Vec::new();
+    for row in &all_rows {
+        for key in row.keys() {
+            if col_name_set.insert(key.clone()) {
+                col_names_ordered.push(key.clone());
+            }
+        }
+    }
+    let col_names = col_names_ordered;
     let mut columns: Vec<Vec<Scalar>> = col_names.iter().map(|_| Vec::with_capacity(all_rows.len())).collect();
 
     for row in &all_rows {
@@ -3641,6 +3651,26 @@ mod tests {
         let input = "{\"a\":1}\n[1,2,3]\n";
         let err = super::read_jsonl_str(input);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn jsonl_different_keys_across_rows() {
+        // Rows with different keys should produce union of all columns.
+        let input = "{\"a\":1,\"b\":2}\n{\"a\":3,\"c\":4}\n";
+        let frame = super::read_jsonl_str(input).expect("JSONL with different keys must parse");
+        assert_eq!(frame.index().len(), 2);
+        // Should have columns a, b, c (union of all keys).
+        assert!(frame.column("a").is_some(), "column a must exist");
+        assert!(frame.column("b").is_some(), "column b must exist");
+        assert!(frame.column("c").is_some(), "column c must exist");
+        // Row 0: a=1, b=2, c=null.
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("b").unwrap().values()[0], Scalar::Int64(2));
+        assert!(frame.column("c").unwrap().values()[0].is_missing());
+        // Row 1: a=3, b=null, c=4.
+        assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
+        assert!(frame.column("b").unwrap().values()[1].is_missing());
+        assert_eq!(frame.column("c").unwrap().values()[1], Scalar::Int64(4));
     }
 
     #[test]

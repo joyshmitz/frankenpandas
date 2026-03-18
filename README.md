@@ -658,6 +658,23 @@ Five optimization rounds with formal evidence:
 
 Performance baselines tracked for join (inner/left/right/outer), filter (boolean mask, head/tail), and DataFrame arithmetic at 10K-100K row scales. Benchmarks run via `cargo test -p fp-conformance --test perf_baselines -- --ignored --nocapture`.
 
+## Optimization Catalog
+
+FrankenPandas applies 14 named optimization techniques (AG-01 through AG-15) drawn from the alien-graveyard systems-pattern library. Each is independently toggled and proven via isomorphism tests:
+
+| ID | Technique | Where Applied | What It Does |
+|----|-----------|---------------|--------------|
+| AG-02 | Borrowed-key HashMap | fp-index `align_union`, fp-join build phase | Builds position maps using `&IndexLabel` references instead of cloning labels. Eliminates O(n) allocations in the join build phase. |
+| AG-03 | Identity-cast skip | fp-types `cast_scalar_owned` | When source dtype already equals target dtype, returns the value without cloning. Saves one allocation per element in column coercion. |
+| AG-05 | N-way leapfrog triejoin | fp-index `multi_way_align` | Computes the union of N indexes in a single O(n log n) sorted-merge pass instead of iterative pairwise O(n^2 log n). Used by `DataFrame::from_series`. |
+| AG-06 | Arena-backed execution | fp-groupby, fp-join | Routes intermediate allocations through Bumpalo bump allocator. Single `malloc`, pointer bumps, bulk dealloc. Configurable budget (default 256 MB). |
+| AG-07 | Vec-based column accumulation | fp-io CSV parser | Pre-allocates `Vec<Vec<Scalar>>` with capacity hints from input byte count. O(1) amortized per cell vs O(log c) BTreeMap insertion. |
+| AG-08 | Source-index referencing | fp-groupby HashMap path | Stores `(source_row_index, accumulator)` instead of `(Scalar_clone, accumulator)`. Reconstructs group key labels at output time, avoiding per-group Scalar clones. |
+| AG-10 | Typed-array vectorization | fp-columnar binary ops | Dispatches to `&[f64]` / `&[i64]` typed arrays instead of per-element `match Scalar`. Enables LLVM auto-vectorization to SIMD. |
+| AG-11 | Fast-path alignment skip | fp-frame, fp-groupby | When both operands share the same index and have no duplicates, skips the alignment planning phase entirely. O(1) check via `OnceCell` memoization. |
+| AG-13 | Adaptive sort-order lookup | fp-index `position()` | Lazily detects whether an index is sorted ascending (Int64 or Utf8). Uses O(log n) binary search for sorted, O(n) scan for unsorted. Sort order cached in `OnceCell`. |
+| AG-14 | Alignment plan validation | fp-index | Debug-mode assertion that position vectors have consistent lengths and valid indices. Catches alignment bugs at the source. |
+
 ## DType System and Coercion Rules
 
 The type hierarchy determines how values are promoted when columns with different types interact:
@@ -706,6 +723,112 @@ FrankenPandas distinguishes three kinds of missing values, exactly matching pand
 - GroupBy with `dropna=true` excludes null group keys
 
 The `ValidityMask` makes null checking O(1) per element (single bit test) and O(n/64) for bulk operations (word-level popcount).
+
+## NanOps: Null-Aware Aggregation Library
+
+The `fp-types` crate provides 10 null-skipping aggregation primitives that underpin all statistical operations:
+
+```rust
+// All skip Null/NaN values automatically:
+nansum(&values)       // → Scalar::Float64 (sum of non-missing)
+nanmean(&values)      // → Scalar::Float64 (mean of non-missing)
+nancount(&values)     // → Scalar::Int64 (count of non-missing)
+nanmin(&values)       // → same type as input minimum
+nanmax(&values)       // → same type as input maximum
+nanmedian(&values)    // → Scalar::Float64 (middle value)
+nanvar(&values, ddof) // → Scalar::Float64 (sample variance, ddof=1 default)
+nanstd(&values, ddof) // → Scalar::Float64 (sample std dev)
+nanprod(&values)      // → Scalar::Float64 (product of non-missing)
+nannunique(&values)   // → Scalar::Int64 (count of unique non-missing)
+```
+
+These are the building blocks for `Series.sum()`, `DataFrame.mean()`, `GroupBy.std()`, `describe()`, and every other statistical method. The "skip nulls by default" behavior matches pandas' `skipna=True` default.
+
+Empty inputs or all-null inputs return `NaN` for float aggregations and `0` for count — matching pandas exactly.
+
+## Error Architecture
+
+Every crate has its own typed error enum, all implementing `std::error::Error` + `Display`:
+
+| Error Type | Crate | Key Variants |
+|-----------|-------|--------------|
+| `TypeError` | fp-types | `IncompatibleDtypes { left, right }` |
+| `ColumnError` | fp-columnar | `LengthMismatch`, `DtypeMismatch`, `EmptyColumn` |
+| `IndexError` | fp-index | `OutOfBounds { position, length }`, `LengthMismatch`, `InvalidAlignmentVectors` |
+| `FrameError` | fp-frame | `LengthMismatch`, `DuplicateIndexUnsupported`, `CompatibilityRejected(String)` |
+| `ExprError` | fp-expr | `ParseError(String)`, `UnknownColumn(String)`, `UnknownLocal(String)` |
+| `JoinError` | fp-join | wraps `FrameError` + join-specific failures |
+| `GroupByError` | fp-groupby | wraps `FrameError` + aggregation failures |
+| `IoError` | fp-io | `MissingHeaders`, `MissingIndexColumn`, `Csv(...)`, `Json(...)`, `Parquet(...)`, `Excel(...)`, `Arrow(...)`, `Sql(...)` |
+
+All error types are re-exported through the `frankenpandas` facade crate, so users can pattern-match without importing internal crates:
+
+```rust
+use frankenpandas::{IoError, FrameError, ExprError};
+
+match result {
+    Err(IoError::MissingHeaders) => eprintln!("CSV has no headers"),
+    Err(IoError::Sql(msg)) => eprintln!("SQL error: {msg}"),
+    _ => {}
+}
+```
+
+## DataFrame Constructors
+
+15+ ways to create a DataFrame, matching every pandas construction pattern:
+
+| Constructor | pandas Equivalent | Example |
+|-------------|-------------------|---------|
+| `from_dict(&[col_order], data)` | `pd.DataFrame({"a": [1,2], "b": [3,4]})` | Column-oriented dict |
+| `from_dict_with_index(data, labels)` | `pd.DataFrame(data, index=[...])` | With custom index |
+| `from_dict_mixed(data)` | `pd.DataFrame({"a": [1], "b": ["x"]})` | Mixed types per column |
+| `from_series(vec![s1, s2])` | `pd.DataFrame({"a": s1, "b": s2})` | From Series with alignment |
+| `from_records(records, columns)` | `pd.DataFrame.from_records(...)` | Row-oriented records |
+| `from_tuples(rows, columns)` | `pd.DataFrame([(1,"a"), (2,"b")])` | Tuple rows |
+| `from_tuples_with_index(rows, cols, idx)` | Same with custom index | Tuples + index labels |
+| `from_csv(text, sep)` | `pd.read_csv(StringIO(text))` | Inline CSV string |
+| `from_dict_index(data)` | `pd.DataFrame.from_dict(data, orient='index')` | Row-keyed dict |
+| `from_dict_index_columns(data, cols)` | Same with column names | Row-keyed + col names |
+| `DataFrame::new(index, columns)` | Low-level construction | Direct index + BTreeMap |
+
+When constructing from multiple Series with different indexes, `from_series` automatically performs N-way index alignment (AG-05 leapfrog triejoin) to produce a DataFrame with the union of all index labels.
+
+## Merge: Advanced Options
+
+Beyond the basic join types, the merge system supports pandas' full merge parameter set:
+
+```rust
+// Merge with validation (like pandas validate='one_to_one')
+let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
+    MergeOptions {
+        validate_mode: Some(MergeValidateMode::OneToOne),
+        ..Default::default()
+    })?;
+
+// Merge with indicator column (like pandas indicator=True)
+// Adds a column showing "left_only", "right_only", or "both"
+let merged = df1.merge_with_options(&df2, &["key"], JoinType::Outer,
+    MergeOptions {
+        indicator_name: Some("_merge".to_owned()),
+        ..Default::default()
+    })?;
+
+// Merge with custom suffixes for overlapping columns
+let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
+    MergeOptions {
+        suffixes: Some([Some("_left".to_owned()), Some("_right".to_owned())]),
+        ..Default::default()
+    })?;
+```
+
+**Validation modes** catch data quality issues at merge time:
+
+| Mode | Constraint | Fails When |
+|------|-----------|------------|
+| `OneToOne` | Each key appears once in both sides | Duplicates in either side |
+| `OneToMany` | Keys unique in left, may repeat in right | Duplicates in left |
+| `ManyToOne` | Keys may repeat in left, unique in right | Duplicates in right |
+| `ManyToMany` | No constraint (default) | Never |
 
 ## Testing
 
@@ -969,6 +1092,102 @@ let reset = df.reset_index(false)?;            // Index → column
 let sorted = df.sort_index(true)?;             // Sort by index
 let deduped = df.drop_duplicates()?;           // Remove duplicate rows
 ```
+
+## Serialization and Interoperability
+
+All core types are fully serializable via serde:
+
+```rust
+// Every type derives Serialize + Deserialize:
+// Scalar, DType, NullKind, IndexLabel, Index, MultiIndex,
+// Series, DataFrame, CategoricalMetadata, Column, ValidityMask
+
+// JSON serialization
+let json = serde_json::to_string(&scalar)?;      // Tagged enum: {"kind":"int64","value":42}
+let back: Scalar = serde_json::from_str(&json)?;  // Round-trips perfectly
+
+// Binary serialization (via bincode, messagepack, etc.)
+let bytes = bincode::serialize(&dataframe)?;
+let back: DataFrame = bincode::deserialize(&bytes)?;
+```
+
+The `Scalar` enum uses serde's tagged representation (`#[serde(tag = "kind", content = "value")]`) for human-readable JSON while remaining efficient for binary formats. `ValidityMask` serializes as a `Vec<bool>` for JSON compatibility but uses bitpacked `Vec<u64>` in memory.
+
+**Arrow interop:** DataFrame ↔ Arrow RecordBatch conversion is built in (used by Parquet and Feather IO). This means FrankenPandas data can be zero-copy shared with any Arrow-compatible system (DuckDB, DataFusion, Spark via Arrow Flight).
+
+## Adversarial and Property-Based Testing
+
+Beyond unit tests, FrankenPandas employs two advanced testing strategies:
+
+### Property-Based Tests (proptest)
+
+75 properties that must hold for ALL randomly-generated inputs:
+
+| Property Category | Examples | Cases |
+|-------------------|----------|-------|
+| DType coercion | `common_dtype` is symmetric, reflexive, transitive | 500 |
+| Scalar cast | Identity cast preserves value, missing stays missing | 500 |
+| Index alignment | Union contains all labels, position vectors correct length | 500 |
+| Series arithmetic | Self-add doubles values, no panics in hardened mode | 200 |
+| Join invariants | Inner ⊆ Left ⊆ Outer, output lengths consistent | 200 |
+| GroupBy | Groups bounded by input rows, arena ≡ global allocator | 200 |
+| ValidityMask | De Morgan's law, NOT involution, AND commutativity | 300 |
+| CSV round-trip | Shape preserved, column names preserved, Int64 exact | 100 |
+| JSON round-trip | Shape preserved across Records/Columns/Split/Values | 50 |
+| SQL round-trip | Shape and values preserved through SQLite | 30 |
+| Excel round-trip | Int64 values recovered from f64 through xlsx | 30 |
+| Feather round-trip | Shape, names, and values exact through Arrow IPC | 50 |
+| DataFrame arithmetic | add_scalar preserves shape, add(0) ≡ identity | 100 |
+| Comparison ops | eq XOR ne = true for non-NaN values | 100 |
+
+### Adversarial Input Tests
+
+15 tests targeting parser edge cases:
+
+- **CSV:** 200K-character field, 1000 columns, embedded newlines in quotes, multi-byte UTF-8 (Japanese, Cyrillic, emoji), header-only files, no trailing newline
+- **JSON:** Deeply nested objects, `i64::MAX`/`i64::MIN` boundary values, near-`f64::MAX` floats, empty arrays/objects
+- **SQL:** 10,000-row batch insert, column names with spaces (quoted identifier handling), SQL injection rejection (Bobby Tables pattern)
+
+## Duplicate Handling
+
+Pandas-compatible `keep` parameter for duplicate detection:
+
+```rust
+// Mark duplicates (like df.duplicated(keep='first'))
+let mask = df.duplicated()?;  // First occurrence = false, subsequent = true
+
+// Drop duplicates
+let unique = df.drop_duplicates()?;
+
+// Series-level with keep parameter
+let deduped = series.drop_duplicates()?;
+
+// Index-level
+let has_dups = index.has_duplicates();  // O(1) after first call (OnceCell)
+let unique_idx = index.drop_duplicates(DuplicateKeep::First)?;
+```
+
+`DuplicateKeep` enum: `First` (keep first occurrence), `Last` (keep last), `None` (mark all duplicates).
+
+## Random Sampling
+
+Deterministic sampling with seed control:
+
+```rust
+// Sample n rows
+let sampled = df.sample(100, None, false, Some(42))?;  // n=100, seed=42
+
+// Sample fraction
+let sampled = df.sample(0, Some(0.1), false, Some(42))?;  // 10% sample
+
+// Sample with replacement (bootstrap)
+let bootstrap = df.sample(1000, None, true, Some(42))?;
+
+// Weighted sampling
+let weighted = df.sample_weights(100, &weights_series, false, Some(42))?;
+```
+
+Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuffle for reproducible results across runs. Matching seed → identical sample, regardless of platform.
 
 ## Roadmap
 

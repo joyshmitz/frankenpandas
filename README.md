@@ -19,7 +19,7 @@
 
 **The Problem:** pandas is the lingua franca of data analysis, but it's single-threaded Python with unpredictable memory spikes, GIL contention in production pipelines, and dtype coercion surprises that silently corrupt results.
 
-**The Solution:** FrankenPandas rebuilds the entire pandas API from first principles in Rust — same semantics, same method names, same edge-case behavior — but with columnar storage, vectorized kernels, arena-backed execution, and compile-time safety guarantees.
+**The Solution:** FrankenPandas rebuilds the entire pandas API from first principles in Rust. Same semantics, same method names, same edge-case behavior, but with columnar storage, vectorized kernels, arena-backed execution, and compile-time safety guarantees.
 
 **Why FrankenPandas?**
 
@@ -65,7 +65,7 @@ println!("{}", summary);
 
 **Alignment-Aware Columnar Execution (AACE):** Every binary operation between DataFrames or Series goes through an explicit index-alignment planning phase before any data is touched. An `EvidenceLedger` records each materialization decision with Bayesian confidence scores, creating a fully auditable execution trace.
 
-This is not a best-effort optimization — it's a core identity constraint. pandas' alignment semantics (outer join on index for arithmetic, left join for assignment) are preserved exactly, with formal correctness evidence.
+AACE is a core identity constraint, not a best-effort optimization. pandas' alignment semantics (outer join on index for arithmetic, left join for assignment) are preserved exactly, with formal correctness evidence.
 
 ## Design Philosophy
 
@@ -242,7 +242,7 @@ ValidityMask {
 - **Bit `1`** = valid, **Bit `0`** = null/missing
 - Element at position `i` is in word `i / 64`, bit `i % 64`
 - Last word is masked to clear unused high bits: `(1u64 << remainder) - 1`
-- Boolean algebra: `and_mask`, `or_mask`, `not_mask` operate word-by-word on u64s — 64 null checks per CPU instruction
+- Boolean algebra: `and_mask`, `or_mask`, `not_mask` operate word-by-word on u64s, processing 64 null checks per CPU instruction
 - `count_valid()` uses `word.count_ones()` (hardware `POPCNT`) across all words
 
 This is the same approach used by Apache Arrow and gives O(n/64) performance for null-aware operations instead of O(n).
@@ -295,11 +295,11 @@ The GroupBy engine automatically selects the fastest execution path based on key
           └─────────────────┘             └─────────────────┘
 ```
 
-**Path 1 — Dense Int64:** When all group keys are integers spanning ≤ 65,536 values, pre-allocates a dense array indexed directly by `key - min_key`. O(1) per-element grouping with zero hash overhead. Used for common patterns like grouping by year, month, category ID.
+**Path 1, Dense Int64:** When all group keys are integers spanning ≤ 65,536 values, pre-allocates a dense array indexed directly by `key - min_key`. O(1) per-element grouping with zero hash overhead. Used for common patterns like grouping by year, month, category ID.
 
-**Path 2 — Arena-backed (Bumpalo):** When estimated intermediate memory fits within the arena budget (default 256 MB), allocates all working memory from a Bumpalo bump allocator. Single `malloc` + pointer bumps; bulk deallocation when the arena drops. Zero fragmentation, cache-friendly.
+**Path 2, Arena-backed (Bumpalo):** When estimated intermediate memory fits within the arena budget (default 256 MB), allocates all working memory from a Bumpalo bump allocator. Single `malloc` + pointer bumps; bulk deallocation when the arena drops. Zero fragmentation, cache-friendly.
 
-**Path 3 — Global allocator HashMap:** Fallback for arbitrary key types and unbounded cardinality. Stores `(source_index, accumulating_sum)` pairs — never clones the group key Scalar itself (AG-08 optimization). The original IndexLabel is reconstructed at output time from the source position.
+**Path 3, Global allocator HashMap:** Fallback for arbitrary key types and unbounded cardinality. Stores `(source_index, accumulating_sum)` pairs and never clones the group key Scalar itself (AG-08 optimization). The original IndexLabel is reconstructed at output time from the source position.
 
 All three paths produce identical output. This is verified by property-based tests that run the same inputs through arena and non-arena paths and assert bitwise equality.
 
@@ -316,7 +316,7 @@ fn vectorized_binary_f64(
 ) -> (Vec<f64>, ValidityMask)
 ```
 
-The compiler auto-vectorizes the inner loop to SIMD instructions. Combined validity is computed via `and_mask` on the bitmap words — again, 64 elements per instruction.
+The compiler auto-vectorizes the inner loop to SIMD instructions. Combined validity is computed via `and_mask` on the bitmap words, again handling 64 elements per instruction.
 
 When types don't align for the fast path (e.g., Int64 + Float64), a scalar fallback promotes each element through `cast_scalar()`, respecting the full pandas type hierarchy.
 
@@ -335,7 +335,7 @@ Grammar (simplified):
   atom       → NUMBER | COLUMN_NAME | @LOCAL_VAR | "(" expr ")"
 ```
 
-The parser produces an `Expr` AST that the evaluator walks, resolving column references against the DataFrame's `EvalContext`. Local variables (prefixed with `@`) are broadcast to Series of the appropriate length. The entire pipeline — parse, resolve, evaluate, filter — happens in a single call with no temporary DataFrames.
+The parser produces an `Expr` AST that the evaluator walks, resolving column references against the DataFrame's `EvalContext`. Local variables (prefixed with `@`) are broadcast to Series of the appropriate length. The entire pipeline (parse, resolve, evaluate, filter) happens in a single call with no temporary DataFrames.
 
 ### Bayesian Runtime Policy
 
@@ -424,7 +424,7 @@ The `.str()` accessor provides 50+ string operations matching pandas `Series.str
 | Asof (forward) | First right row where `right_key ≥ left_key` | = left |
 | Asof (nearest) | Closest right row by absolute distance | = left |
 
-`merge_asof` is particularly useful for time-series data — joining trades with quotes at the nearest preceding timestamp, for example.
+`merge_asof` is particularly useful for time-series data, e.g., joining trades with quotes at the nearest preceding timestamp.
 
 ### Window Operations
 
@@ -680,7 +680,7 @@ FrankenPandas applies 14 named optimization techniques (AG-01 through AG-15) dra
 The type hierarchy determines how values are promoted when columns with different types interact:
 
 ```
-Null (bottom type — promotes to anything)
+Null (bottom type; promotes to anything)
  │
  ├── Bool
  │     └── Int64
@@ -697,9 +697,9 @@ Null (bottom type — promotes to anything)
 | Bool | Int64 | Int64 | `True + 3 → 4` |
 | Bool | Float64 | Float64 | `True + 1.5 → 2.5` |
 | Int64 | Float64 | Float64 | `3 + 1.5 → 4.5` |
-| Utf8 | Int64 | **Error** | Incompatible — fails closed |
-| Utf8 | Float64 | **Error** | Incompatible — fails closed |
-| Same | Same | Same | Identity — no coercion needed (AG-03 fast path) |
+| Utf8 | Int64 | **Error** | Incompatible; fails closed |
+| Utf8 | Float64 | **Error** | Incompatible; fails closed |
+| Same | Same | Same | Identity; no coercion needed (AG-03 fast path) |
 
 The identity-cast optimization (AG-03) detects when source dtype already matches target dtype and skips the clone entirely, which matters when `cast_scalar_owned()` is called millions of times during column coercion.
 
@@ -744,7 +744,7 @@ nannunique(&values)   // → Scalar::Int64 (count of unique non-missing)
 
 These are the building blocks for `Series.sum()`, `DataFrame.mean()`, `GroupBy.std()`, `describe()`, and every other statistical method. The "skip nulls by default" behavior matches pandas' `skipna=True` default.
 
-Empty inputs or all-null inputs return `NaN` for float aggregations and `0` for count — matching pandas exactly.
+Empty inputs or all-null inputs return `NaN` for float aggregations and `0` for count, matching pandas exactly.
 
 ## Error Architecture
 
@@ -867,7 +867,7 @@ let count = series.count();        // Count of non-missing values
 let has   = series.hasnans();      // true if any missing values exist
 ```
 
-DataFrame-level: `df.isna()`, `df.notna()`, `df.isnull()`, `df.notnull()` — all return DataFrames of Booleans. `first_valid_index()` and `last_valid_index()` scan for the first/last non-null row.
+DataFrame-level: `df.isna()`, `df.notna()`, `df.isnull()`, `df.notnull()` return DataFrames of Booleans. `first_valid_index()` and `last_valid_index()` scan for the first/last non-null row.
 
 ### Filling
 
@@ -1074,6 +1074,138 @@ let val = series.at(&label)?;       // By label (like .at[label])
 let values = df.lookup(&row_labels, &col_names)?;
 ```
 
+## SeriesGroupBy
+
+Series-level groupby is separate from DataFrame groupby and provides a lightweight API for single-column aggregation:
+
+```rust
+// Group one Series by another
+let by_region = revenue_series.groupby(&region_series)?;
+
+// Aggregate
+let sums  = by_region.sum()?;
+let means = by_region.mean()?;
+let stds  = by_region.std()?;
+let meds  = by_region.median()?;
+let prods = by_region.prod()?;
+
+// Multiple aggregations at once
+let multi = by_region.agg(&["sum", "mean", "count"])?;  // Returns DataFrame
+```
+
+`SeriesGroupBy` supports: `sum`, `mean`, `count`, `min`, `max`, `std`, `var`, `median`, `first`, `last`, `prod`, `sem`, `skew`, `kurtosis`, `agg` (multi-function), and `value_counts`.
+
+## Sorting
+
+```rust
+// Sort by column values
+let sorted = df.sort_values("price", true)?;          // ascending=true
+let sorted = df.sort_values("price", false)?;         // descending
+
+// Control NaN position
+let sorted = series.sort_values_na(true, "first")?;   // NaN at top
+let sorted = series.sort_values_na(true, "last")?;    // NaN at bottom (default)
+
+// Sort by index labels
+let sorted = df.sort_index(true)?;                    // ascending
+let sorted = df.sort_index(false)?;                   // descending
+```
+
+## Concat: Full Options
+
+```rust
+// Axis 0 (stack rows, default)
+let stacked = concat_dataframes(&[&df1, &df2])?;
+
+// Axis 1 (add columns side-by-side, outer join on index)
+let wide = concat_dataframes_with_axis(&[&df1, &df2], 1)?;
+
+// Axis 1 with inner join (only shared index labels)
+let inner = concat_dataframes_with_axis_join(&[&df1, &df2], 1, ConcatJoin::Inner)?;
+
+// Axis 0 with inner join (only shared columns)
+let shared = concat_dataframes_with_axis_join(&[&df1, &df2], 0, ConcatJoin::Inner)?;
+
+// With hierarchical keys
+let labeled = concat_dataframes_with_keys(&[&df1, &df2], &["train", "test"])?;
+
+// Ignore original indexes (reindex to 0..n)
+let clean = concat_dataframes_with_ignore_index(&[&df1, &df2])?;
+```
+
+## Pivot Tables: Full Options
+
+```rust
+// Basic pivot table
+let pt = df.pivot_table("revenue", "region", "product", "sum")?;
+
+// Multiple values columns
+let pt = df.pivot_table_multi_values(&["revenue", "quantity"], "region", "product", "sum")?;
+
+// With margins (subtotals row/column)
+let pt = df.pivot_table_with_margins("revenue", "region", "product", "sum")?;
+
+// Custom margins label
+let pt = df.pivot_table_with_margins_name("revenue", "region", "product", "sum", "Grand Total")?;
+
+// Fill NaN in pivot output
+let pt = df.pivot_table_fill("revenue", "region", "product", "sum", 0.0)?;
+
+// Multiple aggregation functions
+let pt = df.pivot_table_multi_agg("revenue", "region", "product", &["sum", "mean", "count"])?;
+```
+
+## Time-Series Operations
+
+```rust
+// Select rows at a specific time
+let noon = df.at_time("12:00:00")?;
+
+// Select rows within a time range
+let morning = df.between_time("09:00:00", "12:00:00")?;
+
+// Datetime component extraction (full list)
+let components = series.dt();
+components.year()?;            components.month()?;
+components.day()?;             components.hour()?;
+components.minute()?;          components.second()?;
+components.dayofweek()?;       components.dayofyear()?;
+components.quarter()?;         components.weekofyear()?;
+components.is_month_start()?;  components.is_month_end()?;
+components.is_quarter_start()?; components.is_quarter_end()?;
+components.strftime("%Y-%m-%d %H:%M")?;
+
+// Timezone operations
+let localized = series.dt().tz_localize(Some("America/New_York"))?;
+let converted = series.dt().tz_convert(Some("UTC"))?;
+```
+
+## Column Manipulation
+
+```rust
+// Rename columns
+let renamed = df.rename_with(|name| format!("col_{name}"))?;
+let prefixed = df.add_prefix("input_")?;
+let suffixed = df.add_suffix("_raw")?;
+
+// Assign new column (value vector)
+let df2 = df.assign_column("computed", computed_values)?;
+
+// Assign with closure (sees current DataFrame state)
+let df2 = df.assign_fn(vec![
+    ("ratio", Box::new(|df: &DataFrame| {
+        // Compute from existing columns
+        let a = df.column("revenue").unwrap();
+        let b = df.column("cost").unwrap();
+        // ... return Column
+        Ok(result_column)
+    })),
+])?;
+
+// Reorder columns
+let reordered = df.select_columns(&["id", "name", "value"])?;
+```
+
 ## Recipes
 
 ### Financial Data Pipeline
@@ -1249,7 +1381,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against the actual pandas oracle. We're in early development so not every method is implemented yet, but the architecture is designed for full coverage.
 
 **Q: Why not just use Polars?**
-A: Polars is excellent but has a fundamentally different API (lazy evaluation, no index alignment, different method names). FrankenPandas is for teams that want pandas semantics with Rust performance — no code rewrite required, just change the import.
+A: Polars is excellent but has a fundamentally different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets teams that want pandas semantics with Rust performance. No code rewrite required; just change the import.
 
 **Q: Is `unsafe` code used anywhere?**
 A: No. Every crate in the workspace uses `#![forbid(unsafe_code)]`. Memory safety comes from the Rust type system.
@@ -1258,13 +1390,13 @@ A: No. Every crate in the workspace uses `#![forbid(unsafe_code)]`. Memory safet
 A: PyO3 bindings are a planned future step. Currently this is a pure Rust library.
 
 **Q: What's the `EvidenceLedger`?**
-A: Every alignment decision, dtype coercion, and policy override is logged with Bayesian confidence scores. This creates an auditable trail of exactly how your data was transformed — something pandas silently does without any record.
+A: Every alignment decision, dtype coercion, and policy override is logged with Bayesian confidence scores. This creates an auditable trail of exactly how your data was transformed. pandas makes these same decisions silently with no record.
 
 **Q: What's the performance like?**
 A: Five formal optimization rounds with measured evidence. The groupby path alone saw an 87% speedup through memoization and dense aggregation paths. All optimizations include isomorphism proofs showing behavior is unchanged.
 
 **Q: How is the GroupBy implemented?**
-A: Three automatic execution paths. Dense Int64 keys (range ≤ 65,536) use O(1) array indexing. Medium cardinality uses Bumpalo arena allocation (single malloc, zero fragmentation). Everything else falls back to a HashMap with source-index referencing to avoid per-group clones. All three produce identical results — verified by property-based tests.
+A: Three automatic execution paths. Dense Int64 keys (range ≤ 65,536) use O(1) array indexing. Medium cardinality uses Bumpalo arena allocation (single malloc, zero fragmentation). Everything else falls back to a HashMap with source-index referencing to avoid per-group clones. All three produce identical results, verified by property-based tests.
 
 **Q: What does "clean-room" mean?**
 A: We never read, reference, or copy from the pandas source code. We study pandas' *behavior* (input → output contracts, edge cases, dtype rules) via the conformance oracle, then implement from first principles in Rust. This avoids any license contamination and often produces better implementations.
@@ -1276,7 +1408,7 @@ A: Three distinct null kinds: `NullKind::Null` (generic missing), `NullKind::NaN
 A: Comparable for numeric data. `ValidityMask` uses 1 bit per element (vs pandas' 8-byte nullable dtype). `Column` stores typed arrays (`Vec<f64>`, `Vec<i64>`) instead of object arrays. String data uses `Vec<String>` (heap-allocated per element, same as pandas object dtype). Arena-backed GroupBy/Join operations avoid per-group heap fragmentation.
 
 **Q: Can I use this for production ETL pipelines?**
-A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (1,500+ tests including adversarial inputs and property-based fuzzing). This is pre-1.0 software — API stability is not yet guaranteed, but the correctness bar is high.
+A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (1,500+ tests including adversarial inputs and property-based fuzzing). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high.
 
 ## Selection and Indexing
 
@@ -1413,12 +1545,12 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 
 | Priority | Feature | Status |
 |----------|---------|--------|
-| High | PyO3 Python bindings | Planned — would enable `import frankenpandas as fpd` from Python |
-| High | Native Datetime DType | Design phase — would replace Utf8 ISO 8601 string representation |
-| High | Full MultiIndex ↔ DataFrame integration | Foundation exists — need integration with groupby output, stack/unstack |
-| Medium | Parallel execution (rayon) | Not started — architecture supports it (columns are independent) |
-| Medium | DataFrame.plot() via plotters crate | Not started — would enable terminal/SVG chart output |
-| Medium | Lazy evaluation / query planning | Not started — would enable optimization across chained operations |
+| High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
+| High | Native Datetime DType | Design phase; would replace Utf8 ISO 8601 string representation |
+| High | Full MultiIndex ↔ DataFrame integration | Foundation exists; needs integration with groupby output, stack/unstack |
+| Medium | Parallel execution (rayon) | Not started; architecture supports it (columns are independent) |
+| Medium | DataFrame.plot() via plotters crate | Not started; would enable terminal/SVG chart output |
+| Medium | Lazy evaluation / query planning | Not started; would enable optimization across chained operations |
 | Low | HDF5 IO | Needs system library (libhdf5) |
 | Low | Clipboard IO | Needs system clipboard access |
 | Low | DataFrame.style for HTML formatting | Decorative; low priority vs correctness work |

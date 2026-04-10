@@ -9,6 +9,7 @@ use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
+use fp_types::TypeError;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1070,6 +1071,40 @@ pub enum AsofDirection {
     Nearest,
 }
 
+fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
+    let mut out = Vec::with_capacity(column.len());
+    for value in column.values() {
+        match value.to_f64() {
+            Ok(v) => out.push(v),
+            Err(TypeError::ValueIsMissing { .. }) => out.push(f64::NAN),
+            Err(_) => {
+                return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                    format!("merge_asof: {side} column '{on}' must be numeric"),
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn ensure_sorted_non_decreasing(values: &[f64], side: &str, on: &str) -> Result<(), JoinError> {
+    let mut prev: Option<f64> = None;
+    for &value in values {
+        if value.is_nan() {
+            continue;
+        }
+        if let Some(prev_value) = prev
+            && value < prev_value
+        {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge_asof: {side} column '{on}' must be sorted"),
+            )));
+        }
+        prev = Some(value);
+    }
+    Ok(())
+}
+
 /// Perform an asof merge between two DataFrames.
 pub fn merge_asof(
     left: &fp_frame::DataFrame,
@@ -1088,64 +1123,88 @@ pub fn merge_asof(
         )))
     })?;
 
-    let left_vals: Vec<f64> = left_key
-        .values()
-        .iter()
-        .map(|v| v.to_f64().unwrap_or(f64::NAN))
-        .collect();
-    let right_vals: Vec<f64> = right_key
-        .values()
-        .iter()
-        .map(|v| v.to_f64().unwrap_or(f64::NAN))
-        .collect();
+    let left_vals = asof_numeric_values(left_key, "left", on)?;
+    let right_vals = asof_numeric_values(right_key, "right", on)?;
+
+    ensure_sorted_non_decreasing(&left_vals, "left", on)?;
+    ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
     let right_n = right_vals.len();
 
-    // For each left row, find the matching right row index
+    let mut right_non_nan_values = Vec::new();
+    let mut right_non_nan_positions = Vec::new();
+    for (pos, &rv) in right_vals.iter().enumerate() {
+        if !rv.is_nan() {
+            right_non_nan_values.push(rv);
+            right_non_nan_positions.push(pos);
+        }
+    }
+
+    // For each left row, find the matching right row index.
     let mut right_matches: Vec<Option<usize>> = Vec::with_capacity(left_vals.len());
 
-    for &lv in &left_vals {
-        if lv.is_nan() {
-            right_matches.push(None);
-            continue;
+    match direction {
+        AsofDirection::Backward => {
+            let mut best: Option<usize> = None;
+            let mut j = 0usize;
+            for &lv in &left_vals {
+                if lv.is_nan() {
+                    right_matches.push(None);
+                    continue;
+                }
+                while j < right_non_nan_values.len() && right_non_nan_values[j] <= lv {
+                    best = Some(right_non_nan_positions[j]);
+                    j += 1;
+                }
+                right_matches.push(best);
+            }
         }
-
-        let matched = match direction {
-            AsofDirection::Backward => {
-                // Last right row where right_val <= left_val
-                let mut best: Option<usize> = None;
-                for (j, &rv) in right_vals.iter().enumerate() {
-                    if !rv.is_nan() && rv <= lv {
-                        best = Some(j);
-                    }
+        AsofDirection::Forward => {
+            let mut j = 0usize;
+            for &lv in &left_vals {
+                if lv.is_nan() {
+                    right_matches.push(None);
+                    continue;
                 }
-                best
-            }
-            AsofDirection::Forward => {
-                // First right row where right_val >= left_val
-                right_vals
-                    .iter()
-                    .enumerate()
-                    .find(|&(_, rv)| !rv.is_nan() && *rv >= lv)
-                    .map(|(j, _)| j)
-            }
-            AsofDirection::Nearest => {
-                // Right row with smallest |right_val - left_val|
-                let mut best: Option<(usize, f64)> = None;
-                for (j, &rv) in right_vals.iter().enumerate() {
-                    if rv.is_nan() {
-                        continue;
-                    }
-                    let dist = (rv - lv).abs();
-                    if best.is_none() || dist < best.unwrap().1 {
-                        best = Some((j, dist));
-                    }
+                while j < right_non_nan_values.len() && right_non_nan_values[j] < lv {
+                    j += 1;
                 }
-                best.map(|(j, _)| j)
+                if j < right_non_nan_values.len() {
+                    right_matches.push(Some(right_non_nan_positions[j]));
+                } else {
+                    right_matches.push(None);
+                }
             }
-        };
-
-        right_matches.push(matched);
+        }
+        AsofDirection::Nearest => {
+            for &lv in &left_vals {
+                if lv.is_nan() {
+                    right_matches.push(None);
+                    continue;
+                }
+                if right_non_nan_values.is_empty() {
+                    right_matches.push(None);
+                    continue;
+                }
+                let pos = right_non_nan_values.partition_point(|rv| *rv < lv);
+                let chosen = if pos == 0 {
+                    0
+                } else if pos >= right_non_nan_values.len() {
+                    right_non_nan_values.len() - 1
+                } else {
+                    let lower = pos - 1;
+                    let upper = pos;
+                    let lower_dist = (right_non_nan_values[lower] - lv).abs();
+                    let upper_dist = (right_non_nan_values[upper] - lv).abs();
+                    if upper_dist < lower_dist {
+                        upper
+                    } else {
+                        lower
+                    }
+                };
+                right_matches.push(Some(right_non_nan_positions[chosen]));
+            }
+        }
     }
 
     // Build output columns
@@ -3344,6 +3403,105 @@ mod tests {
 
         let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn merge_asof_unsorted_left_errors() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(1)]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "quote",
+                    vec![Scalar::Float64(100.0), Scalar::Float64(200.0)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
+            .expect_err("unsorted left should error");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(msg))
+                if msg.contains("sorted")
+        ));
+    }
+
+    #[test]
+    fn merge_asof_unsorted_right_errors() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(1)]),
+                (
+                    "quote",
+                    vec![Scalar::Float64(200.0), Scalar::Float64(100.0)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
+            .expect_err("unsorted right should error");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(msg))
+                if msg.contains("sorted")
+        ));
+    }
+
+    #[test]
+    fn merge_asof_non_numeric_key_errors() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Utf8("a".into())]),
+                ("val", vec![Scalar::Float64(10.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Utf8("b".into())]),
+                ("quote", vec![Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+
+        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
+            .expect_err("non-numeric key should error");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(msg))
+                if msg.contains("numeric")
+        ));
     }
 
     #[test]

@@ -476,6 +476,8 @@ pub enum ComparisonOp {
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
     LengthMismatch { left: usize, right: usize },
+    #[error("mask must be Bool dtype; found {dtype:?}")]
+    InvalidMaskType { dtype: DType },
     #[error(transparent)]
     Type(#[from] TypeError),
 }
@@ -785,6 +787,9 @@ impl Column {
     /// The mask must be a `Bool`-typed column of the same length.
     /// Missing values in the mask are treated as `false` (not selected).
     pub fn filter_by_mask(&self, mask: &Self) -> Result<Self, ColumnError> {
+        if mask.dtype != DType::Bool {
+            return Err(ColumnError::InvalidMaskType { dtype: mask.dtype });
+        }
         if self.len() != mask.len() {
             return Err(ColumnError::LengthMismatch {
                 left: self.len(),
@@ -1858,6 +1863,15 @@ mod tests {
             let result = col.filter_by_mask(&mask).expect("filter");
             assert_eq!(result.len(), 1);
             assert_eq!(result.values()[0], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn filter_by_mask_rejects_non_boolean_mask() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let mask = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(0)]).expect("mask");
+
+            let err = col.filter_by_mask(&mask).expect_err("non-bool mask");
+            assert!(matches!(err, ColumnError::InvalidMaskType { .. }));
         }
 
         #[test]

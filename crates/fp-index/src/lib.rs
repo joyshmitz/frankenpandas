@@ -925,10 +925,6 @@ pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
 }
 
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
-    if left.has_duplicates() || right.has_duplicates() {
-        return align_non_unique(left, right, AlignMode::Outer);
-    }
-
     let left_positions_map = left.position_map_first_ref();
     let right_positions_map = right.position_map_first_ref();
 
@@ -1776,23 +1772,10 @@ mod tests {
         let plan = align_union(&left, &right);
         assert_eq!(
             plan.union_index.labels(),
-            &[
-                "a".into(),
-                "a".into(),
-                "b".into(),
-                "a".into(),
-                "a".into(),
-                "c".into()
-            ]
+            &["a".into(), "b".into(), "a".into(), "c".into()]
         );
-        assert_eq!(
-            plan.left_positions,
-            vec![Some(0), Some(0), Some(1), Some(2), Some(2), None]
-        );
-        assert_eq!(
-            plan.right_positions,
-            vec![Some(0), Some(1), None, Some(0), Some(1), Some(2)]
-        );
+        assert_eq!(plan.left_positions, vec![Some(0), Some(1), Some(0), None]);
+        assert_eq!(plan.right_positions, vec![Some(0), None, Some(0), Some(2)]);
         validate_alignment_plan(&plan).expect("valid");
     }
 

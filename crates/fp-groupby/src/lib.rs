@@ -2206,9 +2206,13 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         // a: std([10, 30]) = sqrt(((10-20)^2 + (30-20)^2) / 1) = sqrt(200) ≈ 14.142
         // b: std([20, 40]) = sqrt(((20-30)^2 + (40-30)^2) / 1) = sqrt(200) ≈ 14.142
+        assert!(
+            matches!(out.values()[0], Scalar::Float64(_)),
+            "expected Float64"
+        );
         let a_std = match &out.values()[0] {
             Scalar::Float64(v) => *v,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         assert!((a_std - 200.0_f64.sqrt()).abs() < 1e-10, "a std={a_std}");
         assert_eq!(out.name(), "std");

@@ -1351,13 +1351,8 @@ impl Series {
     /// The mask must be a Bool-typed Series. Indexes are aligned before
     /// applying the mask. Missing values in the mask are treated as `False`.
     pub fn filter(&self, mask: &Self) -> Result<Self, FrameError> {
-        // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
-        let plan = align(&self.index, &mask.index, AlignMode::Left);
-        validate_alignment_plan(&plan)?;
-
-        let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
-        let aligned_mask = mask.column.reindex_by_positions(&plan.right_positions)?;
-        if let Some(offending) = aligned_mask
+        if let Some(offending) = mask
+            .column
             .values()
             .iter()
             .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
@@ -1367,6 +1362,34 @@ impl Series {
                 offending.dtype()
             )));
         }
+
+        if self.index.has_duplicates() || mask.index.has_duplicates() {
+            let data_first = self.index.position_map_first();
+            let mask_first = mask.index.position_map_first();
+
+            let mut new_labels = Vec::new();
+            let mut new_values = Vec::new();
+
+            for label in self.index.labels() {
+                let Some(&mask_pos) = mask_first.get(label) else {
+                    continue;
+                };
+                if matches!(mask.column.values()[mask_pos], Scalar::Bool(true)) {
+                    let data_pos = data_first.get(label).copied().unwrap_or(mask_pos);
+                    new_labels.push(label.clone());
+                    new_values.push(self.column.values()[data_pos].clone());
+                }
+            }
+
+            return Self::from_values(self.name.clone(), new_labels, new_values);
+        }
+
+        // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
+        let plan = align(&self.index, &mask.index, AlignMode::Left);
+        validate_alignment_plan(&plan)?;
+
+        let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
+        let aligned_mask = mask.column.reindex_by_positions(&plan.right_positions)?;
 
         // Collect indices where mask is True.
         let mut new_labels = Vec::new();

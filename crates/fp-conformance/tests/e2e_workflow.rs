@@ -102,11 +102,13 @@ fn e2e_step2_to_datetime() {
     assert_eq!(parsed.len(), 8);
 
     // All dates should be normalized to "YYYY-MM-DD 00:00:00" format.
+    assert!(
+        matches!(parsed.values()[0], Scalar::Utf8(_)),
+        "expected Utf8 datetime string"
+    );
     if let Scalar::Utf8(s) = &parsed.values()[0] {
         assert!(s.starts_with("2024-01-15"), "expected 2024-01-15, got: {s}");
         assert!(s.contains("00:00:00"), "expected time component, got: {s}");
-    } else {
-        panic!("expected Utf8 datetime string");
     }
 }
 

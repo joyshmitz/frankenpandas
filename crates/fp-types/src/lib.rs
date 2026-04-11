@@ -588,10 +588,9 @@ mod tests {
             Scalar::Float64(9.0),
         ];
         let var = super::nanvar(&vals, 0);
+        assert!(matches!(var, Scalar::Float64(_)), "expected Float64");
         if let Scalar::Float64(v) = var {
             assert!((v - 4.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
         }
     }
 
@@ -608,10 +607,9 @@ mod tests {
             Scalar::Float64(9.0),
         ];
         let var = super::nanvar(&vals, 1);
+        assert!(matches!(var, Scalar::Float64(_)), "expected Float64");
         if let Scalar::Float64(v) = var {
             assert!((v - 32.0 / 7.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
         }
     }
 
@@ -634,10 +632,9 @@ mod tests {
             Scalar::Float64(9.0),
         ];
         let std = super::nanstd(&vals, 0);
+        assert!(matches!(std, Scalar::Float64(_)), "expected Float64");
         if let Scalar::Float64(v) = std {
             assert!((v - 2.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
         }
     }
 

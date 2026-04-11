@@ -182,8 +182,11 @@ fn parse_scalar(field: &str) -> Scalar {
     if let Ok(value) = trimmed.parse::<f64>() {
         return Scalar::Float64(value);
     }
-    if let Ok(value) = trimmed.parse::<bool>() {
-        return Scalar::Bool(value);
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Scalar::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Scalar::Bool(false);
     }
 
     Scalar::Utf8(trimmed.to_owned())
@@ -216,8 +219,11 @@ fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
     if let Ok(value) = trimmed.parse::<f64>() {
         return Scalar::Float64(value);
     }
-    if let Ok(value) = trimmed.parse::<bool>() {
-        return Scalar::Bool(value);
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Scalar::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Scalar::Bool(false);
     }
     Scalar::Utf8(trimmed.to_owned())
 }
@@ -2105,6 +2111,17 @@ mod tests {
         let out = write_csv_string(&frame).expect("write");
         assert!(out.contains("id,value"));
         assert!(out.contains("3,3.5"));
+    }
+
+    #[test]
+    fn csv_parses_boolean_true_false_case_insensitive() {
+        let input = "flag\nTrue\nFALSE\ntrue\nfalse\n";
+        let frame = read_csv_str(input).expect("read");
+        let flag_col = frame.column("flag").expect("flag");
+        assert_eq!(flag_col.values()[0], Scalar::Bool(true));
+        assert_eq!(flag_col.values()[1], Scalar::Bool(false));
+        assert_eq!(flag_col.values()[2], Scalar::Bool(true));
+        assert_eq!(flag_col.values()[3], Scalar::Bool(false));
     }
 
     #[test]

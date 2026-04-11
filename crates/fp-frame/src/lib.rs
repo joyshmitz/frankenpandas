@@ -161,7 +161,7 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
 }
 
 fn csv_escape(value: &str, sep: char) -> String {
-    if value.contains(sep) || value.contains('"') || value.contains('\n') {
+    if value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r') {
         let mut escaped = String::with_capacity(value.len() + 2);
         escaped.push('"');
         for ch in value.chars() {
@@ -16260,6 +16260,7 @@ impl DataFrame {
         };
 
         let mut out = String::new();
+        let na_rep_escaped = csv_escape(na_rep, sep);
 
         // Header
         if include_index {
@@ -16289,7 +16290,7 @@ impl DataFrame {
                 }
                 let val = &self.columns[*name].values()[row_idx];
                 match val {
-                    Scalar::Null(_) => out.push_str(na_rep),
+                    Scalar::Null(_) => out.push_str(&na_rep_escaped),
                     Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
@@ -38504,6 +38505,18 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_escapes_carriage_returns() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("line\rbreak".to_owned())],
+        )
+        .unwrap();
+        let csv = s.to_csv(',', false);
+        assert!(csv.contains("\"line\rbreak\""));
+    }
+
+    #[test]
     fn series_to_json_split() {
         let s = Series::from_values(
             "x",
@@ -41714,6 +41727,21 @@ mod tests {
         let csv = df.to_csv_options(',', false, "NA", None).unwrap();
         assert!(csv.contains("NA"));
         assert!(csv.contains("1,2"));
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_na_rep_escapes_delimiters() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_options(',', false, "NA,VAL", None).unwrap();
+        assert!(csv.contains("\"NA,VAL\",1"));
     }
 
     #[test]

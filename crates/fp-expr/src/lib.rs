@@ -423,7 +423,6 @@ fn evaluate_comparison(
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
     match (left, right) {
-        (Expr::Literal { .. }, Expr::Literal { .. }) => Err(ExprError::UnanchoredLiteral),
         (Expr::Literal { value }, right_expr) => {
             let rhs = evaluate(right_expr, context, policy, ledger)?;
             rhs.compare_scalar(value, reverse_comparison_op(op))
@@ -1318,6 +1317,38 @@ mod tests {
     }
 
     #[test]
+    fn expression_compare_supports_scalar_scalar_with_anchor() {
+        let anchor = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .expect("anchor");
+
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(anchor);
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut ledger = EvidenceLedger::new();
+        let out = evaluate(
+            &Expr::Compare {
+                left: Box::new(Expr::Literal {
+                    value: Scalar::Int64(1),
+                }),
+                right: Box::new(Expr::Literal {
+                    value: Scalar::Int64(0),
+                }),
+                op: ComparisonOp::Gt,
+            },
+            &ctx,
+            &policy,
+            &mut ledger,
+        )
+        .expect("scalar > scalar");
+        assert_eq!(out.values(), &[Scalar::Bool(true), Scalar::Bool(true)]);
+    }
+
+    #[test]
     fn expression_logical_ops_support_boolean_masks() {
         let a = Series::from_values(
             "a",
@@ -2089,12 +2120,13 @@ mod tests {
     #[test]
     fn parse_and_or_expression() {
         let expr = super::parse_expr("a > 1 and b < 2").unwrap();
-        match expr {
-            Expr::And { left, right } => {
-                assert!(matches!(*left, Expr::Compare { .. }));
-                assert!(matches!(*right, Expr::Compare { .. }));
-            }
-            other => panic!("expected And, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::And { .. }),
+            "expected And, got {expr:?}"
+        );
+        if let Expr::And { left, right } = expr {
+            assert!(matches!(*left, Expr::Compare { .. }));
+            assert!(matches!(*right, Expr::Compare { .. }));
         }
     }
 
@@ -2108,94 +2140,100 @@ mod tests {
     fn parse_arithmetic() {
         let expr = super::parse_expr("a + b * 2").unwrap();
         // Should parse as a + (b * 2) due to precedence
-        match expr {
-            Expr::Add { left, right } => {
-                assert!(matches!(*left, Expr::Series { .. }));
-                assert!(matches!(*right, Expr::Mul { .. }));
-            }
-            other => panic!("expected Add, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Add { .. }),
+            "expected Add, got {expr:?}"
+        );
+        if let Expr::Add { left, right } = expr {
+            assert!(matches!(*left, Expr::Series { .. }));
+            assert!(matches!(*right, Expr::Mul { .. }));
         }
     }
 
     #[test]
     fn parse_parentheses() {
         let expr = super::parse_expr("(a + b) * 2").unwrap();
-        match expr {
-            Expr::Mul { left, right } => {
-                assert!(matches!(*left, Expr::Add { .. }));
-                assert!(matches!(
-                    *right,
-                    Expr::Literal {
-                        value: Scalar::Int64(2)
-                    }
-                ));
-            }
-            other => panic!("expected Mul, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Mul { .. }),
+            "expected Mul, got {expr:?}"
+        );
+        if let Expr::Mul { left, right } = expr {
+            assert!(matches!(*left, Expr::Add { .. }));
+            assert!(matches!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Int64(2)
+                }
+            ));
         }
     }
 
     #[test]
     fn parse_string_literal() {
         let expr = super::parse_expr("name == 'alice'").unwrap();
-        match expr {
-            Expr::Compare { right, op, .. } => {
-                assert_eq!(op, ComparisonOp::Eq);
-                assert_eq!(
-                    *right,
-                    Expr::Literal {
-                        value: Scalar::Utf8("alice".into())
-                    }
-                );
-            }
-            other => panic!("expected Compare, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, op, .. } = expr {
+            assert_eq!(op, ComparisonOp::Eq);
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Utf8("alice".into())
+                }
+            );
         }
     }
 
     #[test]
     fn parse_float_literal() {
         let expr = super::parse_expr("x > 4.56").unwrap();
-        match expr {
-            Expr::Compare { right, .. } => {
-                assert_eq!(
-                    *right,
-                    Expr::Literal {
-                        value: Scalar::Float64(4.56)
-                    }
-                );
-            }
-            other => panic!("expected Compare, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Float64(4.56)
+                }
+            );
         }
     }
 
     #[test]
     fn parse_negative_literal() {
         let expr = super::parse_expr("x > -5").unwrap();
-        match expr {
-            Expr::Compare { right, .. } => {
-                assert_eq!(
-                    *right,
-                    Expr::Literal {
-                        value: Scalar::Int64(-5)
-                    }
-                );
-            }
-            other => panic!("expected Compare, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Int64(-5)
+                }
+            );
         }
     }
 
     #[test]
     fn parse_local_reference() {
         let expr = super::parse_expr("x > @threshold").unwrap();
-        match expr {
-            Expr::Compare { right, .. } => {
-                assert_eq!(
-                    *right,
-                    Expr::Local {
-                        name: "threshold".into(),
-                    }
-                );
-            }
-            other => panic!("expected Compare, got {other:?}"),
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Local {
+                    name: "threshold".into(),
+                }
+            );
         }
     }
 

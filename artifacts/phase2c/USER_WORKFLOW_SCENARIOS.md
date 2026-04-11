@@ -223,14 +223,14 @@ Each scenario specifies:
 **Operations**: `join_series` (left)
 **Packets**: FP-P2C-004
 
-**Story**: User left-joins a master list with a lookup table. Unmatched rows get NaN.
+**Story**: User left-joins a primary list with a lookup table. Unmatched rows get NaN.
 
 **Golden Journey**:
 ```
-1. master = Series::from_values("ids", [1, 2, 3, 4], [A, B, C, D])
+1. primary = Series::from_values("ids", [1, 2, 3, 4], [A, B, C, D])
    lookup = Series::from_values("prices", [1, 3], [9.99, 29.99])
 
-2. join_series(&master, &lookup, JoinType::Left)
+2. join_series(&primary, &lookup, JoinType::Left)
    -> Index: [1, 2, 3, 4] (all left labels preserved)
    -> Left values: [A, B, C, D]
    -> Right values: [9.99, NaN, 29.99, NaN]

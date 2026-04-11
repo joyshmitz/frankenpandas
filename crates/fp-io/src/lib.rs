@@ -653,6 +653,8 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
 
             let mut index_labels = Vec::with_capacity(obj.len());
             let mut columns: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+            let mut column_order = Vec::new();
+            let mut seen_columns = std::collections::HashSet::new();
 
             for (row_label, row_data) in obj {
                 let row_obj = row_data.as_object().ok_or_else(|| {
@@ -673,6 +675,9 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 index_labels.push(parsed_label);
 
                 for (col_name, value) in row_obj {
+                    if seen_columns.insert(col_name.clone()) {
+                        column_order.push(col_name.clone());
+                    }
                     let scalar = json_value_to_scalar(value);
                     if let Some(values) = columns.get_mut(col_name) {
                         values[row_idx] = scalar;
@@ -688,7 +693,11 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             for (name, vals) in columns {
                 out.insert(name, Column::from_values(vals)?);
             }
-            Ok(DataFrame::new(Index::new(index_labels), out)?)
+            Ok(DataFrame::new_with_column_order(
+                Index::new(index_labels),
+                out,
+                column_order,
+            )?)
         }
         JsonOrient::Split => {
             let obj = parsed
@@ -2665,6 +2674,18 @@ mod tests {
         let frame2 = read_json_str(&output, JsonOrient::Index).expect("re-read");
         assert_eq!(frame2.index().labels(), frame.index().labels());
         assert_eq!(frame2.column("age").unwrap().values()[0], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn json_index_preserves_column_order() {
+        let input = r#"{"r1":{"b":1,"a":2},"r2":{"c":3}}"#;
+        let frame = read_json_str(input, JsonOrient::Index).expect("parse");
+        let order: Vec<&str> = frame
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "a", "c"]);
     }
 
     #[test]

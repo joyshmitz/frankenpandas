@@ -1211,12 +1211,23 @@ pub fn merge_asof(
 
     // Build output columns
     let left_col_names: Vec<String> = left.column_names().iter().map(|s| s.to_string()).collect();
-    let right_col_names: Vec<String> = right
-        .column_names()
+    let right_col_names_all: Vec<String> =
+        right.column_names().iter().map(|s| s.to_string()).collect();
+    let right_col_names: Vec<String> = right_col_names_all
         .iter()
         .filter(|c| c.as_str() != on)
-        .map(|s| s.to_string())
+        .cloned()
         .collect();
+
+    let left_name_set: HashSet<&String> = left_col_names.iter().collect();
+    let right_name_set: HashSet<&String> = right_col_names_all.iter().collect();
+    let mut excluded_names = HashSet::new();
+    excluded_names.insert(on);
+    let overlap_names =
+        collect_overlapping_column_names(&left_name_set, &right_name_set, &excluded_names);
+    let overlap_set: HashSet<String> = overlap_names.iter().cloned().collect();
+    let suffixes = ResolvedMergeSuffixes::default();
+    ensure_merge_suffixes_for_overlaps(&overlap_names, &suffixes)?;
 
     let n_out = left_vals.len();
     let mut out_columns = std::collections::BTreeMap::new();
@@ -1228,7 +1239,12 @@ pub fn merge_asof(
                 "merge_asof: left column '{col_name}' not found"
             )))
         })?;
-        out_columns.insert(col_name.clone(), col.clone());
+        let output_name = if overlap_set.contains(col_name) {
+            apply_merge_suffix(col_name, suffixes.left.as_deref())
+        } else {
+            col_name.clone()
+        };
+        insert_merged_output_column(&mut out_columns, output_name, col.clone())?;
     }
 
     // Right columns (matched or null)
@@ -1238,8 +1254,8 @@ pub fn merge_asof(
                 "merge_asof: right column '{col_name}' not found"
             )))
         })?;
-        let suffix_name = if left_col_names.contains(col_name) {
-            format!("{col_name}_y")
+        let output_name = if overlap_set.contains(col_name) {
+            apply_merge_suffix(col_name, suffixes.right.as_deref())
         } else {
             col_name.clone()
         };
@@ -1251,7 +1267,7 @@ pub fn merge_asof(
                 _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
             }
         }
-        out_columns.insert(suffix_name, Column::from_values(vals)?);
+        insert_merged_output_column(&mut out_columns, output_name, Column::from_values(vals)?)?;
     }
 
     Ok(MergedDataFrame {
@@ -3362,6 +3378,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_asof_overlapping_columns_apply_suffixes() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "shared", "left_only"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("shared", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("left_only", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "shared", "right_only"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("shared", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+                ("right_only", vec![Scalar::Int64(9), Scalar::Int64(8)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        let shared_left = result.columns.get("shared_left").unwrap().values();
+        let shared_right = result.columns.get("shared_right").unwrap().values();
+
+        assert_eq!(shared_left[0], Scalar::Int64(10));
+        assert_eq!(shared_left[1], Scalar::Int64(20));
+        assert_eq!(shared_right[0], Scalar::Int64(100));
+        assert_eq!(shared_right[1], Scalar::Int64(200));
+    }
+
+    #[test]
     fn merge_asof_duplicate_column_gets_suffix() {
         use super::AsofDirection;
 
@@ -3385,15 +3435,15 @@ mod tests {
         .unwrap();
 
         let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
-        // Right "val" should get "_y" suffix.
-        assert!(result.columns.contains_key("val"));
-        assert!(result.columns.contains_key("val_y"));
+        // Overlapping columns should receive default merge suffixes.
+        assert!(result.columns.contains_key("val_left"));
+        assert!(result.columns.contains_key("val_right"));
         assert_eq!(
-            result.columns.get("val").unwrap().values()[0],
+            result.columns.get("val_left").unwrap().values()[0],
             Scalar::Float64(10.0)
         );
         assert_eq!(
-            result.columns.get("val_y").unwrap().values()[0],
+            result.columns.get("val_right").unwrap().values()[0],
             Scalar::Float64(99.0)
         );
     }

@@ -415,18 +415,14 @@ fn vectorized_binary_i64(
     right_validity: &ValidityMask,
     op: ArithmeticOp,
 ) -> Option<(Vec<i64>, ValidityMask)> {
-    // Division always promotes to Float64 in pandas semantics.
-    if matches!(op, ArithmeticOp::Div) {
-        return None;
-    }
-
     let combined = left_validity.and_mask(right_validity);
 
     let apply: fn(i64, i64) -> i64 = match op {
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
         ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
-        ArithmeticOp::Div => unreachable!(),
+        // Division always promotes to Float64 in pandas semantics.
+        ArithmeticOp::Div => return None,
     };
 
     let out: Vec<i64> = left
@@ -1660,11 +1656,12 @@ mod tests {
             let gt5 = crack.filter_gt(&col, 5.0);
             let mut gt5_vals: Vec<i64> = gt5
                 .iter()
-                .map(|&i| match &col.values()[i] {
-                    Scalar::Int64(v) => *v,
-                    _ => panic!("expected Int64"),
+                .filter_map(|&i| match &col.values()[i] {
+                    Scalar::Int64(v) => Some(*v),
+                    _ => None,
                 })
                 .collect();
+            assert_eq!(gt5_vals.len(), gt5.len(), "expected Int64 values");
             gt5_vals.sort_unstable();
             assert_eq!(gt5_vals, vec![8, 10]);
         }

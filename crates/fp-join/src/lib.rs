@@ -822,7 +822,9 @@ pub fn merge_dataframes_on_with_options(
             }
         }
         JoinType::Cross => {
-            unreachable!("cross join handled by merge_dataframes_cross");
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                "cross join must be handled by merge_dataframes_cross".to_owned(),
+            )));
         }
     }
 

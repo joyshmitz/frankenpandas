@@ -926,9 +926,20 @@ impl Series {
     /// Align two Series by their indexes, returning a pair aligned to a common index.
     ///
     /// Matches `pd.Series.align(other, join='inner'|'left'|'right'|'outer')`.
-    /// Uses first-match semantics for duplicate labels (same as arithmetic ops).
+    /// Uses duplicate-aware alignment for outer joins when duplicate labels exist.
     pub fn align(&self, other: &Self, mode: AlignMode) -> Result<(Self, Self), FrameError> {
-        let plan = align(&self.index, &other.index, mode);
+        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        let plan = if matches!(mode, AlignMode::Outer) && has_duplicate_labels {
+            let (union_index, left_positions, right_positions) =
+                align_union_duplicate_aware(&self.index, &other.index);
+            AlignmentPlan {
+                union_index,
+                left_positions,
+                right_positions,
+            }
+        } else {
+            align(&self.index, &other.index, mode)
+        };
         validate_alignment_plan(&plan)?;
 
         let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -23679,6 +23690,47 @@ mod tests {
         assert!(ra.values()[0].is_missing());
         assert_eq!(ra.values()[1], Scalar::Int64(200));
         assert_eq!(ra.values()[2], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn series_align_outer_duplicate_labels_cartesian() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Outer).unwrap();
+        assert_eq!(la.len(), 4);
+        assert_eq!(
+            la.index().labels(),
+            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
+        );
+        assert_eq!(
+            la.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20)
+            ]
+        );
+        assert_eq!(
+            ra.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2)
+            ]
+        );
     }
 
     #[test]

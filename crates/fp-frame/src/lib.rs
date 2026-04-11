@@ -160,6 +160,23 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+fn csv_escape(value: &str, sep: char) -> String {
+    if value.contains(sep) || value.contains('"') || value.contains('\n') {
+        let mut escaped = String::with_capacity(value.len() + 2);
+        escaped.push('"');
+        for ch in value.chars() {
+            if ch == '"' {
+                escaped.push('"');
+            }
+            escaped.push(ch);
+        }
+        escaped.push('"');
+        escaped
+    } else {
+        value.to_owned()
+    }
+}
+
 fn scalar_to_json_value(value: &Scalar) -> Value {
     match value {
         Scalar::Null(_) => Value::Null,
@@ -4059,33 +4076,33 @@ impl Series {
     ///
     /// Matches `pd.Series.to_csv()`.
     pub fn to_csv(&self, sep: char, include_index: bool) -> String {
-        fn format_scalar(val: &Scalar) -> String {
+        fn format_scalar(val: &Scalar, sep: char) -> String {
             match val {
                 Scalar::Null(_) => String::new(),
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 Scalar::Float64(v) => v.to_string(),
-                Scalar::Utf8(s) => s.clone(),
+                Scalar::Utf8(s) => csv_escape(s, sep),
             }
         }
 
         let mut out = String::new();
         // Header
         if include_index {
-            out.push_str(&format!("{sep}{}\n", self.name));
+            out.push_str(&format!("{sep}{}\n", csv_escape(&self.name, sep)));
         } else {
-            out.push_str(&format!("{}\n", self.name));
+            out.push_str(&format!("{}\n", csv_escape(&self.name, sep)));
         }
         // Data
         for (label, val) in self.index.labels().iter().zip(self.column.values()) {
             if include_index {
                 let idx = match label {
                     IndexLabel::Int64(v) => v.to_string(),
-                    IndexLabel::Utf8(s) => s.clone(),
+                    IndexLabel::Utf8(s) => csv_escape(s, sep),
                 };
-                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val)));
+                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep)));
             } else {
-                out.push_str(&format!("{}\n", format_scalar(val)));
+                out.push_str(&format!("{}\n", format_scalar(val, sep)));
             }
         }
         out
@@ -4098,45 +4115,34 @@ impl Series {
     /// - `"records"` / `"values"`: `[val1, val2, ...]`
     /// - `"index"`: `{"label1": val1, "label2": val2, ...}`
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
-        fn json_val(val: &Scalar) -> String {
-            match val {
-                Scalar::Null(_) => "null".to_string(),
-                Scalar::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-                Scalar::Int64(v) => v.to_string(),
-                Scalar::Float64(v) => {
-                    if v.is_nan() {
-                        "null".to_string()
-                    } else {
-                        v.to_string()
-                    }
-                }
-                Scalar::Utf8(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-            }
-        }
-
-        fn json_label(lbl: &IndexLabel) -> String {
-            match lbl {
-                IndexLabel::Int64(v) => format!("\"{v}\""),
-                IndexLabel::Utf8(s) => {
-                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-                }
-            }
-        }
-
         match orient {
             "split" => {
-                let idx: Vec<String> = self.index.labels().iter().map(json_label).collect();
-                let data: Vec<String> = self.column.values().iter().map(json_val).collect();
-                Ok(format!(
-                    "{{\"name\":\"{}\",\"index\":[{}],\"data\":[{}]}}",
-                    self.name,
-                    idx.join(","),
-                    data.join(","),
-                ))
+                let index = self
+                    .index
+                    .labels()
+                    .iter()
+                    .map(index_label_to_json_value)
+                    .collect();
+                let data = self
+                    .column
+                    .values()
+                    .iter()
+                    .map(scalar_to_json_value)
+                    .collect();
+                serialize_json_value(&Value::Object(Map::from_iter([
+                    ("name".to_owned(), Value::String(self.name.clone())),
+                    ("index".to_owned(), Value::Array(index)),
+                    ("data".to_owned(), Value::Array(data)),
+                ])))
             }
             "records" | "values" => {
-                let vals: Vec<String> = self.column.values().iter().map(json_val).collect();
-                Ok(format!("[{}]", vals.join(",")))
+                let vals = self
+                    .column
+                    .values()
+                    .iter()
+                    .map(scalar_to_json_value)
+                    .collect();
+                serialize_json_value(&Value::Array(vals))
             }
             "index" => {
                 if self.index.has_duplicates() {
@@ -4144,14 +4150,11 @@ impl Series {
                         "to_json orient 'index' does not support duplicate index labels".to_owned(),
                     ));
                 }
-                let pairs: Vec<String> = self
-                    .index
-                    .labels()
-                    .iter()
-                    .zip(self.column.values())
-                    .map(|(lbl, val)| format!("{}:{}", json_label(lbl), json_val(val)))
-                    .collect();
-                Ok(format!("{{{}}}", pairs.join(",")))
+                let mut entries = Map::new();
+                for (label, value) in self.index.labels().iter().zip(self.column.values()) {
+                    entries.insert(index_label_to_json_key(label), scalar_to_json_value(value));
+                }
+                serialize_json_value(&Value::Object(entries))
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "unknown orient: {orient}"
@@ -16198,7 +16201,7 @@ impl DataFrame {
             if i > 0 {
                 out.push(sep);
             }
-            out.push_str(name);
+            out.push_str(&csv_escape(name, sep));
         }
         out.push('\n');
 
@@ -16207,7 +16210,7 @@ impl DataFrame {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => out.push_str(s),
+                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                 }
                 out.push(sep);
             }
@@ -16221,15 +16224,7 @@ impl DataFrame {
                     Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
-                    Scalar::Utf8(s) => {
-                        if s.contains(sep) || s.contains('"') || s.contains('\n') {
-                            out.push('"');
-                            out.push_str(&s.replace('"', "\"\""));
-                            out.push('"');
-                        } else {
-                            out.push_str(s);
-                        }
-                    }
+                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                 }
             }
             out.push('\n');
@@ -16275,7 +16270,7 @@ impl DataFrame {
             if i > 0 {
                 out.push(sep);
             }
-            out.push_str(name);
+            out.push_str(&csv_escape(name, sep));
         }
         out.push('\n');
 
@@ -16284,7 +16279,7 @@ impl DataFrame {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => out.push_str(s),
+                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                 }
                 out.push(sep);
             }
@@ -16298,15 +16293,7 @@ impl DataFrame {
                     Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
-                    Scalar::Utf8(s) => {
-                        if s.contains(sep) || s.contains('"') || s.contains('\n') {
-                            out.push('"');
-                            out.push_str(&s.replace('"', "\"\""));
-                            out.push('"');
-                        } else {
-                            out.push_str(s);
-                        }
-                    }
+                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                 }
             }
             out.push('\n');
@@ -34367,6 +34354,19 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_escapes_headers_and_index() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("a,b", vec![Scalar::Utf8("x,y".to_owned())])],
+            vec!["id,1".into()],
+        )
+        .unwrap();
+
+        let csv = df.to_csv(',', true);
+        assert!(csv.starts_with("index,\"a,b\"\n"));
+        assert!(csv.contains("\"id,1\",\"x,y\"\n"));
+    }
+
+    #[test]
     fn dataframe_to_json_records() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -38491,6 +38491,19 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_escapes_fields() {
+        let s = Series::from_values(
+            "name,with,comma",
+            vec!["idx,1".into()],
+            vec![Scalar::Utf8("val,1".to_owned())],
+        )
+        .unwrap();
+        let csv = s.to_csv(',', true);
+        assert!(csv.starts_with(",\"name,with,comma\"\n"));
+        assert!(csv.contains("\"idx,1\",\"val,1\"\n"));
+    }
+
+    #[test]
     fn series_to_json_split() {
         let s = Series::from_values(
             "x",
@@ -38537,6 +38550,32 @@ mod tests {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(3.125)]).unwrap();
         let json = s.to_json("records").unwrap();
         assert!(json.contains("3.125"));
+    }
+
+    #[test]
+    fn series_to_json_records_escapes_strings() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("line\n\"quote\"".to_owned())],
+        )
+        .unwrap();
+        let json = s.to_json("records").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!(["line\n\"quote\""]));
+    }
+
+    #[test]
+    fn series_to_json_records_infinite_becomes_null() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Float64(f64::INFINITY)],
+        )
+        .unwrap();
+        let json = s.to_json("records").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!([null]));
     }
 
     // ── DataFrame scalar arithmetic ──

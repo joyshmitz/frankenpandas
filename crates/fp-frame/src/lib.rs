@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
 use chrono::{
@@ -146,7 +146,7 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
     }
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
 enum ScalarKey<'a> {
     Null(NullKind),
     Bool(bool),
@@ -154,6 +154,9 @@ enum ScalarKey<'a> {
     FloatBits(u64),
     Utf8(&'a str),
 }
+
+type GroupKey<'a> = Vec<ScalarKey<'a>>;
+type GroupMap<'a> = HashMap<GroupKey<'a>, Vec<usize>>;
 
 fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
     match value {
@@ -178,6 +181,89 @@ fn scalar_key_skip_missing(value: &Scalar) -> Option<ScalarKey<'_>> {
     } else {
         Some(scalar_key_allow_missing(value))
     }
+}
+
+fn null_kind_rank(kind: NullKind) -> u8 {
+    match kind {
+        NullKind::Null => 0,
+        NullKind::NaN => 1,
+        NullKind::NaT => 2,
+    }
+}
+
+fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
+    use ScalarKey::{Bool, FloatBits, Int64, Null, Utf8};
+    match (a, b) {
+        (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
+        (Null(_), _) => Ordering::Greater,
+        (_, Null(_)) => Ordering::Less,
+        (Bool(a_val), Bool(b_val)) => a_val.cmp(b_val),
+        (Int64(a_val), Int64(b_val)) => a_val.cmp(b_val),
+        (FloatBits(a_bits), FloatBits(b_bits)) => {
+            f64::from_bits(*a_bits).total_cmp(&f64::from_bits(*b_bits))
+        }
+        (Utf8(a_val), Utf8(b_val)) => a_val.cmp(b_val),
+        (Bool(a_val), Int64(b_val)) => {
+            let ord = i64::from(*a_val).cmp(b_val);
+            if ord == Ordering::Equal {
+                Ordering::Less
+            } else {
+                ord
+            }
+        }
+        (Int64(a_val), Bool(b_val)) => {
+            let ord = a_val.cmp(&i64::from(*b_val));
+            if ord == Ordering::Equal {
+                Ordering::Greater
+            } else {
+                ord
+            }
+        }
+        (Bool(a_val), FloatBits(b_bits)) => {
+            let ord = (*a_val as i64 as f64).total_cmp(&f64::from_bits(*b_bits));
+            if ord == Ordering::Equal {
+                Ordering::Less
+            } else {
+                ord
+            }
+        }
+        (FloatBits(a_bits), Bool(b_val)) => {
+            let ord = f64::from_bits(*a_bits).total_cmp(&(*b_val as i64 as f64));
+            if ord == Ordering::Equal {
+                Ordering::Greater
+            } else {
+                ord
+            }
+        }
+        (Int64(a_val), FloatBits(b_bits)) => {
+            let ord = (*a_val as f64).total_cmp(&f64::from_bits(*b_bits));
+            if ord == Ordering::Equal {
+                Ordering::Less
+            } else {
+                ord
+            }
+        }
+        (FloatBits(a_bits), Int64(b_val)) => {
+            let ord = f64::from_bits(*a_bits).total_cmp(&(*b_val as f64));
+            if ord == Ordering::Equal {
+                Ordering::Greater
+            } else {
+                ord
+            }
+        }
+        (Utf8(_), _) => Ordering::Greater,
+        (_, Utf8(_)) => Ordering::Less,
+    }
+}
+
+fn composite_key_cmp(a: &[ScalarKey<'_>], b: &[ScalarKey<'_>]) -> Ordering {
+    for (left, right) in a.iter().zip(b.iter()) {
+        let ord = scalar_key_cmp(left, right);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
@@ -2835,16 +2921,14 @@ impl Series {
     /// Matches `pd.Series.mode()`. Returns a new Series containing
     /// all values tied for the highest frequency, sorted ascending.
     pub fn mode(&self) -> Result<Self, FrameError> {
-        let mut counts: BTreeMap<String, (Scalar, usize)> = BTreeMap::new();
+        let mut counts: HashMap<ScalarKey<'_>, (Scalar, usize)> = HashMap::new();
         for val in self.column.values() {
-            if val.is_missing() {
-                continue;
+            if let Some(key) = scalar_key_skip_missing(val) {
+                counts
+                    .entry(key)
+                    .and_modify(|(_, c)| *c += 1)
+                    .or_insert_with(|| (val.clone(), 1));
             }
-            let key = format!("{val:?}");
-            counts
-                .entry(key)
-                .and_modify(|(_, c)| *c += 1)
-                .or_insert_with(|| (val.clone(), 1));
         }
         let max_count = counts.values().map(|(_, c)| *c).max().unwrap_or(0);
         if max_count == 0 {
@@ -5187,8 +5271,7 @@ impl Series {
     ) -> Result<Self, FrameError> {
         // Build unique categories preserving first-seen order.
         let mut categories: Vec<Scalar> = Vec::new();
-        let mut cat_positions: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+        let mut cat_positions: HashMap<ScalarKey<'_>, i64> = HashMap::new();
 
         let mut codes: Vec<Scalar> = Vec::with_capacity(values.len());
         let index_labels: Vec<IndexLabel> =
@@ -5199,7 +5282,7 @@ impl Series {
                 codes.push(Scalar::Int64(-1));
                 continue;
             }
-            let key = format!("{val:?}");
+            let key = scalar_key_allow_missing(val);
             let code = if let Some(&pos) = cat_positions.get(&key) {
                 pos
             } else {
@@ -6708,18 +6791,19 @@ impl SeriesGroupBy<'_> {
         &self,
     ) -> (
         Vec<IndexLabel>,
-        std::collections::HashMap<String, Vec<usize>>,
+        Vec<ScalarKey<'_>>,
+        HashMap<ScalarKey<'_>, Vec<usize>>,
     ) {
         let n = self.series.len();
         let mut order: Vec<IndexLabel> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut order_keys: Vec<ScalarKey<'_>> = Vec::new();
+        let mut groups: HashMap<ScalarKey<'_>, Vec<usize>> = HashMap::new();
+        let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
 
         for i in 0..n {
             let val = &self.by.column.values()[i];
-            let key = format!("{val:?}");
-            if seen.insert(key.clone()) {
+            let key = scalar_key_allow_missing(val);
+            if seen.insert(key) {
                 let lbl = match val {
                     Scalar::Int64(v) => IndexLabel::Int64(*v),
                     Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
@@ -6728,11 +6812,12 @@ impl SeriesGroupBy<'_> {
                     _ => IndexLabel::Utf8("NaN".into()),
                 };
                 order.push(lbl);
+                order_keys.push(key);
             }
             groups.entry(key).or_default().push(i);
         }
 
-        (order, groups)
+        (order, order_keys, groups)
     }
 
     /// Apply an aggregation that reduces each group to a single f64 value.
@@ -6740,12 +6825,11 @@ impl SeriesGroupBy<'_> {
     where
         F: Fn(&[f64]) -> f64,
     {
-        let (order, groups) = self.build_groups();
-        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
-        let mut labels = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
 
-        for (i, key) in keys.iter().enumerate() {
+        for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             let nums: Vec<f64> = indices
                 .iter()
@@ -6783,11 +6867,10 @@ impl SeriesGroupBy<'_> {
 
     /// Count of non-null values in each group.
     pub fn count(&self) -> Result<Series, FrameError> {
-        let (order, groups) = self.build_groups();
-        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
-        let mut labels = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             let cnt = indices
                 .iter()
@@ -6869,11 +6952,10 @@ impl SeriesGroupBy<'_> {
 
     /// First value of each group.
     pub fn first(&self) -> Result<Series, FrameError> {
-        let (order, groups) = self.build_groups();
-        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
-        let mut labels = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             labels.push(order[i].clone());
             values.push(self.series.column.values()[indices[0]].clone());
@@ -6883,11 +6965,10 @@ impl SeriesGroupBy<'_> {
 
     /// Last value of each group.
     pub fn last(&self) -> Result<Series, FrameError> {
-        let (order, groups) = self.build_groups();
-        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
-        let mut labels = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             labels.push(order[i].clone());
             values.push(self.series.column.values()[*indices.last().unwrap()].clone());
@@ -6897,11 +6978,10 @@ impl SeriesGroupBy<'_> {
 
     /// Number of elements in each group (including nulls).
     pub fn size(&self) -> Result<Series, FrameError> {
-        let (order, groups) = self.build_groups();
-        let keys: Vec<String> = order.iter().map(|lbl| format!("{lbl:?}")).collect();
-        let mut labels = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
             labels.push(order[i].clone());
             values.push(Scalar::Int64(groups[key].len() as i64));
         }
@@ -6913,7 +6993,7 @@ impl SeriesGroupBy<'_> {
     /// Matches `series.groupby(by).agg(['sum', 'mean'])`. Returns a DataFrame
     /// with group keys as index and one column per function.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
-        let (order, _) = self.build_groups();
+        let (order, _, _) = self.build_groups();
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
@@ -7088,10 +7168,9 @@ impl CategoricalAccessor<'_> {
     /// Values not in new_categories become missing (-1).
     pub fn set_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
         // Build old-value -> new-code mapping.
-        let mut new_code_map: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+        let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
         for (i, cat) in new_categories.iter().enumerate() {
-            new_code_map.insert(format!("{cat:?}"), i as i64);
+            new_code_map.insert(scalar_key_allow_missing(cat), i as i64);
         }
 
         // Remap each old code through: old_code -> old_category -> new_code.
@@ -7106,7 +7185,7 @@ impl CategoricalAccessor<'_> {
                     && (*code as usize) < self.meta.categories.len()
                 {
                     let old_cat = &self.meta.categories[*code as usize];
-                    let key = format!("{old_cat:?}");
+                    let key = scalar_key_allow_missing(old_cat);
                     Scalar::Int64(*new_code_map.get(&key).unwrap_or(&-1))
                 } else {
                     Scalar::Int64(-1)
@@ -13393,18 +13472,27 @@ impl DataFrame {
                 }
                 let vals = col.values();
                 let count = vals.iter().filter(|v| !v.is_missing()).count();
-                let mut freq_map: std::collections::HashMap<String, usize> =
-                    std::collections::HashMap::new();
+                let mut freq_map: HashMap<ScalarKey<'_>, (Scalar, usize)> = HashMap::new();
                 for v in vals {
-                    if !v.is_missing() {
-                        *freq_map.entry(format!("{v:?}")).or_default() += 1;
+                    if let Some(key) = scalar_key_skip_missing(v) {
+                        freq_map
+                            .entry(key)
+                            .and_modify(|(_, c)| *c += 1)
+                            .or_insert_with(|| (v.clone(), 1));
                     }
                 }
                 let unique = freq_map.len();
                 let (top, freq) = freq_map
-                    .iter()
+                    .values()
                     .max_by_key(|(_, c)| *c)
-                    .map(|(k, &c)| (k.clone(), c))
+                    .map(|(v, c)| {
+                        let label = scalar_to_value_counts_index_label(v);
+                        let rendered = match label {
+                            IndexLabel::Int64(n) => n.to_string(),
+                            IndexLabel::Utf8(s) => s,
+                        };
+                        (rendered, *c)
+                    })
                     .unwrap_or_default();
 
                 let stats = vec![
@@ -14195,31 +14283,41 @@ impl DataFrame {
         let n_rows = self.index.len();
 
         // Collect unique index values (preserving first-seen order)
-        let mut idx_order: Vec<String> = Vec::new();
-        let mut idx_set = std::collections::HashSet::new();
+        let mut idx_order_keys: Vec<ScalarKey<'_>> = Vec::new();
+        let mut idx_labels: Vec<IndexLabel> = Vec::new();
+        let mut idx_seen: HashSet<ScalarKey<'_>> = HashSet::new();
         for i in 0..n_rows {
-            let key = format!("{:?}", idx_col.values()[i]);
-            if idx_set.insert(key.clone()) {
-                idx_order.push(key);
+            let val = &idx_col.values()[i];
+            let key = scalar_key_allow_missing(val);
+            if idx_seen.insert(key) {
+                idx_order_keys.push(key);
+                idx_labels.push(scalar_to_value_counts_index_label(val));
             }
         }
 
         // Collect unique column values (preserving first-seen order)
-        let mut col_order_unique: Vec<String> = Vec::new();
-        let mut col_set = std::collections::HashSet::new();
+        let mut col_order_keys: Vec<ScalarKey<'_>> = Vec::new();
+        let mut col_names: Vec<String> = Vec::new();
+        let mut col_seen: HashSet<ScalarKey<'_>> = HashSet::new();
         for i in 0..n_rows {
-            let key = format!("{:?}", cols_col.values()[i]);
-            if col_set.insert(key.clone()) {
-                col_order_unique.push(key);
+            let val = &cols_col.values()[i];
+            let key = scalar_key_allow_missing(val);
+            if col_seen.insert(key) {
+                col_order_keys.push(key);
+                let label = scalar_to_value_counts_index_label(val);
+                let name = match label {
+                    IndexLabel::Int64(v) => v.to_string(),
+                    IndexLabel::Utf8(s) => s,
+                };
+                col_names.push(name);
             }
         }
 
         // Build groups: (idx_key, col_key) -> Vec<f64>
-        let mut groups: std::collections::HashMap<(String, String), Vec<f64>> =
-            std::collections::HashMap::new();
+        let mut groups: HashMap<(ScalarKey<'_>, ScalarKey<'_>), Vec<f64>> = HashMap::new();
         for i in 0..n_rows {
-            let ik = format!("{:?}", idx_col.values()[i]);
-            let ck = format!("{:?}", cols_col.values()[i]);
+            let ik = scalar_key_allow_missing(&idx_col.values()[i]);
+            let ck = scalar_key_allow_missing(&cols_col.values()[i]);
             if let Ok(v) = val_col.values()[i].to_f64() {
                 groups.entry((ik, ck)).or_default().push(v);
             }
@@ -14250,27 +14348,11 @@ impl DataFrame {
         let mut result_cols = BTreeMap::new();
         let mut result_col_order = Vec::new();
 
-        // Extract clean column names from debug format
-        let clean_col_name = |s: &str| -> String {
-            // Strip Utf8("...") or Int64(...) or Bool(...) wrappers
-            if let Some(inner) = s.strip_prefix("Utf8(\"") {
-                inner.strip_suffix("\")").unwrap_or(inner).to_string()
-            } else if let Some(inner) = s.strip_prefix("Int64(") {
-                inner.strip_suffix(')').unwrap_or(inner).to_string()
-            } else if let Some(inner) = s.strip_prefix("Float64(") {
-                inner.strip_suffix(')').unwrap_or(inner).to_string()
-            } else if let Some(inner) = s.strip_prefix("Bool(") {
-                inner.strip_suffix(')').unwrap_or(inner).to_string()
-            } else {
-                s.to_string()
-            }
-        };
-
-        for ck in &col_order_unique {
-            let col_name = clean_col_name(ck);
-            let mut col_vals = Vec::with_capacity(idx_order.len());
-            for ik in &idx_order {
-                if let Some(vals) = groups.get(&(ik.clone(), ck.clone())) {
+        for (idx, ck) in col_order_keys.iter().enumerate() {
+            let col_name = col_names[idx].clone();
+            let mut col_vals = Vec::with_capacity(idx_order_keys.len());
+            for ik in &idx_order_keys {
+                if let Some(vals) = groups.get(&(*ik, *ck)) {
                     col_vals.push(Scalar::Float64(agg_fn(vals)));
                 } else {
                     col_vals.push(Scalar::Null(NullKind::NaN));
@@ -14281,17 +14363,7 @@ impl DataFrame {
         }
 
         // Build index from idx_order
-        let new_labels: Vec<IndexLabel> = idx_order
-            .iter()
-            .map(|s| {
-                let cleaned = clean_col_name(s);
-                if let Ok(i) = cleaned.parse::<i64>() {
-                    IndexLabel::Int64(i)
-                } else {
-                    IndexLabel::Utf8(cleaned)
-                }
-            })
-            .collect();
+        let new_labels = idx_labels;
 
         Ok(Self {
             columns: result_cols,
@@ -17297,27 +17369,49 @@ impl DataFrame {
         })?;
 
         // Collect unique index and column values in order of appearance
-        let mut row_keys: Vec<Scalar> = Vec::new();
-        let mut col_keys: Vec<String> = Vec::new();
-
+        let mut row_keys: Vec<ScalarKey<'_>> = Vec::new();
+        let mut row_labels: Vec<IndexLabel> = Vec::new();
+        let mut seen_rows: HashSet<ScalarKey<'_>> = HashSet::new();
         for v in idx_vals.values() {
-            if !row_keys.contains(v) {
-                row_keys.push(v.clone());
+            let key = scalar_key_allow_missing(v);
+            if seen_rows.insert(key) {
+                let label = match v {
+                    Scalar::Utf8(s) => s.as_str().into(),
+                    Scalar::Int64(n) => (*n).into(),
+                    other => format!("{other:?}").as_str().into(),
+                };
+                row_keys.push(key);
+                row_labels.push(label);
             }
         }
+
+        let mut col_keys: Vec<ScalarKey<'_>> = Vec::new();
+        let mut col_labels: Vec<String> = Vec::new();
+        let mut seen_cols: HashSet<ScalarKey<'_>> = HashSet::new();
         for v in col_vals.values() {
-            let key = format!("{v:?}");
-            if !col_keys.contains(&key) {
+            let key = scalar_key_allow_missing(v);
+            if seen_cols.insert(key) {
+                let raw = format!("{v:?}");
+                let clean_name = raw
+                    .strip_prefix("Utf8(\"")
+                    .and_then(|s| s.strip_suffix("\")"))
+                    .or_else(|| raw.strip_prefix("Int64(").and_then(|s| s.strip_suffix(")")))
+                    .or_else(|| {
+                        raw.strip_prefix("Float64(")
+                            .and_then(|s| s.strip_suffix(")"))
+                    })
+                    .unwrap_or(raw.as_str());
                 col_keys.push(key);
+                col_labels.push(clean_name.to_string());
             }
         }
 
         // Build a map of (row_key, col_key) -> value
-        let mut cells: BTreeMap<(String, String), Scalar> = BTreeMap::new();
+        let mut cells: HashMap<(ScalarKey<'_>, ScalarKey<'_>), Scalar> = HashMap::new();
         for i in 0..self.len() {
-            let rk = format!("{:?}", idx_vals.values()[i]);
-            let ck = format!("{:?}", col_vals.values()[i]);
-            if cells.contains_key(&(rk.clone(), ck.clone())) {
+            let rk = scalar_key_allow_missing(&idx_vals.values()[i]);
+            let ck = scalar_key_allow_missing(&col_vals.values()[i]);
+            if cells.contains_key(&(rk, ck)) {
                 return Err(FrameError::CompatibilityRejected(
                     "pivot: duplicate entries, use pivot_table for aggregation".to_owned(),
                 ));
@@ -17326,37 +17420,17 @@ impl DataFrame {
         }
 
         // Build output columns
-        let index_labels: Vec<IndexLabel> = row_keys
-            .iter()
-            .map(|v| match v {
-                Scalar::Utf8(s) => s.as_str().into(),
-                Scalar::Int64(n) => (*n).into(),
-                other => format!("{other:?}").as_str().into(),
-            })
-            .collect();
-
         let mut data = Vec::new();
-        for ck in &col_keys {
+        for (ck, label) in col_keys.iter().zip(col_labels.iter()) {
             let mut col_data = Vec::with_capacity(row_keys.len());
             for rk in &row_keys {
-                let rk_str = format!("{rk:?}");
                 let val = cells
-                    .get(&(rk_str, ck.clone()))
+                    .get(&(*rk, *ck))
                     .cloned()
                     .unwrap_or(Scalar::Null(NullKind::NaN));
                 col_data.push(val);
             }
-            // Clean up column name: remove Scalar debug formatting
-            let clean_name = ck
-                .strip_prefix("Utf8(\"")
-                .and_then(|s| s.strip_suffix("\")"))
-                .or_else(|| ck.strip_prefix("Int64(").and_then(|s| s.strip_suffix(")")))
-                .or_else(|| {
-                    ck.strip_prefix("Float64(")
-                        .and_then(|s| s.strip_suffix(")"))
-                })
-                .unwrap_or(ck);
-            data.push((clean_name.to_string(), col_data));
+            data.push((label.clone(), col_data));
         }
 
         let column_order: Vec<String> = data.iter().map(|(n, _)| n.clone()).collect();
@@ -17365,7 +17439,7 @@ impl DataFrame {
             columns.insert(name, Column::from_values(vals)?);
         }
 
-        let index = Index::new(index_labels);
+        let index = Index::new(row_labels);
         Ok(Self {
             index,
             column_order,
@@ -20113,11 +20187,10 @@ pub struct DataFrameGroupBy<'a> {
 
 impl DataFrameGroupBy<'_> {
     /// Internal: build groups as (composite_key -> Vec<row_index>).
-    fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    fn build_groups(&self) -> (Vec<GroupKey<'_>>, GroupMap<'_>) {
         let n = self.df.len();
-        let mut group_order: Vec<String> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut group_order: Vec<GroupKey<'_>> = Vec::new();
+        let mut groups: GroupMap<'_> = HashMap::new();
 
         for row in 0..n {
             // Check if any group key is missing
@@ -20131,15 +20204,14 @@ impl DataFrameGroupBy<'_> {
                 }
             }
 
-            let key: String = self
+            let key: GroupKey<'_> = self
                 .by
                 .iter()
                 .map(|col_name| {
                     let val = &self.df.columns[col_name].values()[row];
-                    format!("{val:?}")
+                    scalar_key_allow_missing(val)
                 })
-                .collect::<Vec<_>>()
-                .join("|");
+                .collect();
 
             if !groups.contains_key(&key) {
                 group_order.push(key.clone());
@@ -20148,7 +20220,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         if self.sort {
-            group_order.sort();
+            group_order.sort_by(|a, b| composite_key_cmp(a, b));
         }
 
         (group_order, groups)
@@ -21397,19 +21469,24 @@ impl DataFrameGroupBy<'_> {
     /// or `"Int64(1)"` for numeric keys).
     pub fn get_group(&self, name: &str) -> Result<DataFrame, FrameError> {
         let (_group_order, groups) = self.build_groups();
-        // Try exact match on the build_groups key first
-        if let Some(row_indices) = groups.get(name) {
-            return self.df.take_rows_by_positions(row_indices);
-        }
         // Try matching by the human-readable group key label
-        for (gkey, row_indices) in &groups {
+        for row_indices in groups.values() {
             let first_row = row_indices[0];
             let label = self.group_key_label(first_row);
             let label_str = match &label {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Int64(v) => v.to_string(),
             };
-            if label_str == name || gkey == name {
+            if label_str == name {
+                return self.df.take_rows_by_positions(row_indices);
+            }
+            let debug_str = self
+                .by
+                .iter()
+                .map(|col_name| format!("{:?}", self.df.columns[col_name].values()[first_row]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if debug_str == name {
                 return self.df.take_rows_by_positions(row_indices);
             }
         }

@@ -4309,28 +4309,22 @@ impl Series {
     /// "self" and "other" containing only the rows where the values differ.
     /// Equal values are shown as NaN.
     pub fn compare_with(&self, other: &Self) -> Result<DataFrame, FrameError> {
-        if self.len() != other.len() {
-            return Err(FrameError::CompatibilityRejected(
-                "compare requires Series of equal length".to_owned(),
-            ));
-        }
-        let mut self_vals = Vec::with_capacity(self.len());
-        let mut other_vals = Vec::with_capacity(self.len());
+        let (left, right) = self.align(other, AlignMode::Outer)?;
+        let mut self_vals = Vec::with_capacity(left.len());
+        let mut other_vals = Vec::with_capacity(left.len());
         let mut labels = Vec::new();
-        let mut has_diff = false;
 
-        for i in 0..self.len() {
-            let sv = &self.column.values()[i];
-            let ov = &other.column.values()[i];
+        for i in 0..left.len() {
+            let sv = &left.column.values()[i];
+            let ov = &right.column.values()[i];
             if !sv.semantic_eq(ov) {
-                has_diff = true;
                 self_vals.push(sv.clone());
                 other_vals.push(ov.clone());
-                labels.push(self.index.labels()[i].clone());
+                labels.push(left.index.labels()[i].clone());
             }
         }
 
-        if !has_diff {
+        if labels.is_empty() {
             // No differences - return empty DataFrame
             return DataFrame::from_dict(
                 &["self", "other"],
@@ -19469,19 +19463,11 @@ impl DataFrame {
     /// columns showing `self` and `other` values where they differ.
     /// Only rows and columns with at least one difference are included.
     pub fn compare(&self, other: &Self) -> Result<Self, FrameError> {
-        if self.len() != other.len() {
+        if self.index != other.index || self.column_order != other.column_order {
             return Err(FrameError::CompatibilityRejected(
-                "compare requires DataFrames of equal length".to_owned(),
+                "compare requires DataFrames with identical index and columns".to_owned(),
             ));
         }
-
-        // Find shared columns
-        let shared_cols: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| other.columns.contains_key(name.as_str()))
-            .cloned()
-            .collect();
 
         let n = self.len();
         // Track which rows have any difference
@@ -19490,7 +19476,7 @@ impl DataFrame {
         // Build diff columns: for each shared column, create "col_self" and "col_other"
         let mut diff_cols: Vec<(String, Vec<Scalar>)> = Vec::new();
 
-        for col_name in &shared_cols {
+        for col_name in &self.column_order {
             let self_col = &self.columns[col_name];
             let other_col = &other.columns[col_name];
 
@@ -33776,6 +33762,29 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_compare_column_mismatch() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let df2 = DataFrame::from_dict(
+            &["b", "a"],
+            vec![
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        assert!(df1.compare(&df2).is_err());
+    }
+
+    #[test]
     fn dataframe_compare_multiple_diffs() {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
@@ -38827,6 +38836,33 @@ mod tests {
         assert_eq!(diff.len(), 1);
         assert_eq!(diff.columns()["self"].values()[0], Scalar::Int64(2));
         assert_eq!(diff.columns()["other"].values()[0], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn series_compare_with_aligns_index() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let diff = s1.compare_with(&s2).unwrap();
+        assert_eq!(diff.len(), 2);
+        assert_eq!(
+            diff.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(2)]
+        );
+        assert_eq!(diff.columns()["self"].values()[0], Scalar::Int64(1));
+        assert!(diff.columns()["other"].values()[0].is_missing());
+        assert!(diff.columns()["self"].values()[1].is_missing());
+        assert_eq!(diff.columns()["other"].values()[1], Scalar::Int64(3));
     }
 
     #[test]

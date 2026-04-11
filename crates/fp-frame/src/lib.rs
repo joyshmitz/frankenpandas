@@ -4487,31 +4487,29 @@ impl Series {
 
     /// Combine two Series element-wise using a function.
     ///
-    /// Matches `pd.Series.combine(other, func)`. The function receives
-    /// two scalars (one from self, one from other) and returns a scalar.
+    /// Matches `pd.Series.combine(other, func)`. Aligns on the union of
+    /// index labels before applying the function element-wise.
+    /// The function receives two scalars (one from self, one from other)
+    /// and returns a scalar.
     pub fn combine<F>(&self, other: &Self, func: F) -> Result<Self, FrameError>
     where
         F: Fn(&Scalar, &Scalar) -> Scalar,
     {
-        let len = self.len().max(other.len());
-        let fill = Scalar::Null(NullKind::NaN);
-        let mut out = Vec::with_capacity(len);
-        let mut labels = Vec::with_capacity(len);
-
-        for i in 0..len {
-            let sv = self.column.values().get(i).unwrap_or(&fill);
-            let ov = other.column.values().get(i).unwrap_or(&fill);
-            out.push(func(sv, ov));
-            labels.push(
-                self.index
-                    .labels()
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| (i as i64).into()),
-            );
+        let (left_aligned, right_aligned) = self.align(other, AlignMode::Outer)?;
+        let mut out = Vec::with_capacity(left_aligned.len());
+        for (lv, rv) in left_aligned
+            .column()
+            .values()
+            .iter()
+            .zip(right_aligned.column().values().iter())
+        {
+            out.push(func(lv, rv));
         }
-
-        Self::from_values(self.name.clone(), labels, out)
+        Self::from_values(
+            self.name.clone(),
+            left_aligned.index().labels().to_vec(),
+            out,
+        )
     }
 
     /// Explode a Series of string values by splitting on a separator.
@@ -38168,24 +38166,31 @@ mod tests {
     fn series_combine() {
         let a = Series::from_values(
             "x",
-            vec![0_i64.into(), 1_i64.into()],
+            vec![0_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
         let b = Series::from_values(
             "y",
-            vec![0_i64.into(), 1_i64.into()],
+            vec![1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(30)],
         )
         .unwrap();
         let result = a
             .combine(&b, |a_val, b_val| match (a_val.to_f64(), b_val.to_f64()) {
                 (Ok(a), Ok(b)) => Scalar::Float64(a.max(b)),
+                (Ok(a), Err(_)) => Scalar::Float64(a),
+                (Err(_), Ok(b)) => Scalar::Float64(b),
                 _ => Scalar::Null(NullKind::NaN),
             })
             .unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &vec![0_i64.into(), 2_i64.into(), 1_i64.into()]
+        );
         assert_eq!(result.values()[0], Scalar::Float64(10.0));
         assert_eq!(result.values()[1], Scalar::Float64(30.0));
+        assert_eq!(result.values()[2], Scalar::Float64(5.0));
     }
 
     // ── DataFrame: corrwith, dot ──

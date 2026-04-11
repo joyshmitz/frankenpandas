@@ -2544,6 +2544,18 @@ mod tests {
     }
 
     #[test]
+    fn json_records_preserves_column_order() {
+        let input = r#"[{"b":1,"a":2},{"c":3}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("read json records");
+        let order: Vec<&str> = frame
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "a", "c"]);
+    }
+
+    #[test]
     fn json_columns_read_write_roundtrip() {
         let input = r#"{"name":{"row_a":"Alice","row_b":"Bob"},"age":{"row_a":30,"row_b":25}}"#;
         let frame = read_json_str(input, JsonOrient::Columns).expect("read json columns");
@@ -3743,6 +3755,21 @@ mod tests {
             back.column("names").unwrap().values()[2],
             Scalar::Utf8("carol".into())
         );
+    }
+
+    #[test]
+    fn jsonl_preserves_column_order() {
+        let input = r#"
+{"b":1,"a":2}
+{"c":3}
+"#;
+        let frame = super::read_jsonl_str(input).expect("JSONL read failed");
+        let order: Vec<&str> = frame
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "a", "c"]);
     }
 
     #[test]

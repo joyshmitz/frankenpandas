@@ -346,13 +346,30 @@ pub fn nanprod(values: &[Scalar]) -> Scalar {
 /// Count of unique non-missing values.
 pub fn nannunique(values: &[Scalar]) -> Scalar {
     use std::collections::HashSet;
+    #[derive(Hash, PartialEq, Eq)]
+    enum ScalarKey<'a> {
+        Bool(bool),
+        Int64(i64),
+        FloatBits(u64),
+        Utf8(&'a str),
+    }
+
     let mut seen = HashSet::new();
     for val in values {
         if val.is_missing() {
             continue;
         }
-        // Use debug representation as a hashable key
-        seen.insert(format!("{val:?}"));
+        let key = match val {
+            Scalar::Bool(v) => ScalarKey::Bool(*v),
+            Scalar::Int64(v) => ScalarKey::Int64(*v),
+            Scalar::Float64(v) => {
+                let normalized = if *v == 0.0 { 0.0 } else { *v };
+                ScalarKey::FloatBits(normalized.to_bits())
+            }
+            Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
+            Scalar::Null(_) => continue,
+        };
+        seen.insert(key);
     }
     Scalar::Int64(seen.len() as i64)
 }
@@ -498,6 +515,16 @@ mod tests {
     #[test]
     fn nansum_empty_returns_zero() {
         assert_eq!(super::nansum(&[]), Scalar::Float64(0.0));
+    }
+
+    #[test]
+    fn nannunique_merges_negative_zero_and_zero() {
+        let vals = vec![
+            Scalar::Float64(-0.0),
+            Scalar::Float64(0.0),
+            Scalar::Float64(1.0),
+        ];
+        assert_eq!(super::nannunique(&vals), Scalar::Int64(2));
     }
 
     #[test]

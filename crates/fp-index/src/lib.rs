@@ -925,6 +925,10 @@ pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
 }
 
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        return align_non_unique(left, right, AlignMode::Outer);
+    }
+
     let left_positions_map = left.position_map_first_ref();
     let right_positions_map = right.position_map_first_ref();
 

@@ -169,11 +169,11 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
 /// when the value already has the correct type (AG-03: identity-cast skip).
 pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeError> {
     let from = value.dtype();
-    if value.is_missing() {
-        return Ok(Scalar::missing_for_dtype(target));
-    }
     if from == target {
         return Ok(value);
+    }
+    if value.is_missing() {
+        return Ok(Scalar::missing_for_dtype(target));
     }
 
     // Note: identity casts (from == target) are handled above, so same-type

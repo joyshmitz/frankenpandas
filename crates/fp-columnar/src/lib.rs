@@ -442,20 +442,30 @@ fn vectorized_binary_i64(
 ) -> Option<(Vec<i64>, ValidityMask)> {
     let combined = left_validity.and_mask(right_validity);
 
-    if matches!(
-        op,
-        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv
-    ) {
+    // Div and Pow always produce floats
+    if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) {
         return None;
+    }
+
+    // For Mod/FloorDiv: if any valid position has zero divisor, fall back to float
+    // (pandas promotes to float64 to represent NaN/inf for division by zero)
+    if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) {
+        let has_zero_divisor = right
+            .iter()
+            .enumerate()
+            .any(|(i, &r)| combined.get(i) && r == 0);
+        if has_zero_divisor {
+            return None;
+        }
     }
 
     let apply: fn(i64, i64) -> i64 = match op {
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
         ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
-        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv => {
-            unreachable!("handled by early return above")
-        }
+        ArithmeticOp::Mod => |a, b| a.rem_euclid(b),
+        ArithmeticOp::FloorDiv => |a, b| a.div_euclid(b),
+        ArithmeticOp::Div | ArithmeticOp::Pow => unreachable!("handled by early return above"),
     };
 
     let out: Vec<i64> = left
@@ -719,16 +729,21 @@ impl Column {
         if matches!(out_dtype, DType::Bool) {
             out_dtype = DType::Int64;
         }
-        if matches!(
-            op,
-            ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv
-        ) {
+        // Div and Pow always produce Float64; Mod and FloorDiv preserve int if no zero divisors
+        if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) {
             out_dtype = DType::Float64;
         }
 
         // AG-10: Try vectorized path first; fallback to scalar path.
         if let Some(result) = self.try_vectorized_binary(right, op, out_dtype) {
             return result;
+        }
+
+        // For Mod/FloorDiv: if vectorized failed (likely due to zero divisors), use Float64
+        if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv)
+            && matches!(out_dtype, DType::Int64)
+        {
+            out_dtype = DType::Float64;
         }
 
         // Scalar fallback path (original implementation).
@@ -1495,6 +1510,80 @@ mod tests {
         assert!(matches!(floordiv.values()[0], Scalar::Float64(v) if (v - 3.0).abs() < 1e-10));
         assert!(matches!(floordiv.values()[1], Scalar::Float64(v) if (v - 0.0).abs() < 1e-10));
         assert!(matches!(floordiv.values()[2], Scalar::Float64(v) if (v - -2.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn int64_mod_floordiv_preserves_dtype() {
+        // Test that int % int and int // int stay Int64 (pandas parity)
+        let left = Column::from_values(vec![
+            Scalar::Int64(10),
+            Scalar::Int64(20),
+            Scalar::Int64(30),
+        ])
+        .expect("left");
+        let right = Column::from_values(vec![
+            Scalar::Int64(3),
+            Scalar::Int64(7),
+            Scalar::Int64(4),
+        ])
+        .expect("right");
+
+        let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
+        assert_eq!(modulo.dtype(), DType::Int64, "mod should preserve Int64");
+        assert_eq!(modulo.values()[0], Scalar::Int64(1));
+        assert_eq!(modulo.values()[1], Scalar::Int64(6));
+        assert_eq!(modulo.values()[2], Scalar::Int64(2));
+
+        let floordiv = left
+            .binary_numeric(&right, ArithmeticOp::FloorDiv)
+            .expect("floordiv");
+        assert_eq!(
+            floordiv.dtype(),
+            DType::Int64,
+            "floordiv should preserve Int64"
+        );
+        assert_eq!(floordiv.values()[0], Scalar::Int64(3));
+        assert_eq!(floordiv.values()[1], Scalar::Int64(2));
+        assert_eq!(floordiv.values()[2], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn int64_mod_floordiv_with_zero_promotes_to_float() {
+        // Test that int % 0 and int // 0 promote to Float64 (pandas parity)
+        let left = Column::from_values(vec![
+            Scalar::Int64(10),
+            Scalar::Int64(20),
+            Scalar::Int64(30),
+        ])
+        .expect("left");
+        let right = Column::from_values(vec![
+            Scalar::Int64(3),
+            Scalar::Int64(0), // Zero divisor
+            Scalar::Int64(4),
+        ])
+        .expect("right");
+
+        let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
+        assert_eq!(
+            modulo.dtype(),
+            DType::Float64,
+            "mod with zero should promote to Float64"
+        );
+        assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[1], Scalar::Float64(v) if v.is_nan()));
+        assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
+
+        let floordiv = left
+            .binary_numeric(&right, ArithmeticOp::FloorDiv)
+            .expect("floordiv");
+        assert_eq!(
+            floordiv.dtype(),
+            DType::Float64,
+            "floordiv with zero should promote to Float64"
+        );
+        assert!(matches!(floordiv.values()[0], Scalar::Float64(v) if (v - 3.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[1], Scalar::Float64(v) if v.is_infinite()));
+        assert!(matches!(floordiv.values()[2], Scalar::Float64(v) if (v - 7.0).abs() < 1e-10));
     }
 
     #[test]

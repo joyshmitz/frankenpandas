@@ -10657,6 +10657,13 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         };
     }
 
+    if has_tz_suffix(trimmed) {
+        return parse_tz_aware_datetime(trimmed).map_or_else(
+            |_| Scalar::Null(NullKind::NaT),
+            |parsed| Scalar::Utf8(format_aware_datetime(parsed.fixed, None)),
+        );
+    }
+
     // Auto-detect format: try common patterns in order.
 
     // ISO 8601 with T separator: 2024-01-15T10:30:00
@@ -47311,6 +47318,48 @@ mod tests {
         );
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn to_datetime_normalizes_timezone_aware_strings() {
+        let s = Series::from_values(
+            "aware",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00Z".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_mixed_naive_and_aware_strings_preserves_object_like_values() {
+        let s = Series::from_values(
+            "mixed_tz",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-01-15T10:30:00Z".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
+            ]
+        );
     }
 
     // ── agg_named tests ──

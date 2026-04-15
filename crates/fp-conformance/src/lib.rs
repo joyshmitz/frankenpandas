@@ -238,6 +238,12 @@ pub enum FixtureOperation {
     SeriesDropNa,
     #[serde(rename = "series_count", alias = "series_count_default")]
     SeriesCount,
+    #[serde(rename = "series_diff", alias = "series_diff_default")]
+    SeriesDiff,
+    #[serde(rename = "series_shift", alias = "series_shift_default")]
+    SeriesShift,
+    #[serde(rename = "series_pct_change", alias = "series_pct_change_default")]
+    SeriesPctChange,
     SeriesLoc,
     SeriesIloc,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
@@ -408,6 +414,9 @@ impl FixtureOperation {
             Self::GroupByStd => "groupby_std",
             Self::GroupByVar => "groupby_var",
             Self::GroupByMedian => "groupby_median",
+            Self::SeriesDiff => "series_diff",
+            Self::SeriesShift => "series_shift",
+            Self::SeriesPctChange => "series_pct_change",
         }
     }
 }
@@ -567,6 +576,10 @@ pub struct PacketFixture {
     pub tail_n: Option<i64>,
     #[serde(default)]
     pub diff_periods: Option<i64>,
+    #[serde(default)]
+    pub shift_periods: Option<i64>,
+    #[serde(default)]
+    pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
     #[serde(default)]
@@ -857,6 +870,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesAll
         | FixtureOperation::SeriesSortIndex
         | FixtureOperation::SeriesSortValues
+        | FixtureOperation::SeriesDiff
+        | FixtureOperation::SeriesShift
+        | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::DataFrameLoc
@@ -1366,6 +1382,10 @@ struct OracleRequest {
     pub tail_n: Option<i64>,
     #[serde(default)]
     pub diff_periods: Option<i64>,
+    #[serde(default)]
+    pub shift_periods: Option<i64>,
+    #[serde(default)]
+    pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
     #[serde(default)]
@@ -3904,6 +3924,91 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesDiff => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.diff_periods.unwrap_or(1);
+            let actual = series.diff(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_diff error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_diff to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_diff to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_series or expected_error is required for series_diff".to_owned())
+                }
+            }
+        }
+        FixtureOperation::SeriesShift => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.shift_periods.unwrap_or(1);
+            let actual = series.shift(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_shift error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_shift to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_shift to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_series or expected_error is required for series_shift".to_owned())
+                }
+            }
+        }
+        FixtureOperation::SeriesPctChange => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let actual = series.pct_change(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_pct_change error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_pct_change to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_pct_change to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_pct_change"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesIsNa => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -4637,6 +4742,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesValueCounts
         | FixtureOperation::SeriesSortIndex
         | FixtureOperation::SeriesSortValues
+        | FixtureOperation::SeriesDiff
+        | FixtureOperation::SeriesShift
+        | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -4792,6 +4900,8 @@ fn capture_live_oracle_expected(
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
         diff_periods: fixture.diff_periods,
+        shift_periods: fixture.shift_periods,
+        pct_change_periods: fixture.pct_change_periods,
         diff_axis: fixture.diff_axis,
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
@@ -4920,6 +5030,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesValueCounts
         | FixtureOperation::SeriesSortIndex
         | FixtureOperation::SeriesSortValues
+        | FixtureOperation::SeriesDiff
+        | FixtureOperation::SeriesShift
+        | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -7252,6 +7365,114 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_sort_values".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesDiff => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.diff_periods.unwrap_or(1);
+            let actual = series.diff(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_diff.error",
+                        format!("expected series_diff error containing '{substr}', got '{message}'"),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_diff.error",
+                        "expected series_diff to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_diff.error",
+                        "expected series_diff to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_diff".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesShift => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.shift_periods.unwrap_or(1);
+            let actual = series.shift(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_shift.error",
+                        format!(
+                            "expected series_shift error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_shift.error",
+                        "expected series_shift to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_shift.error",
+                        "expected series_shift to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_shift".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesPctChange => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let actual = series.pct_change(periods).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_pct_change.error",
+                        format!(
+                            "expected series_pct_change error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_pct_change.error",
+                        "expected series_pct_change to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_pct_change.error",
+                        "expected series_pct_change to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_pct_change".to_owned(),
                 ),
             }
         }

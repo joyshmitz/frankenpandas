@@ -1151,6 +1151,63 @@ def op_series_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_diff(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_diff requires left payload")
+
+    periods = payload.get("diff_periods", 1)
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.diff(periods=int(periods))
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_shift requires left payload")
+
+    periods = payload.get("shift_periods", 1)
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.shift(periods=int(periods))
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_pct_change requires left payload")
+
+    periods = payload.get("pct_change_periods", 1)
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.pct_change(periods=int(periods))
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -2003,6 +2060,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_sort_index(pd, payload)
     if op == "series_sort_values":
         return op_series_sort_values(pd, payload)
+    if op == "series_diff":
+        return op_series_diff(pd, payload)
+    if op == "series_shift":
+        return op_series_shift(pd, payload)
+    if op == "series_pct_change":
+        return op_series_pct_change(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
     if op == "dataframe_iloc":

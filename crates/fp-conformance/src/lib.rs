@@ -583,6 +583,15 @@ pub struct PacketFixture {
     pub concat_join: Option<String>,
     #[serde(default)]
     pub direction: Option<String>,
+    /// For merge_asof: allow matching with same key value (default true)
+    #[serde(default)]
+    pub allow_exact_matches: Option<bool>,
+    /// For merge_asof: maximum distance between keys for a match
+    #[serde(default)]
+    pub tolerance: Option<f64>,
+    /// For merge_asof: columns to match exactly before asof matching
+    #[serde(default, rename = "by")]
+    pub merge_asof_by: Option<Vec<String>>,
     #[serde(default)]
     pub set_index_column: Option<String>,
     #[serde(default)]
@@ -5233,7 +5242,25 @@ fn execute_dataframe_merge_asof_fixture_operation(
         _ => return Err(format!("invalid merge_asof direction: {direction_str}")),
     };
 
-    let merged = fp_join::merge_asof(&left, &right, on, direction)
+    // Build options from fixture fields
+    let mut options = fp_join::MergeAsofOptions::new();
+
+    // allow_exact_matches defaults to true in both pandas and our impl
+    if let Some(allow) = fixture.allow_exact_matches {
+        options = options.allow_exact_matches(allow);
+    }
+
+    // tolerance: maximum distance for a match
+    if let Some(tol) = fixture.tolerance {
+        options = options.tolerance(tol);
+    }
+
+    // by: columns to match exactly before asof matching
+    if let Some(ref by_cols) = fixture.merge_asof_by {
+        options = options.by(by_cols.clone());
+    }
+
+    let merged = fp_join::merge_asof_with_options(&left, &right, on, direction, options)
         .map_err(|err| err.to_string())?;
     DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
 }

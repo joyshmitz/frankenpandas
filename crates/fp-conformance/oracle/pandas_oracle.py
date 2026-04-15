@@ -1830,8 +1830,21 @@ def op_dataframe_merge_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     direction = payload.get("direction", "backward")
 
+    # New options for pandas parity
+    allow_exact_matches = payload.get("allow_exact_matches", True)
+    tolerance = payload.get("tolerance")  # None means no tolerance limit
+    by = payload.get("by")  # str or list of str for equi-join columns
+
     try:
-        out = pd.merge_asof(left, right, on=on, direction=direction)
+        out = pd.merge_asof(
+            left,
+            right,
+            on=on,
+            direction=direction,
+            allow_exact_matches=allow_exact_matches,
+            tolerance=tolerance,
+            by=by,
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_merge_asof failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}

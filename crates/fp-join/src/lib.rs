@@ -1106,6 +1106,24 @@ pub trait DataFrameMergeExt {
         on: &str,
         direction: &str,
     ) -> Result<MergedDataFrame, JoinError>;
+
+    /// Perform an asof merge with additional options.
+    ///
+    /// Matches `pd.merge_asof(left, right, on=key, direction=...,
+    /// allow_exact_matches=..., tolerance=..., by=...)`.
+    ///
+    /// # Parameters
+    /// - `other`: Right DataFrame to merge with
+    /// - `on`: Column name to merge on (must be numeric and sorted)
+    /// - `direction`: "backward", "forward", or "nearest"
+    /// - `options`: Additional options (allow_exact_matches, tolerance, by)
+    fn merge_asof_with_options(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &str,
+        direction: &str,
+        options: MergeAsofOptions,
+    ) -> Result<MergedDataFrame, JoinError>;
 }
 
 /// Direction for asof merge matching.
@@ -1114,6 +1132,54 @@ pub enum AsofDirection {
     Backward,
     Forward,
     Nearest,
+}
+
+/// Options for asof merge operations.
+///
+/// Matches pandas `merge_asof` parameters:
+/// - `allow_exact_matches`: If true (default), allow matching with same key value
+/// - `tolerance`: Maximum distance between keys for a match
+/// - `by`: Columns to match exactly before asof matching
+#[derive(Debug, Clone, Default)]
+pub struct MergeAsofOptions {
+    /// If true (default), allow matching with the same 'on' value.
+    /// If false, don't match rows where left key == right key exactly.
+    pub allow_exact_matches: bool,
+    /// Maximum distance between left and right keys for a valid match.
+    /// None means no tolerance limit.
+    pub tolerance: Option<f64>,
+    /// Columns to match exactly before performing asof merge.
+    /// Acts like an equi-join on these columns first.
+    pub by: Option<Vec<String>>,
+}
+
+impl MergeAsofOptions {
+    /// Create options with defaults matching pandas behavior.
+    pub fn new() -> Self {
+        Self {
+            allow_exact_matches: true,
+            tolerance: None,
+            by: None,
+        }
+    }
+
+    /// Set whether exact matches are allowed.
+    pub fn allow_exact_matches(mut self, allow: bool) -> Self {
+        self.allow_exact_matches = allow;
+        self
+    }
+
+    /// Set the tolerance for matching.
+    pub fn tolerance(mut self, tol: f64) -> Self {
+        self.tolerance = Some(tol);
+        self
+    }
+
+    /// Set the columns to match exactly before asof merge.
+    pub fn by(mut self, cols: Vec<String>) -> Self {
+        self.by = Some(cols);
+        self
+    }
 }
 
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
@@ -1157,6 +1223,40 @@ pub fn merge_asof(
     on: &str,
     direction: AsofDirection,
 ) -> Result<MergedDataFrame, JoinError> {
+    merge_asof_with_options(left, right, on, direction, MergeAsofOptions::new())
+}
+
+/// Perform an asof merge between two DataFrames with additional options.
+///
+/// # Parameters
+/// - `left`: Left DataFrame
+/// - `right`: Right DataFrame
+/// - `on`: Column name to merge on (must be numeric and sorted)
+/// - `direction`: Match direction (Backward, Forward, Nearest)
+/// - `options`: Additional merge options (allow_exact_matches, tolerance, by)
+pub fn merge_asof_with_options(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    direction: AsofDirection,
+    options: MergeAsofOptions,
+) -> Result<MergedDataFrame, JoinError> {
+    // If `by` columns are specified, we need to do grouped asof merge
+    if let Some(ref by_cols) = options.by {
+        return merge_asof_grouped(left, right, on, direction, &options, by_cols);
+    }
+
+    merge_asof_simple(left, right, on, direction, &options)
+}
+
+/// Simple asof merge without grouping.
+fn merge_asof_simple(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    direction: AsofDirection,
+    options: &MergeAsofOptions,
+) -> Result<MergedDataFrame, JoinError> {
     let left_key = left.columns().get(on).ok_or_else(|| {
         JoinError::Frame(FrameError::CompatibilityRejected(format!(
             "merge_asof: column '{on}' not found in left"
@@ -1174,8 +1274,171 @@ pub fn merge_asof(
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
-    let right_n = right_vals.len();
+    let right_matches = compute_asof_matches(
+        &left_vals,
+        &right_vals,
+        direction,
+        options.allow_exact_matches,
+        options.tolerance,
+    );
 
+    build_asof_output(left, right, on, &right_matches, None)
+}
+
+/// Grouped asof merge: match on `by` columns first, then asof within groups.
+fn merge_asof_grouped(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    direction: AsofDirection,
+    options: &MergeAsofOptions,
+    by_cols: &[String],
+) -> Result<MergedDataFrame, JoinError> {
+    // Validate by columns exist
+    for col in by_cols {
+        if left.columns().get(col).is_none() {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: 'by' column '{col}' not found in left"
+            ))));
+        }
+        if right.columns().get(col).is_none() {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: 'by' column '{col}' not found in right"
+            ))));
+        }
+    }
+
+    let left_key = left.columns().get(on).ok_or_else(|| {
+        JoinError::Frame(FrameError::CompatibilityRejected(format!(
+            "merge_asof: column '{on}' not found in left"
+        )))
+    })?;
+    let right_key = right.columns().get(on).ok_or_else(|| {
+        JoinError::Frame(FrameError::CompatibilityRejected(format!(
+            "merge_asof: column '{on}' not found in right"
+        )))
+    })?;
+
+    let left_vals = asof_numeric_values(left_key, "left", on)?;
+    let right_vals = asof_numeric_values(right_key, "right", on)?;
+
+    // Build group keys for left and right
+    let left_group_keys = build_group_keys(left, by_cols)?;
+    let right_group_keys = build_group_keys(right, by_cols)?;
+
+    // Group left rows by their group key (to check sorting per-group)
+    let mut left_groups: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+    for (idx, key) in left_group_keys.iter().enumerate() {
+        left_groups.entry(key.clone()).or_default().push(idx);
+    }
+
+    // Group right rows by their group key
+    let mut right_groups: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+    for (idx, key) in right_group_keys.iter().enumerate() {
+        right_groups.entry(key.clone()).or_default().push(idx);
+    }
+
+    // Check sorting within each left group
+    for (group_key, indices) in &left_groups {
+        let group_vals: Vec<f64> = indices.iter().map(|&i| left_vals[i]).collect();
+        ensure_sorted_non_decreasing(&group_vals, "left", on).map_err(|_| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: left column '{on}' must be sorted within group {:?}",
+                group_key
+            )))
+        })?;
+    }
+
+    // Check sorting within each right group
+    for (group_key, indices) in &right_groups {
+        let group_vals: Vec<f64> = indices.iter().map(|&i| right_vals[i]).collect();
+        ensure_sorted_non_decreasing(&group_vals, "right", on).map_err(|_| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: right column '{on}' must be sorted within group {:?}",
+                group_key
+            )))
+        })?;
+    }
+
+    // For each left row, find match within its group
+    let mut right_matches: Vec<Option<usize>> = Vec::with_capacity(left_vals.len());
+
+    for (left_idx, left_group_key) in left_group_keys.iter().enumerate() {
+        let lv = left_vals[left_idx];
+
+        if lv.is_nan() {
+            right_matches.push(None);
+            continue;
+        }
+
+        // Get right indices in same group
+        let group_indices = match right_groups.get(left_group_key) {
+            Some(indices) => indices,
+            None => {
+                right_matches.push(None);
+                continue;
+            }
+        };
+
+        // Extract right values for this group
+        let group_right_vals: Vec<f64> = group_indices
+            .iter()
+            .map(|&i| right_vals[i])
+            .collect();
+
+        // Compute match within group
+        let group_matches = compute_asof_matches(
+            &[lv],
+            &group_right_vals,
+            direction,
+            options.allow_exact_matches,
+            options.tolerance,
+        );
+
+        // Map back to original right index
+        match group_matches.first() {
+            Some(Some(group_idx)) => {
+                right_matches.push(Some(group_indices[*group_idx]));
+            }
+            _ => {
+                right_matches.push(None);
+            }
+        }
+    }
+
+    build_asof_output(left, right, on, &right_matches, Some(by_cols))
+}
+
+/// Build group keys from the `by` columns.
+fn build_group_keys(
+    df: &fp_frame::DataFrame,
+    by_cols: &[String],
+) -> Result<Vec<Vec<String>>, JoinError> {
+    let n = df.len();
+    let mut keys = vec![Vec::with_capacity(by_cols.len()); n];
+
+    for col_name in by_cols {
+        let col = df.columns().get(col_name).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: column '{col_name}' not found"
+            )))
+        })?;
+        for (i, val) in col.values().iter().enumerate() {
+            keys[i].push(format!("{val:?}"));
+        }
+    }
+
+    Ok(keys)
+}
+
+/// Compute asof matches for a single group or the whole dataset.
+fn compute_asof_matches(
+    left_vals: &[f64],
+    right_vals: &[f64],
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Vec<Option<usize>> {
     let mut right_non_nan_values = Vec::new();
     let mut right_non_nan_positions = Vec::new();
     for (pos, &rv) in right_vals.iter().enumerate() {
@@ -1185,44 +1448,80 @@ pub fn merge_asof(
         }
     }
 
-    // For each left row, find the matching right row index.
     let mut right_matches: Vec<Option<usize>> = Vec::with_capacity(left_vals.len());
 
     match direction {
         AsofDirection::Backward => {
             let mut best: Option<usize> = None;
+            let mut best_val: Option<f64> = None;
             let mut j = 0usize;
-            for &lv in &left_vals {
+            for &lv in left_vals {
                 if lv.is_nan() {
                     right_matches.push(None);
                     continue;
                 }
-                while j < right_non_nan_values.len() && right_non_nan_values[j] <= lv {
+                // Advance while right <= left (or right < left if !allow_exact_matches)
+                while j < right_non_nan_values.len() {
+                    let rv = right_non_nan_values[j];
+                    let should_include = if allow_exact_matches {
+                        rv <= lv
+                    } else {
+                        rv < lv
+                    };
+                    if !should_include {
+                        break;
+                    }
                     best = Some(right_non_nan_positions[j]);
+                    best_val = Some(rv);
                     j += 1;
                 }
-                right_matches.push(best);
+
+                // Check tolerance
+                let matched = match (best, best_val, tolerance) {
+                    (Some(idx), Some(rv), Some(tol)) if (lv - rv).abs() <= tol => Some(idx),
+                    (Some(idx), _, None) => Some(idx),
+                    _ => None,
+                };
+                right_matches.push(matched);
             }
         }
         AsofDirection::Forward => {
             let mut j = 0usize;
-            for &lv in &left_vals {
+            for &lv in left_vals {
                 if lv.is_nan() {
                     right_matches.push(None);
                     continue;
                 }
-                while j < right_non_nan_values.len() && right_non_nan_values[j] < lv {
+                // Advance while right < left (or right <= left if !allow_exact_matches)
+                while j < right_non_nan_values.len() {
+                    let rv = right_non_nan_values[j];
+                    let should_skip = if allow_exact_matches {
+                        rv < lv
+                    } else {
+                        rv <= lv
+                    };
+                    if !should_skip {
+                        break;
+                    }
                     j += 1;
                 }
+
                 if j < right_non_nan_values.len() {
-                    right_matches.push(Some(right_non_nan_positions[j]));
+                    let rv = right_non_nan_values[j];
+                    // Check tolerance
+                    let matched = match tolerance {
+                        Some(tol) if (rv - lv).abs() <= tol => Some(right_non_nan_positions[j]),
+                        None => Some(right_non_nan_positions[j]),
+                        _ => None,
+                    };
+                    right_matches.push(matched);
                 } else {
                     right_matches.push(None);
                 }
             }
         }
         AsofDirection::Nearest => {
-            for &lv in &left_vals {
+            for &lv in left_vals {
                 if lv.is_nan() {
                     right_matches.push(None);
                     continue;
@@ -1231,34 +1530,124 @@ pub fn merge_asof(
                     right_matches.push(None);
                     continue;
                 }
+
+                // For nearest, find the closest value
+                // If !allow_exact_matches, exclude exact matches from consideration
                 let pos = right_non_nan_values.partition_point(|rv| *rv <= lv);
-                let chosen = if pos == 0 {
-                    0
-                } else if pos >= right_non_nan_values.len() {
-                    right_non_nan_values.len() - 1
+
+                let lower = if pos > 0 { Some(pos - 1) } else { None };
+                let upper = if pos < right_non_nan_values.len() {
+                    Some(pos)
                 } else {
-                    let lower = pos - 1;
-                    let upper = pos;
-                    let lower_dist = (right_non_nan_values[lower] - lv).abs();
-                    let upper_dist = (right_non_nan_values[upper] - lv).abs();
-                    if upper_dist < lower_dist {
-                        upper
-                    } else {
-                        lower
-                    }
+                    None
                 };
-                right_matches.push(Some(right_non_nan_positions[chosen]));
+
+                let chosen = match (lower, upper) {
+                    (Some(l), Some(u)) => {
+                        let lower_val = right_non_nan_values[l];
+                        let upper_val = right_non_nan_values[u];
+                        let lower_exact = (lower_val - lv).abs() < f64::EPSILON;
+                        let upper_exact = (upper_val - lv).abs() < f64::EPSILON;
+
+                        if !allow_exact_matches {
+                            // Exclude exact matches
+                            if lower_exact && upper_exact {
+                                None
+                            } else if lower_exact {
+                                Some(u)
+                            } else if upper_exact {
+                                Some(l)
+                            } else {
+                                let lower_dist = (lower_val - lv).abs();
+                                let upper_dist = (upper_val - lv).abs();
+                                if upper_dist < lower_dist {
+                                    Some(u)
+                                } else {
+                                    Some(l)
+                                }
+                            }
+                        } else {
+                            let lower_dist = (lower_val - lv).abs();
+                            let upper_dist = (upper_val - lv).abs();
+                            if upper_dist < lower_dist {
+                                Some(u)
+                            } else {
+                                Some(l)
+                            }
+                        }
+                    }
+                    (Some(l), None) => {
+                        let val = right_non_nan_values[l];
+                        let exact = (val - lv).abs() < f64::EPSILON;
+                        if !allow_exact_matches && exact {
+                            None
+                        } else {
+                            Some(l)
+                        }
+                    }
+                    (None, Some(u)) => {
+                        let val = right_non_nan_values[u];
+                        let exact = (val - lv).abs() < f64::EPSILON;
+                        if !allow_exact_matches && exact {
+                            None
+                        } else {
+                            Some(u)
+                        }
+                    }
+                    (None, None) => None,
+                };
+
+                // Apply tolerance check
+                let matched = match chosen {
+                    Some(idx) => {
+                        let rv = right_non_nan_values[idx];
+                        match tolerance {
+                            Some(tol) if (lv - rv).abs() <= tol => {
+                                Some(right_non_nan_positions[idx])
+                            }
+                            None => Some(right_non_nan_positions[idx]),
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                right_matches.push(matched);
             }
         }
     }
 
-    // Build output columns
+    right_matches
+}
+
+/// Build the output DataFrame from computed matches.
+fn build_asof_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    right_matches: &[Option<usize>],
+    by_cols: Option<&[String]>,
+) -> Result<MergedDataFrame, JoinError> {
+    let right_n = right.len();
+
     let left_col_names: Vec<String> = left.column_names().iter().map(|s| s.to_string()).collect();
     let right_col_names_all: Vec<String> =
         right.column_names().iter().map(|s| s.to_string()).collect();
+
+    // Exclude the `on` column and `by` columns from right output
+    let excluded_cols: HashSet<&str> = {
+        let mut s = HashSet::new();
+        s.insert(on);
+        if let Some(by) = by_cols {
+            for c in by {
+                s.insert(c.as_str());
+            }
+        }
+        s
+    };
+
     let right_col_names: Vec<String> = right_col_names_all
         .iter()
-        .filter(|c| c.as_str() != on)
+        .filter(|c| !excluded_cols.contains(c.as_str()))
         .cloned()
         .collect();
 
@@ -1272,7 +1661,7 @@ pub fn merge_asof(
     let suffixes = ResolvedMergeSuffixes::default();
     ensure_merge_suffixes_for_overlaps(&overlap_names, &suffixes)?;
 
-    let n_out = left_vals.len();
+    let n_out = left.len();
     let mut out_columns = std::collections::BTreeMap::new();
 
     // Left columns (all rows present)
@@ -1304,7 +1693,7 @@ pub fn merge_asof(
         };
 
         let mut vals = Vec::with_capacity(n_out);
-        for m in &right_matches {
+        for m in right_matches {
             match m {
                 Some(j) if *j < right_n => vals.push(right_col.values()[*j].clone()),
                 _ => {
@@ -1362,6 +1751,16 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
         on: &str,
         direction: &str,
     ) -> Result<MergedDataFrame, JoinError> {
+        self.merge_asof_with_options(other, on, direction, MergeAsofOptions::new())
+    }
+
+    fn merge_asof_with_options(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &str,
+        direction: &str,
+        options: MergeAsofOptions,
+    ) -> Result<MergedDataFrame, JoinError> {
         let dir = match direction {
             "backward" => AsofDirection::Backward,
             "forward" => AsofDirection::Forward,
@@ -1372,7 +1771,7 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
                 )));
             }
         };
-        crate::merge_asof(self, other, on, dir)
+        crate::merge_asof_with_options(self, other, on, dir, options)
     }
 }
 
@@ -3740,5 +4139,250 @@ mod tests {
         let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
         // All 5 left rows should be present.
         assert_eq!(result.index.len(), 5);
+    }
+
+    // ── merge_asof options tests ──
+
+    #[test]
+    fn merge_asof_allow_exact_matches_false_backward() {
+        use super::{AsofDirection, MergeAsofOptions, merge_asof_with_options};
+
+        // Left: keys 1, 2, 3
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Right: keys 1, 2, 3 (exact matches exist)
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "quote",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(300.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // With allow_exact_matches=true (default), all should match
+        let result_with_exact = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new(),
+        )
+        .unwrap();
+
+        let quote_col = result_with_exact.columns.get("quote").unwrap();
+        assert_eq!(quote_col.values()[0], Scalar::Float64(100.0)); // 1 matches 1
+        assert_eq!(quote_col.values()[1], Scalar::Float64(200.0)); // 2 matches 2
+        assert_eq!(quote_col.values()[2], Scalar::Float64(300.0)); // 3 matches 3
+
+        // With allow_exact_matches=false, exact matches should be excluded
+        let result_no_exact = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().allow_exact_matches(false),
+        )
+        .unwrap();
+
+        let quote_col_no_exact = result_no_exact.columns.get("quote").unwrap();
+        // 1 has no previous right key, should be null
+        assert!(matches!(
+            quote_col_no_exact.values()[0],
+            Scalar::Null(_)
+        ));
+        // 2 should match previous (1)
+        assert_eq!(quote_col_no_exact.values()[1], Scalar::Float64(100.0));
+        // 3 should match previous (2)
+        assert_eq!(quote_col_no_exact.values()[2], Scalar::Float64(200.0));
+    }
+
+    #[test]
+    fn merge_asof_tolerance() {
+        use super::{AsofDirection, MergeAsofOptions, merge_asof_with_options};
+
+        // Left: keys 1, 5, 10
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(50.0),
+                        Scalar::Float64(100.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Right: keys 2, 6
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(6)]),
+                (
+                    "quote",
+                    vec![Scalar::Float64(200.0), Scalar::Float64(600.0)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // With tolerance=2, matches within 2 units are valid
+        let result = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().tolerance(2.0),
+        )
+        .unwrap();
+
+        let quote_col = result.columns.get("quote").unwrap();
+        // 1 < 2, no previous match, null
+        assert!(matches!(quote_col.values()[0], Scalar::Null(_)));
+        // 5 finds 2 (diff = 3), but tolerance is 2, so null
+        assert!(matches!(quote_col.values()[1], Scalar::Null(_)));
+        // 10 finds 6 (diff = 4), but tolerance is 2, so null
+        assert!(matches!(quote_col.values()[2], Scalar::Null(_)));
+
+        // With tolerance=5, all should match
+        let result_wider = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().tolerance(5.0),
+        )
+        .unwrap();
+
+        let quote_col_wider = result_wider.columns.get("quote").unwrap();
+        // 1 < 2, still no previous
+        assert!(matches!(quote_col_wider.values()[0], Scalar::Null(_)));
+        // 5 finds 2 (diff = 3 <= 5)
+        assert_eq!(quote_col_wider.values()[1], Scalar::Float64(200.0));
+        // 10 finds 6 (diff = 4 <= 5)
+        assert_eq!(quote_col_wider.values()[2], Scalar::Float64(600.0));
+    }
+
+    #[test]
+    fn merge_asof_by_column() {
+        use super::{AsofDirection, MergeAsofOptions, merge_asof_with_options};
+
+        // Left: two groups (A and B), each with times
+        let left = fp_frame::DataFrame::from_dict(
+            &["group", "time", "val"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
+                        Scalar::Int64(2),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Right: same groups with quotes
+        let right = fp_frame::DataFrame::from_dict(
+            &["group", "time", "quote"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(3)],
+                ),
+                (
+                    "quote",
+                    vec![
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(400.0),
+                        Scalar::Float64(300.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Merge with 'by' column
+        let result = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().by(vec!["group".to_string()]),
+        )
+        .unwrap();
+
+        let quote_col = result.columns.get("quote").unwrap();
+        // Row 0: group=A, time=1, no right A with time <= 1 -> null
+        assert!(matches!(quote_col.values()[0], Scalar::Null(_)));
+        // Row 1: group=A, time=3, right A has time=2 <= 3 -> 200.0
+        assert_eq!(quote_col.values()[1], Scalar::Float64(200.0));
+        // Row 2: group=B, time=2, no right B with time <= 2 -> null
+        assert!(matches!(quote_col.values()[2], Scalar::Null(_)));
+        // Row 3: group=B, time=4, right B has time=3 <= 4 -> 300.0
+        assert_eq!(quote_col.values()[3], Scalar::Float64(300.0));
     }
 }

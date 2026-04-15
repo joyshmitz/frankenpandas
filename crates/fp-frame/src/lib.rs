@@ -3938,6 +3938,24 @@ impl Series {
         Ok(self.column.values()[0].clone())
     }
 
+    /// Extract the single boolean value from a single-element Series.
+    ///
+    /// Matches `pd.Series.bool()`. Raises an error unless the Series has
+    /// exactly one element and that element is a boolean scalar.
+    pub fn bool_(&self) -> Result<bool, FrameError> {
+        if self.len() != 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "bool_: Series must contain exactly one element".to_string(),
+            ));
+        }
+        match &self.column.values()[0] {
+            Scalar::Bool(b) => Ok(*b),
+            _ => Err(FrameError::CompatibilityRejected(
+                "bool_: value must be a boolean scalar".to_string(),
+            )),
+        }
+    }
+
     /// Approximate memory usage in bytes.
     ///
     /// Matches `pd.Series.memory_usage()`. Includes index and values.
@@ -19760,8 +19778,8 @@ impl DataFrame {
 
     /// Extract the single bool value from a single-element DataFrame.
     ///
-    /// Matches `pd.DataFrame.bool()`. Raises an error if the DataFrame
-    /// does not contain exactly one element.
+    /// Matches `pd.DataFrame.bool()`. Raises an error unless the DataFrame
+    /// contains exactly one boolean scalar.
     pub fn bool_(&self) -> Result<bool, FrameError> {
         if self.len() != 1 || self.column_order.len() != 1 {
             return Err(FrameError::CompatibilityRejected(
@@ -19771,10 +19789,8 @@ impl DataFrame {
         let col = &self.columns[&self.column_order[0]];
         match &col.values()[0] {
             Scalar::Bool(b) => Ok(*b),
-            Scalar::Int64(i) => Ok(*i != 0),
-            Scalar::Float64(f) => Ok(*f != 0.0 && !f.is_nan()),
             _ => Err(FrameError::CompatibilityRejected(
-                "bool_: value is not boolean-like".to_string(),
+                "bool_: value must be a boolean scalar".to_string(),
             )),
         }
     }
@@ -42430,6 +42446,12 @@ mod tests {
         assert!(df.bool_().is_err());
     }
 
+    #[test]
+    fn df_bool_non_boolean_error() {
+        let df = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
+        assert!(df.bool_().is_err());
+    }
+
     // ── DataFrame.get_column ──
 
     #[test]
@@ -44445,6 +44467,29 @@ mod tests {
         )
         .unwrap();
         assert!(s2.item().is_err());
+    }
+
+    #[test]
+    fn test_series_bool_true() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Bool(true)]).unwrap();
+        assert!(s.bool_().unwrap());
+    }
+
+    #[test]
+    fn test_series_bool_rejects_non_boolean_scalars() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        assert!(s.bool_().is_err());
+    }
+
+    #[test]
+    fn test_series_bool_requires_single_element() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert!(s.bool_().is_err());
     }
 
     #[test]

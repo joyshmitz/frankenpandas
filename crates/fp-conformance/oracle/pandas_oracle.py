@@ -1273,6 +1273,21 @@ def op_series_all(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_bool": bool(series.all(skipna=True))}
 
 
+def op_series_bool(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_bool requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = bool(series.bool())
+    except Exception as exc:
+        raise OracleError(f"series_bool failed: {exc}") from exc
+    return {"expected_bool": out}
+
+
 def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -1753,6 +1768,19 @@ def op_dataframe_dropna_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame = dataframe_from_json(pd, frame_payload)
     out = frame.dropna(axis=1)
     return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_bool(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_bool requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = bool(frame.bool())
+    except Exception as exc:
+        raise OracleError(f"dataframe_bool failed: {exc}") from exc
+    return {"expected_bool": out}
 
 
 def _resolve_duplicate_subset(payload: dict[str, Any], op_name: str):
@@ -2355,6 +2383,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_any(pd, payload)
     if op == "series_all":
         return op_series_all(pd, payload)
+    if op == "series_bool":
+        return op_series_bool(pd, payload)
     if op == "series_value_counts":
         return op_series_value_counts(pd, payload)
     if op == "series_sort_index":
@@ -2407,6 +2437,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_dropna(pd, payload)
     if op in {"dataframe_dropna_columns", "data_frame_dropna_columns"}:
         return op_dataframe_dropna_columns(pd, payload)
+    if op in {"dataframe_bool", "data_frame_bool"}:
+        return op_dataframe_bool(pd, payload)
     if op in {"dataframe_duplicated", "data_frame_duplicated"}:
         return op_dataframe_duplicated(pd, payload)
     if op in {"dataframe_drop_duplicates", "data_frame_drop_duplicates"}:

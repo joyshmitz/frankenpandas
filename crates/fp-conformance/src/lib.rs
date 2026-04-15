@@ -220,6 +220,8 @@ pub enum FixtureOperation {
     SeriesTail,
     SeriesAny,
     SeriesAll,
+    #[serde(rename = "series_bool", alias = "series_bool_default")]
+    SeriesBool,
     #[serde(rename = "series_value_counts", alias = "series_value_counts_default")]
     SeriesValueCounts,
     #[serde(rename = "series_sort_index", alias = "series_sort_index_default")]
@@ -266,6 +268,8 @@ pub enum FixtureOperation {
     DataFrameAtTime,
     #[serde(rename = "dataframe_between_time", alias = "data_frame_between_time")]
     DataFrameBetweenTime,
+    #[serde(rename = "dataframe_bool", alias = "data_frame_bool")]
+    DataFrameBool,
     #[serde(rename = "dataframe_head", alias = "data_frame_head")]
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
@@ -388,6 +392,7 @@ impl FixtureOperation {
             Self::SeriesTail => "series_tail",
             Self::SeriesAny => "series_any",
             Self::SeriesAll => "series_all",
+            Self::SeriesBool => "series_bool",
             Self::SeriesValueCounts => "series_value_counts",
             Self::SeriesSortIndex => "series_sort_index",
             Self::SeriesSortValues => "series_sort_values",
@@ -409,6 +414,7 @@ impl FixtureOperation {
             Self::DataFrameAsof => "dataframe_asof",
             Self::DataFrameAtTime => "dataframe_at_time",
             Self::DataFrameBetweenTime => "dataframe_between_time",
+            Self::DataFrameBool => "dataframe_bool",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
             Self::DataFrameIsNa => "dataframe_isna",
@@ -929,6 +935,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesTail
         | FixtureOperation::SeriesAny
         | FixtureOperation::SeriesAll
+        | FixtureOperation::SeriesBool
         | FixtureOperation::SeriesSortIndex
         | FixtureOperation::SeriesSortValues
         | FixtureOperation::SeriesDiff
@@ -945,6 +952,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
+        | FixtureOperation::DataFrameBool
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameSetIndex
@@ -4517,6 +4525,38 @@ fn run_fixture_operation(
                 _ => Err("expected_bool or expected_error is required for series_all".to_owned()),
             }
         }
+        FixtureOperation::SeriesBool => {
+            let actual = execute_series_bool_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Bool(value) => {
+                    let actual = actual?;
+                    if actual == value {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "series_bool mismatch: actual={actual}, expected={value}"
+                        ))
+                    }
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_bool error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_bool to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_bool to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_bool or expected_error is required for series_bool".to_owned()),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -4826,6 +4866,40 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameBool => {
+            let actual = execute_dataframe_bool_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Bool(value) => {
+                    let actual = actual?;
+                    if actual == value {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "dataframe_bool mismatch: actual={actual}, expected={value}"
+                        ))
+                    }
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_bool error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_bool to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_bool to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_bool or expected_error is required for dataframe_bool".to_owned())
+                }
+            }
+        }
         FixtureOperation::DataFrameHead => {
             let frame = require_frame(fixture)?;
             let n = fixture
@@ -5052,7 +5126,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
-        FixtureOperation::SeriesAny | FixtureOperation::SeriesAll => fixture
+        FixtureOperation::SeriesAny
+        | FixtureOperation::SeriesAll
+        | FixtureOperation::SeriesBool => fixture
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| {
@@ -5179,7 +5255,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
-        FixtureOperation::CsvRoundTrip => fixture
+        FixtureOperation::DataFrameBool | FixtureOperation::CsvRoundTrip => fixture
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| {
@@ -5374,7 +5450,9 @@ fn capture_live_oracle_expected(
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
-        FixtureOperation::SeriesAny | FixtureOperation::SeriesAll => response
+        FixtureOperation::SeriesAny
+        | FixtureOperation::SeriesAll
+        | FixtureOperation::SeriesBool => response
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
@@ -5426,6 +5504,10 @@ fn capture_live_oracle_expected(
             .ok_or_else(|| {
                 HarnessError::FixtureFormat("oracle omitted expected_series".to_owned())
             }),
+        FixtureOperation::DataFrameBool => response
+            .expected_bool
+            .map(ResolvedExpected::Bool)
+            .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
@@ -6575,6 +6657,18 @@ fn execute_dataframe_asof_fixture_operation(fixture: &PacketFixture) -> Result<S
     frame
         .asof(require_asof_label(fixture)?, subset_refs.as_deref())
         .map_err(|err| err.to_string())
+}
+
+fn execute_series_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left)?;
+    series.bool_().map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    frame.bool_().map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_merge_fixture_operation(
@@ -8542,6 +8636,39 @@ fn execute_and_compare_differential(
                 _ => Err("expected_bool or expected_error required for series_all".to_owned()),
             }
         }
+        FixtureOperation::SeriesBool => {
+            let actual = execute_series_bool_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, "series_bool")),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_bool.error",
+                        format!(
+                            "expected series_bool error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_bool.error",
+                        "expected series_bool to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_bool.error",
+                        "expected series_bool to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_bool or expected_error required for series_bool".to_owned()),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -8942,6 +9069,39 @@ fn execute_and_compare_differential(
                     "expected_frame or expected_error required for dataframe_between_time"
                         .to_owned(),
                 ),
+            }
+        }
+        FixtureOperation::DataFrameBool => {
+            let actual = execute_dataframe_bool_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, "dataframe_bool")),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_bool.error",
+                        format!(
+                            "expected dataframe_bool error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_bool.error",
+                        "expected dataframe_bool to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_bool.error",
+                        "expected dataframe_bool to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_bool or expected_error required for dataframe_bool".to_owned()),
             }
         }
         FixtureOperation::DataFrameHead => {
@@ -12441,6 +12601,173 @@ mod tests {
         );
         super::compare_series_expected(&actual.expect("actual series"), &expected)
             .expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_bool_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "series_bool_live",
+            "mode": "strict",
+            "operation": "series_bool",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "flag",
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "bool", "value": true }]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series bool oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Bool(_)),
+            "expected live oracle bool payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Bool(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_series_bool_fixture_operation(&fixture).expect("actual bool");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn live_oracle_series_bool_non_boolean_errors_like_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "series_bool_non_boolean_live",
+            "mode": "strict",
+            "operation": "series_bool",
+            "oracle_source": "live_legacy_pandas",
+            "expected_error_contains": "boolean scalar",
+            "left": {
+                "name": "flag",
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "int64", "value": 1 }]
+            }
+        }))
+        .expect("fixture");
+
+        let expected = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected {
+            eprintln!("live pandas unavailable; skipping series bool error oracle test: {message}");
+            return;
+        }
+
+        let expected = expected.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::ErrorAny),
+            "expected live oracle error payload, got {expected:?}"
+        );
+
+        let actual = super::execute_series_bool_fixture_operation(&fixture);
+        assert!(
+            actual
+                .as_ref()
+                .err()
+                .is_some_and(|message| message.contains("boolean scalar")),
+            "{actual:?}"
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_bool_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "dataframe_bool_live",
+            "mode": "strict",
+            "operation": "dataframe_bool",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [{ "kind": "int64", "value": 0 }],
+                "column_order": ["flag"],
+                "columns": {
+                    "flag": [{ "kind": "bool", "value": false }]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping dataframe bool oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Bool(_)),
+            "expected live oracle bool payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Bool(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_dataframe_bool_fixture_operation(&fixture).expect("actual bool");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_bool_non_boolean_errors_like_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "dataframe_bool_non_boolean_live",
+            "mode": "strict",
+            "operation": "dataframe_bool",
+            "oracle_source": "live_legacy_pandas",
+            "expected_error_contains": "boolean scalar",
+            "frame": {
+                "index": [{ "kind": "int64", "value": 0 }],
+                "column_order": ["flag"],
+                "columns": {
+                    "flag": [{ "kind": "int64", "value": 1 }]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe bool error oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::ErrorAny),
+            "expected live oracle error payload, got {expected:?}"
+        );
+
+        let actual = super::execute_dataframe_bool_fixture_operation(&fixture);
+        assert!(
+            actual
+                .as_ref()
+                .err()
+                .is_some_and(|message| message.contains("boolean scalar")),
+            "{actual:?}"
+        );
     }
 
     #[test]

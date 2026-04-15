@@ -160,6 +160,8 @@ pub enum FixtureOperation {
     SeriesJoin,
     #[serde(rename = "series_constructor", alias = "series_from_values")]
     SeriesConstructor,
+    #[serde(rename = "series_to_datetime", alias = "to_datetime")]
+    SeriesToDatetime,
     #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
     DataFrameFromSeries,
     #[serde(rename = "dataframe_from_dict", alias = "data_frame_from_dict")]
@@ -339,6 +341,7 @@ impl FixtureOperation {
             Self::SeriesDiv => "series_div",
             Self::SeriesJoin => "series_join",
             Self::SeriesConstructor => "series_constructor",
+            Self::SeriesToDatetime => "series_to_datetime",
             Self::DataFrameFromSeries => "dataframe_from_series",
             Self::DataFrameFromDict => "dataframe_from_dict",
             Self::DataFrameFromRecords => "dataframe_from_records",
@@ -571,6 +574,8 @@ pub struct PacketFixture {
     pub expected_scalar: Option<Scalar>,
     #[serde(default)]
     pub expected_dtype: Option<String>,
+    #[serde(default)]
+    pub datetime_unit: Option<String>,
     #[serde(default)]
     pub fill_value: Option<Scalar>,
     #[serde(default)]
@@ -818,6 +823,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesMul
         | FixtureOperation::SeriesDiv => &["CC-004", "CC-005"],
         FixtureOperation::SeriesConstructor
+        | FixtureOperation::SeriesToDatetime
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
         | FixtureOperation::DataFrameConstructorKwargs
@@ -1388,6 +1394,8 @@ struct OracleRequest {
     merge_sort: Option<bool>,
     #[serde(default)]
     fill_value: Option<Scalar>,
+    #[serde(default)]
+    datetime_unit: Option<String>,
     #[serde(default)]
     pub head_n: Option<i64>,
     #[serde(default)]
@@ -3421,6 +3429,36 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesToDatetime => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = if let Some(unit) = fixture.datetime_unit.as_deref() {
+                fp_frame::to_datetime_with_unit(&series, unit)
+            } else {
+                fp_frame::to_datetime(&series)
+            }
+            .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_to_datetime error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_to_datetime to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected series_to_datetime to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_series or expected_error is required for series_to_datetime"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameFromSeries => {
             let actual = execute_dataframe_from_series_fixture_operation(fixture);
             match expected {
@@ -4755,6 +4793,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
             }),
         FixtureOperation::SeriesConcat
         | FixtureOperation::SeriesConstructor
+        | FixtureOperation::SeriesToDatetime
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -4919,6 +4958,7 @@ fn capture_live_oracle_expected(
         merge_suffixes: fixture.merge_suffixes.clone(),
         merge_sort: fixture.merge_sort,
         fill_value: fixture.fill_value.clone(),
+        datetime_unit: fixture.datetime_unit.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
         diff_periods: fixture.diff_periods,
@@ -5048,6 +5088,7 @@ fn capture_live_oracle_expected(
             }),
         FixtureOperation::SeriesConcat
         | FixtureOperation::SeriesConstructor
+        | FixtureOperation::SeriesToDatetime
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -6804,6 +6845,48 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_constructor".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesToDatetime => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = if let Some(unit) = fixture.datetime_unit.as_deref() {
+                fp_frame::to_datetime_with_unit(&series, unit)
+            } else {
+                fp_frame::to_datetime(&series)
+            }
+            .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_datetime.error",
+                        format!(
+                            "expected series_to_datetime error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_datetime.error",
+                        "expected series_to_datetime to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_datetime.error",
+                        "expected series_to_datetime to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_to_datetime".to_owned(),
                 ),
             }
         }
@@ -11023,6 +11106,108 @@ mod tests {
             diff.drift_records.is_empty(),
             "expected no drift for mixed object constructor parity: {diff:?}"
         );
+    }
+
+    #[test]
+    fn live_oracle_series_to_datetime_unit_seconds_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-064",
+            "case_id": "series_to_datetime_unit_seconds_live",
+            "mode": "strict",
+            "operation": "series_to_datetime",
+            "oracle_source": "live_legacy_pandas",
+            "datetime_unit": "s",
+            "left": {
+                "name": "epoch_s",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "utf8", "value": "bad" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping to_datetime unit seconds oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = fp_frame::to_datetime_with_unit(
+            &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+            fixture.datetime_unit.as_deref().expect("unit"),
+        )
+        .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_to_datetime_unit_nanoseconds_preserves_precision() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-064",
+            "case_id": "series_to_datetime_unit_nanoseconds_live",
+            "mode": "strict",
+            "operation": "series_to_datetime",
+            "oracle_source": "live_legacy_pandas",
+            "datetime_unit": "ns",
+            "left": {
+                "name": "epoch_ns",
+                "index": [
+                    { "kind": "int64", "value": 0 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1490195805433502912_i64 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping to_datetime unit nanoseconds oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = fp_frame::to_datetime_with_unit(
+            &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+            fixture.datetime_unit.as_deref().expect("unit"),
+        )
+        .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

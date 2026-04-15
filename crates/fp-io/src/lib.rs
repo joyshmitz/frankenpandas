@@ -2984,9 +2984,13 @@ mod tests {
     }
 
     #[test]
-    fn json_records_incompatible_types_errors() {
+    fn json_records_mixed_utf8_numeric_preserves_object_values() {
         let input = r#"[{"v":1},{"v":"text"}]"#;
-        assert!(read_json_str(input, JsonOrient::Records).is_err());
+        let frame = read_json_str(input, JsonOrient::Records).expect("parse");
+        assert_eq!(
+            frame.column("v").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Utf8("text".into())]
+        );
     }
 
     #[test]

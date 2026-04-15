@@ -593,6 +593,35 @@ def op_series_constructor(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(series)}
 
 
+def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    series = fixture_series_from_payload(pd, left, "series_to_datetime")
+    unit = payload.get("datetime_unit")
+
+    kwargs: dict[str, Any] = {"errors": "coerce"}
+    if unit is not None:
+        if not isinstance(unit, str) or unit.strip() == "":
+            raise OracleError("series_to_datetime datetime_unit must be a non-empty string")
+        kwargs["unit"] = unit
+
+    try:
+        out = pd.to_datetime(series, **kwargs)
+    except Exception as exc:
+        raise OracleError(f"series_to_datetime failed: {exc}") from exc
+
+    def datetime_scalar_to_json(value: Any) -> dict[str, Any]:
+        if pd.isna(value):
+            return {"kind": "null", "value": "null"}
+        return {"kind": "utf8", "value": str(value)}
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [datetime_scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_dataframe_from_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
     payloads = collect_constructor_series_payloads(payload, "dataframe_from_series")
     series_list = [
@@ -2012,6 +2041,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_join(pd, payload)
     if op == "series_constructor":
         return op_series_constructor(pd, payload)
+    if op in {"series_to_datetime", "to_datetime"}:
+        return op_series_to_datetime(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
         return op_dataframe_from_series(pd, payload)
     if op in {"dataframe_from_dict", "data_frame_from_dict"}:

@@ -10230,7 +10230,7 @@ pub fn to_numeric(series: &Series) -> Result<Series, FrameError> {
 ///
 /// Missing/unparseable values become `Null`.
 pub fn to_datetime(series: &Series) -> Result<Series, FrameError> {
-    to_datetime_with_format(series, None)
+    to_datetime_with_options(series, None, None)
 }
 
 /// Convert to datetime with an explicit format string.
@@ -10240,36 +10240,50 @@ pub fn to_datetime_with_format(
     series: &Series,
     format: Option<&str>,
 ) -> Result<Series, FrameError> {
+    to_datetime_with_options(series, format, None)
+}
+
+/// Convert numeric epoch values using an explicit unit.
+///
+/// Matches the numeric `unit=` slice of `pd.to_datetime(series, unit=...)`
+/// for Unix-origin conversions.
+pub fn to_datetime_with_unit(series: &Series, unit: &str) -> Result<Series, FrameError> {
+    to_datetime_with_options(series, None, Some(unit))
+}
+
+fn to_datetime_with_options(
+    series: &Series,
+    format: Option<&str>,
+    unit: Option<&str>,
+) -> Result<Series, FrameError> {
+    let parsed_unit = unit.map(DatetimeUnit::parse).transpose()?;
     let mut converted = Vec::with_capacity(series.len());
 
     for val in series.values() {
-        let result = match val {
-            Scalar::Null(_) => Scalar::Null(NullKind::NaT),
-            Scalar::Utf8(s) => parse_datetime_string(s, format),
-            Scalar::Int64(epoch) => {
-                // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
-                let secs = if epoch.unsigned_abs() > 100_000_000_000 {
-                    *epoch / 1000
-                } else {
-                    *epoch
-                };
-                match DateTime::from_timestamp(secs, 0) {
-                    Some(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    None => Scalar::Null(NullKind::NaT),
+        let result = if let Some(unit) = parsed_unit {
+            parse_datetime_scalar_with_unit(val, unit)
+        } else {
+            match val {
+                Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+                Scalar::Utf8(s) => parse_datetime_string(s, format),
+                Scalar::Int64(epoch) => {
+                    // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
+                    let secs = if epoch.unsigned_abs() > 100_000_000_000 {
+                        *epoch / 1000
+                    } else {
+                        *epoch
+                    };
+                    format_unix_timestamp(secs, 0)
                 }
-            }
-            Scalar::Float64(v) => {
-                if v.is_nan() || v.is_infinite() {
-                    Scalar::Null(NullKind::NaT)
-                } else {
-                    let secs = *v as i64;
-                    match DateTime::from_timestamp(secs, 0) {
-                        Some(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-                        None => Scalar::Null(NullKind::NaT),
+                Scalar::Float64(v) => {
+                    if v.is_nan() || v.is_infinite() {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        format_unix_timestamp(*v as i64, 0)
                     }
                 }
+                _ => Scalar::Null(NullKind::NaT),
             }
-            _ => Scalar::Null(NullKind::NaT),
         };
         converted.push(result);
     }
@@ -10279,6 +10293,121 @@ pub fn to_datetime_with_format(
         series.index().labels().to_vec(),
         converted,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatetimeUnit {
+    Days,
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+}
+
+impl DatetimeUnit {
+    fn parse(unit: &str) -> Result<Self, FrameError> {
+        match unit.trim().to_ascii_lowercase().as_str() {
+            "d" => Ok(Self::Days),
+            "s" => Ok(Self::Seconds),
+            "ms" => Ok(Self::Milliseconds),
+            "us" => Ok(Self::Microseconds),
+            "ns" => Ok(Self::Nanoseconds),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported to_datetime unit '{other}'"
+            ))),
+        }
+    }
+
+    fn nanos_per_unit(self) -> f64 {
+        match self {
+            Self::Days => 86_400_f64 * 1_000_000_000_f64,
+            Self::Seconds => 1_000_000_000_f64,
+            Self::Milliseconds => 1_000_000_f64,
+            Self::Microseconds => 1_000_f64,
+            Self::Nanoseconds => 1_f64,
+        }
+    }
+}
+
+fn parse_datetime_scalar_with_unit(value: &Scalar, unit: DatetimeUnit) -> Scalar {
+    match value {
+        Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+        Scalar::Int64(epoch) => parse_epoch_i64_with_unit(*epoch, unit),
+        Scalar::Float64(epoch) => parse_epoch_f64_with_unit(*epoch, unit),
+        Scalar::Utf8(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Scalar::Null(NullKind::NaT)
+            } else if let Ok(epoch) = trimmed.parse::<i64>() {
+                parse_epoch_i64_with_unit(epoch, unit)
+            } else if let Ok(epoch) = trimmed.parse::<f64>() {
+                parse_epoch_f64_with_unit(epoch, unit)
+            } else {
+                Scalar::Null(NullKind::NaT)
+            }
+        }
+        _ => Scalar::Null(NullKind::NaT),
+    }
+}
+
+fn parse_epoch_i64_with_unit(epoch: i64, unit: DatetimeUnit) -> Scalar {
+    match unit {
+        DatetimeUnit::Days => epoch
+            .checked_mul(86_400)
+            .map_or(Scalar::Null(NullKind::NaT), |secs| {
+                format_unix_timestamp(secs, 0)
+            }),
+        DatetimeUnit::Seconds => format_unix_timestamp(epoch, 0),
+        DatetimeUnit::Milliseconds => {
+            let secs = epoch.div_euclid(1_000);
+            let nanos = u32::try_from(epoch.rem_euclid(1_000)).unwrap_or_default() * 1_000_000;
+            format_unix_timestamp(secs, nanos)
+        }
+        DatetimeUnit::Microseconds => {
+            let secs = epoch.div_euclid(1_000_000);
+            let nanos = u32::try_from(epoch.rem_euclid(1_000_000)).unwrap_or_default() * 1_000;
+            format_unix_timestamp(secs, nanos)
+        }
+        DatetimeUnit::Nanoseconds => {
+            let secs = epoch.div_euclid(1_000_000_000);
+            let nanos = u32::try_from(epoch.rem_euclid(1_000_000_000)).unwrap_or_default();
+            format_unix_timestamp(secs, nanos)
+        }
+    }
+}
+
+fn parse_epoch_f64_with_unit(epoch: f64, unit: DatetimeUnit) -> Scalar {
+    if epoch.is_nan() || epoch.is_infinite() {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    let total_nanos = epoch * unit.nanos_per_unit();
+    if !total_nanos.is_finite() {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    let rounded_nanos = total_nanos.round();
+    if rounded_nanos < i128::MIN as f64 || rounded_nanos > i128::MAX as f64 {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    let nanos = rounded_nanos as i128;
+    let secs = nanos.div_euclid(1_000_000_000);
+    let subsec = nanos.rem_euclid(1_000_000_000);
+    let Ok(secs) = i64::try_from(secs) else {
+        return Scalar::Null(NullKind::NaT);
+    };
+    let Ok(subsec) = u32::try_from(subsec) else {
+        return Scalar::Null(NullKind::NaT);
+    };
+    format_unix_timestamp(secs, subsec)
+}
+
+fn format_unix_timestamp(secs: i64, nanos: u32) -> Scalar {
+    match Utc.timestamp_opt(secs, nanos) {
+        LocalResult::Single(dt) => Scalar::Utf8(format_naive_datetime(dt.naive_utc())),
+        _ => Scalar::Null(NullKind::NaT),
+    }
 }
 
 /// Parse a datetime string in various common formats.
@@ -10291,11 +10420,15 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     // If explicit format is provided, use it.
     if let Some(fmt) = format {
         return match NaiveDateTime::parse_from_str(trimmed, fmt) {
-            Ok(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            Ok(dt) => Scalar::Utf8(format_naive_datetime(dt)),
             Err(_) => {
                 // Try as date-only.
                 match NaiveDate::parse_from_str(trimmed, fmt) {
-                    Ok(d) => Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d"))),
+                    Ok(d) => d
+                        .and_hms_opt(0, 0, 0)
+                        .map_or(Scalar::Null(NullKind::NaT), |dt| {
+                            Scalar::Utf8(format_naive_datetime(dt))
+                        }),
                     Err(_) => Scalar::Null(NullKind::NaT),
                 }
             }
@@ -10306,12 +10439,12 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
 
     // ISO 8601 with T separator: 2024-01-15T10:30:00
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
-        return Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        return Scalar::Utf8(format_naive_datetime(dt));
     }
 
     // ISO 8601 with space: 2024-01-15 10:30:00
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        return Scalar::Utf8(format_naive_datetime(dt));
     }
 
     // Date only: 2024-01-15
@@ -28801,10 +28934,11 @@ mod tests {
             row.index().labels(),
             &[IndexLabel::from("a"), IndexLabel::from("b")]
         );
-        // Mixed dtypes (Int64 + Utf8) fall back to Utf8 representation
+        // Mixed row values preserve heterogeneous scalars under object-like
+        // storage rather than stringifying numerics.
         assert_eq!(
             row.column().values(),
-            &[Scalar::Utf8("20".to_owned()), Scalar::Utf8("y".to_owned())]
+            &[Scalar::Int64(20), Scalar::Utf8("y".to_owned())]
         );
         // Name should be the row's index label (stringified)
         assert_eq!(row.name(), "1");
@@ -33415,16 +33549,17 @@ mod tests {
         assert!(cola.values()[0].is_missing());
         assert!(cola.values()[1].is_missing());
 
-        if let Scalar::Float64(v) = &colb.values()[0] {
-            assert!((v - 0.1).abs() < 1e-10); // (110 - 100) / 100
-        } else {
-            panic!("Expected float");
-        }
-        if let Scalar::Float64(v) = &colb.values()[1] {
-            assert!((v + 0.2).abs() < 1e-10); // (40 - 50) / 50
-        } else {
-            panic!("Expected float");
-        }
+        assert!(matches!(&colb.values()[0], Scalar::Float64(_)));
+        let Scalar::Float64(v0) = &colb.values()[0] else {
+            return;
+        };
+        assert!((v0 - 0.1).abs() < 1e-10); // (110 - 100) / 100
+
+        assert!(matches!(&colb.values()[1], Scalar::Float64(_)));
+        let Scalar::Float64(v1) = &colb.values()[1] else {
+            return;
+        };
+        assert!((v1 + 0.2).abs() < 1e-10); // (40 - 50) / 50
     }
 
     // ── DataFrame.prod_agg test ──
@@ -46530,6 +46665,96 @@ mod tests {
         let result = super::to_datetime(&s).unwrap();
         let dt_str = expect_utf8(&result.values()[0]);
         assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
+    }
+
+    #[test]
+    fn to_datetime_with_unit_seconds_matches_unix_epoch() {
+        let s = Series::from_values(
+            "epoch_s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(-1)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_unit(&s, "s").unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("1970-01-01 00:00:01".into()),
+                Scalar::Utf8("1969-12-31 23:59:59".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_unit_subsecond_precision_is_preserved() {
+        let millis = super::to_datetime_with_unit(
+            &Series::from_values("ms", vec![0_i64.into()], vec![Scalar::Int64(1500)]).unwrap(),
+            "ms",
+        )
+        .unwrap();
+        assert_eq!(
+            millis.values()[0],
+            Scalar::Utf8("1970-01-01 00:00:01.5".into())
+        );
+
+        let nanos = super::to_datetime_with_unit(
+            &Series::from_values(
+                "ns",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(1490195805433502912)],
+            )
+            .unwrap(),
+            "ns",
+        )
+        .unwrap();
+        assert_eq!(
+            nanos.values()[0],
+            Scalar::Utf8("2017-03-22 15:16:45.433502912".into())
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_unit_days_uses_unix_origin() {
+        let s = Series::from_values("epoch_d", vec![0_i64.into()], vec![Scalar::Int64(2)]).unwrap();
+        let result = super::to_datetime_with_unit(&s, "D").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("1970-01-03 00:00:00".into())
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_unit_parses_numeric_strings_and_coerces_invalid_values() {
+        let s = Series::from_values(
+            "epoch_str",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("1".into()),
+                Scalar::Utf8("2.5".into()),
+                Scalar::Utf8("bad".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_unit(&s, "s").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("1970-01-01 00:00:01".into())
+        );
+        assert_eq!(
+            result.values()[1],
+            Scalar::Utf8("1970-01-01 00:00:02.5".into())
+        );
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn to_datetime_with_unit_rejects_unknown_units() {
+        let s = Series::from_values("epoch", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = super::to_datetime_with_unit(&s, "minutes").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: unsupported to_datetime unit 'minutes'"
+        );
     }
 
     #[test]

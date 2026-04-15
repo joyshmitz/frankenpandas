@@ -38,7 +38,7 @@ pub use fp_frame::{
 pub use fp_frame::to_numeric;
 pub use fp_frame::{cut, qcut};
 pub use fp_frame::{timedelta_total_seconds, to_timedelta};
-pub use fp_frame::{to_datetime, to_datetime_with_format};
+pub use fp_frame::{to_datetime, to_datetime_with_format, to_datetime_with_unit};
 
 // ── IO functions ────────────────────────────────────────────────────────
 

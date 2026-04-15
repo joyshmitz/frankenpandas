@@ -180,12 +180,11 @@ pub enum TypeError {
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Float64, Int64, Null, Utf8};
+    use DType::{Bool, Float64, Int64, Null};
 
     let out = match (left, right) {
         (a, b) if a == b => a,
         (Null, other) | (other, Null) => other,
-        (Utf8, _) | (_, Utf8) => Utf8,
         (Bool, Int64) | (Int64, Bool) => Int64,
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
@@ -512,6 +511,21 @@ mod tests {
     #[test]
     fn common_dtype_rejects_string_numeric_mix() {
         let err = common_dtype(DType::Utf8, DType::Int64).expect_err("must fail");
+        assert_eq!(
+            err.to_string(),
+            "dtype coercion from Utf8 to Int64 has no compatible common type"
+        );
+        let err = common_dtype(DType::Float64, DType::Utf8).expect_err("must fail");
+        assert_eq!(
+            err.to_string(),
+            "dtype coercion from Float64 to Utf8 has no compatible common type"
+        );
+    }
+
+    #[test]
+    fn infer_dtype_rejects_string_numeric_mix() {
+        let values = vec![Scalar::Utf8("x".into()), Scalar::Int64(7)];
+        let err = infer_dtype(&values).expect_err("must fail");
         assert_eq!(
             err.to_string(),
             "dtype coercion from Utf8 to Int64 has no compatible common type"

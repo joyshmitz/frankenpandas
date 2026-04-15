@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -120,8 +120,8 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let mut headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
-    mangle_duplicate_headers(&mut headers);
+    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    reject_duplicate_headers(&headers)?;
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
     // Capacity hint from byte length avoids reallocation for typical CSVs.
@@ -270,30 +270,14 @@ fn parse_scalar_with_options(
     Scalar::Utf8(trimmed.to_owned())
 }
 
-fn mangle_duplicate_headers(headers: &mut [String]) {
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-    for name in headers.iter_mut() {
-        let base = name.clone();
-        let entry = counts.entry(base.clone()).or_insert(0);
-
-        if *entry == 0 && !used.contains(&base) {
-            used.insert(base.clone());
-            *entry = 1;
-            continue;
+fn reject_duplicate_headers(headers: &[String]) -> Result<(), IoError> {
+    let mut used = BTreeSet::new();
+    for name in headers {
+        if !used.insert(name.clone()) {
+            return Err(IoError::DuplicateColumnName(name.clone()));
         }
-
-        let mut suffix = *entry;
-        let mut candidate = format!("{base}.{suffix}");
-        while used.contains(&candidate) {
-            suffix += 1;
-            candidate = format!("{base}.{suffix}");
-        }
-        *entry = suffix + 1;
-        used.insert(candidate.clone());
-        *name = candidate;
     }
+    Ok(())
 }
 
 fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoError> {
@@ -330,7 +314,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     let mut row_count: i64 = 0;
-    let (mut headers, mut columns) = if options.has_headers {
+    let (headers, mut columns) = if options.has_headers {
         let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
         if headers_record.is_empty() {
             return Err(IoError::MissingHeaders);
@@ -398,7 +382,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
         row_count += 1;
     }
-    mangle_duplicate_headers(&mut headers);
+    reject_duplicate_headers(&headers)?;
     if let Some(ref usecols) = options.usecols {
         validate_usecols(&headers, usecols)?;
     }
@@ -754,14 +738,14 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .as_object()
                 .ok_or_else(|| IoError::JsonFormat("expected object for split orient".into()))?;
 
-            let mut col_names: Vec<String> = obj
+            let col_names: Vec<String> = obj
                 .get("columns")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| IoError::JsonFormat("split orient needs 'columns' array".into()))?
                 .iter()
                 .map(json_value_to_column_name)
                 .collect();
-            mangle_duplicate_headers(&mut col_names);
+            reject_duplicate_headers(&col_names)?;
 
             let data = obj
                 .get("data")
@@ -1604,7 +1588,7 @@ fn parse_excel_rows(
     }
 
     // Extract headers.
-    let (mut headers, data_rows) = if options.has_headers {
+    let (headers, data_rows) = if options.has_headers {
         let header_row = &rows[0];
         let headers: Vec<String> = header_row
             .iter()
@@ -1620,7 +1604,7 @@ fn parse_excel_rows(
         let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
         (headers, rows.as_slice())
     };
-    mangle_duplicate_headers(&mut headers);
+    reject_duplicate_headers(&headers)?;
 
     let ncols = headers.len();
 
@@ -1991,10 +1975,10 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
         .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
 
     let col_count = stmt.column_count();
-    let mut headers: Vec<String> = (0..col_count)
+    let headers: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
         .collect();
-    mangle_duplicate_headers(&mut headers);
+    reject_duplicate_headers(&headers)?;
 
     let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
 

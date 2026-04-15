@@ -4685,10 +4685,10 @@ impl Series {
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Utf8(s) = label {
                 let time_part = DataFrame::extract_time(s);
-                if let Some(ref t) = time_part {
-                    if t.as_str() == time {
-                        keep.push(i);
-                    }
+                if let Some(ref t) = time_part
+                    && t.as_str() == time
+                {
+                    keep.push(i);
                 }
             }
         }
@@ -4706,10 +4706,11 @@ impl Series {
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Utf8(s) = label {
                 let time_part = DataFrame::extract_time(s);
-                if let Some(ref t) = time_part {
-                    if t.as_str() >= start && t.as_str() <= end {
-                        keep.push(i);
-                    }
+                if let Some(ref t) = time_part
+                    && t.as_str() >= start
+                    && t.as_str() <= end
+                {
+                    keep.push(i);
                 }
             }
         }

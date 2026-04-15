@@ -989,6 +989,59 @@ def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    time_value = payload.get("time_value")
+    if left is None:
+        raise OracleError("series_at_time requires left payload")
+    if not isinstance(time_value, str) or not time_value:
+        raise OracleError("series_at_time requires non-empty time_value payload")
+
+    index = pd.DatetimeIndex([label_from_json(item) for item in left["index"]])
+    values = [scalar_from_json(item) for item in left["values"]]
+
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.at_time(time_value)
+    except Exception as exc:
+        raise OracleError(f"series_at_time selection failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v.isoformat()) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    start_time = payload.get("start_time")
+    end_time = payload.get("end_time")
+    if left is None:
+        raise OracleError("series_between_time requires left payload")
+    if not isinstance(start_time, str) or not start_time:
+        raise OracleError("series_between_time requires non-empty start_time payload")
+    if not isinstance(end_time, str) or not end_time:
+        raise OracleError("series_between_time requires non-empty end_time payload")
+
+    index = pd.DatetimeIndex([label_from_json(item) for item in left["index"]])
+    values = [scalar_from_json(item) for item in left["values"]]
+
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.between_time(start_time, end_time)
+    except Exception as exc:
+        raise OracleError(f"series_between_time selection failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v.isoformat()) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
@@ -2205,6 +2258,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_iloc(pd, payload)
     if op == "series_take":
         return op_series_take(pd, payload)
+    if op == "series_at_time":
+        return op_series_at_time(pd, payload)
+    if op == "series_between_time":
+        return op_series_between_time(pd, payload)
     if op == "series_filter":
         return op_series_filter(pd, payload)
     if op == "series_head":

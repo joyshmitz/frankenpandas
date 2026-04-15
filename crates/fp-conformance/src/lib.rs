@@ -10949,7 +10949,7 @@ mod tests {
     }
 
     #[test]
-    fn live_oracle_dataframe_from_series_mixed_utf8_numeric_reports_object_gap() {
+    fn live_oracle_dataframe_from_series_mixed_utf8_numeric_matches_object_values() {
         let mut cfg = HarnessConfig::default_paths();
         cfg.allow_system_pandas_fallback = false;
 
@@ -11017,14 +11017,11 @@ mod tests {
             },
         )
         .expect("differential report");
-        assert_eq!(diff.status, CaseStatus::Fail);
+        assert_eq!(diff.status, CaseStatus::Pass);
         assert_eq!(diff.oracle_source, FixtureOracleSource::LiveLegacyPandas);
         assert!(
-            diff.drift_records.iter().any(|record| {
-                record.level == DriftLevel::Critical
-                    && record.message.contains("no compatible common type")
-            }),
-            "expected structured drift for mixed object constructor gap: {diff:?}"
+            diff.drift_records.is_empty(),
+            "expected no drift for mixed object constructor parity: {diff:?}"
         );
     }
 

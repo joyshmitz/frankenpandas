@@ -529,16 +529,35 @@ pub enum ColumnError {
 }
 
 impl Column {
+    fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
+        match value {
+            Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
+            Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
+            other => other,
+        }
+    }
+
     /// Construct a column, coercing values to the target dtype.
     /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
     /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        let preserve_utf8_object_bucket = matches!(dtype, DType::Utf8)
+            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+            && values
+                .iter()
+                .any(|value| !matches!(value, Scalar::Utf8(_) | Scalar::Null(_)));
         let needs_coercion = values.iter().any(|v| {
             let d = v.dtype();
             d != dtype && d != DType::Null
-        });
+        }) && !preserve_utf8_object_bucket;
 
-        let coerced = if needs_coercion {
+        let coerced = if preserve_utf8_object_bucket {
+            values
+                .into_iter()
+                .map(|value| Self::normalize_missing_for_dtype(value, dtype))
+                .collect()
+        } else if needs_coercion {
             values
                 .into_iter()
                 .map(|value| cast_scalar_owned(value, dtype))
@@ -548,12 +567,7 @@ impl Column {
             // Preserve explicit NaN/NaT markers; remap generic Null to dtype-specific missing.
             values
                 .into_iter()
-                .map(|value| match value {
-                    Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
-                    Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
-                    Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
-                    other => other,
-                })
+                .map(|value| Self::normalize_missing_for_dtype(value, dtype))
                 .collect()
         };
 
@@ -1449,6 +1463,18 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(11));
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn column_from_values_preserves_mixed_utf8_numeric_scalars() {
+        let column = Column::from_values(vec![Scalar::Utf8("x".into()), Scalar::Int64(1)])
+            .expect("mixed object-like constructor should succeed");
+
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(
+            column.values(),
+            &[Scalar::Utf8("x".into()), Scalar::Int64(1)]
+        );
     }
 
     #[test]

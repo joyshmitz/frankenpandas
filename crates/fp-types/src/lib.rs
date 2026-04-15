@@ -196,10 +196,32 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
 
 pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut current = DType::Null;
+    let mut saw_utf8 = false;
+    let mut saw_non_utf8_non_null = false;
+
     for value in values {
-        current = common_dtype(current, value.dtype())?;
+        match value.dtype() {
+            DType::Null => {}
+            DType::Utf8 => saw_utf8 = true,
+            other => {
+                saw_non_utf8_non_null = true;
+                current = common_dtype(current, other)?;
+            }
+        }
+
+        if saw_utf8 && saw_non_utf8_non_null {
+            // Constructor inference follows pandas object-dtype behavior for
+            // heterogeneous string/scalar payloads while arithmetic coercion
+            // remains governed by the stricter common_dtype lattice.
+            return Ok(DType::Utf8);
+        }
     }
-    Ok(current)
+
+    if saw_utf8 {
+        Ok(DType::Utf8)
+    } else {
+        Ok(current)
+    }
 }
 
 /// Cast a scalar to a target dtype, taking ownership to avoid redundant clones
@@ -523,12 +545,11 @@ mod tests {
     }
 
     #[test]
-    fn infer_dtype_rejects_string_numeric_mix() {
+    fn infer_dtype_preserves_string_numeric_mix_as_utf8_bucket() {
         let values = vec![Scalar::Utf8("x".into()), Scalar::Int64(7)];
-        let err = infer_dtype(&values).expect_err("must fail");
         assert_eq!(
-            err.to_string(),
-            "dtype coercion from Utf8 to Int64 has no compatible common type"
+            infer_dtype(&values).expect("dtype should infer"),
+            DType::Utf8
         );
     }
 

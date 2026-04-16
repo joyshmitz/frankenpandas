@@ -3559,6 +3559,41 @@ fn load_fixture(path: &Path) -> Result<PacketFixture, HarnessError> {
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Structure-aware fuzz entrypoint for the `PacketFixture` JSON boundary.
+///
+/// This targets parse + serialize + expectation resolution + fixture replay and
+/// treats any semantic error as acceptable as long as the harness does not
+/// panic.
+pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
+    let fixture: PacketFixture = serde_json::from_slice(input)?;
+    let _ = serde_json::to_vec(&fixture)?;
+
+    let config = HarnessConfig {
+        repo_root: PathBuf::new(),
+        oracle_root: PathBuf::new(),
+        fixture_root: PathBuf::new(),
+        strict_mode: true,
+        python_bin: "python3".to_owned(),
+        allow_system_pandas_fallback: false,
+    };
+    let policy = match fixture.mode {
+        RuntimeMode::Strict => RuntimePolicy::strict(),
+        RuntimeMode::Hardened => RuntimePolicy::hardened(Some(100_000)),
+    };
+    let mut ledger = EvidenceLedger::new();
+
+    let _ = fixture_expected(&fixture);
+    let _ = run_fixture_operation(
+        &config,
+        &fixture,
+        &policy,
+        &mut ledger,
+        OracleMode::FixtureExpected,
+    );
+
+    Ok(())
+}
+
 fn list_fixture_files(root: &Path) -> Result<Vec<PathBuf>, HarnessError> {
     if !root.exists() {
         return Ok(Vec::new());
@@ -13160,9 +13195,9 @@ mod tests {
         SuiteOptions, append_phase2c_drift_history, build_ci_forensics_report,
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
-        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, generate_raptorq_sidecar,
-        run_ci_pipeline, run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_fixture_parse_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -13200,6 +13235,32 @@ mod tests {
         let report = run_packet_suite(&cfg).expect("suite should run");
         assert!(report.fixture_count >= 1, "expected packet fixtures");
         assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn fuzz_fixture_parse_bytes_accepts_valid_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/series_add_valid_seed.json"
+        );
+        fuzz_fixture_parse_bytes(seed).expect("valid fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_fixture_parse_bytes_accepts_expected_error_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/dataframe_constructor_missing_matrix_rows_seed.json"
+        );
+        fuzz_fixture_parse_bytes(seed).expect("expected-error fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_fixture_parse_bytes_reports_invalid_json() {
+        let err = fuzz_fixture_parse_bytes(br#"{"packet_id": "oops""#)
+            .expect_err("invalid json should error");
+        assert!(
+            matches!(err, super::HarnessError::Json(_)),
+            "expected JSON parse error, got {err:?}"
+        );
     }
 
     #[test]

@@ -118,6 +118,11 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 | `fuzz_fixture_parse` | fp-conformance | `serde_json::from_str::<PacketFixture>()` | `&[u8]` (raw JSON bytes) | ADV-5 |
 | `fuzz_column_arith` | fp-columnar | `Column::binary_numeric()` | `(Column, Column, BinaryOp)` | ADV-4 |
 
+Implemented entrypoint:
+
+- `fuzz_fixture_parse` target: `fuzz/fuzz_targets/fuzz_fixture_parse.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/`
+
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 
 For targets that need structured input (not raw bytes), derive `Arbitrary` or implement custom structured fuzzing:
@@ -159,24 +164,16 @@ Every fuzz target must satisfy these contracts:
 ### 2.4 Fuzz Configuration
 
 ```toml
-# fuzz/Cargo.toml (future)
+# fuzz/Cargo.toml
 [package]
 name = "fp-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-libfuzzer-sys = "0.4"
-arbitrary = { version = "1", features = ["derive"] }
-fp-io = { path = "../crates/fp-io" }
-fp-types = { path = "../crates/fp-types" }
-fp-index = { path = "../crates/fp-index" }
-fp-frame = { path = "../crates/fp-frame" }
-fp-join = { path = "../crates/fp-join" }
-fp-groupby = { path = "../crates/fp-groupby" }
-fp-columnar = { path = "../crates/fp-columnar" }
 fp-conformance = { path = "../crates/fp-conformance" }
+libfuzzer-sys = "0.4.10"
 ```
 
 Runtime parameters:
@@ -189,6 +186,10 @@ cargo +nightly fuzz run fuzz_csv_parse -- -max_total_time=3600 -max_len=262144
 
 # With seed corpus
 cargo +nightly fuzz run fuzz_csv_parse crates/fp-conformance/fixtures/adversarial/fuzz_corpus/csv_parse/
+
+# Packet fixture parser target
+cargo +nightly fuzz run fuzz_fixture_parse \
+  crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/
 ```
 
 ---

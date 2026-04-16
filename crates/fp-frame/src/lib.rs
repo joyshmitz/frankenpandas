@@ -7868,6 +7868,23 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Split each string from the right and return the n-th element.
+    ///
+    /// Matches `pd.Series.str.rsplit(pat).str[n]`.
+    pub fn rsplit_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| {
+                let parts: Vec<&str> = s.rsplit(pat).collect();
+                if n < parts.len() {
+                    Scalar::Utf8(parts[n].to_string())
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            },
+            self.series.name(),
+        )
+    }
+
     /// Count the number of parts when splitting by pattern.
     ///
     /// Matches `pd.Series.str.split(pat).str.len()`. Returns Int64 count.
@@ -8854,6 +8871,38 @@ impl StringAccessor<'_> {
         let s2 = Series::from_values(format!("{}_1", self.series.name()), labels.clone(), sep_out)?;
         let s3 = Series::from_values(format!("{}_2", self.series.name()), labels, after)?;
         Ok((s1, s2, s3))
+    }
+
+    /// Split the string at the first occurrence of `sep` and return a DataFrame.
+    ///
+    /// Matches `pd.Series.str.partition(sep)`.
+    pub fn partition_df(&self, sep: &str) -> Result<DataFrame, FrameError> {
+        let (b, s, a) = self.partition(sep)?;
+        let mut columns = BTreeMap::new();
+        columns.insert("0".to_string(), b.column().clone());
+        columns.insert("1".to_string(), s.column().clone());
+        columns.insert("2".to_string(), a.column().clone());
+        Ok(DataFrame::new_with_column_order(
+            self.series.index().clone(),
+            columns,
+            vec!["0".to_string(), "1".to_string(), "2".to_string()],
+        )?)
+    }
+
+    /// Split the string at the last occurrence of `sep` and return a DataFrame.
+    ///
+    /// Matches `pd.Series.str.rpartition(sep)`.
+    pub fn rpartition_df(&self, sep: &str) -> Result<DataFrame, FrameError> {
+        let (b, s, a) = self.rpartition(sep)?;
+        let mut columns = BTreeMap::new();
+        columns.insert("0".to_string(), b.column().clone());
+        columns.insert("1".to_string(), s.column().clone());
+        columns.insert("2".to_string(), a.column().clone());
+        Ok(DataFrame::new_with_column_order(
+            self.series.index().clone(),
+            columns,
+            vec!["0".to_string(), "1".to_string(), "2".to_string()],
+        )?)
     }
 
     /// Split each string by separator and return a DataFrame of indicator columns.

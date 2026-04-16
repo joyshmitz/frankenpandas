@@ -383,10 +383,7 @@ pub enum FixtureOperation {
     DataFrameMergeIndex,
     #[serde(rename = "dataframe_merge_asof", alias = "data_frame_merge_asof")]
     DataFrameMergeAsof,
-    #[serde(
-        rename = "dataframe_merge_ordered",
-        alias = "data_frame_merge_ordered"
-    )]
+    #[serde(rename = "dataframe_merge_ordered", alias = "data_frame_merge_ordered")]
     DataFrameMergeOrdered,
     #[serde(rename = "dataframe_concat", alias = "data_frame_concat")]
     DataFrameConcat,

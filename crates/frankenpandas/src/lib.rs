@@ -137,7 +137,6 @@ pub mod prelude {
         JoinType,
         JsonOrient,
         MultiIndex,
-        merge_ordered,
         NullKind,
         RuntimePolicy,
         Scalar,
@@ -145,6 +144,7 @@ pub mod prelude {
         // Module-level functions
         concat_dataframes,
         concat_series,
+        merge_ordered,
         // IO
         read_csv_str,
         read_feather_bytes,

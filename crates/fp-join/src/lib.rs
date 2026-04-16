@@ -1159,9 +1159,9 @@ pub fn merge_ordered(
             "ffill" => df.ffill(None).map_err(JoinError::Frame)?,
             "bfill" => df.bfill(None).map_err(JoinError::Frame)?,
             _ => {
-                return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
-                    "merge_ordered: unknown fill_method '{method}'"
-                ))));
+                return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                    format!("merge_ordered: unknown fill_method '{method}'"),
+                )));
             }
         };
 
@@ -4466,11 +4466,7 @@ mod tests {
         );
         assert_eq!(
             frame.column("left_val").unwrap().values(),
-            &[
-                Scalar::Int64(10),
-                Scalar::Int64(10),
-                Scalar::Int64(30),
-            ]
+            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30),]
         );
         assert_eq!(
             frame.column("right_val").unwrap().values(),

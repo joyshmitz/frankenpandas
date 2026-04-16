@@ -7906,7 +7906,8 @@ impl StringAccessor<'_> {
         for val in self.series.column().values() {
             match val {
                 Scalar::Utf8(s) => {
-                    let parts: Vec<Scalar> = s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect();
+                    let parts: Vec<Scalar> =
+                        s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect();
                     max_parts = max_parts.max(parts.len());
                     row_parts.push(parts);
                 }
@@ -7916,7 +7917,8 @@ impl StringAccessor<'_> {
             }
         }
 
-        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); max_parts];
+        let mut out_cols_data: Vec<Vec<Scalar>> =
+            vec![Vec::with_capacity(self.series.len()); max_parts];
         for parts in row_parts {
             for i in 0..max_parts {
                 if i < parts.len() {
@@ -7929,18 +7931,14 @@ impl StringAccessor<'_> {
 
         let mut out_columns = BTreeMap::new();
         let mut col_order = Vec::new();
-        for i in 0..max_parts {
+        for (i, col_data) in out_cols_data.iter_mut().enumerate() {
             let col_name = format!("{}", i);
-            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            let col = Column::from_values(std::mem::take(col_data))?;
             out_columns.insert(col_name.clone(), col);
             col_order.push(col_name);
         }
 
-        Ok(DataFrame::new_with_column_order(
-            self.series.index().clone(),
-            out_columns,
-            col_order,
-        )?)
+        DataFrame::new_with_column_order(self.series.index().clone(), out_columns, col_order)
     }
 
     /// Split each string from the right and return a DataFrame.
@@ -7953,7 +7951,9 @@ impl StringAccessor<'_> {
             match val {
                 Scalar::Utf8(s) => {
                     let parts: Vec<Scalar> = if let Some(limit) = n {
-                        s.rsplitn(limit + 1, pat).map(|p| Scalar::Utf8(p.to_string())).collect()
+                        s.rsplitn(limit + 1, pat)
+                            .map(|p| Scalar::Utf8(p.to_string()))
+                            .collect()
                     } else {
                         s.rsplit(pat).map(|p| Scalar::Utf8(p.to_string())).collect()
                     };
@@ -7968,7 +7968,8 @@ impl StringAccessor<'_> {
             }
         }
 
-        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); max_parts];
+        let mut out_cols_data: Vec<Vec<Scalar>> =
+            vec![Vec::with_capacity(self.series.len()); max_parts];
         for parts in row_parts {
             for i in 0..max_parts {
                 if i < parts.len() {
@@ -7981,18 +7982,14 @@ impl StringAccessor<'_> {
 
         let mut out_columns = BTreeMap::new();
         let mut col_order = Vec::new();
-        for i in 0..max_parts {
+        for (i, col_data) in out_cols_data.iter_mut().enumerate() {
             let col_name = format!("{}", i);
-            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            let col = Column::from_values(std::mem::take(col_data))?;
             out_columns.insert(col_name.clone(), col);
             col_order.push(col_name);
         }
 
-        Ok(DataFrame::new_with_column_order(
-            self.series.index().clone(),
-            out_columns,
-            col_order,
-        )?)
+        DataFrame::new_with_column_order(self.series.index().clone(), out_columns, col_order)
     }
 
     /// Count the number of parts when splitting by pattern.
@@ -8175,13 +8172,17 @@ impl StringAccessor<'_> {
             ));
         }
 
-        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); n_groups];
+        let mut out_cols_data: Vec<Vec<Scalar>> =
+            vec![Vec::with_capacity(self.series.len()); n_groups];
         for val in self.series.column().values() {
             match val {
                 Scalar::Utf8(s) => {
                     if let Some(caps) = re.captures(s) {
                         for i in 1..=n_groups {
-                            let m = caps.get(i).map(|m| Scalar::Utf8(m.as_str().to_string())).unwrap_or(Scalar::Null(NullKind::NaN));
+                            let m = caps
+                                .get(i)
+                                .map(|m| Scalar::Utf8(m.as_str().to_string()))
+                                .unwrap_or(Scalar::Null(NullKind::NaN));
                             out_cols_data[i - 1].push(m);
                         }
                     } else {
@@ -8203,17 +8204,15 @@ impl StringAccessor<'_> {
         let capture_names: Vec<Option<&str>> = re.capture_names().skip(1).collect();
 
         for i in 0..n_groups {
-            let col_name = capture_names[i].map(|s| s.to_string()).unwrap_or_else(|| format!("{}", i));
+            let col_name = capture_names[i]
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}", i));
             let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
             out_columns.insert(col_name.clone(), col);
             col_order.push(col_name);
         }
 
-        Ok(DataFrame::new_with_column_order(
-            self.series.index().clone(),
-            out_columns,
-            col_order,
-        )?)
+        DataFrame::new_with_column_order(self.series.index().clone(), out_columns, col_order)
     }
 
     /// Count occurrences of pattern in each string.
@@ -8774,7 +8773,11 @@ impl StringAccessor<'_> {
             }
         }
 
-        Series::from_values(self.series.name(), self.series.index().labels().to_vec(), out)
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
     }
 
     /// Concatenate strings element-wise with multiple other Series.
@@ -8994,11 +8997,11 @@ impl StringAccessor<'_> {
         columns.insert("0".to_string(), b.column().clone());
         columns.insert("1".to_string(), s.column().clone());
         columns.insert("2".to_string(), a.column().clone());
-        Ok(DataFrame::new_with_column_order(
+        DataFrame::new_with_column_order(
             self.series.index().clone(),
             columns,
             vec!["0".to_string(), "1".to_string(), "2".to_string()],
-        )?)
+        )
     }
 
     /// Split the string at the last occurrence of `sep` and return a DataFrame.
@@ -9010,11 +9013,11 @@ impl StringAccessor<'_> {
         columns.insert("0".to_string(), b.column().clone());
         columns.insert("1".to_string(), s.column().clone());
         columns.insert("2".to_string(), a.column().clone());
-        Ok(DataFrame::new_with_column_order(
+        DataFrame::new_with_column_order(
             self.series.index().clone(),
             columns,
             vec!["0".to_string(), "1".to_string(), "2".to_string()],
-        )?)
+        )
     }
 
     /// Split each string by separator and return a DataFrame of indicator columns.
@@ -32535,6 +32538,126 @@ mod tests {
             .unwrap();
         let result = s.str().split_get("-", 1).unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("b".into()));
+    }
+
+    #[test]
+    fn str_split_df() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("solo".into())],
+        )
+        .unwrap();
+        let result = s.str().split_df("-").unwrap();
+
+        assert_eq!(result.column_names(), vec!["0", "1", "2"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("solo".into())]
+        );
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[Scalar::Utf8("b".into()), Scalar::Null(NullKind::NaN)]
+        );
+        assert_eq!(
+            result.column("2").unwrap().values(),
+            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn str_rsplit_df_with_limit() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("solo".into())],
+        )
+        .unwrap();
+        let result = s.str().rsplit_df("-", Some(1)).unwrap();
+
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a-b".into()), Scalar::Utf8("solo".into())]
+        );
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn str_extract_df_prefers_capture_names() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("abc-123".into()), Scalar::Utf8("xyz".into())],
+        )
+        .unwrap();
+        let result = s
+            .str()
+            .extract_df(r"(?P<prefix>[a-z]+)-(?P<number>\d+)")
+            .unwrap();
+
+        assert_eq!(result.column_names(), vec!["prefix", "number"]);
+        assert_eq!(
+            result.column("prefix").unwrap().values(),
+            &[Scalar::Utf8("abc".into()), Scalar::Null(NullKind::NaN)]
+        );
+        assert_eq!(
+            result.column("number").unwrap().values(),
+            &[Scalar::Utf8("123".into()), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn str_partition_df() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("solo".into())],
+        )
+        .unwrap();
+        let result = s.str().partition_df("-").unwrap();
+
+        assert_eq!(result.column_names(), vec!["0", "1", "2"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("solo".into())]
+        );
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[Scalar::Utf8("-".into()), Scalar::Utf8("".into())]
+        );
+        assert_eq!(
+            result.column("2").unwrap().values(),
+            &[Scalar::Utf8("b-c".into()), Scalar::Utf8("".into())]
+        );
+    }
+
+    #[test]
+    fn str_rpartition_df() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("solo".into())],
+        )
+        .unwrap();
+        let result = s.str().rpartition_df("-").unwrap();
+
+        assert_eq!(result.column_names(), vec!["0", "1", "2"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a-b".into()), Scalar::Utf8("".into())]
+        );
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[Scalar::Utf8("-".into()), Scalar::Utf8("".into())]
+        );
+        assert_eq!(
+            result.column("2").unwrap().values(),
+            &[Scalar::Utf8("c".into()), Scalar::Utf8("solo".into())]
+        );
     }
 
     #[test]

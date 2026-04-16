@@ -4970,7 +4970,9 @@ fn run_fixture_operation(
                         Err("expected dataframe_xs to fail but operation succeeded".to_owned())
                     }
                 }
-                _ => Err("expected_frame or expected_error is required for dataframe_xs".to_owned()),
+                _ => {
+                    Err("expected_frame or expected_error is required for dataframe_xs".to_owned())
+                }
             }
         }
         FixtureOperation::DataFrameGroupByIdxMin => {
@@ -9310,9 +9312,7 @@ fn execute_and_compare_differential(
                         ComparisonCategory::Value,
                         DriftLevel::Critical,
                         "series_xs.error",
-                        format!(
-                            "expected series_xs error containing '{substr}', got '{message}'"
-                        ),
+                        format!("expected series_xs error containing '{substr}', got '{message}'"),
                     )],
                     Ok(_) => vec![make_drift_record(
                         ComparisonCategory::Value,
@@ -13835,6 +13835,53 @@ mod tests {
     }
 
     #[test]
+    fn live_oracle_series_xs_duplicate_labels_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-077",
+            "case_id": "series_xs_duplicate_labels_live",
+            "mode": "strict",
+            "operation": "series_xs",
+            "oracle_source": "live_legacy_pandas",
+            "xs_key": { "kind": "utf8", "value": "x" },
+            "left": {
+                "name": "vals",
+                "index": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "x" }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series xs oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_series_xs_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
     fn live_oracle_series_repeat_scalar_matches_pandas() {
         let mut cfg = HarnessConfig::default_paths();
         cfg.allow_system_pandas_fallback = false;
@@ -13926,6 +13973,60 @@ mod tests {
 
         let actual = super::execute_series_repeat_fixture_operation(&fixture).expect("actual");
         super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_xs_duplicate_labels_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-078",
+            "case_id": "dataframe_xs_duplicate_labels_live",
+            "mode": "strict",
+            "operation": "dataframe_xs",
+            "oracle_source": "live_legacy_pandas",
+            "xs_key": { "kind": "utf8", "value": "x" },
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "x" }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "b": [
+                        { "kind": "utf8", "value": "u" },
+                        { "kind": "utf8", "value": "v" },
+                        { "kind": "utf8", "value": "w" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping dataframe xs oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

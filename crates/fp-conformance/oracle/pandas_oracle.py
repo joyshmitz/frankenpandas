@@ -2666,6 +2666,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_iloc(pd, payload)
     if op == "series_take":
         return op_series_take(pd, payload)
+    if op == "series_xs":
+        return op_series_xs(pd, payload)
     if op == "series_repeat":
         return op_series_repeat(pd, payload)
     if op == "series_at_time":
@@ -2718,6 +2720,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_pct_change(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
+    if op in {"dataframe_xs", "data_frame_xs"}:
+        return op_dataframe_xs(pd, payload)
     if op == "dataframe_iloc":
         return op_dataframe_iloc(pd, payload)
     if op in {"dataframe_take", "data_frame_take"}:

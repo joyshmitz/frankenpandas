@@ -8034,6 +8034,59 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Extract multiple capture groups as a DataFrame.
+    ///
+    /// Matches `pd.Series.str.extract(pat)` when `pat` has multiple groups.
+    pub fn extract_df(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let n_groups = re.captures_len() - 1;
+        if n_groups == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "extract_df: regex must have at least one capture group".to_string(),
+            ));
+        }
+
+        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); n_groups];
+        for val in self.series.column().values() {
+            match val {
+                Scalar::Utf8(s) => {
+                    if let Some(caps) = re.captures(s) {
+                        for i in 1..=n_groups {
+                            let m = caps.get(i).map(|m| Scalar::Utf8(m.as_str().to_string())).unwrap_or(Scalar::Null(NullKind::NaN));
+                            out_cols_data[i - 1].push(m);
+                        }
+                    } else {
+                        for i in 1..=n_groups {
+                            out_cols_data[i - 1].push(Scalar::Null(NullKind::NaN));
+                        }
+                    }
+                }
+                _ => {
+                    for i in 1..=n_groups {
+                        out_cols_data[i - 1].push(Scalar::Null(NullKind::NaN));
+                    }
+                }
+            }
+        }
+
+        let mut out_columns = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for i in 0..n_groups {
+            let col_name = format!("{}", i);
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            out_columns.insert(col_name.clone(), col);
+            col_order.push(col_name);
+        }
+
+        Ok(DataFrame::new_with_column_order(
+            self.series.index().clone(),
+            out_columns,
+            col_order,
+        )?)
+    }
+
     /// Count occurrences of pattern in each string.
     ///
     /// Matches `pd.Series.str.count(pat)`.

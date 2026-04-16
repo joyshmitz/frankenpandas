@@ -1146,8 +1146,10 @@ pub fn merge_ordered(
     on: &[&str],
     fill_method: Option<&str>,
 ) -> Result<MergedDataFrame, JoinError> {
-    let mut options = MergeExecutionOptions::default();
-    options.sort = true;
+    let options = MergeExecutionOptions {
+        sort: true,
+        ..MergeExecutionOptions::default()
+    };
     let merged = merge_dataframes_on_with_options(left, right, on, on, JoinType::Outer, options)?;
 
     if let Some(method) = fill_method {
@@ -4471,7 +4473,7 @@ mod tests {
         assert_eq!(
             frame.column("right_val").unwrap().values(),
             &[
-                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
                 Scalar::Int64(200),
                 Scalar::Int64(300),
             ]

@@ -284,6 +284,50 @@ fn normalized_join_rows_with_swapped_sides(joined: &JoinedSeries) -> Vec<String>
     rows
 }
 
+fn normalized_series_rows(series: &Series) -> Vec<String> {
+    let mut rows = series
+        .index()
+        .labels()
+        .iter()
+        .zip(series.values().iter())
+        .map(|(label, value)| format!("{label:?}|{value:?}"))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+fn normalized_dataframe_rows(df: &DataFrame) -> Vec<String> {
+    let column_names = df.column_names();
+    let mut rows = (0..df.index().len())
+        .map(|row_idx| {
+            let rendered_values = column_names
+                .iter()
+                .map(|name| {
+                    format!(
+                        "{name}:{:?}",
+                        df.column(name)
+                            .expect("column listed in order must exist")
+                            .values()[row_idx]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            format!("{:?}|{rendered_values}", df.index().labels()[row_idx])
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+fn sample_count_from_hint(total: usize, replace: bool, hint: usize) -> usize {
+    let upper_bound = if replace {
+        total.saturating_mul(2).max(1)
+    } else {
+        total.max(1)
+    };
+    1 + (hint % upper_bound)
+}
+
 // ---------------------------------------------------------------------------
 // Property: Index alignment invariants
 // ---------------------------------------------------------------------------
@@ -1651,6 +1695,13 @@ fn arb_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
     })
 }
 
+fn arb_variable_numeric_series(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = Series> {
+    (1..=max_len).prop_flat_map(move |len| arb_numeric_series(name, len))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -1833,6 +1884,124 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: Sampling metamorphic invariants (frankenpandas-ags)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Sampling with the same seed must be deterministic for Series.
+    #[test]
+    fn prop_series_sample_same_seed_is_deterministic(
+        series in arb_variable_numeric_series("sample", 12),
+        replace in proptest::bool::ANY,
+        seed in any::<u64>(),
+        hint in 0usize..24,
+    ) {
+        let sample_n = sample_count_from_hint(series.len(), replace, hint);
+        let first = series
+            .sample(Some(sample_n), None, replace, Some(seed))
+            .expect("series sampling should succeed for derived parameters");
+        let second = series
+            .sample(Some(sample_n), None, replace, Some(seed))
+            .expect("series sampling should succeed for identical replay");
+
+        prop_assert!(
+            first.equals(&second),
+            "same seed must reproduce the same series sample"
+        );
+    }
+
+    /// Sampling the full fraction without replacement must permute, not mutate,
+    /// the Series rows.
+    #[test]
+    fn prop_series_sample_full_fraction_is_permutation(
+        series in arb_variable_numeric_series("sample", 12),
+        seed in any::<u64>(),
+    ) {
+        let sampled = series
+            .sample(None, Some(1.0), false, Some(seed))
+            .expect("full-fraction series sampling should succeed");
+
+        prop_assert_eq!(
+            normalized_series_rows(&sampled),
+            normalized_series_rows(&series),
+            "frac=1.0 series sampling without replacement must be a permutation"
+        );
+    }
+
+    /// Sampling with the same seed must be deterministic for DataFrames.
+    #[test]
+    fn prop_dataframe_sample_same_seed_is_deterministic(
+        df in arb_numeric_dataframe(8),
+        replace in proptest::bool::ANY,
+        seed in any::<u64>(),
+        hint in 0usize..24,
+    ) {
+        let sample_n = sample_count_from_hint(df.len(), replace, hint);
+        let first = df
+            .sample(Some(sample_n), None, replace, Some(seed))
+            .expect("dataframe sampling should succeed for derived parameters");
+        let second = df
+            .sample(Some(sample_n), None, replace, Some(seed))
+            .expect("dataframe sampling should succeed for identical replay");
+
+        prop_assert!(
+            first.equals(&second),
+            "same seed must reproduce the same dataframe sample"
+        );
+    }
+
+    /// Sampling the full fraction without replacement must permute, not mutate,
+    /// the DataFrame rows.
+    #[test]
+    fn prop_dataframe_sample_full_fraction_is_permutation(
+        df in arb_numeric_dataframe(8),
+        seed in any::<u64>(),
+    ) {
+        let sampled = df
+            .sample(None, Some(1.0), false, Some(seed))
+            .expect("full-fraction dataframe sampling should succeed");
+
+        prop_assert_eq!(
+            normalized_dataframe_rows(&sampled),
+            normalized_dataframe_rows(&df),
+            "frac=1.0 dataframe sampling without replacement must be a permutation"
+        );
+    }
+
+    /// Weighted sampling should be invariant under uniform positive scaling of
+    /// the weights when all other inputs are fixed.
+    #[test]
+    fn prop_dataframe_weighted_sample_invariant_under_weight_scaling(
+        df in arb_numeric_dataframe(8),
+        base_weights in proptest::collection::vec(1u16..1000u16, 8),
+        replace in proptest::bool::ANY,
+        seed in any::<u64>(),
+        hint in 0usize..24,
+    ) {
+        let weights = base_weights[..df.len()]
+            .iter()
+            .map(|&weight| f64::from(weight))
+            .collect::<Vec<_>>();
+        let sample_n = sample_count_from_hint(df.len(), replace, hint);
+        let scaled_weights = weights.iter().map(|weight| weight * 8.0).collect::<Vec<_>>();
+
+        let baseline = df
+            .sample_weights(sample_n, &weights, replace, Some(seed))
+            .expect("baseline weighted sample should succeed");
+        let scaled = df
+            .sample_weights(sample_n, &scaled_weights, replace, Some(seed))
+            .expect("scaled weighted sample should succeed");
+
+        prop_assert!(
+            baseline.equals(&scaled),
+            "uniform weight scaling must not change weighted sampling with a fixed seed"
+        );
     }
 }
 

@@ -1,0 +1,18 @@
+FAILURES: 2/5 fixtures failed
+
+  1. FAIL FP-P2C-001::case_a [SeriesAdd/Strict]
+  Class:    value_critical
+  ReplayKey: FP-P2C-001/case_a/strict
+  Trace:    FP-P2C-001:case_a:strict
+  Mismatch: value drift
+  Replay:   cargo test -- case_a
+  2. FAIL FP-P2C-002::case_b [IndexAlignUnion/Hardened]
+  Class:    shape_critical
+  ReplayKey: FP-P2C-002/case_b/hardened
+  Trace:    FP-P2C-002:case_b:hardened
+  Mismatch: shape mismatch
+  Replay:   cargo test -- case_b
+  Artifact: path/to/corpus.json
+
+GATE FAILURES:
+  - FP-P2C-001: strict_failed > 0

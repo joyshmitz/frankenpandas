@@ -1,0 +1,7 @@
+FAIL FP-P2C-001::series_add_strict [SeriesAdd/Strict]
+  Class:    value_critical
+  ReplayKey: FP-P2C-001/series_add_strict/strict
+  Trace:    FP-P2C-001:series_add_strict:strict
+  Mismatch: expected Int64(10), got Float64(10.0)
+  Replay:   cargo test -p fp-conformance -- series_add_strict --nocapture
+  Artifact: artifacts/phase2c/FP-P2C-001/mismatch.json

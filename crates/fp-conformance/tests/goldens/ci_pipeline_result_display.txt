@@ -1,0 +1,5 @@
+CI PIPELINE: FAILED (1/2 gates passed)
+  [PASS] G3: Unit Tests (100ms)
+  [FAIL] G6: Conformance (200ms)
+         2 fixtures failed
+         - case_a: value drift

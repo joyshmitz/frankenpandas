@@ -13213,6 +13213,107 @@ mod tests {
             .expect("phase2c artifact test lock poisoned")
     }
 
+    fn assert_text_golden(golden_name: &str, actual: &str) {
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("goldens")
+            .join(golden_name);
+
+        if std::env::var_os("UPDATE_GOLDENS").is_some() {
+            let parent = golden_path
+                .parent()
+                .expect("golden files should always have a parent directory");
+            std::fs::create_dir_all(parent).expect("golden directory should be creatable");
+            std::fs::write(&golden_path, actual).expect("golden file should be writable");
+            return;
+        }
+
+        let expected =
+            std::fs::read_to_string(&golden_path).expect("golden file should be readable");
+        assert_eq!(
+            actual,
+            expected,
+            "golden mismatch for {}",
+            golden_path.display()
+        );
+    }
+
+    fn sample_failure_digest() -> FailureDigest {
+        FailureDigest {
+            packet_id: "FP-P2C-001".to_owned(),
+            case_id: "series_add_strict".to_owned(),
+            operation: FixtureOperation::SeriesAdd,
+            mode: RuntimeMode::Strict,
+            mismatch_class: Some("value_critical".to_owned()),
+            mismatch_summary: "expected Int64(10), got Float64(10.0)".to_owned(),
+            replay_key: "FP-P2C-001/series_add_strict/strict".to_owned(),
+            trace_id: "FP-P2C-001:series_add_strict:strict".to_owned(),
+            replay_command: "cargo test -p fp-conformance -- series_add_strict --nocapture"
+                .to_owned(),
+            artifact_path: Some("artifacts/phase2c/FP-P2C-001/mismatch.json".to_owned()),
+        }
+    }
+
+    fn sample_failure_forensics_report() -> FailureForensicsReport {
+        FailureForensicsReport {
+            run_ts_unix_ms: 1000,
+            total_fixtures: 5,
+            total_passed: 3,
+            total_failed: 2,
+            failures: vec![
+                FailureDigest {
+                    packet_id: "FP-P2C-001".to_owned(),
+                    case_id: "case_a".to_owned(),
+                    operation: FixtureOperation::SeriesAdd,
+                    mode: RuntimeMode::Strict,
+                    mismatch_class: Some("value_critical".to_owned()),
+                    mismatch_summary: "value drift".to_owned(),
+                    replay_key: "FP-P2C-001/case_a/strict".to_owned(),
+                    trace_id: "FP-P2C-001:case_a:strict".to_owned(),
+                    replay_command: "cargo test -- case_a".to_owned(),
+                    artifact_path: None,
+                },
+                FailureDigest {
+                    packet_id: "FP-P2C-002".to_owned(),
+                    case_id: "case_b".to_owned(),
+                    operation: FixtureOperation::IndexAlignUnion,
+                    mode: RuntimeMode::Hardened,
+                    mismatch_class: Some("shape_critical".to_owned()),
+                    mismatch_summary: "shape mismatch".to_owned(),
+                    replay_key: "FP-P2C-002/case_b/hardened".to_owned(),
+                    trace_id: "FP-P2C-002:case_b:hardened".to_owned(),
+                    replay_command: "cargo test -- case_b".to_owned(),
+                    artifact_path: Some("path/to/corpus.json".to_owned()),
+                },
+            ],
+            gate_failures: vec!["FP-P2C-001: strict_failed > 0".to_owned()],
+        }
+    }
+
+    fn sample_ci_pipeline_result() -> CiPipelineResult {
+        CiPipelineResult {
+            gates: vec![
+                CiGateResult {
+                    gate: CiGate::G3Unit,
+                    passed: true,
+                    elapsed_ms: 100,
+                    summary: "10 tests passed".to_owned(),
+                    errors: vec![],
+                },
+                CiGateResult {
+                    gate: CiGate::G6Conformance,
+                    passed: false,
+                    elapsed_ms: 200,
+                    summary: "2 fixtures failed".to_owned(),
+                    errors: vec!["case_a: value drift".to_owned()],
+                },
+            ],
+            all_passed: false,
+            first_failure: Some(CiGate::G6Conformance),
+            elapsed_ms: 300,
+        }
+    }
+
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
         let cfg = HarnessConfig::default_paths();
@@ -18233,25 +18334,10 @@ mod tests {
 
     #[test]
     fn failure_digest_display_format() {
-        let digest = FailureDigest {
-            packet_id: "FP-P2C-001".to_owned(),
-            case_id: "series_add_strict".to_owned(),
-            operation: FixtureOperation::SeriesAdd,
-            mode: RuntimeMode::Strict,
-            mismatch_class: Some("value_critical".to_owned()),
-            mismatch_summary: "expected Int64(10), got Float64(10.0)".to_owned(),
-            replay_key: "FP-P2C-001/series_add_strict/strict".to_owned(),
-            trace_id: "FP-P2C-001:series_add_strict:strict".to_owned(),
-            replay_command: "cargo test -p fp-conformance -- series_add_strict --nocapture"
-                .to_owned(),
-            artifact_path: Some("artifacts/phase2c/FP-P2C-001/mismatch.json".to_owned()),
-        };
+        let digest = sample_failure_digest();
 
         let output = format!("{digest}");
-        assert!(output.contains("FAIL FP-P2C-001::series_add_strict"));
-        assert!(output.contains("Mismatch:"));
-        assert!(output.contains("Replay:"));
-        assert!(output.contains("Artifact:"));
+        assert_text_golden("failure_digest_display.txt", &output);
     }
 
     #[test]
@@ -18275,47 +18361,26 @@ mod tests {
 
     #[test]
     fn failure_forensics_report_shows_failures() {
-        let report = FailureForensicsReport {
-            run_ts_unix_ms: 1000,
-            total_fixtures: 5,
-            total_passed: 3,
-            total_failed: 2,
-            failures: vec![
-                FailureDigest {
-                    packet_id: "FP-P2C-001".to_owned(),
-                    case_id: "case_a".to_owned(),
-                    operation: FixtureOperation::SeriesAdd,
-                    mode: RuntimeMode::Strict,
-                    mismatch_class: Some("value_critical".to_owned()),
-                    mismatch_summary: "value drift".to_owned(),
-                    replay_key: "FP-P2C-001/case_a/strict".to_owned(),
-                    trace_id: "FP-P2C-001:case_a:strict".to_owned(),
-                    replay_command: "cargo test -- case_a".to_owned(),
-                    artifact_path: None,
-                },
-                FailureDigest {
-                    packet_id: "FP-P2C-002".to_owned(),
-                    case_id: "case_b".to_owned(),
-                    operation: FixtureOperation::IndexAlignUnion,
-                    mode: RuntimeMode::Hardened,
-                    mismatch_class: Some("shape_critical".to_owned()),
-                    mismatch_summary: "shape mismatch".to_owned(),
-                    replay_key: "FP-P2C-002/case_b/hardened".to_owned(),
-                    trace_id: "FP-P2C-002:case_b:hardened".to_owned(),
-                    replay_command: "cargo test -- case_b".to_owned(),
-                    artifact_path: Some("path/to/corpus.json".to_owned()),
-                },
-            ],
-            gate_failures: vec!["FP-P2C-001: strict_failed > 0".to_owned()],
-        };
+        let report = sample_failure_forensics_report();
 
         assert!(!report.is_clean());
         let output = format!("{report}");
-        assert!(output.contains("FAILURES: 2/5"));
-        assert!(output.contains("case_a"));
-        assert!(output.contains("case_b"));
-        assert!(output.contains("GATE FAILURES:"));
-        assert!(output.contains("strict_failed > 0"));
+        assert_text_golden("failure_forensics_report.txt", &output);
+    }
+
+    #[test]
+    fn failure_forensics_clean_display_matches_golden() {
+        let report = FailureForensicsReport {
+            run_ts_unix_ms: 1000,
+            total_fixtures: 5,
+            total_passed: 5,
+            total_failed: 0,
+            failures: Vec::new(),
+            gate_failures: Vec::new(),
+        };
+
+        let output = format!("{report}");
+        assert_text_golden("failure_forensics_all_green.txt", &output);
     }
 
     #[test]
@@ -18818,32 +18883,9 @@ mod tests {
 
     #[test]
     fn ci_pipeline_result_display_format() {
-        let result = CiPipelineResult {
-            gates: vec![
-                CiGateResult {
-                    gate: CiGate::G3Unit,
-                    passed: true,
-                    elapsed_ms: 100,
-                    summary: "10 tests passed".to_owned(),
-                    errors: vec![],
-                },
-                CiGateResult {
-                    gate: CiGate::G6Conformance,
-                    passed: false,
-                    elapsed_ms: 200,
-                    summary: "2 fixtures failed".to_owned(),
-                    errors: vec!["case_a: value drift".to_owned()],
-                },
-            ],
-            all_passed: false,
-            first_failure: Some(CiGate::G6Conformance),
-            elapsed_ms: 300,
-        };
+        let result = sample_ci_pipeline_result();
         let output = format!("{result}");
-        assert!(output.contains("FAILED"));
-        assert!(output.contains("[PASS]"));
-        assert!(output.contains("[FAIL]"));
-        assert!(output.contains("value drift"));
+        assert_text_golden("ci_pipeline_result_display.txt", &output);
     }
 
     #[test]

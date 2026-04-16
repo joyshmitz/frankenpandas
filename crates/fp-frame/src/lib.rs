@@ -21577,6 +21577,8 @@ impl DataFrameGroupBy<'_> {
                     }
                     "nunique" => fp_types::nannunique(&group_vals),
                     "prod" => fp_types::nanprod(&group_vals),
+                    "any" => fp_types::nanany(&group_vals),
+                    "all" => fp_types::nanall(&group_vals),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported groupby aggregation: '{other}'"
@@ -21591,6 +21593,16 @@ impl DataFrameGroupBy<'_> {
         }
 
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
+    /// GroupBy any (returns True if any value is truthy per group).
+    pub fn any(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("any")
+    }
+
+    /// GroupBy all (returns True if all values are truthy per group).
+    pub fn all(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("all")
     }
 
     /// GroupBy quantile.

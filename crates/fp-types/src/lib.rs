@@ -341,6 +341,38 @@ pub fn nanmean(values: &[Scalar]) -> Scalar {
     Scalar::Float64(sum / nums.len() as f64)
 }
 
+pub fn nanany(values: &[Scalar]) -> Scalar {
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Bool(flag) if *flag => return Scalar::Bool(true),
+            Scalar::Int64(val) if *val != 0 => return Scalar::Bool(true),
+            Scalar::Float64(val) if !val.is_nan() && *val != 0.0 => return Scalar::Bool(true),
+            Scalar::Utf8(val) if !val.is_empty() => return Scalar::Bool(true),
+            _ => continue,
+        }
+    }
+    Scalar::Bool(false)
+}
+
+pub fn nanall(values: &[Scalar]) -> Scalar {
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Bool(flag) if !*flag => return Scalar::Bool(false),
+            Scalar::Int64(val) if *val == 0 => return Scalar::Bool(false),
+            Scalar::Float64(val) if val.is_nan() || *val == 0.0 => return Scalar::Bool(false),
+            Scalar::Utf8(val) if val.is_empty() => return Scalar::Bool(false),
+            _ => continue,
+        }
+    }
+    Scalar::Bool(true)
+}
+
 pub fn nancount(values: &[Scalar]) -> Scalar {
     let n = values.iter().filter(|v| !v.is_missing()).count();
     Scalar::Int64(n as i64)

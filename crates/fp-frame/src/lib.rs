@@ -11278,17 +11278,21 @@ fn parse_hms(s: &str) -> Option<f64> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
         3 => {
-            let h: f64 = parts[0].trim().parse().ok()?;
+            let first = parts[0].trim();
+            let negative = first.starts_with('-');
+            let h: f64 = first.parse().ok()?;
             let m: f64 = parts[1].trim().parse().ok()?;
             let sec: f64 = parts[2].trim().parse().ok()?;
             let abs_total = h.abs() * 3600.0 + m * 60.0 + sec;
-            Some(if h < 0.0 { -abs_total } else { abs_total })
+            Some(if negative { -abs_total } else { abs_total })
         }
         2 => {
-            let m: f64 = parts[0].trim().parse().ok()?;
+            let first = parts[0].trim();
+            let negative = first.starts_with('-');
+            let m: f64 = first.parse().ok()?;
             let sec: f64 = parts[1].trim().parse().ok()?;
             let abs_total = m.abs() * 60.0 + sec;
-            Some(if m < 0.0 { -abs_total } else { abs_total })
+            Some(if negative { -abs_total } else { abs_total })
         }
         _ => None,
     }

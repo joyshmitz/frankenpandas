@@ -165,6 +165,8 @@ pub enum FixtureOperation {
     SeriesToDatetime,
     #[serde(rename = "series_to_timedelta", alias = "to_timedelta")]
     SeriesToTimedelta,
+    #[serde(rename = "series_timedelta_total_seconds", alias = "timedelta_total_seconds")]
+    SeriesTimedeltaTotalSeconds,
     #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
     DataFrameFromSeries,
     #[serde(rename = "dataframe_from_dict", alias = "data_frame_from_dict")]
@@ -439,6 +441,7 @@ impl FixtureOperation {
             Self::SeriesConstructor => "series_constructor",
             Self::SeriesToDatetime => "series_to_datetime",
             Self::SeriesToTimedelta => "series_to_timedelta",
+            Self::SeriesTimedeltaTotalSeconds => "series_timedelta_total_seconds",
             Self::DataFrameFromSeries => "dataframe_from_series",
             Self::DataFrameFromDict => "dataframe_from_dict",
             Self::DataFrameFromRecords => "dataframe_from_records",
@@ -998,6 +1001,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
         | FixtureOperation::SeriesToTimedelta
+        | FixtureOperation::SeriesTimedeltaTotalSeconds
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
         | FixtureOperation::DataFrameConstructorKwargs
@@ -3740,6 +3744,32 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesTimedeltaTotalSeconds => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual =
+                fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected timedelta_total_seconds error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected timedelta_total_seconds to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected timedelta_total_seconds to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_series or expected_error is required for timedelta_total_seconds"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameFromSeries => {
             let actual = execute_dataframe_from_series_fixture_operation(fixture);
             match expected {
@@ -3996,7 +4026,12 @@ fn run_fixture_operation(
             compare_series_expected(&actual, &expected)
         }
         FixtureOperation::SeriesCombineFirst => {
-            Err("combine_first operations not yet implemented in conformance harness".to_owned())
+            let actual = execute_series_combine_first_fixture_operation(fixture);
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series is required for series_combine_first".to_owned()),
+            };
+            compare_series_expected(&actual?, &expected)
         }
         FixtureOperation::NanSum
         | FixtureOperation::NanMean
@@ -5937,6 +5972,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
         | FixtureOperation::SeriesToTimedelta
+        | FixtureOperation::SeriesTimedeltaTotalSeconds
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -6288,6 +6324,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
         | FixtureOperation::SeriesToTimedelta
+        | FixtureOperation::SeriesTimedeltaTotalSeconds
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -8639,6 +8676,47 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_to_timedelta".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesTimedeltaTotalSeconds => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual =
+                fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "timedelta_total_seconds.error",
+                        format!(
+                            "expected timedelta_total_seconds error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "timedelta_total_seconds.error",
+                        "expected timedelta_total_seconds to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "timedelta_total_seconds.error",
+                        "expected timedelta_total_seconds to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for timedelta_total_seconds"
+                        .to_owned(),
                 ),
             }
         }

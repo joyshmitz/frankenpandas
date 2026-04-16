@@ -1853,6 +1853,81 @@ def op_dataframe_groupby_bfill(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_groupby_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_sem requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_sem requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_sem groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).sem()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_sem failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_skew requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_skew requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_skew groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).skew()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_skew failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_kurtosis requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_kurtosis requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_kurtosis groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).kurt()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_kurtosis failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     groupby_columns = payload.get("groupby_columns")
@@ -2788,6 +2863,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_ffill(pd, payload)
     if op in {"dataframe_groupby_bfill", "data_frame_groupby_bfill"}:
         return op_dataframe_groupby_bfill(pd, payload)
+    if op in {"dataframe_groupby_sem", "data_frame_groupby_sem"}:
+        return op_dataframe_groupby_sem(pd, payload)
+    if op in {"dataframe_groupby_skew", "data_frame_groupby_skew"}:
+        return op_dataframe_groupby_skew(pd, payload)
+    if op in {"dataframe_groupby_kurtosis", "data_frame_groupby_kurtosis"}:
+        return op_dataframe_groupby_kurtosis(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

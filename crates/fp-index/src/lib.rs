@@ -378,6 +378,12 @@ impl Index {
         true
     }
 
+    /// Alias for is_monotonic_increasing.
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
         if self.labels.len() <= 1 {

@@ -12,7 +12,9 @@ use proptest::prelude::*;
 use fp_frame::{DataFrame, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
-use fp_join::{JoinExecutionOptions, JoinType, join_series, join_series_with_options};
+use fp_join::{
+    JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
+};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{NullKind, Scalar};
 
@@ -250,6 +252,36 @@ fn poison_dataframe_right_cells_for_combine_first(
 
     DataFrame::new_with_column_order(right.index().clone(), poisoned_columns, column_order)
         .expect("poisoned right dataframe must construct")
+}
+
+fn normalized_join_rows(joined: &JoinedSeries) -> Vec<String> {
+    let mut rows = joined
+        .index
+        .labels()
+        .iter()
+        .zip(joined.left_values.values().iter())
+        .zip(joined.right_values.values().iter())
+        .map(|((label, left_value), right_value)| {
+            format!("{label:?}|{left_value:?}|{right_value:?}")
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+fn normalized_join_rows_with_swapped_sides(joined: &JoinedSeries) -> Vec<String> {
+    let mut rows = joined
+        .index
+        .labels()
+        .iter()
+        .zip(joined.left_values.values().iter())
+        .zip(joined.right_values.values().iter())
+        .map(|((label, left_value), right_value)| {
+            format!("{label:?}|{right_value:?}|{left_value:?}")
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +674,52 @@ proptest! {
                 inner.index.len(), outer.index.len()
             );
         }
+    }
+
+    /// Inner join is symmetric once left/right payload columns are swapped.
+    #[test]
+    fn prop_inner_join_commutative_up_to_side_swap((left, right) in arb_series_pair(10)) {
+        let forward = join_series(&left, &right, JoinType::Inner)
+            .expect("inner join must succeed for valid series inputs");
+        let swapped = join_series(&right, &left, JoinType::Inner)
+            .expect("swapped inner join must succeed for valid series inputs");
+
+        prop_assert_eq!(
+            normalized_join_rows(&forward),
+            normalized_join_rows_with_swapped_sides(&swapped),
+            "swapping inner-join inputs should only swap payload sides"
+        );
+    }
+
+    /// Outer join is symmetric once left/right payload columns are swapped and
+    /// row order is normalized.
+    #[test]
+    fn prop_outer_join_commutative_up_to_side_swap((left, right) in arb_series_pair(10)) {
+        let forward = join_series(&left, &right, JoinType::Outer)
+            .expect("outer join must succeed for valid series inputs");
+        let swapped = join_series(&right, &left, JoinType::Outer)
+            .expect("swapped outer join must succeed for valid series inputs");
+
+        prop_assert_eq!(
+            normalized_join_rows(&forward),
+            normalized_join_rows_with_swapped_sides(&swapped),
+            "swapping outer-join inputs should only swap payload sides"
+        );
+    }
+
+    /// Left joins are the side-swapped dual of right joins.
+    #[test]
+    fn prop_left_join_equals_swapped_right_join((left, right) in arb_series_pair(10)) {
+        let left_join = join_series(&left, &right, JoinType::Left)
+            .expect("left join must succeed for valid series inputs");
+        let swapped_right_join = join_series(&right, &left, JoinType::Right)
+            .expect("swapped right join must succeed for valid series inputs");
+
+        prop_assert_eq!(
+            normalized_join_rows(&left_join),
+            normalized_join_rows_with_swapped_sides(&swapped_right_join),
+            "left join must match side-swapped right join"
+        );
     }
 }
 

@@ -267,6 +267,10 @@ pub enum FixtureOperation {
     SeriesAtTime,
     #[serde(rename = "series_between_time", alias = "series_between_time_default")]
     SeriesBetweenTime,
+    #[serde(rename = "series_partition_df", alias = "series_str_partition_df")]
+    SeriesPartitionDf,
+    #[serde(rename = "series_rpartition_df", alias = "series_str_rpartition_df")]
+    SeriesRpartitionDf,
     #[serde(rename = "series_extract_df", alias = "series_str_extract_df")]
     SeriesExtractDf,
     #[serde(rename = "series_extractall", alias = "series_str_extractall")]
@@ -476,6 +480,8 @@ impl FixtureOperation {
             Self::SeriesTake => "series_take",
             Self::SeriesAtTime => "series_at_time",
             Self::SeriesBetweenTime => "series_between_time",
+            Self::SeriesPartitionDf => "series_partition_df",
+            Self::SeriesRpartitionDf => "series_rpartition_df",
             Self::SeriesExtractDf => "series_extract_df",
             Self::SeriesExtractAll => "series_extractall",
             Self::DataFrameLoc => "dataframe_loc",
@@ -783,6 +789,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub end_time: Option<String>,
     #[serde(default)]
+    pub string_sep: Option<String>,
+    #[serde(default)]
     pub regex_pattern: Option<String>,
     #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
@@ -1055,6 +1063,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::SeriesPartitionDf
+        | FixtureOperation::SeriesRpartitionDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::DataFrameLoc
@@ -1657,6 +1667,8 @@ struct OracleRequest {
     start_time: Option<String>,
     #[serde(default)]
     end_time: Option<String>,
+    #[serde(default)]
+    string_sep: Option<String>,
     #[serde(default)]
     regex_pattern: Option<String>,
     #[serde(default)]
@@ -4921,6 +4933,64 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesPartitionDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_partition_df error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_partition_df to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected series_partition_df to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for series_partition_df"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesRpartitionDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_rpartition_df error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_rpartition_df to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected series_rpartition_df to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for series_rpartition_df"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesExtractAll => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -5849,6 +5919,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::SeriesPartitionDf
+        | FixtureOperation::SeriesRpartitionDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
@@ -6055,6 +6127,7 @@ fn capture_live_oracle_expected(
         time_value: fixture.time_value.clone(),
         start_time: fixture.start_time.clone(),
         end_time: fixture.end_time.clone(),
+        string_sep: fixture.string_sep.clone(),
         regex_pattern: fixture.regex_pattern.clone(),
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
@@ -6194,6 +6267,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::SeriesPartitionDf
+        | FixtureOperation::SeriesRpartitionDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
@@ -6726,6 +6801,16 @@ fn require_regex_pattern<'a>(
         .regex_pattern
         .as_deref()
         .ok_or_else(|| format!("regex_pattern is required for {operation_name}"))
+}
+
+fn require_string_sep<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a str, String> {
+    fixture
+        .string_sep
+        .as_deref()
+        .ok_or_else(|| format!("string_sep is required for {operation_name}"))
 }
 
 fn require_start_time(fixture: &PacketFixture) -> Result<&str, String> {
@@ -7272,6 +7357,24 @@ const INDEX_MERGE_KEY_COLUMN: &str = "__index_key";
 
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
+        FixtureOperation::SeriesPartitionDf => {
+            let left = require_left_series(fixture)?;
+            let sep = require_string_sep(fixture, "series_partition_df")?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series
+                .str()
+                .partition_df(sep)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesRpartitionDf => {
+            let left = require_left_series(fixture)?;
+            let sep = require_string_sep(fixture, "series_rpartition_df")?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series
+                .str()
+                .rpartition_df(sep)
+                .map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesExtractDf => {
             let left = require_left_series(fixture)?;
             let pattern = require_regex_pattern(fixture, "series_extract_df")?;
@@ -9947,6 +10050,76 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_between_time".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesPartitionDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_partition_df.error",
+                        format!(
+                            "expected series_partition_df error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_partition_df.error",
+                        "expected series_partition_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_partition_df.error",
+                        "expected series_partition_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for series_partition_df".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesRpartitionDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_rpartition_df.error",
+                        format!(
+                            "expected series_rpartition_df error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_rpartition_df.error",
+                        "expected series_rpartition_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_rpartition_df.error",
+                        "expected series_rpartition_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for series_rpartition_df".to_owned(),
                 ),
             }
         }
@@ -15704,6 +15877,100 @@ mod tests {
         let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!("live pandas unavailable; skipping series extract_df oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_partition_df_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-088",
+            "case_id": "series_partition_df_live",
+            "mode": "strict",
+            "operation": "series_partition_df",
+            "oracle_source": "live_legacy_pandas",
+            "string_sep": "-",
+            "left": {
+                "name": "tokens",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "a-b-c" },
+                    { "kind": "utf8", "value": "solo" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping series partition_df oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_rpartition_df_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-089",
+            "case_id": "series_rpartition_df_live",
+            "mode": "strict",
+            "operation": "series_rpartition_df",
+            "oracle_source": "live_legacy_pandas",
+            "string_sep": "-",
+            "left": {
+                "name": "tokens",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "a-b-c" },
+                    { "kind": "utf8", "value": "solo" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping series rpartition_df oracle test: {message}"
+            );
             return;
         }
 

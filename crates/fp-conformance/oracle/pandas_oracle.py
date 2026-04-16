@@ -1588,6 +1588,40 @@ def op_series_extract_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_partition_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_partition_df requires left payload")
+    string_sep = payload.get("string_sep")
+    if not isinstance(string_sep, str):
+        raise OracleError("series_partition_df requires string_sep")
+
+    series = fixture_series_from_payload(pd, left, "series_partition_df")
+    try:
+        out = series.str.partition(string_sep, expand=True)
+    except Exception as exc:
+        raise OracleError(f"series_partition_df failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_series_rpartition_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_rpartition_df requires left payload")
+    string_sep = payload.get("string_sep")
+    if not isinstance(string_sep, str):
+        raise OracleError("series_rpartition_df requires string_sep")
+
+    series = fixture_series_from_payload(pd, left, "series_rpartition_df")
+    try:
+        out = series.str.rpartition(string_sep, expand=True)
+    except Exception as exc:
+        raise OracleError(f"series_rpartition_df failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -2995,6 +3029,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_shift(pd, payload)
     if op == "series_pct_change":
         return op_series_pct_change(pd, payload)
+    if op == "series_partition_df":
+        return op_series_partition_df(pd, payload)
+    if op == "series_rpartition_df":
+        return op_series_rpartition_df(pd, payload)
     if op == "series_extract_df":
         return op_series_extract_df(pd, payload)
     if op == "series_extractall":

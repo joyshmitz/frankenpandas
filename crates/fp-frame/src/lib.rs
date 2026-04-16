@@ -16799,6 +16799,37 @@ impl DataFrame {
         })
     }
 
+    /// Conform DataFrame to new index or columns.
+    ///
+    /// Matches `pd.DataFrame.reindex(labels, axis=...)`.
+    pub fn reindex_axis(&self, labels: Vec<IndexLabel>, axis: usize) -> Result<Self, FrameError> {
+        match axis {
+            0 => self.reindex(labels),
+            1 => {
+                let mut result_cols = BTreeMap::new();
+                let mut col_order = Vec::new();
+                for label in &labels {
+                    let col_name = label.to_string();
+                    if let Some(col) = self.columns.get(&col_name) {
+                        result_cols.insert(col_name.clone(), col.clone());
+                    } else {
+                        let nans = vec![Scalar::Null(NullKind::NaN); self.len()];
+                        result_cols.insert(col_name.clone(), Column::from_values(nans)?);
+                    }
+                    col_order.push(col_name);
+                }
+                Ok(Self {
+                    columns: result_cols,
+                    column_order: col_order,
+                    index: self.index.clone(),
+                })
+            }
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "reindex: axis must be 0 or 1 (got {axis})"
+            ))),
+        }
+    }
+
     /// Reindex with a static fill_value for missing labels.
     ///
     /// Matches `df.reindex(new_labels, fill_value=X)`. Labels not found
@@ -17023,7 +17054,7 @@ impl DataFrame {
     ///
     /// Matches `df.combine(other, func)`. Aligns on both index and columns
     /// (union), filling missing positions with NaN before applying `func`.
-    pub fn combine<F>(&self, other: &Self, func: F) -> Result<Self, FrameError>
+    pub fn combine_elementwise<F>(&self, other: &Self, func: F) -> Result<Self, FrameError>
     where
         F: Fn(&Scalar, &Scalar) -> Scalar,
     {
@@ -17075,6 +17106,86 @@ impl DataFrame {
             columns: result_cols,
             column_order: col_order,
             index: plan.union_index,
+        })
+    }
+
+    /// Combine the DataFrame with another DataFrame using a column-wise function.
+    ///
+    /// Matches `pd.DataFrame.combine(other, func, fill_value=None, overwrite=True)`.
+    pub fn combine<F>(
+        &self,
+        other: &Self,
+        func: F,
+        fill_value: Option<&Scalar>,
+        overwrite: bool,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(&Series, &Series) -> Result<Series, FrameError>,
+    {
+        // Align columns (union)
+        let mut seen_cols = std::collections::HashSet::new();
+        let mut union_cols = Vec::new();
+        for c in &self.column_order {
+            if seen_cols.insert(c.clone()) {
+                union_cols.push(c.clone());
+            }
+        }
+        for c in &other.column_order {
+            if seen_cols.insert(c.clone()) {
+                union_cols.push(c.clone());
+            }
+        }
+
+        // Align indexes (union)
+        let mut seen_idx = std::collections::HashSet::new();
+        let mut union_labels = Vec::new();
+        for l in self.index.labels() {
+            if seen_idx.insert(l.clone()) {
+                union_labels.push(l.clone());
+            }
+        }
+        for l in other.index.labels() {
+            if seen_idx.insert(l.clone()) {
+                union_labels.push(l.clone());
+            }
+        }
+        let union_index = Index::new(union_labels);
+
+        let mut result_cols = BTreeMap::new();
+        for name in &union_cols {
+            let left_s = if let Some(col) = self.columns.get(name) {
+                Series::new(name, self.index.clone(), col.clone())?
+                    .reindex(union_index.labels().to_vec())?
+            } else {
+                let vals = vec![
+                    fill_value.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+                    union_index.len()
+                ];
+                Series::from_values(name, union_index.labels().to_vec(), vals)?
+            };
+
+            let right_s = if let Some(col) = other.columns.get(name) {
+                Series::new(name, other.index.clone(), col.clone())?
+                    .reindex(union_index.labels().to_vec())?
+            } else {
+                let vals = vec![
+                    fill_value.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+                    union_index.len()
+                ];
+                Series::from_values(name, union_index.labels().to_vec(), vals)?
+            };
+
+            let mut combined = func(&left_s, &right_s)?;
+            if !overwrite {
+                combined = left_s.combine_first(&combined)?;
+            }
+            result_cols.insert(name.clone(), combined.column().clone());
+        }
+
+        Ok(Self {
+            index: union_index,
+            columns: result_cols,
+            column_order: union_cols,
         })
     }
 
@@ -44993,7 +45104,7 @@ mod tests {
         .unwrap();
 
         let result = df1
-            .combine(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
+            .combine_elementwise(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
                 (Ok(l), Ok(r)) => Scalar::Float64(l + r),
                 _ => Scalar::Null(NullKind::NaN),
             })
@@ -45030,7 +45141,7 @@ mod tests {
         .unwrap();
 
         let result = df1
-            .combine(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
+            .combine_elementwise(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
                 (Ok(l), Ok(r)) => Scalar::Float64(l + r),
                 (Ok(l), Err(_)) => Scalar::Float64(l),
                 (Err(_), Ok(r)) => Scalar::Float64(r),
@@ -45075,7 +45186,7 @@ mod tests {
         .unwrap();
 
         let result = df1
-            .combine(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
+            .combine_elementwise(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
                 (Ok(l), Ok(r)) => Scalar::Float64(l.min(r)),
                 _ => Scalar::Null(NullKind::NaN),
             })

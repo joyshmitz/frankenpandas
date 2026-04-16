@@ -989,6 +989,45 @@ def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_repeat(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    repeat_n = payload.get("repeat_n")
+    repeat_counts = payload.get("repeat_counts")
+    if left is None:
+        raise OracleError("series_repeat requires left payload")
+    if (repeat_n is None) == (repeat_counts is None):
+        raise OracleError("series_repeat requires exactly one of repeat_n or repeat_counts")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    if repeat_n is not None:
+        try:
+            repeats: Any = int(repeat_n)
+        except Exception as exc:  # pragma: no cover - defensive conversion
+            raise OracleError(f"series_repeat repeat_n must be an integer: {exc}") from exc
+    else:
+        if not isinstance(repeat_counts, list):
+            raise OracleError("series_repeat repeat_counts must be a list")
+        try:
+            repeats = [int(value) for value in repeat_counts]
+        except Exception as exc:  # pragma: no cover - defensive conversion
+            raise OracleError(f"series_repeat repeat_counts must be integers: {exc}") from exc
+
+    try:
+        out = series.repeat(repeats)
+    except Exception as exc:
+        raise OracleError(f"series_repeat failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     time_value = payload.get("time_value")
@@ -2355,6 +2394,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_iloc(pd, payload)
     if op == "series_take":
         return op_series_take(pd, payload)
+    if op == "series_repeat":
+        return op_series_repeat(pd, payload)
     if op == "series_at_time":
         return op_series_at_time(pd, payload)
     if op == "series_between_time":

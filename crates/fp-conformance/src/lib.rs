@@ -222,6 +222,8 @@ pub enum FixtureOperation {
     SeriesAll,
     #[serde(rename = "series_bool", alias = "series_bool_default")]
     SeriesBool,
+    #[serde(rename = "series_repeat", alias = "series_repeat_default")]
+    SeriesRepeat,
     #[serde(rename = "series_value_counts", alias = "series_value_counts_default")]
     SeriesValueCounts,
     #[serde(rename = "series_sort_index", alias = "series_sort_index_default")]
@@ -393,6 +395,7 @@ impl FixtureOperation {
             Self::SeriesAny => "series_any",
             Self::SeriesAll => "series_all",
             Self::SeriesBool => "series_bool",
+            Self::SeriesRepeat => "series_repeat",
             Self::SeriesValueCounts => "series_value_counts",
             Self::SeriesSortIndex => "series_sort_index",
             Self::SeriesSortValues => "series_sort_values",
@@ -672,6 +675,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub take_indices: Option<Vec<i64>>,
     #[serde(default)]
+    pub repeat_n: Option<i64>,
+    #[serde(default)]
+    pub repeat_counts: Option<Vec<i64>>,
+    #[serde(default)]
     pub take_axis: Option<usize>,
     #[serde(default)]
     pub asof_label: Option<IndexLabel>,
@@ -936,6 +943,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesAny
         | FixtureOperation::SeriesAll
         | FixtureOperation::SeriesBool
+        | FixtureOperation::SeriesRepeat
         | FixtureOperation::SeriesSortIndex
         | FixtureOperation::SeriesSortValues
         | FixtureOperation::SeriesDiff
@@ -1508,6 +1516,10 @@ struct OracleRequest {
     iloc_positions: Option<Vec<i64>>,
     #[serde(default)]
     take_indices: Option<Vec<i64>>,
+    #[serde(default)]
+    repeat_n: Option<i64>,
+    #[serde(default)]
+    repeat_counts: Option<Vec<i64>>,
     #[serde(default)]
     take_axis: Option<usize>,
     #[serde(default)]
@@ -4557,6 +4569,31 @@ fn run_fixture_operation(
                 _ => Err("expected_bool or expected_error is required for series_bool".to_owned()),
             }
         }
+        FixtureOperation::SeriesRepeat => {
+            let actual = execute_series_repeat_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_repeat error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_repeat to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_repeat to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_repeat".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -5170,6 +5207,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::SeriesTake
+        | FixtureOperation::SeriesRepeat
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameAsof
@@ -5349,6 +5387,8 @@ fn capture_live_oracle_expected(
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
         take_indices: fixture.take_indices.clone(),
+        repeat_n: fixture.repeat_n,
+        repeat_counts: fixture.repeat_counts.clone(),
         take_axis: fixture.take_axis,
         asof_label: fixture.asof_label.clone(),
         time_value: fixture.time_value.clone(),
@@ -5485,6 +5525,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::SeriesTake
+        | FixtureOperation::SeriesRepeat
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameAsof
@@ -6046,6 +6087,39 @@ fn resolve_take_axis(fixture: &PacketFixture) -> Result<usize, String> {
         axis => Err(format!(
             "take_axis must be 0 or 1 for dataframe_take (got {axis})"
         )),
+    }
+}
+
+fn resolve_series_repeat_counts(fixture: &PacketFixture, len: usize) -> Result<Vec<usize>, String> {
+    match (fixture.repeat_n, fixture.repeat_counts.as_ref()) {
+        (Some(_), Some(_)) => {
+            Err("series_repeat accepts either repeat_n or repeat_counts, but not both".to_owned())
+        }
+        (Some(repeat_n), None) => {
+            let repeat_n = usize::try_from(repeat_n).map_err(|_| {
+                format!("repeat_n must be non-negative for series_repeat (got {repeat_n})")
+            })?;
+            Ok(vec![repeat_n; len])
+        }
+        (None, Some(repeat_counts)) => {
+            if repeat_counts.len() != len {
+                return Err(format!(
+                    "repeat_counts must contain {len} elements for series_repeat (got {})",
+                    repeat_counts.len()
+                ));
+            }
+            repeat_counts
+                .iter()
+                .map(|count| {
+                    usize::try_from(*count).map_err(|_| {
+                        format!(
+                            "repeat_counts must be non-negative for series_repeat (got {count})"
+                        )
+                    })
+                })
+                .collect()
+        }
+        (None, None) => Err("series_repeat requires repeat_n or repeat_counts".to_owned()),
     }
 }
 
@@ -6663,6 +6737,15 @@ fn execute_series_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool
     let left = require_left_series(fixture)?;
     let series = build_series(left)?;
     series.bool_().map_err(|err| err.to_string())
+}
+
+fn execute_series_repeat_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left)?;
+    let repeat_counts = resolve_series_repeat_counts(fixture, series.len())?;
+    series
+        .repeat_by(&repeat_counts)
+        .map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -8667,6 +8750,39 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_bool or expected_error required for series_bool".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesRepeat => {
+            let actual = execute_series_repeat_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_repeat.error",
+                        format!(
+                            "expected series_repeat error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_repeat.error",
+                        "expected series_repeat to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_repeat.error",
+                        "expected series_repeat to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_repeat".to_owned()),
             }
         }
         FixtureOperation::SeriesLoc => {
@@ -12493,6 +12609,100 @@ mod tests {
         let actual = series.take(fixture.take_indices.as_deref().expect("take indices"));
         super::compare_series_expected(&actual.expect("actual series"), &expected)
             .expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_repeat_scalar_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-069",
+            "case_id": "series_repeat_scalar_live",
+            "mode": "strict",
+            "operation": "series_repeat",
+            "oracle_source": "live_legacy_pandas",
+            "repeat_n": 2,
+            "left": {
+                "name": "animals",
+                "index": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "falcon" },
+                    { "kind": "utf8", "value": "lion" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series repeat oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_series_repeat_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_repeat_counts_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-069",
+            "case_id": "series_repeat_counts_live",
+            "mode": "strict",
+            "operation": "series_repeat",
+            "oracle_source": "live_legacy_pandas",
+            "repeat_counts": [2, 0, 1],
+            "left": {
+                "name": "nums",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping series repeat-count oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_series_repeat_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

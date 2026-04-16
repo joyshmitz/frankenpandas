@@ -3938,6 +3938,44 @@ impl Series {
         Ok(self.column.values()[0].clone())
     }
 
+    /// Repeat each element a constant number of times.
+    ///
+    /// Matches the scalar `repeats` form of `pd.Series.repeat(repeats)`.
+    pub fn repeat(&self, repeats: usize) -> Result<Self, FrameError> {
+        self.repeat_by(&vec![repeats; self.len()])
+    }
+
+    /// Repeat each element according to the corresponding repeat count.
+    ///
+    /// Matches the array-like `repeats` form of `pd.Series.repeat(repeats)`.
+    pub fn repeat_by(&self, repeats: &[usize]) -> Result<Self, FrameError> {
+        if repeats.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "repeat_by() requires {} repeat counts, got {}",
+                self.len(),
+                repeats.len()
+            )));
+        }
+
+        let total_len = repeats.iter().sum();
+        let mut labels = Vec::with_capacity(total_len);
+        let mut values = Vec::with_capacity(total_len);
+        for ((label, value), &count) in self
+            .index
+            .labels()
+            .iter()
+            .zip(self.column.values())
+            .zip(repeats.iter())
+        {
+            for _ in 0..count {
+                labels.push(label.clone());
+                values.push(value.clone());
+            }
+        }
+
+        Self::from_values(self.name(), labels, values)
+    }
+
     /// Extract the single boolean value from a single-element Series.
     ///
     /// Matches `pd.Series.bool()`. Raises an error unless the Series has
@@ -44467,6 +44505,70 @@ mod tests {
         )
         .unwrap();
         assert!(s2.item().is_err());
+    }
+
+    #[test]
+    fn test_series_repeat_scalar_count() {
+        let s = Series::from_values(
+            "animals",
+            vec![10_i64.into(), 20_i64.into()],
+            vec![
+                Scalar::Utf8("falcon".to_string()),
+                Scalar::Utf8("lion".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let out = s.repeat(2).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[10_i64.into(), 10_i64.into(), 20_i64.into(), 20_i64.into()]
+        );
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("falcon".to_string()),
+                Scalar::Utf8("falcon".to_string()),
+                Scalar::Utf8("lion".to_string()),
+                Scalar::Utf8("lion".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_series_repeat_per_element_counts() {
+        let s = Series::from_values(
+            "nums",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let out = s.repeat_by(&[2, 0, 1]).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[0_i64.into(), 0_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn test_series_repeat_requires_matching_repeat_counts() {
+        let s = Series::from_values(
+            "nums",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let err = s.repeat_by(&[1]).expect_err("repeat_by length mismatch");
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(ref msg) if msg.contains("requires 2 repeat counts")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

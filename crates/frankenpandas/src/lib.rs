@@ -16,7 +16,7 @@
 // ── Core types ──────────────────────────────────────────────────────────
 
 pub use fp_types::{DType, NullKind, Scalar};
-pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, notna};
+pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, isnull, notna, notnull};
 
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 

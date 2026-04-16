@@ -289,8 +289,16 @@ pub fn isna(values: &[Scalar]) -> Vec<bool> {
     values.iter().map(Scalar::is_missing).collect()
 }
 
+pub fn isnull(values: &[Scalar]) -> Vec<bool> {
+    isna(values)
+}
+
 pub fn notna(values: &[Scalar]) -> Vec<bool> {
     values.iter().map(|v| !v.is_missing()).collect()
+}
+
+pub fn notnull(values: &[Scalar]) -> Vec<bool> {
+    notna(values)
 }
 
 pub fn count_na(values: &[Scalar]) -> usize {

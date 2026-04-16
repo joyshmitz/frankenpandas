@@ -43,6 +43,12 @@ fn arb_index_labels(len: usize) -> impl Strategy<Value = Vec<IndexLabel>> {
     proptest::collection::vec(arb_index_label(), len)
 }
 
+/// Generate a Vec of unique IndexLabels with `len` entries.
+fn arb_unique_index_labels(len: usize) -> impl Strategy<Value = Vec<IndexLabel>> {
+    proptest::collection::btree_set(arb_index_label(), len)
+        .prop_map(|labels| labels.into_iter().collect())
+}
+
 /// Generate an Index with `len` labels, allowing some duplicates.
 fn arb_index(len: usize) -> impl Strategy<Value = Index> {
     arb_index_labels(len).prop_map(Index::new)
@@ -61,12 +67,30 @@ fn arb_numeric_series(name: &'static str, len: usize) -> impl Strategy<Value = S
     )
 }
 
+/// Generate an arbitrary Series with numeric values and unique index labels.
+fn arb_unique_numeric_series(name: &'static str, len: usize) -> impl Strategy<Value = Series> {
+    (arb_unique_index_labels(len), arb_numeric_values(len)).prop_filter_map(
+        "series construction must succeed",
+        move |(labels, values)| Series::from_values(name.to_owned(), labels, values).ok(),
+    )
+}
+
 /// Generate a pair of numeric series with independently chosen lengths (1..max_len).
 fn arb_series_pair(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
     (1..=max_len, 1..=max_len).prop_flat_map(|(len_a, len_b)| {
         (
             arb_numeric_series("left", len_a),
             arb_numeric_series("right", len_b),
+        )
+    })
+}
+
+/// Generate a pair of numeric series with unique index labels.
+fn arb_unique_series_pair(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
+    (1..=max_len, 1..=max_len).prop_flat_map(|(len_a, len_b)| {
+        (
+            arb_unique_numeric_series("left", len_a),
+            arb_unique_numeric_series("right", len_b),
         )
     })
 }
@@ -100,6 +124,132 @@ fn arb_groupby_pair(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
             },
         )
     })
+}
+
+/// Generate a small DataFrame with unique index labels and a variable column subset.
+fn arb_combine_first_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        (
+            arb_unique_index_labels(nrows),
+            proptest::sample::subsequence(
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                1..=3,
+            ),
+        )
+            .prop_flat_map(move |(labels, column_names)| {
+                let ncols = column_names.len();
+                (
+                    Just(labels),
+                    Just(column_names),
+                    proptest::collection::vec(arb_numeric_values(nrows), ncols),
+                )
+            })
+            .prop_filter_map(
+                "dataframe construction must succeed",
+                |(labels, column_names, column_values)| {
+                    let index = Index::new(labels);
+                    let mut columns = std::collections::BTreeMap::new();
+                    for (name, values) in column_names.iter().cloned().zip(column_values) {
+                        columns.insert(name, fp_columnar::Column::from_values(values).ok()?);
+                    }
+                    DataFrame::new_with_column_order(index, columns, column_names).ok()
+                },
+            )
+    })
+}
+
+fn poison_numeric_scalar(value: &Scalar) -> Scalar {
+    match value {
+        Scalar::Int64(v) => Scalar::Int64(v.saturating_add(1)),
+        Scalar::Float64(v) if v.is_finite() => Scalar::Float64(v + 1.0),
+        Scalar::Float64(_) => Scalar::Float64(0.0),
+        Scalar::Null(_) => Scalar::Int64(1),
+        Scalar::Bool(v) => Scalar::Bool(!v),
+        Scalar::Utf8(v) => Scalar::Utf8(format!("{v}_poisoned")),
+    }
+}
+
+fn poison_series_right_cells_for_combine_first(left: &Series, right: &Series) -> Series {
+    let left_lookup: std::collections::BTreeMap<&IndexLabel, &Scalar> = left
+        .index()
+        .labels()
+        .iter()
+        .zip(left.values().iter())
+        .collect();
+
+    let poisoned_values = right
+        .index()
+        .labels()
+        .iter()
+        .zip(right.values().iter())
+        .map(|(label, value)| {
+            if let Some(left_value) = left_lookup.get(label)
+                && !left_value.is_missing()
+            {
+                return poison_numeric_scalar(value);
+            }
+            value.clone()
+        })
+        .collect::<Vec<_>>();
+
+    Series::from_values(
+        right.name().to_owned(),
+        right.index().labels().to_vec(),
+        poisoned_values,
+    )
+    .expect("poisoned right series must construct")
+}
+
+fn poison_dataframe_right_cells_for_combine_first(
+    left: &DataFrame,
+    right: &DataFrame,
+) -> DataFrame {
+    let left_row_positions: std::collections::BTreeMap<&IndexLabel, usize> = left
+        .index()
+        .labels()
+        .iter()
+        .enumerate()
+        .map(|(position, label)| (label, position))
+        .collect();
+
+    let column_order = right
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut poisoned_columns = std::collections::BTreeMap::new();
+
+    for column_name in &column_order {
+        let right_column = right
+            .column(column_name)
+            .expect("column name listed in order must exist");
+        let left_column = left.column(column_name);
+        let poisoned_values = right
+            .index()
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(right_position, label)| {
+                if let Some(left_column) = left_column
+                    && let Some(&left_position) = left_row_positions.get(label)
+                {
+                    let left_value = &left_column.values()[left_position];
+                    if !left_value.is_missing() {
+                        return poison_numeric_scalar(&right_column.values()[right_position]);
+                    }
+                }
+                right_column.values()[right_position].clone()
+            })
+            .collect::<Vec<_>>();
+        poisoned_columns.insert(
+            column_name.clone(),
+            fp_columnar::Column::from_values(poisoned_values)
+                .expect("poisoned right dataframe column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(right.index().clone(), poisoned_columns, column_order)
+        .expect("poisoned right dataframe must construct")
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +437,100 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: combine_first metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series combine_first is idempotent for unique-label inputs.
+    #[test]
+    fn prop_series_combine_first_idempotent(series in arb_unique_numeric_series("combine_first", 12)) {
+        let result = series
+            .combine_first(&series)
+            .expect("combine_first must succeed for self-composition");
+        prop_assert!(
+            result.equals(&series),
+            "combine_first(self, self) must preserve the original series"
+        );
+    }
+
+    /// Changes to right-side values hidden behind non-missing left values must not
+    /// affect the result.
+    #[test]
+    fn prop_series_combine_first_ignores_poisoned_right_values(
+        (left, right) in arb_unique_series_pair(12)
+    ) {
+        let baseline = left
+            .combine_first(&right)
+            .expect("combine_first must succeed for unique-label inputs");
+        let poisoned_right = poison_series_right_cells_for_combine_first(&left, &right);
+        let poisoned = left
+            .combine_first(&poisoned_right)
+            .expect("combine_first must succeed for poisoned unique-label inputs");
+        prop_assert!(
+            baseline.equals(&poisoned),
+            "right-side changes under non-missing left values must be observationally irrelevant"
+        );
+    }
+
+    /// DataFrame combine_first is idempotent for unique-label inputs.
+    #[test]
+    fn prop_dataframe_combine_first_idempotent(df in arb_combine_first_dataframe(8)) {
+        let result = df
+            .combine_first(&df)
+            .expect("combine_first must succeed for self-composition");
+        prop_assert!(
+            result.equals(&df),
+            "combine_first(self, self) must preserve the original dataframe"
+        );
+    }
+
+    /// Right-side cell edits hidden behind non-missing left cells must not affect
+    /// the observed dataframe result.
+    #[test]
+    fn prop_dataframe_combine_first_ignores_poisoned_right_values(
+        (left, right) in (arb_combine_first_dataframe(8), arb_combine_first_dataframe(8))
+    ) {
+        let baseline = left
+            .combine_first(&right)
+            .expect("combine_first must succeed for unique-label dataframe inputs");
+        let poisoned_right = poison_dataframe_right_cells_for_combine_first(&left, &right);
+        let poisoned = left
+            .combine_first(&poisoned_right)
+            .expect("combine_first must succeed for poisoned dataframe inputs");
+        prop_assert!(
+            baseline.equals(&poisoned),
+            "right-side changes under non-missing left cells must be observationally irrelevant"
+        );
+    }
+
+    /// Cascading combine_first operations must compose associatively when row and
+    /// column labels are unique.
+    #[test]
+    fn prop_dataframe_combine_first_associative(
+        (left, middle, right) in (
+            arb_combine_first_dataframe(6),
+            arb_combine_first_dataframe(6),
+            arb_combine_first_dataframe(6)
+        )
+    ) {
+        let left_assoc = left
+            .combine_first(&middle)
+            .and_then(|df| df.combine_first(&right))
+            .expect("left-associated combine_first chain must succeed");
+        let right_assoc = middle
+            .combine_first(&right)
+            .and_then(|df| left.combine_first(&df))
+            .expect("right-associated combine_first chain must succeed");
+        prop_assert!(
+            left_assoc.equals(&right_assoc),
+            "combine_first chaining must be associative for unique-label dataframe inputs"
+        );
     }
 }
 

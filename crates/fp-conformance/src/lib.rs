@@ -22,7 +22,7 @@ use fp_index::{
 use fp_io::{read_csv_str, write_csv_string};
 use fp_join::{
     JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
-    merge_dataframes_on_with_options,
+    merge_dataframes_on_with_options, merge_ordered,
 };
 #[cfg(feature = "asupersync")]
 use fp_runtime::asupersync::{
@@ -383,6 +383,11 @@ pub enum FixtureOperation {
     DataFrameMergeIndex,
     #[serde(rename = "dataframe_merge_asof", alias = "data_frame_merge_asof")]
     DataFrameMergeAsof,
+    #[serde(
+        rename = "dataframe_merge_ordered",
+        alias = "data_frame_merge_ordered"
+    )]
+    DataFrameMergeOrdered,
     #[serde(rename = "dataframe_concat", alias = "data_frame_concat")]
     DataFrameConcat,
     // FP-P2C-011: Full GroupBy aggregate matrix
@@ -513,6 +518,7 @@ impl FixtureOperation {
             Self::DataFrameMerge => "dataframe_merge",
             Self::DataFrameMergeIndex => "dataframe_merge_index",
             Self::DataFrameMergeAsof => "dataframe_merge_asof",
+            Self::DataFrameMergeOrdered => "dataframe_merge_ordered",
             Self::DataFrameConcat => "dataframe_concat",
             Self::GroupByMean => "groupby_mean",
             Self::GroupByCount => "groupby_count",
@@ -726,6 +732,8 @@ pub struct PacketFixture {
     /// For merge_asof: columns to match exactly before asof matching
     #[serde(default, rename = "by")]
     pub merge_asof_by: Option<Vec<String>>,
+    #[serde(default)]
+    pub merge_fill_method: Option<String>,
     #[serde(default)]
     pub set_index_column: Option<String>,
     #[serde(default)]
@@ -972,6 +980,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
+        | FixtureOperation::DataFrameMergeOrdered
         | FixtureOperation::DataFrameConcat => &["CC-006"],
         FixtureOperation::DataFrameFromSeries => &["CC-003", "CC-005", "CC-006"],
         FixtureOperation::GroupBySum
@@ -5533,6 +5542,7 @@ fn run_fixture_operation(
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
+        | FixtureOperation::DataFrameMergeOrdered
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameIsNa
         | FixtureOperation::DataFrameNotNa
@@ -5810,6 +5820,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
+        | FixtureOperation::DataFrameMergeOrdered
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -6150,6 +6161,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
+        | FixtureOperation::DataFrameMergeOrdered
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -6445,6 +6457,32 @@ fn execute_dataframe_merge_asof_fixture_operation(
 
     let merged = fp_join::merge_asof_with_options(&left, &right, on, direction, options)
         .map_err(|err| err.to_string())?;
+    DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_merge_ordered_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let left = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("left frame build failed: {err}"))?;
+    let right = build_dataframe(require_frame_right(fixture)?)
+        .map_err(|err| format!("right frame build failed: {err}"))?;
+
+    let on_keys = if let Some(keys) = fixture.merge_on_keys.as_ref() {
+        keys.iter().map(String::as_str).collect::<Vec<_>>()
+    } else if let Some(key) = fixture.merge_on.as_deref() {
+        vec![key]
+    } else {
+        return Err("merge_on or merge_on_keys field required for dataframe_merge_ordered".into());
+    };
+
+    let merged = merge_ordered(
+        &left,
+        &right,
+        &on_keys,
+        fixture.merge_fill_method.as_deref(),
+    )
+    .map_err(|err| err.to_string())?;
     DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
 }
 
@@ -7133,6 +7171,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         }
         FixtureOperation::DataFrameMergeAsof => {
             execute_dataframe_merge_asof_fixture_operation(fixture)
+        }
+        FixtureOperation::DataFrameMergeOrdered => {
+            execute_dataframe_merge_ordered_fixture_operation(fixture)
         }
         FixtureOperation::DataFrameConcat => {
             let left = build_dataframe(require_frame(fixture)?)
@@ -10590,6 +10631,7 @@ fn execute_and_compare_differential(
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
+        | FixtureOperation::DataFrameMergeOrdered
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameIsNa
         | FixtureOperation::DataFrameNotNa
@@ -13388,6 +13430,76 @@ mod tests {
         assert!(
             diff.drift_records.is_empty(),
             "expected no drift for mixed object constructor parity: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_merge_ordered_ffill_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "dataframe_merge_ordered_ffill_live",
+            "mode": "strict",
+            "operation": "dataframe_merge_ordered",
+            "oracle_source": "live_legacy_pandas",
+            "merge_on": "date",
+            "merge_fill_method": "ffill",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "columns": {
+                    "date": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "left_val": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "c" }
+                    ]
+                }
+            },
+            "frame_right": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "columns": {
+                    "date": [
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "right_val": [
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "d" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let diff_result = super::run_differential_fixture(
+            &cfg,
+            &fixture,
+            &SuiteOptions {
+                packet_filter: None,
+                oracle_mode: OracleMode::LiveLegacyPandas,
+            },
+        );
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &diff_result {
+            eprintln!("live pandas unavailable; skipping merge_ordered oracle test: {message}");
+            return;
+        }
+
+        let diff = diff_result.expect("differential report");
+        assert_eq!(diff.status, CaseStatus::Pass);
+        assert_eq!(diff.oracle_source, FixtureOracleSource::LiveLegacyPandas);
+        assert!(
+            diff.drift_records.is_empty(),
+            "expected no drift for merge_ordered parity: {diff:?}"
         );
     }
 

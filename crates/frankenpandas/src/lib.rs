@@ -104,7 +104,7 @@ pub use fp_expr::{DataFrameExprExt, ExprError};
 
 pub use fp_join::{
     AsofDirection, DataFrameMergeExt, JoinError, JoinType, MergedDataFrame, join_series,
-    merge_asof, merge_dataframes_on,
+    merge_asof, merge_dataframes_on, merge_ordered,
 };
 
 // ── Runtime policy ──────────────────────────────────────────────────────
@@ -137,6 +137,7 @@ pub mod prelude {
         JoinType,
         JsonOrient,
         MultiIndex,
+        merge_ordered,
         NullKind,
         RuntimePolicy,
         Scalar,

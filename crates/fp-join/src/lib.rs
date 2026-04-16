@@ -4436,4 +4436,78 @@ mod tests {
         // Row 3: group=B, time=4, right B has time=3 <= 4 -> 300.0
         assert_eq!(quote_col.values()[3], Scalar::Float64(300.0));
     }
+
+    #[test]
+    fn merge_ordered_sorts_and_ffills_values() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["date", "left_val"],
+            vec![
+                ("date", vec![Scalar::Int64(1), Scalar::Int64(3)]),
+                ("left_val", vec![Scalar::Int64(10), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["date", "right_val"],
+            vec![
+                ("date", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                ("right_val", vec![Scalar::Int64(200), Scalar::Int64(300)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_ordered(&left, &right, &["date"], Some("ffill")).unwrap();
+        let frame = fp_frame::DataFrame::new(result.index, result.columns).unwrap();
+
+        assert_eq!(
+            frame.column("date").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            frame.column("left_val").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(30),
+            ]
+        );
+        assert_eq!(
+            frame.column("right_val").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(200),
+                Scalar::Int64(300),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_ordered_invalid_fill_method_errors() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["date", "left_val"],
+            vec![
+                ("date", vec![Scalar::Int64(1)]),
+                ("left_val", vec![Scalar::Int64(10)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["date", "right_val"],
+            vec![
+                ("date", vec![Scalar::Int64(2)]),
+                ("right_val", vec![Scalar::Int64(200)]),
+            ],
+        )
+        .unwrap();
+
+        let err = super::merge_ordered(&left, &right, &["date"], Some("sideways"))
+            .expect_err("invalid fill method should error");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message.contains("unknown fill_method")
+        ));
+    }
 }

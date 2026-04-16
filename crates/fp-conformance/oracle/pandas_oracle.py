@@ -1631,6 +1631,56 @@ def op_dataframe_groupby_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_groupby_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_any requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_any requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_any groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).any()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_any failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_all(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_all requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_all requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_all groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).all()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_all failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     groupby_columns = payload.get("groupby_columns")
@@ -2548,6 +2598,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_idxmin(pd, payload)
     if op in {"dataframe_groupby_idxmax", "data_frame_groupby_idxmax"}:
         return op_dataframe_groupby_idxmax(pd, payload)
+    if op in {"dataframe_groupby_any", "data_frame_groupby_any"}:
+        return op_dataframe_groupby_any(pd, payload)
+    if op in {"dataframe_groupby_all", "data_frame_groupby_all"}:
+        return op_dataframe_groupby_all(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

@@ -21653,7 +21653,8 @@ impl DataFrameGroupBy<'_> {
                 let agg_val = if group_vals.is_empty() {
                     Scalar::Null(NullKind::NaN)
                 } else {
-                    group_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    group_vals
+                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let pos = q * (group_vals.len() - 1) as f64;
                     let lo = pos.floor() as usize;
                     let hi = pos.ceil() as usize;
@@ -32935,6 +32936,113 @@ mod tests {
         assert_eq!(
             idxmax.columns["val"].values(),
             &[Scalar::Utf8("r0".into()), Scalar::Utf8("r2".into())]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_any_all() {
+        let labels = vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+            IndexLabel::Utf8("r4".into()),
+            IndexLabel::Utf8("r5".into()),
+        ];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                labels.clone(),
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("c".into()),
+                    Scalar::Utf8("c".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "flag",
+                labels.clone(),
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "count",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Int64(2),
+                    Scalar::Int64(0),
+                    Scalar::Int64(0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "all_na",
+                labels,
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let any_result = df.groupby(&["grp"]).unwrap().any().unwrap();
+        assert_eq!(
+            any_result.index().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into())
+            ]
+        );
+        assert_eq!(
+            any_result.columns["flag"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            any_result.columns["count"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            any_result.columns["all_na"].values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let all_result = df.groupby(&["grp"]).unwrap().all().unwrap();
+        assert_eq!(
+            all_result.columns["flag"].values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            all_result.columns["count"].values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            all_result.columns["all_na"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)]
         );
     }
 

@@ -8492,6 +8492,62 @@ impl StringAccessor<'_> {
         Ok(parts.join(sep))
     }
 
+    /// Concatenate strings element-wise with another Series.
+    ///
+    /// Matches `pd.Series.str.cat(others, sep, na_rep)`.
+    /// `na_rep` is used to replace Null values in either Series.
+    pub fn cat_series(
+        &self,
+        others: &Series,
+        sep: &str,
+        na_rep: Option<&str>,
+    ) -> Result<Series, FrameError> {
+        let (left, right) = self.series.align(others, AlignMode::Left)?;
+        let left_vals = left.column().values();
+        let right_vals = right.column().values();
+        let mut out = Vec::with_capacity(left_vals.len());
+
+        for (lv, rv) in left_vals.iter().zip(right_vals.iter()) {
+            let l_str = match lv {
+                Scalar::Utf8(s) => Some(s.as_str()),
+                Scalar::Null(_) => na_rep,
+                _ => None,
+            };
+            let r_str = match rv {
+                Scalar::Utf8(s) => Some(s.as_str()),
+                Scalar::Null(_) => na_rep,
+                _ => None,
+            };
+
+            match (l_str, r_str) {
+                (Some(ls), Some(rs)) => {
+                    out.push(Scalar::Utf8(format!("{ls}{sep}{rs}")));
+                }
+                _ => {
+                    out.push(Scalar::Null(fp_types::NullKind::NaN));
+                }
+            }
+        }
+
+        Series::from_values(self.series.name(), self.series.index().labels().to_vec(), out)
+    }
+
+    /// Concatenate strings element-wise with multiple other Series.
+    ///
+    /// Matches `pd.Series.str.cat([s1, s2, ...], sep, na_rep)`.
+    pub fn cat_list(
+        &self,
+        others: &[&Series],
+        sep: &str,
+        na_rep: Option<&str>,
+    ) -> Result<Series, FrameError> {
+        let mut current = self.series.clone();
+        for other in others {
+            current = current.str().cat_series(other, sep, na_rep)?;
+        }
+        Ok(current)
+    }
+
     /// Find the first occurrence of a substring.
     ///
     /// Matches `pd.Series.str.find(sub)`. Returns -1 if not found.

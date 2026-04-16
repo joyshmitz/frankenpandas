@@ -305,6 +305,8 @@ pub enum FixtureOperation {
         alias = "data_frame_groupby_kurtosis"
     )]
     DataFrameGroupByKurtosis,
+    #[serde(rename = "dataframe_groupby_ohlc", alias = "data_frame_groupby_ohlc")]
+    DataFrameGroupByOhlc,
     #[serde(
         rename = "dataframe_groupby_cumcount",
         alias = "data_frame_groupby_cumcount"
@@ -483,6 +485,7 @@ impl FixtureOperation {
             Self::DataFrameGroupBySem => "dataframe_groupby_sem",
             Self::DataFrameGroupBySkew => "dataframe_groupby_skew",
             Self::DataFrameGroupByKurtosis => "dataframe_groupby_kurtosis",
+            Self::DataFrameGroupByOhlc => "dataframe_groupby_ohlc",
             Self::DataFrameGroupByCumcount => "dataframe_groupby_cumcount",
             Self::DataFrameGroupByNgroup => "dataframe_groupby_ngroup",
             Self::DataFrameAsof => "dataframe_asof",
@@ -1057,6 +1060,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameGroupBySem
         | FixtureOperation::DataFrameGroupBySkew
         | FixtureOperation::DataFrameGroupByKurtosis
+        | FixtureOperation::DataFrameGroupByOhlc
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
         | FixtureOperation::DataFrameAsof
@@ -5305,6 +5309,35 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameGroupByOhlc => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_groupby_ohlc error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_groupby_ohlc to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_groupby_ohlc to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_groupby_ohlc"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameGroupByCumcount => {
             let actual = execute_dataframe_groupby_series_fixture_operation(fixture, false);
             match expected {
@@ -5791,6 +5824,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameGroupBySem
         | FixtureOperation::DataFrameGroupBySkew
         | FixtureOperation::DataFrameGroupByKurtosis
+        | FixtureOperation::DataFrameGroupByOhlc
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
@@ -6132,6 +6166,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameGroupBySem
         | FixtureOperation::DataFrameGroupBySkew
         | FixtureOperation::DataFrameGroupByKurtosis
+        | FixtureOperation::DataFrameGroupByOhlc
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
@@ -7395,6 +7430,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFrameGroupByKurtosis => {
             execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_kurtosis")
         }
+        FixtureOperation::DataFrameGroupByOhlc => {
+            execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_ohlc")
+        }
         FixtureOperation::DataFrameAtTime => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -7443,6 +7481,7 @@ fn execute_dataframe_groupby_frame_fixture_operation(
         "dataframe_groupby_sem" => groupby.sem().map_err(|err| err.to_string()),
         "dataframe_groupby_skew" => groupby.skew().map_err(|err| err.to_string()),
         "dataframe_groupby_kurtosis" => groupby.kurtosis().map_err(|err| err.to_string()),
+        "dataframe_groupby_ohlc" => groupby.ohlc().map_err(|err| err.to_string()),
         other => Err(format!(
             "unsupported dataframe groupby frame operation: {other}"
         )),
@@ -10328,6 +10367,44 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_frame or expected_error required for dataframe_groupby_kurtosis"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameGroupByOhlc => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_ohlc.error",
+                        format!(
+                            "expected dataframe_groupby_ohlc error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_ohlc.error",
+                        "expected dataframe_groupby_ohlc to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_ohlc.error",
+                        "expected dataframe_groupby_ohlc to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_groupby_ohlc"
                         .to_owned(),
                 ),
             }
@@ -14570,6 +14647,134 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping dataframe groupby kurtosis oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_ohlc_single_value_column_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-084",
+            "case_id": "dataframe_groupby_ohlc_single_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_ohlc",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" }
+                ],
+                "column_order": ["grp", "price"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "price": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 15.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 12.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby ohlc single-column oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_ohlc_multi_value_columns_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-085",
+            "case_id": "dataframe_groupby_ohlc_multi_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_ohlc",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" },
+                    { "kind": "utf8", "value": "r4" }
+                ],
+                "column_order": ["grp", "price", "qty"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" }
+                    ],
+                    "price": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 15.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 12.0 },
+                        { "kind": "float64", "value": 20.0 }
+                    ],
+                    "qty": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 4.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby ohlc multi-column oracle test: {message}"
             );
             return;
         }

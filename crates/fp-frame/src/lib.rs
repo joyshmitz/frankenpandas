@@ -41209,6 +41209,90 @@ mod tests {
         assert_eq!(result.columns()["close"].values()[0], Scalar::Float64(12.0));
     }
 
+    #[test]
+    fn groupby_ohlc_multiple_value_columns_use_prefixed_names() {
+        let df = DataFrame::from_dict(
+            &["g", "price", "qty"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+                (
+                    "price",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(12.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+                (
+                    "qty",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["g"]).unwrap();
+        let result = gb.ohlc().unwrap();
+
+        assert_eq!(
+            result.column_names(),
+            vec![
+                "price_open",
+                "price_high",
+                "price_low",
+                "price_close",
+                "qty_open",
+                "qty_high",
+                "qty_low",
+                "qty_close",
+            ]
+        );
+        assert_eq!(
+            result.columns()["price_open"].values()[0],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            result.columns()["price_close"].values()[0],
+            Scalar::Float64(20.0)
+        );
+        assert_eq!(
+            result.columns()["price_open"].values()[1],
+            Scalar::Float64(12.0)
+        );
+        assert_eq!(
+            result.columns()["qty_open"].values()[0],
+            Scalar::Float64(1.0)
+        );
+        assert_eq!(
+            result.columns()["qty_close"].values()[0],
+            Scalar::Float64(3.0)
+        );
+        assert_eq!(
+            result.columns()["qty_high"].values()[1],
+            Scalar::Float64(5.0)
+        );
+        assert_eq!(
+            result.columns()["qty_low"].values()[1],
+            Scalar::Float64(4.0)
+        );
+    }
+
     // ── Batch 10: DataFrame skew_agg/kurtosis_agg/sem_agg ──
 
     #[test]

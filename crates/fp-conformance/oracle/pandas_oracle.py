@@ -1614,6 +1614,26 @@ def dataframe_to_json(frame) -> dict[str, Any]:
     }
 
 
+def normalize_groupby_ohlc_frame(frame):
+    if getattr(frame.columns, "nlevels", 1) <= 1:
+        return frame
+
+    top_level = [str(value) for value in frame.columns.get_level_values(0)]
+    unique_top_level = list(dict.fromkeys(top_level))
+    single_value_column = len(unique_top_level) == 1
+
+    flattened_names: list[str] = []
+    for column_name, stat_name in frame.columns.tolist():
+        if single_value_column:
+            flattened_names.append(str(stat_name))
+        else:
+            flattened_names.append(f"{column_name}_{stat_name}")
+
+    out = frame.copy()
+    out.columns = flattened_names
+    return out
+
+
 def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     loc_labels = payload.get("loc_labels")
@@ -1952,6 +1972,31 @@ def op_dataframe_groupby_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]
         out = frame.groupby(columns).kurt()
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_kurtosis failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_ohlc(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_ohlc requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_ohlc requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_ohlc groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = normalize_groupby_ohlc_frame(frame.groupby(columns).ohlc())
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_ohlc failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -2926,6 +2971,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_skew(pd, payload)
     if op in {"dataframe_groupby_kurtosis", "data_frame_groupby_kurtosis"}:
         return op_dataframe_groupby_kurtosis(pd, payload)
+    if op in {"dataframe_groupby_ohlc", "data_frame_groupby_ohlc"}:
+        return op_dataframe_groupby_ohlc(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

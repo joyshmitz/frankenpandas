@@ -1361,6 +1361,17 @@ fn bool_values(series: &Series) -> Result<Vec<bool>, String> {
         .collect()
 }
 
+fn int64_values(series: &Series) -> Result<Vec<i64>, String> {
+    series
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(count) => Ok(*count),
+            other => Err(format!("expected Int64 series output, got {other:?}")),
+        })
+        .collect()
+}
+
 fn invert_bool_series(series: &Series) -> Result<Series, String> {
     let values = bool_values(series)?
         .into_iter()
@@ -6247,6 +6258,143 @@ proptest! {
             all_dataframe_bool_values(&notna, true)
                 .expect("DataFrame::notna() output must be boolean-valued"),
             "dataframe fillna(v).notna() must be all true"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: count / count_na metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Negating numeric values must not change `Series::count()`.
+    #[test]
+    fn prop_series_count_is_sign_flip_invariant(
+        series in arb_variable_numeric_series("count", 12),
+    ) {
+        let baseline = series.count();
+        let flipped = sign_flip_series(&series).count();
+        prop_assert_eq!(
+            baseline,
+            flipped,
+            "series count(-x) must equal count(x)"
+        );
+    }
+
+    /// Non-missing and missing positions partition a Series.
+    #[test]
+    fn prop_series_count_plus_isna_matches_len(
+        series in arb_variable_numeric_series("count", 12),
+    ) {
+        let missing = bool_values(
+            &series
+                .isna()
+                .expect("Series::isna() must succeed for numeric inputs"),
+        )
+        .expect("Series::isna() output must be boolean-valued")
+        .into_iter()
+        .filter(|flag| *flag)
+        .count();
+        prop_assert_eq!(
+            series.count() + missing,
+            series.len(),
+            "series count() + missing_count must equal len()"
+        );
+    }
+
+    /// Filling missing values with a concrete scalar must make every Series position countable.
+    #[test]
+    fn prop_series_fillna_makes_count_equal_len(
+        series in arb_variable_numeric_series("count", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let filled = series
+            .fillna(&Scalar::Int64(fill))
+            .expect("Series::fillna() must succeed for numeric inputs");
+        prop_assert_eq!(
+            filled.count(),
+            series.len(),
+            "series fillna(v).count() must equal len()"
+        );
+    }
+
+    /// Negating numeric cells must not change per-column `DataFrame::count()`.
+    #[test]
+    fn prop_dataframe_count_is_sign_flip_invariant(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .count()
+            .expect("DataFrame::count() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .count()
+            .expect("DataFrame::count() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_series(&baseline, &flipped),
+            "dataframe count(-x) must equal count(x)"
+        );
+    }
+
+    /// Per-column non-missing and missing counts must partition DataFrame rows.
+    #[test]
+    fn prop_dataframe_count_plus_count_na_matches_row_count(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let count = df
+            .count()
+            .expect("DataFrame::count() must succeed for numeric inputs");
+        let count_na = df
+            .count_na()
+            .expect("DataFrame::count_na() must succeed for numeric inputs");
+        let row_count = i64::try_from(df.index().len()).expect("row count must fit in i64");
+        let counts = int64_values(&count).expect("DataFrame::count() must produce Int64 output");
+        let na_counts =
+            int64_values(&count_na).expect("DataFrame::count_na() must produce Int64 output");
+        for (present, missing) in counts.into_iter().zip(na_counts) {
+            prop_assert_eq!(
+                present + missing,
+                row_count,
+                "dataframe count() + count_na() must equal row_count for every column"
+            );
+        }
+    }
+
+    /// Filling missing values with a concrete scalar must make every DataFrame cell countable.
+    #[test]
+    fn prop_dataframe_fillna_sets_count_to_row_count_and_count_na_to_zero(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let filled = df
+            .fillna(&Scalar::Int64(fill))
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        let count = filled
+            .count()
+            .expect("DataFrame::count() must succeed after fillna");
+        let count_na = filled
+            .count_na()
+            .expect("DataFrame::count_na() must succeed after fillna");
+        let expected_count = Series::from_values(
+            count.name().to_owned(),
+            count.index().labels().to_vec(),
+            vec![Scalar::Int64(i64::try_from(df.index().len()).expect("row count must fit in i64")); count.len()],
+        )
+        .expect("expected count series must construct");
+        let expected_count_na = Series::from_values(
+            count_na.name().to_owned(),
+            count_na.index().labels().to_vec(),
+            vec![Scalar::Int64(0); count_na.len()],
+        )
+        .expect("expected count_na series must construct");
+        prop_assert!(
+            approx_equal_series(&count, &expected_count),
+            "dataframe fillna(v).count() must equal row_count per column"
+        );
+        prop_assert!(
+            approx_equal_series(&count_na, &expected_count_na),
+            "dataframe fillna(v).count_na() must be zero per column"
         );
     }
 }

@@ -621,6 +621,157 @@ fn arb_dataframe_truncate_composition_case(
         })
 }
 
+fn merged_drop_items<T: Ord + Clone>(lhs: &[T], rhs: &[T]) -> Vec<T> {
+    let mut merged = lhs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    merged.extend(rhs.iter().cloned());
+    merged.into_iter().collect()
+}
+
+fn arb_unique_utf8_index_strings(len: usize) -> impl Strategy<Value = Vec<String>> {
+    proptest::collection::btree_set("[a-z]{1,6}", len)
+        .prop_map(|labels| labels.into_iter().collect())
+}
+
+fn utf8_index_strings(labels: &[IndexLabel]) -> Vec<String> {
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Utf8(value) => value.clone(),
+            _ => unreachable!("drop row helpers require Utf8 index labels"),
+        })
+        .collect()
+}
+
+fn arb_unique_utf8_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        let idx_labels = arb_unique_utf8_index_strings(nrows)
+            .prop_map(|labels| labels.into_iter().map(IndexLabel::Utf8).collect::<Vec<_>>());
+        let col_a = arb_numeric_values(nrows);
+        let col_b = arb_numeric_values(nrows);
+        let col_c = arb_numeric_values(nrows);
+        (idx_labels, col_a, col_b, col_c).prop_filter_map(
+            "Utf8-index dataframe construction must succeed",
+            move |(labels, va, vb, vc)| {
+                let index = Index::new(labels);
+                let col_a = fp_columnar::Column::from_values(va).ok()?;
+                let col_b = fp_columnar::Column::from_values(vb).ok()?;
+                let col_c = fp_columnar::Column::from_values(vc).ok()?;
+                let mut cols = std::collections::BTreeMap::new();
+                cols.insert("a".to_string(), col_a);
+                cols.insert("b".to_string(), col_b);
+                cols.insert("c".to_string(), col_c);
+                DataFrame::new_with_column_order(
+                    index,
+                    cols,
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                )
+                .ok()
+            },
+        )
+    })
+}
+
+fn arb_series_drop_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Vec<IndexLabel>)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        arb_unique_numeric_series(name, len).prop_flat_map(move |series| {
+            let labels = series.index().labels().to_vec();
+            (Just(series), proptest::sample::subsequence(labels, 0..=len))
+        })
+    })
+}
+
+fn arb_series_drop_composition_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Vec<IndexLabel>, Vec<IndexLabel>)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        arb_unique_numeric_series(name, len).prop_flat_map(move |series| {
+            let labels = series.index().labels().to_vec();
+            (
+                Just(series),
+                proptest::sample::subsequence(labels.clone(), 0..=len),
+                proptest::sample::subsequence(labels, 0..=len),
+            )
+        })
+    })
+}
+
+fn arb_dataframe_row_drop_case(max_rows: usize) -> impl Strategy<Value = (DataFrame, Vec<String>)> {
+    arb_unique_utf8_numeric_dataframe(max_rows).prop_flat_map(|df| {
+        let labels = utf8_index_strings(df.index().labels());
+        let nrows = labels.len();
+        (Just(df), proptest::sample::subsequence(labels, 0..=nrows))
+    })
+}
+
+fn arb_dataframe_row_drop_composition_case(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<String>, Vec<String>)> {
+    arb_unique_utf8_numeric_dataframe(max_rows).prop_flat_map(|df| {
+        let labels = utf8_index_strings(df.index().labels());
+        let nrows = labels.len();
+        (
+            Just(df),
+            proptest::sample::subsequence(labels.clone(), 0..=nrows),
+            proptest::sample::subsequence(labels, 0..=nrows),
+        )
+    })
+}
+
+fn arb_dataframe_column_drop_case(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<String>)> {
+    arb_unique_utf8_numeric_dataframe(max_rows).prop_flat_map(|df| {
+        let columns = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let ncols = columns.len();
+        (Just(df), proptest::sample::subsequence(columns, 0..=ncols))
+    })
+}
+
+fn arb_dataframe_column_drop_composition_case(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<String>, Vec<String>)> {
+    arb_unique_utf8_numeric_dataframe(max_rows).prop_flat_map(|df| {
+        let columns = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let ncols = columns.len();
+        (
+            Just(df),
+            proptest::sample::subsequence(columns.clone(), 0..=ncols),
+        )
+            .prop_flat_map(move |(df, first)| {
+                let remaining = columns
+                    .iter()
+                    .filter(|name| !first.contains(*name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let remaining_len = remaining.len();
+                (
+                    Just(df),
+                    Just(first),
+                    proptest::sample::subsequence(remaining, 0..=remaining_len),
+                )
+            })
+    })
+}
+
+fn drop_dataframe_rows(df: &DataFrame, labels: &[String]) -> DataFrame {
+    let refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    df.drop(&refs, 0)
+        .expect("DataFrame::drop(axis=0) must succeed for existing Utf8 row labels")
+}
+
+fn drop_dataframe_columns(df: &DataFrame, columns: &[String]) -> DataFrame {
+    let refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+    df.drop(&refs, 1)
+        .expect("DataFrame::drop(axis=1) must succeed for existing column labels")
+}
+
 fn normalize_take_position(idx: i64, len: usize) -> usize {
     let len_i64 = i64::try_from(len).expect("take length must fit in i64");
     let resolved = if idx < 0 {
@@ -4591,6 +4742,148 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&nested, &direct),
             "nested dataframe truncates must equal directly truncating with intersected bounds"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: drop metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Dropping no Series labels must be identity.
+    #[test]
+    fn prop_series_drop_empty_is_identity(
+        series in (1..=12usize).prop_flat_map(|len| arb_unique_numeric_series("drop", len)),
+    ) {
+        let labels = Vec::<IndexLabel>::new();
+        let dropped = series
+            .drop(&labels)
+            .expect("Series::drop([]) must succeed");
+        prop_assert!(
+            approx_equal_series(&dropped, &series),
+            "series drop([]) must be identity"
+        );
+    }
+
+    /// Dropping Series labels in two passes must equal dropping their union directly.
+    #[test]
+    fn prop_series_drop_composes(
+        (series, first, second) in arb_series_drop_composition_case("drop", 12),
+    ) {
+        let nested = series
+            .drop(&first)
+            .and_then(|dropped| dropped.drop(&second))
+            .expect("nested Series::drop() must succeed");
+        let merged = merged_drop_items(&first, &second);
+        let direct = series
+            .drop(&merged)
+            .expect("direct composed Series::drop() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "series drop(labels1).drop(labels2) must equal dropping the union directly"
+        );
+    }
+
+    /// Dropping Series labels must commute with numeric sign flipping.
+    #[test]
+    fn prop_series_drop_commutes_with_sign_flip(
+        (series, labels) in arb_series_drop_case("drop", 12),
+    ) {
+        let dropped = series
+            .drop(&labels)
+            .expect("Series::drop() must succeed for existing labels");
+        let flipped_then_dropped = sign_flip_series(&series)
+            .drop(&labels)
+            .expect("Series::drop() must succeed after sign flipping");
+        let expected = sign_flip_series(&dropped);
+        prop_assert!(
+            approx_equal_series(&flipped_then_dropped, &expected),
+            "series drop must commute with sign flipping"
+        );
+    }
+
+    /// Dropping no DataFrame rows must be identity.
+    #[test]
+    fn prop_dataframe_drop_rows_empty_is_identity(
+        df in arb_unique_utf8_numeric_dataframe(8),
+    ) {
+        let labels = Vec::<String>::new();
+        let dropped = drop_dataframe_rows(&df, &labels);
+        prop_assert!(
+            approx_equal_dataframe(&dropped, &df),
+            "dataframe drop(axis=0, labels=[]) must be identity"
+        );
+    }
+
+    /// Dropping DataFrame rows in two passes must equal dropping their union directly.
+    #[test]
+    fn prop_dataframe_drop_rows_composes(
+        (df, first, second) in arb_dataframe_row_drop_composition_case(8),
+    ) {
+        let nested = drop_dataframe_rows(&drop_dataframe_rows(&df, &first), &second);
+        let merged = merged_drop_items(&first, &second);
+        let direct = drop_dataframe_rows(&df, &merged);
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "dataframe row drop must compose through the union of row labels"
+        );
+    }
+
+    /// Dropping DataFrame rows must commute with numeric sign flipping.
+    #[test]
+    fn prop_dataframe_drop_rows_commutes_with_sign_flip(
+        (df, labels) in arb_dataframe_row_drop_case(8),
+    ) {
+        let dropped = drop_dataframe_rows(&df, &labels);
+        let flipped_then_dropped = drop_dataframe_rows(&sign_flip_dataframe(&df), &labels);
+        let expected = sign_flip_dataframe(&dropped);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_dropped, &expected),
+            "dataframe row drop must commute with sign flipping"
+        );
+    }
+
+    /// Dropping no DataFrame columns must be identity.
+    #[test]
+    fn prop_dataframe_drop_columns_empty_is_identity(
+        df in arb_unique_utf8_numeric_dataframe(8),
+    ) {
+        let columns = Vec::<String>::new();
+        let dropped = drop_dataframe_columns(&df, &columns);
+        prop_assert!(
+            approx_equal_dataframe(&dropped, &df),
+            "dataframe drop(axis=1, labels=[]) must be identity"
+        );
+    }
+
+    /// Dropping disjoint DataFrame columns in two passes must equal dropping their union directly.
+    #[test]
+    fn prop_dataframe_drop_columns_composes(
+        (df, first, second) in arb_dataframe_column_drop_composition_case(8),
+    ) {
+        let nested = drop_dataframe_columns(&drop_dataframe_columns(&df, &first), &second);
+        let merged = merged_drop_items(&first, &second);
+        let direct = drop_dataframe_columns(&df, &merged);
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "dataframe column drop must compose through the union of disjoint column labels"
+        );
+    }
+
+    /// Dropping DataFrame columns must commute with numeric sign flipping.
+    #[test]
+    fn prop_dataframe_drop_columns_commutes_with_sign_flip(
+        (df, columns) in arb_dataframe_column_drop_case(8),
+    ) {
+        let dropped = drop_dataframe_columns(&df, &columns);
+        let flipped_then_dropped = drop_dataframe_columns(&sign_flip_dataframe(&df), &columns);
+        let expected = sign_flip_dataframe(&dropped);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_dropped, &expected),
+            "dataframe column drop must commute with sign flipping"
         );
     }
 }

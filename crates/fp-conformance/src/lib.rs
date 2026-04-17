@@ -26,8 +26,8 @@ use fp_io::{
     write_jsonl_string,
 };
 use fp_join::{
-    JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
-    merge_dataframes_on_with_options, merge_ordered,
+    JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
+    join_series, join_series_with_options, merge_dataframes_on_with_options, merge_ordered,
 };
 #[cfg(feature = "asupersync")]
 use fp_runtime::asupersync::{
@@ -3953,6 +3953,56 @@ fn normalized_series_rows(series: &Series) -> Vec<String> {
     rows
 }
 
+fn normalized_join_rows(joined: &JoinedSeries) -> Vec<String> {
+    let mut rows = joined
+        .index
+        .labels()
+        .iter()
+        .zip(joined.left_values.values().iter())
+        .zip(joined.right_values.values().iter())
+        .map(|((label, left_value), right_value)| {
+            format!("{label:?}|{left_value:?}|{right_value:?}")
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows
+}
+
+fn normalized_join_rows_with_swapped_sides(joined: &JoinedSeries) -> Vec<String> {
+    let mut rows = joined
+        .index
+        .labels()
+        .iter()
+        .zip(joined.left_values.values().iter())
+        .zip(joined.right_values.values().iter())
+        .map(|((label, left_value), right_value)| {
+            format!("{label:?}|{right_value:?}|{left_value:?}")
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows
+}
+
+fn fuzz_join_type_from_byte(byte: u8) -> JoinType {
+    match byte % 5 {
+        0 => JoinType::Inner,
+        1 => JoinType::Left,
+        2 => JoinType::Right,
+        3 => JoinType::Outer,
+        _ => JoinType::Cross,
+    }
+}
+
+fn swapped_join_type(join_type: JoinType) -> JoinType {
+    match join_type {
+        JoinType::Inner => JoinType::Inner,
+        JoinType::Left => JoinType::Right,
+        JoinType::Right => JoinType::Left,
+        JoinType::Outer => JoinType::Outer,
+        JoinType::Cross => JoinType::Cross,
+    }
+}
+
 /// Structure-aware fuzz entrypoint for `Series::add()` alignment semantics.
 ///
 /// Inputs are split at `|` (or midpoint when absent) and projected into small
@@ -4009,6 +4059,161 @@ pub fn fuzz_series_add_bytes(input: &[u8]) -> Result<(), String> {
              left={left:?} right={right:?} forward_rows={normalized_forward:?} \
              reverse_rows={normalized_reverse:?}"
         ));
+    }
+
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `join_series()` invariants.
+///
+/// The first byte selects the join type; remaining bytes are split at `|`
+/// (or midpoint) into left/right `Series` payloads. The harness projects these
+/// into bounded numeric/missing series, then requires global, arena, and
+/// forced-fallback execution paths to agree exactly. It also checks join-type
+/// specific output contracts plus side-swapped dualities where pandas-visible
+/// semantics should remain invariant.
+pub fn fuzz_join_series_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&join_tag, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let join_type = fuzz_join_type_from_byte(join_tag);
+    let (left_bytes, right_bytes) =
+        if let Some(split_at) = payload.iter().position(|byte| *byte == b'|') {
+            (&payload[..split_at], &payload[split_at + 1..])
+        } else {
+            payload.split_at(payload.len() / 2)
+        };
+
+    let left = fuzz_series_from_bytes("left", left_bytes)
+        .map_err(|err| format!("left series projection failed: {err:?}"))?;
+    let right = fuzz_series_from_bytes("right", right_bytes)
+        .map_err(|err| format!("right series projection failed: {err:?}"))?;
+
+    let global = join_series_with_options(
+        &left,
+        &right,
+        join_type,
+        JoinExecutionOptions {
+            use_arena: false,
+            arena_budget_bytes: 0,
+        },
+    )
+    .map_err(|err| format!("global join unexpectedly failed: {err:?}"))?;
+
+    let arena = join_series_with_options(&left, &right, join_type, JoinExecutionOptions::default())
+        .map_err(|err| format!("arena join unexpectedly failed: {err:?}"))?;
+
+    let fallback = join_series_with_options(
+        &left,
+        &right,
+        join_type,
+        JoinExecutionOptions {
+            use_arena: true,
+            arena_budget_bytes: 1,
+        },
+    )
+    .map_err(|err| format!("fallback join unexpectedly failed: {err:?}"))?;
+
+    if global != arena {
+        return Err(format!(
+            "arena join result drifted from global: \
+             join_type={join_type:?} left={left:?} right={right:?} global={global:?} arena={arena:?}"
+        ));
+    }
+    if global != fallback {
+        return Err(format!(
+            "fallback join result drifted from global: \
+             join_type={join_type:?} left={left:?} right={right:?} global={global:?} fallback={fallback:?}"
+        ));
+    }
+
+    if global.index.len() != global.left_values.len()
+        || global.index.len() != global.right_values.len()
+    {
+        return Err(format!(
+            "join output length mismatch: join_type={join_type:?} index_len={} left_len={} right_len={}",
+            global.index.len(),
+            global.left_values.len(),
+            global.right_values.len()
+        ));
+    }
+
+    match join_type {
+        JoinType::Inner => {
+            for label in global.index.labels() {
+                if !left.index().labels().contains(label) || !right.index().labels().contains(label)
+                {
+                    return Err(format!(
+                        "inner join emitted label not present on both sides: \
+                         join_type={join_type:?} label={label:?} left={left:?} right={right:?}"
+                    ));
+                }
+            }
+        }
+        JoinType::Left => {
+            let joined_labels = global.index.labels();
+            for label in left.index().labels() {
+                if !joined_labels.contains(label) {
+                    return Err(format!(
+                        "left join dropped left label {label:?}: result={global:?}"
+                    ));
+                }
+            }
+        }
+        JoinType::Right => {
+            let joined_labels = global.index.labels();
+            for label in right.index().labels() {
+                if !joined_labels.contains(label) {
+                    return Err(format!(
+                        "right join dropped right label {label:?}: result={global:?}"
+                    ));
+                }
+            }
+        }
+        JoinType::Outer => {
+            let joined_labels = global.index.labels();
+            for label in left.index().labels() {
+                if !joined_labels.contains(label) {
+                    return Err(format!(
+                        "outer join dropped left label {label:?}: result={global:?}"
+                    ));
+                }
+            }
+            for label in right.index().labels() {
+                if !joined_labels.contains(label) {
+                    return Err(format!(
+                        "outer join dropped right label {label:?}: result={global:?}"
+                    ));
+                }
+            }
+        }
+        JoinType::Cross => {
+            let expected_rows = left.index().len().saturating_mul(right.index().len());
+            if global.index.len() != expected_rows {
+                return Err(format!(
+                    "cross join row count drifted: expected_rows={expected_rows} actual_rows={} \
+                     left_rows={} right_rows={}",
+                    global.index.len(),
+                    left.index().len(),
+                    right.index().len()
+                ));
+            }
+        }
+    }
+
+    if !matches!(join_type, JoinType::Cross) {
+        let swapped = join_series(&right, &left, swapped_join_type(join_type))
+            .map_err(|err| format!("swapped join unexpectedly failed: {err:?}"))?;
+        if normalized_join_rows(&global) != normalized_join_rows_with_swapped_sides(&swapped) {
+            return Err(format!(
+                "join lost side-swapped duality after normalization: \
+                 join_type={join_type:?} left={left:?} right={right:?} \
+                 forward_rows={:?} swapped_rows={:?}",
+                normalized_join_rows(&global),
+                normalized_join_rows_with_swapped_sides(&swapped)
+            ));
+        }
     }
 
     Ok(())
@@ -14039,14 +14244,15 @@ mod tests {
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
         fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes,
-        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
-        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
-        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_compat_closure_e2e_scenario_report,
-        write_compat_closure_final_evidence_pack, write_differential_validation_log,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
+        fuzz_scalar_cast_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
+        run_differential_by_id, run_differential_suite, run_e2e_suite,
+        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
+        write_differential_validation_log, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -14325,6 +14531,45 @@ mod tests {
             "../fixtures/adversarial/fuzz_corpus/series_add/missing_alignment_seed.bin"
         );
         fuzz_series_add_bytes(seed).expect("missing alignment seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_join_series_bytes_accepts_inner_overlap_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/join_series/inner_overlap_seed.bin"
+        );
+        fuzz_join_series_bytes(seed).expect("inner-overlap seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_join_series_bytes_accepts_left_unmatched_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/join_series/left_unmatched_seed.bin"
+        );
+        fuzz_join_series_bytes(seed).expect("left-unmatched seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_join_series_bytes_accepts_right_unmatched_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/join_series/right_unmatched_seed.bin"
+        );
+        fuzz_join_series_bytes(seed).expect("right-unmatched seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_join_series_bytes_accepts_outer_union_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/join_series/outer_union_seed.bin");
+        fuzz_join_series_bytes(seed).expect("outer-union seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_join_series_bytes_accepts_cross_product_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/join_series/cross_product_seed.bin"
+        );
+        fuzz_join_series_bytes(seed).expect("cross-product seed should satisfy invariants");
     }
 
     #[test]

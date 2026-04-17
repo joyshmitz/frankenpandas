@@ -68,6 +68,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_join_series"
+path = "fuzz_targets/fuzz_join_series.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_groupby_sum"
 path = "fuzz_targets/fuzz_groupby_sum.rs"
 test = false

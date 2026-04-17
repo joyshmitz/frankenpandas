@@ -145,6 +145,9 @@ Implemented entrypoint:
 - `fuzz_series_add` target: `fuzz/fuzz_targets/fuzz_series_add.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/series_add/`
 - splits inputs at `|`, projects bounded numeric/missing `Series` pairs, and checks `Series::add()` success, union-label preservation, index/value length parity, and commutativity after row normalization
+- `fuzz_join_series` target: `fuzz/fuzz_targets/fuzz_join_series.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/join_series/`
+- selects a `JoinType` from the first byte, projects bounded numeric/missing `Series` pairs, and checks `join_series()` global, arena, and forced-fallback execution paths plus side-swapped dualities for non-cross joins
 - `fuzz_groupby_sum` target: `fuzz/fuzz_targets/fuzz_groupby_sum.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/groupby_sum/`
 - splits inputs at `|`, projects Int64-or-null key series plus numeric value series, and checks `groupby_sum()` global, arena, and forced-fallback execution paths stay isomorphic under both `dropna` modes
@@ -399,6 +402,8 @@ crates/fp-conformance/
         scalar_cast/
           ...
         series_add/
+          ...
+        join_series/
           ...
         groupby_sum/
           ...

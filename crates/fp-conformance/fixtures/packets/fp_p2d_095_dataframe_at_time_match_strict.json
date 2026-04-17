@@ -1,0 +1,33 @@
+{
+  "packet_id": "FP-P2D-095",
+  "case_id": "dataframe_at_time_match_strict",
+  "mode": "strict",
+  "operation": "dataframe_at_time",
+  "time_value": "14:30:00",
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "2024-01-15 14:30:00" },
+      { "kind": "utf8", "value": "2024-01-15 15:00:00" },
+      { "kind": "utf8", "value": "2024-01-16 14:30:00" }
+    ],
+    "columns": {
+      "value": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "2024-01-15 14:30:00" },
+      { "kind": "utf8", "value": "2024-01-16 14:30:00" }
+    ],
+    "columns": {
+      "value": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  }
+}

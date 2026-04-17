@@ -32,6 +32,16 @@ fn arb_numeric_scalar() -> impl Strategy<Value = Scalar> {
     ]
 }
 
+fn arb_replace_numeric_scalar() -> impl Strategy<Value = Scalar> {
+    prop_oneof![
+        2 => (-1_000_000i64..1_000_000i64).prop_map(Scalar::Int64),
+        3 => (-1e6_f64..1e6_f64).prop_map(Scalar::Float64),
+        1 => Just(Scalar::Float64(f64::NAN)),
+        1 => Just(Scalar::Null(NullKind::Null)),
+        1 => Just(Scalar::Null(NullKind::NaN)),
+    ]
+}
+
 /// Generate an arbitrary IndexLabel.
 fn arb_index_label() -> impl Strategy<Value = IndexLabel> {
     prop_oneof![
@@ -59,6 +69,10 @@ fn arb_index(len: usize) -> impl Strategy<Value = Index> {
 /// Generate a Vec of numeric Scalars of given length.
 fn arb_numeric_values(len: usize) -> impl Strategy<Value = Vec<Scalar>> {
     proptest::collection::vec(arb_numeric_scalar(), len)
+}
+
+fn arb_replace_numeric_values(len: usize) -> impl Strategy<Value = Vec<Scalar>> {
+    proptest::collection::vec(arb_replace_numeric_scalar(), len)
 }
 
 fn arb_condition_scalar() -> impl Strategy<Value = Scalar> {
@@ -332,6 +346,17 @@ fn shift_dataframe(df: &DataFrame, delta: f64) -> DataFrame {
         .collect::<Vec<_>>();
     DataFrame::new_with_column_order(df.index().clone(), shifted_columns, column_order)
         .expect("shifted dataframe must construct")
+}
+
+fn uniform_replace_dict(
+    df: &DataFrame,
+    replacements: &[(Scalar, Scalar)],
+) -> std::collections::BTreeMap<String, Vec<(Scalar, Scalar)>> {
+    df.column_names()
+        .into_iter()
+        .cloned()
+        .map(|name| (name, replacements.to_vec()))
+        .collect()
 }
 
 fn scale_numeric_scalar(value: &Scalar, factor: f64) -> Scalar {
@@ -2802,6 +2827,40 @@ fn arb_variable_numeric_series(
     (1..=max_len).prop_flat_map(move |len| arb_numeric_series(name, len))
 }
 
+fn arb_replace_numeric_series(name: &'static str, max_len: usize) -> impl Strategy<Value = Series> {
+    (1..=max_len).prop_flat_map(move |len| {
+        (arb_index_labels(len), arb_replace_numeric_values(len)).prop_filter_map(
+            "replace-series construction must succeed",
+            move |(labels, values)| Series::from_values(name.to_owned(), labels, values).ok(),
+        )
+    })
+}
+
+fn arb_replace_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        let idx_labels = arb_index_labels(nrows);
+        let col_a = arb_replace_numeric_values(nrows);
+        let col_b = arb_replace_numeric_values(nrows);
+        (idx_labels, col_a, col_b).prop_filter_map(
+            "replace-dataframe construction must succeed",
+            move |(labels, va, vb)| {
+                let index = Index::new(labels);
+                let col_a = fp_columnar::Column::from_values(va).ok()?;
+                let col_b = fp_columnar::Column::from_values(vb).ok()?;
+                let mut cols = std::collections::BTreeMap::new();
+                cols.insert("a".to_string(), col_a);
+                cols.insert("b".to_string(), col_b);
+                DataFrame::new_with_column_order(
+                    index,
+                    cols,
+                    vec!["a".to_string(), "b".to_string()],
+                )
+                .ok()
+            },
+        )
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -3917,6 +3976,187 @@ proptest! {
         prop_assert!(
             all_then_any.equals(&direct_any),
             "dataframe dropna_columns(any) must equal dropna_columns(any) after dropna_columns(all)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: replace metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// A single Series replacement pair is idempotent.
+    #[test]
+    fn prop_series_replace_single_pair_is_idempotent(
+        series in arb_replace_numeric_series("replace", 12),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+    ) {
+        prop_assume!(!old.is_missing());
+        let replacements = vec![(old, new)];
+        let once = series
+            .replace(&replacements)
+            .expect("Series::replace() must succeed for scalar pairs");
+        let twice = once
+            .replace(&replacements)
+            .expect("Series::replace() must remain stable on the replaced series");
+        prop_assert!(
+            approx_equal_series(&once, &twice),
+            "series replace(old -> new) must be idempotent"
+        );
+    }
+
+    /// Translating both a Series and its replacement pair by the same offset must commute with replace.
+    #[test]
+    fn prop_series_replace_is_translation_covariant(
+        series in arb_replace_numeric_series("replace", 12),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+        delta in -10.0f64..10.0,
+    ) {
+        prop_assume!(!old.is_missing() && !new.is_missing());
+        let replacements = vec![(old.clone(), new.clone())];
+        let baseline = series
+            .replace(&replacements)
+            .expect("Series::replace() must succeed for scalar pairs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_replacements = vec![(
+            shift_numeric_scalar(&old, delta),
+            shift_numeric_scalar(&new, delta),
+        )];
+        let shifted_result = shifted_input
+            .replace(&shifted_replacements)
+            .expect("Series::replace() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_result, &expected),
+            "series replace(x + c, old + c -> new + c) must equal replace(x, old -> new) + c"
+        );
+    }
+
+    /// Negating both a Series and its replacement pair must commute with replace.
+    #[test]
+    fn prop_series_replace_is_sign_symmetric(
+        series in arb_replace_numeric_series("replace", 12),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+    ) {
+        prop_assume!(!old.is_missing() && !new.is_missing());
+        let replacements = vec![(old.clone(), new.clone())];
+        let baseline = series
+            .replace(&replacements)
+            .expect("Series::replace() must succeed for scalar pairs");
+        let flipped_input = sign_flip_series(&series);
+        let flipped_replacements = vec![(
+            sign_flip_numeric_scalar(&old),
+            sign_flip_numeric_scalar(&new),
+        )];
+        let flipped_result = flipped_input
+            .replace(&flipped_replacements)
+            .expect("Series::replace() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_result, &expected),
+            "series replace(-x, -old -> -new) must equal -replace(x, old -> new)"
+        );
+    }
+
+    /// A single DataFrame replacement pair is idempotent.
+    #[test]
+    fn prop_dataframe_replace_single_pair_is_idempotent(
+        df in arb_replace_numeric_dataframe(8),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+    ) {
+        prop_assume!(!old.is_missing());
+        let replacements = vec![(old, new)];
+        let once = df
+            .replace(&replacements)
+            .expect("DataFrame::replace() must succeed for scalar pairs");
+        let twice = once
+            .replace(&replacements)
+            .expect("DataFrame::replace() must remain stable on the replaced frame");
+        prop_assert!(
+            approx_equal_dataframe(&once, &twice),
+            "dataframe replace(old -> new) must be idempotent"
+        );
+    }
+
+    /// Translating both a DataFrame and its replacement pair by the same offset must commute with replace.
+    #[test]
+    fn prop_dataframe_replace_is_translation_covariant(
+        df in arb_replace_numeric_dataframe(8),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+        delta in -10.0f64..10.0,
+    ) {
+        prop_assume!(!old.is_missing() && !new.is_missing());
+        let replacements = vec![(old.clone(), new.clone())];
+        let baseline = df
+            .replace(&replacements)
+            .expect("DataFrame::replace() must succeed for scalar pairs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_replacements = vec![(
+            shift_numeric_scalar(&old, delta),
+            shift_numeric_scalar(&new, delta),
+        )];
+        let shifted_result = shifted_input
+            .replace(&shifted_replacements)
+            .expect("DataFrame::replace() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe replace(x + c, old + c -> new + c) must equal replace(x, old -> new) + c"
+        );
+    }
+
+    /// Negating both a DataFrame and its replacement pair must commute with replace.
+    #[test]
+    fn prop_dataframe_replace_is_sign_symmetric(
+        df in arb_replace_numeric_dataframe(8),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+    ) {
+        prop_assume!(!old.is_missing() && !new.is_missing());
+        let replacements = vec![(old.clone(), new.clone())];
+        let baseline = df
+            .replace(&replacements)
+            .expect("DataFrame::replace() must succeed for scalar pairs");
+        let flipped_input = sign_flip_dataframe(&df);
+        let flipped_replacements = vec![(
+            sign_flip_numeric_scalar(&old),
+            sign_flip_numeric_scalar(&new),
+        )];
+        let flipped_result = flipped_input
+            .replace(&flipped_replacements)
+            .expect("DataFrame::replace() must succeed after sign flip");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_result, &expected),
+            "dataframe replace(-x, -old -> -new) must equal -replace(x, old -> new)"
+        );
+    }
+
+    /// Uniform scalar replacement must agree with per-column dict replacement using the same pairs.
+    #[test]
+    fn prop_dataframe_replace_matches_uniform_replace_dict(
+        df in arb_replace_numeric_dataframe(8),
+        old in arb_replace_numeric_scalar(),
+        new in arb_replace_numeric_scalar(),
+    ) {
+        let replacements = vec![(old, new)];
+        let scalar_replaced = df
+            .replace(&replacements)
+            .expect("DataFrame::replace() must succeed for scalar pairs");
+        let per_column = uniform_replace_dict(&df, &replacements);
+        let dict_replaced = df
+            .replace_dict(&per_column)
+            .expect("DataFrame::replace_dict() must succeed for existing columns");
+        prop_assert!(
+            approx_equal_dataframe(&scalar_replaced, &dict_replaced),
+            "dataframe replace() must equal replace_dict() when every column gets the same replacements"
         );
     }
 }

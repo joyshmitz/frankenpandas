@@ -21034,7 +21034,7 @@ impl DataFrame {
                 .iter()
                 .map(|val| {
                     for (from, to) in replacements {
-                        if val == from {
+                        if from.semantic_eq(val) {
                             return to.clone();
                         }
                     }
@@ -36145,6 +36145,22 @@ mod tests {
 
         let out = df.replace_dict(&per_col).unwrap();
         // NaN should be replaced via semantic_eq
+        assert_eq!(out.column("x").unwrap().values()[0], Scalar::Float64(0.0));
+        assert_eq!(out.column("x").unwrap().values()[1], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn dataframe_replace_handles_float_nan_replacement() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(f64::NAN), Scalar::Float64(1.0)])],
+        )
+        .unwrap();
+
+        let out = df
+            .replace(&[(Scalar::Null(NullKind::NaN), Scalar::Float64(0.0))])
+            .unwrap();
+
         assert_eq!(out.column("x").unwrap().values()[0], Scalar::Float64(0.0));
         assert_eq!(out.column("x").unwrap().values()[1], Scalar::Float64(1.0));
     }

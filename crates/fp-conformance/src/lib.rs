@@ -272,6 +272,14 @@ pub enum FixtureOperation {
     SeriesNsmallest,
     #[serde(rename = "series_between", alias = "series_between_default")]
     SeriesBetween,
+    #[serde(rename = "dataframe_cumsum", alias = "dataframe_cumsum_default")]
+    DataFrameCumsum,
+    #[serde(rename = "dataframe_cumprod", alias = "dataframe_cumprod_default")]
+    DataFrameCumprod,
+    #[serde(rename = "dataframe_cummax", alias = "dataframe_cummax_default")]
+    DataFrameCummax,
+    #[serde(rename = "dataframe_cummin", alias = "dataframe_cummin_default")]
+    DataFrameCummin,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -524,6 +532,10 @@ impl FixtureOperation {
             Self::SeriesNlargest => "series_nlargest",
             Self::SeriesNsmallest => "series_nsmallest",
             Self::SeriesBetween => "series_between",
+            Self::DataFrameCumsum => "dataframe_cumsum",
+            Self::DataFrameCumprod => "dataframe_cumprod",
+            Self::DataFrameCummax => "dataframe_cummax",
+            Self::DataFrameCummin => "dataframe_cummin",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1105,7 +1117,11 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesCount
         | FixtureOperation::DataFrameCount
-        | FixtureOperation::DataFrameMode => &["CC-005"],
+        | FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameCumsum
+        | FixtureOperation::DataFrameCumprod
+        | FixtureOperation::DataFrameCummax
+        | FixtureOperation::DataFrameCummin => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesToNumeric
@@ -6018,31 +6034,46 @@ fn run_fixture_operation(
                 ),
             }
         }
-        FixtureOperation::DataFrameMode => {
+        FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameCumsum
+        | FixtureOperation::DataFrameCumprod
+        | FixtureOperation::DataFrameCummax
+        | FixtureOperation::DataFrameCummin => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
-            let actual = frame.mode().map_err(|err| err.to_string());
+            let op_name = fixture.operation.operation_name();
+            let actual = match fixture.operation {
+                FixtureOperation::DataFrameMode => frame.mode(),
+                FixtureOperation::DataFrameCumsum => frame.cumsum(),
+                FixtureOperation::DataFrameCumprod => frame.cumprod(),
+                FixtureOperation::DataFrameCummax => frame.cummax(),
+                FixtureOperation::DataFrameCummin => frame.cummin(),
+                _ => unreachable!(),
+            }
+            .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
                 ResolvedExpected::ErrorContains(substr) => match actual {
                     Err(message) if message.contains(&substr) => Ok(()),
                     Err(message) => Err(format!(
-                        "expected dataframe_mode error containing '{substr}', got '{message}'"
+                        "expected {op_name} error containing '{substr}', got '{message}'"
                     )),
                     Ok(_) => Err(format!(
-                        "expected dataframe_mode to fail with error containing '{substr}'"
+                        "expected {op_name} to fail with error containing '{substr}'"
                     )),
                 },
                 ResolvedExpected::ErrorAny => {
                     if actual.is_err() {
                         Ok(())
                     } else {
-                        Err("expected dataframe_mode to fail but operation succeeded".to_owned())
+                        Err(format!(
+                            "expected {op_name} to fail but operation succeeded"
+                        ))
                     }
                 }
-                _ => Err(
-                    "expected_frame or expected_error is required for dataframe_mode".to_owned(),
-                ),
+                _ => Err(format!(
+                    "expected_frame or expected_error is required for {op_name}"
+                )),
             }
         }
         FixtureOperation::DataFrameRank => {
@@ -7678,6 +7709,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameCumsum
+        | FixtureOperation::DataFrameCumprod
+        | FixtureOperation::DataFrameCummax
+        | FixtureOperation::DataFrameCummin
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -8042,6 +8077,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameCumsum
+        | FixtureOperation::DataFrameCumprod
+        | FixtureOperation::DataFrameCummax
+        | FixtureOperation::DataFrameCummin
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -9250,6 +9289,26 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.mode().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCumsum => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.cumsum().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCumprod => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.cumprod().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCummax => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.cummax().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCummin => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.cummin().map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameRank => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -12951,6 +13010,10 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameCumsum
+        | FixtureOperation::DataFrameCumprod
+        | FixtureOperation::DataFrameCummax
+        | FixtureOperation::DataFrameCummin
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -16163,6 +16226,58 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-072 series_between fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_cumsum_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-073", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-073"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-073 dataframe_cumsum fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_cumprod_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-074", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-074"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-074 dataframe_cumprod fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_cummax_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-075", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-075"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-075 dataframe_cummax fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_cummin_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-076", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-076"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-076 dataframe_cummin fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

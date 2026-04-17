@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-091",
+  "case_id": "series_to_datetime_unix_epoch_strict",
+  "mode": "strict",
+  "operation": "series_to_datetime",
+  "left": {
+    "name": "timestamps",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1704067200 },
+      { "kind": "int64", "value": 1704153600 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "1970-01-01 00:00:00" },
+      { "kind": "utf8", "value": "2024-01-01 00:00:00" },
+      { "kind": "utf8", "value": "2024-01-02 00:00:00" }
+    ]
+  }
+}

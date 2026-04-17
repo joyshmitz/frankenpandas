@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-091",
+  "case_id": "series_to_datetime_iso_parse_hardened",
+  "mode": "hardened",
+  "operation": "series_to_datetime",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "c" }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-01-15" },
+      { "kind": "utf8", "value": "2024-06-30 12:30:00" },
+      { "kind": "utf8", "value": "2024-12-31T23:59:59" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "c" }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-01-15 00:00:00" },
+      { "kind": "utf8", "value": "2024-06-30 12:30:00" },
+      { "kind": "utf8", "value": "2024-12-31 23:59:59" }
+    ]
+  }
+}

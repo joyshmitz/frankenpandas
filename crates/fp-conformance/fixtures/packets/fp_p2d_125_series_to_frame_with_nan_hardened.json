@@ -1,0 +1,33 @@
+{
+  "packet_id": "FP-P2D-125",
+  "case_id": "series_to_frame_with_nan_hardened",
+  "mode": "hardened",
+  "operation": "series_to_frame",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.5 },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "float64", "value": 3.5 }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "data": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 3.5 }
+      ]
+    }
+  }
+}

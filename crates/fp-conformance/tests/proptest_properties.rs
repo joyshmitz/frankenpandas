@@ -384,6 +384,48 @@ fn reindex_columns_from_names(df: &DataFrame, columns: &[String]) -> DataFrame {
         .expect("DataFrame::reindex_columns() must succeed")
 }
 
+fn normalize_take_position(idx: i64, len: usize) -> usize {
+    let len_i64 = i64::try_from(len).expect("take length must fit in i64");
+    let resolved = if idx < 0 {
+        len_i64
+            .checked_add(idx)
+            .expect("negative take index resolution must not overflow")
+    } else {
+        idx
+    };
+    usize::try_from(resolved).expect("normalized take index must be non-negative")
+}
+
+fn normalized_take_positions(indices: &[i64], len: usize) -> Vec<usize> {
+    indices
+        .iter()
+        .map(|&idx| normalize_take_position(idx, len))
+        .collect()
+}
+
+fn compose_take_indices(outer: &[i64], inner: &[i64], len: usize) -> Vec<i64> {
+    let outer_positions = normalized_take_positions(outer, len);
+    let inner_positions = normalized_take_positions(inner, outer_positions.len());
+    inner_positions
+        .into_iter()
+        .map(|idx| {
+            i64::try_from(outer_positions[idx]).expect("composed take index must fit in i64")
+        })
+        .collect()
+}
+
+fn take_rows_via_normalized_positions(df: &DataFrame, indices: &[i64]) -> DataFrame {
+    let normalized = normalized_take_positions(indices, df.len());
+    df.take_rows(&normalized)
+        .expect("DataFrame::take_rows() must succeed for normalized indices")
+}
+
+fn take_columns_via_normalized_positions(df: &DataFrame, indices: &[i64]) -> DataFrame {
+    let normalized = normalized_take_positions(indices, df.column_names().len());
+    df.take_columns(&normalized)
+        .expect("DataFrame::take_columns() must succeed for normalized indices")
+}
+
 fn negate_condition_scalar(value: &Scalar) -> Scalar {
     match value {
         Scalar::Bool(v) => Scalar::Bool(!v),
@@ -3081,6 +3123,137 @@ fn arb_replace_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataF
     })
 }
 
+fn arb_take_positions_for_len(len: usize, max_take: usize) -> impl Strategy<Value = Vec<i64>> {
+    let len_i64 = i64::try_from(len).expect("take length must fit in i64");
+    proptest::collection::vec(
+        prop_oneof![
+            (0..len_i64).prop_map(|idx| idx),
+            (1..=len_i64).prop_map(|distance| -distance),
+        ],
+        1..=max_take,
+    )
+}
+
+fn arb_unique_take_positions_for_len(
+    len: usize,
+    max_take: usize,
+) -> impl Strategy<Value = Vec<i64>> {
+    let len_i64 = i64::try_from(len).expect("take length must fit in i64");
+    let population = (0..len_i64).collect::<Vec<_>>();
+    proptest::sample::subsequence(population, 1..=max_take.min(len)).prop_flat_map(
+        move |positions| {
+            let count = positions.len();
+            (
+                Just(positions),
+                proptest::collection::vec(proptest::bool::ANY, count),
+            )
+                .prop_map(move |(positions, use_negative)| {
+                    positions
+                        .into_iter()
+                        .zip(use_negative)
+                        .map(|(position, negative)| {
+                            if negative {
+                                position - len_i64
+                            } else {
+                                position
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+        },
+    )
+}
+
+fn arb_series_take_case(
+    name: &'static str,
+    max_len: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (Series, Vec<i64>)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        (
+            arb_numeric_series(name, len),
+            arb_take_positions_for_len(len, max_take),
+        )
+    })
+}
+
+fn arb_series_take_composition_case(
+    name: &'static str,
+    max_len: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (Series, Vec<i64>, Vec<i64>)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        (
+            arb_numeric_series(name, len),
+            arb_take_positions_for_len(len, max_take),
+        )
+            .prop_flat_map(move |(series, outer)| {
+                let outer_len = outer.len();
+                (
+                    Just(series),
+                    Just(outer),
+                    arb_take_positions_for_len(outer_len, max_take),
+                )
+            })
+    })
+}
+
+fn arb_dataframe_take_rows_case(
+    max_rows: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<i64>)> {
+    arb_combine_first_dataframe(max_rows).prop_flat_map(move |df| {
+        let len = df.len();
+        (Just(df), arb_take_positions_for_len(len, max_take))
+    })
+}
+
+fn arb_dataframe_take_rows_composition_case(
+    max_rows: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<i64>, Vec<i64>)> {
+    arb_combine_first_dataframe(max_rows).prop_flat_map(move |df| {
+        let len = df.len();
+        (Just(df), arb_take_positions_for_len(len, max_take)).prop_flat_map(move |(df, outer)| {
+            let outer_len = outer.len();
+            (
+                Just(df),
+                Just(outer),
+                arb_take_positions_for_len(outer_len, max_take),
+            )
+        })
+    })
+}
+
+fn arb_dataframe_take_columns_case(
+    max_rows: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<i64>)> {
+    arb_combine_first_dataframe(max_rows).prop_flat_map(move |df| {
+        let ncols = df.column_names().len();
+        (Just(df), arb_unique_take_positions_for_len(ncols, max_take))
+    })
+}
+
+fn arb_dataframe_take_columns_composition_case(
+    max_rows: usize,
+    max_take: usize,
+) -> impl Strategy<Value = (DataFrame, Vec<i64>, Vec<i64>)> {
+    arb_combine_first_dataframe(max_rows).prop_flat_map(move |df| {
+        let ncols = df.column_names().len();
+        (Just(df), arb_unique_take_positions_for_len(ncols, max_take)).prop_flat_map(
+            move |(df, outer)| {
+                let outer_len = outer.len();
+                (
+                    Just(df),
+                    Just(outer),
+                    arb_unique_take_positions_for_len(outer_len, max_take),
+                )
+            },
+        )
+    })
+}
+
 fn arb_isin_test_values(max_len: usize) -> impl Strategy<Value = Vec<Scalar>> {
     proptest::collection::vec(arb_replace_numeric_scalar(), 0..=max_len)
 }
@@ -4049,6 +4222,155 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&direct, &via_intermediate),
             "dataframe column reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: take metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Nested Series take operations must collapse to a single take on composed positions.
+    #[test]
+    fn prop_series_take_composes(
+        (series, outer, inner) in arb_series_take_composition_case("take", 12, 12),
+    ) {
+        let nested = series
+            .take(&outer)
+            .and_then(|taken| taken.take(&inner))
+            .expect("nested Series::take() must succeed for valid positions");
+        let composed_indices = compose_take_indices(&outer, &inner, series.len());
+        let direct = series
+            .take(&composed_indices)
+            .expect("direct composed Series::take() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "nested series take operations must equal a single take on composed positions"
+        );
+    }
+
+    /// Series take must commute with sign flip because positional selection is value-blind.
+    #[test]
+    fn prop_series_take_commutes_with_sign_flip(
+        (series, indices) in arb_series_take_case("take", 12, 12),
+    ) {
+        let taken = series
+            .take(&indices)
+            .expect("Series::take() must succeed for valid positions");
+        let flipped_then_taken = sign_flip_series(&series)
+            .take(&indices)
+            .expect("Series::take() must succeed after sign flipping");
+        let expected = sign_flip_series(&taken);
+        prop_assert!(
+            approx_equal_series(&flipped_then_taken, &expected),
+            "series take must commute with sign flipping"
+        );
+    }
+
+    /// DataFrame take(axis=0) must match take_rows on normalized positions.
+    #[test]
+    fn prop_dataframe_take_axis0_matches_take_rows(
+        (df, indices) in arb_dataframe_take_rows_case(8, 12),
+    ) {
+        let axis_take = df
+            .take(&indices, 0)
+            .expect("DataFrame::take(axis=0) must succeed for valid positions");
+        let helper_take = take_rows_via_normalized_positions(&df, &indices);
+        prop_assert!(
+            approx_equal_dataframe(&axis_take, &helper_take),
+            "dataframe take(axis=0) must equal take_rows(normalized indices)"
+        );
+    }
+
+    /// Nested DataFrame take(axis=0) operations must collapse to a single take on composed row positions.
+    #[test]
+    fn prop_dataframe_take_axis0_composes(
+        (df, outer, inner) in arb_dataframe_take_rows_composition_case(8, 12),
+    ) {
+        let nested = df
+            .take(&outer, 0)
+            .and_then(|taken| taken.take(&inner, 0))
+            .expect("nested DataFrame::take(axis=0) must succeed for valid positions");
+        let composed_indices = compose_take_indices(&outer, &inner, df.len());
+        let direct = df
+            .take(&composed_indices, 0)
+            .expect("direct composed DataFrame::take(axis=0) must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "nested dataframe row takes must equal a single take on composed positions"
+        );
+    }
+
+    /// DataFrame take(axis=0) must commute with sign flip because row selection is value-blind.
+    #[test]
+    fn prop_dataframe_take_axis0_commutes_with_sign_flip(
+        (df, indices) in arb_dataframe_take_rows_case(8, 12),
+    ) {
+        let taken = df
+            .take(&indices, 0)
+            .expect("DataFrame::take(axis=0) must succeed for valid positions");
+        let flipped_then_taken = sign_flip_dataframe(&df)
+            .take(&indices, 0)
+            .expect("DataFrame::take(axis=0) must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&taken);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_taken, &expected),
+            "dataframe row take must commute with sign flipping"
+        );
+    }
+
+    /// DataFrame take(axis=1) must match take_columns on normalized positions.
+    #[test]
+    fn prop_dataframe_take_axis1_matches_take_columns(
+        (df, indices) in arb_dataframe_take_columns_case(8, 6),
+    ) {
+        let axis_take = df
+            .take(&indices, 1)
+            .expect("DataFrame::take(axis=1) must succeed for valid positions");
+        let helper_take = take_columns_via_normalized_positions(&df, &indices);
+        prop_assert!(
+            approx_equal_dataframe(&axis_take, &helper_take),
+            "dataframe take(axis=1) must equal take_columns(normalized indices)"
+        );
+    }
+
+    /// Nested DataFrame take(axis=1) operations must collapse to a single take on composed column positions.
+    #[test]
+    fn prop_dataframe_take_axis1_composes(
+        (df, outer, inner) in arb_dataframe_take_columns_composition_case(8, 6),
+    ) {
+        let nested = df
+            .take(&outer, 1)
+            .and_then(|taken| taken.take(&inner, 1))
+            .expect("nested DataFrame::take(axis=1) must succeed for valid positions");
+        let composed_indices = compose_take_indices(&outer, &inner, df.column_names().len());
+        let direct = df
+            .take(&composed_indices, 1)
+            .expect("direct composed DataFrame::take(axis=1) must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "nested dataframe column takes must equal a single take on composed positions"
+        );
+    }
+
+    /// DataFrame take(axis=1) must commute with sign flip because column selection is value-blind.
+    #[test]
+    fn prop_dataframe_take_axis1_commutes_with_sign_flip(
+        (df, indices) in arb_dataframe_take_columns_case(8, 6),
+    ) {
+        let taken = df
+            .take(&indices, 1)
+            .expect("DataFrame::take(axis=1) must succeed for valid positions");
+        let flipped_then_taken = sign_flip_dataframe(&df)
+            .take(&indices, 1)
+            .expect("DataFrame::take(axis=1) must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&taken);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_taken, &expected),
+            "dataframe column take must commute with sign flipping"
         );
     }
 }

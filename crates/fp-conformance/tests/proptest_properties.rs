@@ -6707,6 +6707,230 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: std / var metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Negating numeric values must preserve `Series::std()`.
+    #[test]
+    fn prop_series_std_is_sign_invariant(
+        series in arb_variable_numeric_series("std", 12),
+    ) {
+        let baseline = series
+            .std()
+            .expect("Series::std() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .std()
+            .expect("Series::std() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_scalar(&flipped, &baseline),
+            "series std(-x) must equal std(x)"
+        );
+    }
+
+    /// Translating numeric values by `c` must preserve `Series::std()`.
+    #[test]
+    fn prop_series_std_is_translation_invariant(
+        series in arb_variable_numeric_series("std", 12),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .std()
+            .expect("Series::std() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta)
+            .std()
+            .expect("Series::std() must succeed after translation");
+        prop_assert!(
+            approx_equal_scalar(&shifted, &baseline),
+            "series std(x + c) must equal std(x)"
+        );
+    }
+
+    /// Scaling numeric values by a nonnegative factor must scale `Series::std()` linearly.
+    #[test]
+    fn prop_series_std_scales_linearly(
+        series in arb_variable_numeric_series("std", 12),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .std()
+            .expect("Series::std() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor)
+            .std()
+            .expect("Series::std() must succeed after scaling");
+        let expected = scale_numeric_scalar(&baseline, factor);
+        prop_assert!(
+            approx_equal_scalar(&scaled, &expected),
+            "series std(kx) must equal k * std(x) for nonnegative k"
+        );
+    }
+
+    /// Negating numeric values must preserve `Series::var()`.
+    #[test]
+    fn prop_series_var_is_sign_invariant(
+        series in arb_variable_numeric_series("var", 12),
+    ) {
+        let baseline = series
+            .var()
+            .expect("Series::var() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .var()
+            .expect("Series::var() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_scalar(&flipped, &baseline),
+            "series var(-x) must equal var(x)"
+        );
+    }
+
+    /// Translating numeric values by `c` must preserve `Series::var()`.
+    #[test]
+    fn prop_series_var_is_translation_invariant(
+        series in arb_variable_numeric_series("var", 12),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .var()
+            .expect("Series::var() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta)
+            .var()
+            .expect("Series::var() must succeed after translation");
+        prop_assert!(
+            approx_equal_scalar(&shifted, &baseline),
+            "series var(x + c) must equal var(x)"
+        );
+    }
+
+    /// Scaling numeric values by a factor must scale `Series::var()` by `k^2`.
+    #[test]
+    fn prop_series_var_scales_quadratically(
+        series in arb_variable_numeric_series("var", 12),
+        factor in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .var()
+            .expect("Series::var() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor)
+            .var()
+            .expect("Series::var() must succeed after scaling");
+        let expected = scale_numeric_scalar(&baseline, factor * factor);
+        prop_assert!(
+            approx_equal_scalar(&scaled, &expected),
+            "series var(kx) must equal k^2 * var(x)"
+        );
+    }
+
+    /// Negating numeric cells must preserve every component of `DataFrame::std()`.
+    #[test]
+    fn prop_dataframe_std_is_sign_invariant(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .std_agg()
+            .expect("DataFrame::std() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .std_agg()
+            .expect("DataFrame::std() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_series(&flipped, &baseline),
+            "dataframe std(-x) must equal std(x) per column"
+        );
+    }
+
+    /// Translating numeric cells by `c` must preserve every component of `DataFrame::std()`.
+    #[test]
+    fn prop_dataframe_std_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .std_agg()
+            .expect("DataFrame::std() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta)
+            .std_agg()
+            .expect("DataFrame::std() must succeed after translation");
+        prop_assert!(
+            approx_equal_series(&shifted, &baseline),
+            "dataframe std(x + c) must equal std(x) per column"
+        );
+    }
+
+    /// Scaling numeric cells by a nonnegative factor must scale every component of `DataFrame::std()` linearly.
+    #[test]
+    fn prop_dataframe_std_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .std_agg()
+            .expect("DataFrame::std() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor)
+            .std_agg()
+            .expect("DataFrame::std() must succeed after scaling");
+        let expected = scale_series(&baseline, factor);
+        prop_assert!(
+            approx_equal_series(&scaled, &expected),
+            "dataframe std(kx) must equal k * std(x) per column for nonnegative k"
+        );
+    }
+
+    /// Negating numeric cells must preserve every component of `DataFrame::var()`.
+    #[test]
+    fn prop_dataframe_var_is_sign_invariant(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .var_agg()
+            .expect("DataFrame::var() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .var_agg()
+            .expect("DataFrame::var() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_series(&flipped, &baseline),
+            "dataframe var(-x) must equal var(x) per column"
+        );
+    }
+
+    /// Translating numeric cells by `c` must preserve every component of `DataFrame::var()`.
+    #[test]
+    fn prop_dataframe_var_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .var_agg()
+            .expect("DataFrame::var() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta)
+            .var_agg()
+            .expect("DataFrame::var() must succeed after translation");
+        prop_assert!(
+            approx_equal_series(&shifted, &baseline),
+            "dataframe var(x + c) must equal var(x) per column"
+        );
+    }
+
+    /// Scaling numeric cells by a factor must scale every component of `DataFrame::var()` by `k^2`.
+    #[test]
+    fn prop_dataframe_var_scales_quadratically(
+        df in arb_numeric_dataframe(8),
+        factor in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .var_agg()
+            .expect("DataFrame::var() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor)
+            .var_agg()
+            .expect("DataFrame::var() must succeed after scaling");
+        let expected = scale_series(&baseline, factor * factor);
+        prop_assert!(
+            approx_equal_series(&scaled, &expected),
+            "dataframe var(kx) must equal k^2 * var(x) per column"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: isin metamorphic invariants
 // ---------------------------------------------------------------------------
 

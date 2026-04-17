@@ -14,7 +14,7 @@ use csv::{ReaderBuilder, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError};
 use fp_index::{Index, IndexLabel};
-use fp_types::{DType, NullKind, Scalar};
+use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use thiserror::Error;
@@ -230,6 +230,13 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
             }
         }
         Scalar::Utf8(v) => v.clone(),
+        Scalar::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                String::new()
+            } else {
+                Timedelta::format(*v)
+            }
+        }
     }
 }
 
@@ -434,6 +441,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Scalar::Float64(v) => fp_index::IndexLabel::Utf8(v.to_string()),
                 Scalar::Bool(v) => fp_index::IndexLabel::Utf8(v.to_string()),
                 Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
+                Scalar::Timedelta64(v) => {
+                    if v == Timedelta::NAT {
+                        fp_index::IndexLabel::Utf8("<NaT>".to_owned())
+                    } else {
+                        fp_index::IndexLabel::Utf8(Timedelta::format(v))
+                    }
+                }
             })
             .collect();
         let index = Index::new(index_labels);
@@ -525,6 +539,13 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
             }
         }
         Scalar::Utf8(s) => serde_json::Value::String(s.clone()),
+        Scalar::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(Timedelta::format(*v))
+            }
+        }
     }
 }
 
@@ -1110,6 +1131,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Utf8 => ArrowDataType::Utf8,
         DType::Bool => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
+        DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
     }
 }
 
@@ -1173,6 +1195,23 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
                         Scalar::Utf8(s) => builder.append_value(s),
                         _ if v.is_missing() => builder.append_null(),
                         _ => builder.append_value(format!("{v:?}")),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            DType::Timedelta64 => {
+                let mut builder = Int64Builder::with_capacity(col.len());
+                for v in col.values() {
+                    match v {
+                        Scalar::Timedelta64(n) => {
+                            if *n == Timedelta::NAT {
+                                builder.append_null();
+                            } else {
+                                builder.append_value(*n);
+                            }
+                        }
+                        _ if v.is_missing() => builder.append_null(),
+                        _ => builder.append_null(),
                     }
                 }
                 Arc::new(builder.finish())
@@ -1780,6 +1819,15 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
                             .write_string(excel_row, excel_col, s.as_str())
                             .map_err(|e| IoError::Excel(format!("write string: {e}")))?;
                     }
+                    Scalar::Timedelta64(v) => {
+                        if *v == Timedelta::NAT {
+                            // Leave NaT cells empty (Excel convention).
+                        } else {
+                            worksheet
+                                .write_string(excel_row, excel_col, &Timedelta::format(*v))
+                                .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
+                        }
+                    }
                     Scalar::Float64(_) | Scalar::Null(_) => {
                         // Leave NaN and null cells empty (Excel convention).
                     }
@@ -1945,6 +1993,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Utf8 => "TEXT",
         DType::Bool => "INTEGER",
         DType::Null => "TEXT",
+        DType::Timedelta64 => "INTEGER", // store as nanoseconds
     }
 }
 
@@ -2135,6 +2184,13 @@ pub fn write_sql(
                             }
                             Scalar::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
                             Scalar::Null(_) => rusqlite::types::Value::Null,
+                            Scalar::Timedelta64(v) => {
+                                if *v == Timedelta::NAT {
+                                    rusqlite::types::Value::Null
+                                } else {
+                                    rusqlite::types::Value::Integer(*v)
+                                }
+                            }
                         })
                 })
                 .collect();

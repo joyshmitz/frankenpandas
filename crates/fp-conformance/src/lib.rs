@@ -40,8 +40,8 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, cast_scalar, cast_scalar_owned, common_dtype, dropna, fill_na,
-    nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, Timedelta, cast_scalar, cast_scalar_owned, common_dtype, dropna,
+    fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -3958,6 +3958,9 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
             payload % 4
         )),
         DType::Null => Scalar::Null(NullKind::Null),
+        DType::Timedelta64 => {
+            Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
+        }
     }
 }
 
@@ -10297,6 +10300,12 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                 let escaped = serde_json::to_string(v)
                     .map_err(|err| format!("groupby key encoding failed: {err}"))?;
                 format!("s:{escaped}")
+            }
+            Scalar::Timedelta64(v) => {
+                if *v == Timedelta::NAT {
+                    return Err("groupby composite key component cannot be NaT".to_owned());
+                }
+                format!("td:{v}")
             }
             Scalar::Null(_) => {
                 return Err("groupby composite key component cannot be null".to_owned());

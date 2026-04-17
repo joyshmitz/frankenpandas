@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use fp_types::{
-    DType, NullKind, Scalar, TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype,
+    DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
+    infer_dtype,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -185,6 +186,7 @@ pub enum ColumnData {
     Int64(Vec<i64>),
     Bool(Vec<bool>),
     Utf8(Vec<String>),
+    Timedelta64(Vec<i64>),
 }
 
 impl ColumnData {
@@ -241,6 +243,17 @@ impl ColumnData {
                 Self::Utf8(data)
             }
             DType::Null => Self::Float64(vec![0.0; values.len()]),
+            DType::Timedelta64 => {
+                let data: Vec<i64> = values
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Timedelta64(n) => *n,
+                        Scalar::Int64(i) => *i,
+                        _ => Timedelta::NAT,
+                    })
+                    .collect();
+                Self::Timedelta64(data)
+            }
         }
     }
 
@@ -292,6 +305,17 @@ impl ColumnData {
                     }
                 })
                 .collect(),
+            Self::Timedelta64(data) => data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if !validity.get(i) || *v == Timedelta::NAT {
+                        Scalar::Timedelta64(Timedelta::NAT)
+                    } else {
+                        Scalar::Timedelta64(*v)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -302,6 +326,7 @@ impl ColumnData {
             Self::Int64(d) => d.len(),
             Self::Bool(d) => d.len(),
             Self::Utf8(d) => d.len(),
+            Self::Timedelta64(d) => d.len(),
         }
     }
 

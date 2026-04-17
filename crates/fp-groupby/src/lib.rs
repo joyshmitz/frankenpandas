@@ -7,7 +7,7 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{NullKind, Scalar};
+use fp_types::{NullKind, Scalar, Timedelta};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +264,7 @@ fn emit_groupby_result<'a>(
             | Scalar::Null(NullKind::NaT)
             | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         });
         out_values.push(Scalar::Float64(sum));
     }
@@ -279,6 +280,7 @@ enum GroupKeyRef<'a> {
     FloatBits(u64),
     Utf8(&'a str),
     Null(NullKind),
+    Timedelta64(i64),
 }
 
 impl<'a> GroupKeyRef<'a> {
@@ -296,6 +298,13 @@ impl<'a> GroupKeyRef<'a> {
             }
             Scalar::Utf8(v) => Self::Utf8(v.as_str()),
             Scalar::Null(kind) => Self::Null(*kind),
+            Scalar::Timedelta64(v) => {
+                if *v == Timedelta::NAT {
+                    Self::Null(NullKind::NaT)
+                } else {
+                    Self::Timedelta64(*v)
+                }
+            }
         }
     }
 }
@@ -560,6 +569,7 @@ pub fn groupby_agg(
                 IndexLabel::Utf8("<null>".to_owned())
             }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         });
 
         let agg_value = match func {
@@ -775,6 +785,7 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
             h
         }
         Scalar::Null(_) => 0,
+        Scalar::Timedelta64(v) => *v as u64,
     }
 }
 

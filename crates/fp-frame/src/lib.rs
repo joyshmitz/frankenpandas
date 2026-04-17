@@ -16,7 +16,7 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, common_dtype};
+use fp_types::{DType, NullKind, Scalar, Timedelta, common_dtype};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -142,6 +142,7 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         }),
         // Keep float labels as textual index labels for current IndexLabel surface.
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
+        Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
     }
 }
@@ -153,6 +154,7 @@ enum ScalarKey<'a> {
     Int64(i64),
     FloatBits(u64),
     Utf8(&'a str),
+    Timedelta64(i64),
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
@@ -172,6 +174,13 @@ fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
             }
         }
         Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
+        Scalar::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                ScalarKey::Null(NullKind::NaT)
+            } else {
+                ScalarKey::Timedelta64(*v)
+            }
+        }
     }
 }
 
@@ -192,7 +201,7 @@ fn null_kind_rank(kind: NullKind) -> u8 {
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
-    use ScalarKey::{Bool, FloatBits, Int64, Null, Utf8};
+    use ScalarKey::{Bool, FloatBits, Int64, Null, Timedelta64, Utf8};
     match (a, b) {
         (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
         (Null(_), _) => Ordering::Greater,
@@ -203,6 +212,7 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
             f64::from_bits(*a_bits).total_cmp(&f64::from_bits(*b_bits))
         }
         (Utf8(a_val), Utf8(b_val)) => a_val.cmp(b_val),
+        (Timedelta64(a_val), Timedelta64(b_val)) => a_val.cmp(b_val),
         (Bool(a_val), Int64(b_val)) => {
             let ord = i64::from(*a_val).cmp(b_val);
             if ord == Ordering::Equal {
@@ -251,6 +261,8 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
                 ord
             }
         }
+        (Timedelta64(_), _) => Ordering::Greater,
+        (_, Timedelta64(_)) => Ordering::Less,
         (Utf8(_), _) => Ordering::Greater,
         (_, Utf8(_)) => Ordering::Less,
     }
@@ -306,6 +318,8 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         Scalar::Utf8(v) => Value::String(v.clone()),
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => Value::Null,
+        Scalar::Timedelta64(v) => Value::String(Timedelta::format(*v)),
     }
 }
 
@@ -500,6 +514,15 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
             _ => Scalar::Null(NullKind::NaN),
         },
         DType::Null => Scalar::Null(NullKind::Null),
+        DType::Timedelta64 => match val {
+            Scalar::Timedelta64(_) => val.clone(),
+            Scalar::Int64(n) => Scalar::Timedelta64(*n),
+            Scalar::Utf8(s) => match Timedelta::parse(s) {
+                Ok(nanos) => Scalar::Timedelta64(nanos),
+                Err(_) => Scalar::Timedelta64(Timedelta::NAT),
+            },
+            _ => Scalar::Timedelta64(Timedelta::NAT),
+        },
     }
 }
 
@@ -712,6 +735,7 @@ impl Series {
                     }
                 }
                 Scalar::Utf8(s) => s.clone(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             };
             lines.push(format!("{lbl_str:<label_width$}    {val_str}"));
         }
@@ -2735,6 +2759,7 @@ impl Series {
             Scalar::Int64(v) => *v != 0,
             Scalar::Float64(v) => !v.is_nan() && *v != 0.0,
             Scalar::Utf8(v) => !v.is_empty(),
+            Scalar::Timedelta64(v) => *v != Timedelta::NAT && *v != 0,
         }
     }
 
@@ -4403,6 +4428,8 @@ impl Series {
                 Scalar::Int64(v) => v.to_string(),
                 Scalar::Float64(v) => v.to_string(),
                 Scalar::Utf8(s) => csv_escape(s, sep),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => String::new(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             }
         }
 
@@ -5628,6 +5655,10 @@ impl Series {
                     Scalar::Int64(i) => i.to_string(),
                     Scalar::Float64(f) => f.to_string(),
                     Scalar::Bool(b) => b.to_string(),
+                    Scalar::Timedelta64(n) if *n == Timedelta::NAT => {
+                        return Scalar::Null(NullKind::NaT)
+                    }
+                    Scalar::Timedelta64(n) => Timedelta::format(*n),
                     Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
                 };
                 mapping
@@ -12699,6 +12730,14 @@ impl DataFrame {
                                 })?
                             }
                             DType::Utf8 => Scalar::Utf8(raw.to_owned()),
+                            DType::Timedelta64 => Timedelta::parse(raw)
+                                .map(Scalar::Timedelta64)
+                                .map_err(|_| {
+                                    FrameError::CompatibilityRejected(format!(
+                                        "cannot parse timedelta value '{raw}' in column '{}'",
+                                        col_names[idx]
+                                    ))
+                                })?,
                         }
                     }
                 } else if is_na {
@@ -12753,6 +12792,7 @@ impl DataFrame {
                     Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
                     Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
                     Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
+                    Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                 })
                 .collect::<Vec<_>>();
 
@@ -13602,6 +13642,7 @@ impl DataFrame {
                             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
                             Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
                             Scalar::Null(_) => IndexLabel::Utf8(String::new()),
+                            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                         })
                         .unwrap_or(IndexLabel::Utf8(String::new()))
                 })
@@ -14122,6 +14163,7 @@ impl DataFrame {
                         Scalar::Int64(n) => Scalar::Utf8(n.to_string()),
                         Scalar::Float64(f) => Scalar::Utf8(format!("{f}")),
                         Scalar::Utf8(s) => Scalar::Utf8(s),
+                        Scalar::Timedelta64(v) => Scalar::Utf8(Timedelta::format(v)),
                     })
                     .collect();
                 Series::from_values(name, labels, utf8_values)
@@ -17325,6 +17367,7 @@ impl DataFrame {
                     }
                 }
                 Scalar::Utf8(s) => s.clone(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             }
         }
 
@@ -17407,6 +17450,7 @@ impl DataFrame {
                     }
                 }
                 Scalar::Utf8(s) => escape_html(s),
+                Scalar::Timedelta64(v) => escape_html(&Timedelta::format(*v)),
             }
         }
 
@@ -17774,6 +17818,8 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
+                    Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                 }
             }
             out.push('\n');
@@ -17844,6 +17890,10 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
+                        out.push_str(&na_rep_escaped)
+                    }
+                    Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                 }
             }
             out.push('\n');
@@ -18002,6 +18052,7 @@ impl DataFrame {
                     }
                 }
                 Scalar::Utf8(s) => s.clone(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             }
         }
 
@@ -18129,6 +18180,7 @@ impl DataFrame {
                     }
                 }
                 Scalar::Utf8(s) => s.clone(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             }
         }
 
@@ -18191,6 +18243,7 @@ impl DataFrame {
                     }
                 }
                 Scalar::Utf8(s) => s.clone(),
+                Scalar::Timedelta64(v) => Timedelta::format(*v),
             }
         }
 
@@ -19510,6 +19563,7 @@ impl DataFrame {
                     Scalar::Int64(v) => *v != 0,
                     Scalar::Float64(v) => *v != 0.0 && !v.is_nan(),
                     Scalar::Utf8(s) => !s.is_empty(),
+                    Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
                 }
             });
             values.push(Scalar::Bool(result));
@@ -19531,6 +19585,7 @@ impl DataFrame {
                     Scalar::Int64(v) => *v != 0,
                     Scalar::Float64(v) => *v != 0.0 && !v.is_nan(),
                     Scalar::Utf8(s) => !s.is_empty(),
+                    Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
                 }
             });
             values.push(Scalar::Bool(result));

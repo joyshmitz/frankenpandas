@@ -11,6 +11,7 @@ pub enum DType {
     Int64,
     Float64,
     Utf8,
+    Timedelta64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -29,6 +30,7 @@ pub enum Scalar {
     Int64(i64),
     Float64(f64),
     Utf8(String),
+    Timedelta64(i64),
 }
 
 impl std::fmt::Display for Scalar {
@@ -41,6 +43,7 @@ impl std::fmt::Display for Scalar {
             Self::Int64(v) => write!(f, "{v}"),
             Self::Float64(v) => write!(f, "{v}"),
             Self::Utf8(s) => write!(f, "{s}"),
+            Self::Timedelta64(nanos) => write!(f, "{}", Timedelta::format(*nanos)),
         }
     }
 }
@@ -54,6 +57,7 @@ impl Scalar {
             Self::Int64(_) => DType::Int64,
             Self::Float64(_) => DType::Float64,
             Self::Utf8(_) => DType::Utf8,
+            Self::Timedelta64(_) => DType::Timedelta64,
         }
     }
 
@@ -62,6 +66,7 @@ impl Scalar {
         match self {
             Self::Null(_) => true,
             Self::Float64(v) => v.is_nan(),
+            Self::Timedelta64(v) => *v == Timedelta::NAT,
             _ => false,
         }
     }
@@ -75,6 +80,7 @@ impl Scalar {
     pub fn missing_for_dtype(dtype: DType) -> Self {
         match dtype {
             DType::Float64 => Self::Null(NullKind::NaN),
+            DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool | DType::Int64 | DType::Utf8 => Self::Null(NullKind::Null),
         }
@@ -135,6 +141,13 @@ impl Scalar {
             (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
             (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
             (Self::Null(a), Self::Null(b)) => a.cmp(b),
+            (Self::Timedelta64(a), Self::Timedelta64(b)) => {
+                if *a == Timedelta::NAT || *b == Timedelta::NAT {
+                    std::cmp::Ordering::Equal
+                } else {
+                    a.cmp(b)
+                }
+            }
             // Cross-numeric comparison
             (Self::Int64(a), Self::Float64(b)) => (*a as f64)
                 .partial_cmp(b)
@@ -156,6 +169,13 @@ impl Scalar {
             Self::Utf8(v) => Err(TypeError::NonNumericValue {
                 value: v.clone(),
                 dtype: DType::Utf8,
+            }),
+            Self::Timedelta64(v) if *v == Timedelta::NAT => {
+                Err(TypeError::ValueIsMissing { kind: NullKind::NaT })
+            }
+            Self::Timedelta64(v) => Err(TypeError::NonNumericValue {
+                value: Timedelta::format(*v),
+                dtype: DType::Timedelta64,
             }),
         }
     }
@@ -180,7 +200,7 @@ pub enum TypeError {
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Float64, Int64, Null};
+    use DType::{Bool, Float64, Int64, Null, Timedelta64};
 
     let out = match (left, right) {
         (a, b) if a == b => a,
@@ -188,6 +208,7 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
         (Bool, Int64) | (Int64, Bool) => Int64,
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
+        (Timedelta64, Timedelta64) => Timedelta64,
         _ => return Err(TypeError::IncompatibleDtypes { left, right }),
     };
 
@@ -197,12 +218,24 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
 pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut current = DType::Null;
     let mut saw_utf8 = false;
+    let mut saw_timedelta = false;
     let mut saw_non_utf8_non_null = false;
 
     for value in values {
         match value.dtype() {
             DType::Null => {}
             DType::Utf8 => saw_utf8 = true,
+            DType::Timedelta64 => {
+                saw_timedelta = true;
+                if current == DType::Null {
+                    current = DType::Timedelta64;
+                } else if current != DType::Timedelta64 {
+                    return Err(TypeError::IncompatibleDtypes {
+                        left: current,
+                        right: DType::Timedelta64,
+                    });
+                }
+            }
             other => {
                 saw_non_utf8_non_null = true;
                 current = common_dtype(current, other)?;
@@ -214,6 +247,12 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
             // heterogeneous string/scalar payloads while arithmetic coercion
             // remains governed by the stricter common_dtype lattice.
             return Ok(DType::Utf8);
+        }
+        if saw_timedelta && saw_non_utf8_non_null {
+            return Err(TypeError::IncompatibleDtypes {
+                left: DType::Timedelta64,
+                right: current,
+            });
         }
     }
 
@@ -275,12 +314,254 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
+        DType::Timedelta64 => match &value {
+            Scalar::Int64(v) => Ok(Scalar::Timedelta64(*v)),
+            Scalar::Utf8(s) => Timedelta::parse(s)
+                .map(Scalar::Timedelta64)
+                .map_err(|_| TypeError::InvalidCast { from, to: target }),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
     }
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
 pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
     cast_scalar_owned(value.clone(), target)
+}
+
+// ── Timedelta support ──────────────────────────────────────────────────
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum TimedeltaError {
+    #[error("invalid timedelta string: {0}")]
+    InvalidFormat(String),
+    #[error("overflow in timedelta computation")]
+    Overflow,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TimedeltaComponents {
+    pub days: i64,
+    pub hours: i64,
+    pub minutes: i64,
+    pub seconds: i64,
+    pub milliseconds: i64,
+    pub microseconds: i64,
+    pub nanoseconds: i64,
+}
+
+pub struct Timedelta;
+
+impl Timedelta {
+    pub const NANOS_PER_MICRO: i64 = 1_000;
+    pub const NANOS_PER_MILLI: i64 = 1_000_000;
+    pub const NANOS_PER_SEC: i64 = 1_000_000_000;
+    pub const NANOS_PER_MIN: i64 = 60 * Self::NANOS_PER_SEC;
+    pub const NANOS_PER_HOUR: i64 = 60 * Self::NANOS_PER_MIN;
+    pub const NANOS_PER_DAY: i64 = 24 * Self::NANOS_PER_HOUR;
+    pub const NANOS_PER_WEEK: i64 = 7 * Self::NANOS_PER_DAY;
+
+    pub const NAT: i64 = i64::MIN;
+
+    pub fn parse(s: &str) -> Result<i64, TimedeltaError> {
+        let s = s.trim();
+
+        if s.eq_ignore_ascii_case("nat") {
+            return Ok(Self::NAT);
+        }
+
+        let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+            (true, rest.trim())
+        } else {
+            (false, s)
+        };
+
+        if let Some(nanos) = Self::try_parse_time_format(s) {
+            return Ok(if negative { -nanos } else { nanos });
+        }
+
+        let nanos = Self::parse_compound(s)?;
+        Ok(if negative { -nanos } else { nanos })
+    }
+
+    fn try_parse_time_format(s: &str) -> Option<i64> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() < 2 || parts.len() > 3 {
+            return None;
+        }
+
+        let hours: i64 = parts[0].parse().ok()?;
+        let minutes: i64 = parts[1].parse().ok()?;
+
+        let (seconds, frac_nanos) = if parts.len() == 3 {
+            if let Some((sec_str, frac_str)) = parts[2].split_once('.') {
+                let sec: i64 = sec_str.parse().ok()?;
+                let padded = format!("{:0<9}", frac_str);
+                let frac: i64 = padded[..9].parse().ok()?;
+                (sec, frac)
+            } else {
+                let sec: i64 = parts[2].parse().ok()?;
+                (sec, 0)
+            }
+        } else {
+            (0, 0)
+        };
+
+        Some(
+            hours * Self::NANOS_PER_HOUR
+                + minutes * Self::NANOS_PER_MIN
+                + seconds * Self::NANOS_PER_SEC
+                + frac_nanos,
+        )
+    }
+
+    fn parse_compound(s: &str) -> Result<i64, TimedeltaError> {
+        let mut total: i64 = 0;
+        let mut remaining = s;
+
+        while !remaining.is_empty() {
+            remaining = remaining.trim_start();
+            if remaining.is_empty() {
+                break;
+            }
+
+            let num_end = remaining
+                .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+                .unwrap_or(remaining.len());
+
+            if num_end == 0 {
+                return Err(TimedeltaError::InvalidFormat(s.to_string()));
+            }
+
+            let num_str = &remaining[..num_end];
+            let num: f64 = num_str
+                .parse()
+                .map_err(|_| TimedeltaError::InvalidFormat(s.to_string()))?;
+
+            remaining = remaining[num_end..].trim_start();
+
+            let unit_end = remaining
+                .find(|c: char| c.is_ascii_digit() || c.is_whitespace())
+                .unwrap_or(remaining.len());
+
+            let unit = &remaining[..unit_end];
+            remaining = &remaining[unit_end..];
+
+            let multiplier = Self::unit_to_nanos(unit)
+                .ok_or_else(|| TimedeltaError::InvalidFormat(s.to_string()))?;
+
+            let nanos = (num * multiplier as f64).round() as i64;
+            total = total
+                .checked_add(nanos)
+                .ok_or(TimedeltaError::Overflow)?;
+        }
+
+        if total == 0 && !s.trim().is_empty() && s.trim() != "0" {
+            return Err(TimedeltaError::InvalidFormat(s.to_string()));
+        }
+
+        Ok(total)
+    }
+
+    fn unit_to_nanos(unit: &str) -> Option<i64> {
+        match unit.to_lowercase().as_str() {
+            "w" | "week" | "weeks" => Some(Self::NANOS_PER_WEEK),
+            "d" | "day" | "days" => Some(Self::NANOS_PER_DAY),
+            "h" | "hr" | "hour" | "hours" => Some(Self::NANOS_PER_HOUR),
+            "m" | "min" | "minute" | "minutes" | "t" => Some(Self::NANOS_PER_MIN),
+            "s" | "sec" | "second" | "seconds" => Some(Self::NANOS_PER_SEC),
+            "ms" | "milli" | "millis" | "millisecond" | "milliseconds" | "l" => {
+                Some(Self::NANOS_PER_MILLI)
+            }
+            "us" | "µs" | "micro" | "micros" | "microsecond" | "microseconds" | "u" => {
+                Some(Self::NANOS_PER_MICRO)
+            }
+            "ns" | "nano" | "nanos" | "nanosecond" | "nanoseconds" | "n" => Some(1),
+            "" => Some(Self::NANOS_PER_DAY),
+            _ => None,
+        }
+    }
+
+    pub fn components(nanos: i64) -> TimedeltaComponents {
+        if nanos == Self::NAT {
+            return TimedeltaComponents::default();
+        }
+
+        let negative = nanos < 0;
+        let abs_nanos = nanos.unsigned_abs() as i64;
+
+        let days = abs_nanos / Self::NANOS_PER_DAY;
+        let rem = abs_nanos % Self::NANOS_PER_DAY;
+
+        let hours = rem / Self::NANOS_PER_HOUR;
+        let rem = rem % Self::NANOS_PER_HOUR;
+
+        let minutes = rem / Self::NANOS_PER_MIN;
+        let rem = rem % Self::NANOS_PER_MIN;
+
+        let seconds = rem / Self::NANOS_PER_SEC;
+        let rem = rem % Self::NANOS_PER_SEC;
+
+        let milliseconds = rem / Self::NANOS_PER_MILLI;
+        let rem = rem % Self::NANOS_PER_MILLI;
+
+        let microseconds = rem / Self::NANOS_PER_MICRO;
+        let nanoseconds = rem % Self::NANOS_PER_MICRO;
+
+        TimedeltaComponents {
+            days: if negative { -days } else { days },
+            hours,
+            minutes,
+            seconds,
+            milliseconds,
+            microseconds,
+            nanoseconds,
+        }
+    }
+
+    pub fn total_seconds(nanos: i64) -> f64 {
+        if nanos == Self::NAT {
+            f64::NAN
+        } else {
+            nanos as f64 / Self::NANOS_PER_SEC as f64
+        }
+    }
+
+    pub fn format(nanos: i64) -> String {
+        if nanos == Self::NAT {
+            return "NaT".to_string();
+        }
+
+        let comp = Self::components(nanos);
+        let sign = if nanos < 0 { "-" } else { "" };
+
+        let time_part = format!(
+            "{:02}:{:02}:{:02}",
+            comp.hours, comp.minutes, comp.seconds
+        );
+
+        let frac = comp.milliseconds * 1_000_000
+            + comp.microseconds * 1_000
+            + comp.nanoseconds;
+
+        if frac > 0 {
+            format!(
+                "{}{} days {}.{:09}",
+                sign,
+                comp.days.abs(),
+                time_part,
+                frac
+            )
+        } else {
+            format!("{}{} days {}", sign, comp.days.abs(), time_part)
+        }
+    }
+
+    pub fn from_unit(value: f64, unit: &str) -> Result<i64, TimedeltaError> {
+        let multiplier = Self::unit_to_nanos(unit)
+            .ok_or_else(|| TimedeltaError::InvalidFormat(unit.to_string()))?;
+        Ok((value * multiplier as f64).round() as i64)
+    }
 }
 
 // ── Missingness utilities ──────────────────────────────────────────────
@@ -517,6 +798,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Int64(i64),
         FloatBits(u64),
         Utf8(&'a str),
+        Timedelta64(i64),
     }
 
     let mut seen = HashSet::new();
@@ -532,6 +814,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
                 ScalarKey::FloatBits(normalized.to_bits())
             }
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
+            Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
             Scalar::Null(_) => continue,
         };
         seen.insert(key);
@@ -882,5 +1165,105 @@ mod tests {
         assert!(super::nanmedian(&vals).is_missing());
         assert!(super::nanvar(&vals, 0).is_missing());
         assert!(super::nanstd(&vals, 0).is_missing());
+    }
+
+    // ── Timedelta tests ────────────────────────────────────────────────
+
+    #[test]
+    fn timedelta_parse_simple_units() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::parse("1d").unwrap(), Timedelta::NANOS_PER_DAY);
+        assert_eq!(Timedelta::parse("2h").unwrap(), 2 * Timedelta::NANOS_PER_HOUR);
+        assert_eq!(Timedelta::parse("30m").unwrap(), 30 * Timedelta::NANOS_PER_MIN);
+        assert_eq!(Timedelta::parse("45s").unwrap(), 45 * Timedelta::NANOS_PER_SEC);
+        assert_eq!(Timedelta::parse("100ms").unwrap(), 100 * Timedelta::NANOS_PER_MILLI);
+        assert_eq!(Timedelta::parse("500us").unwrap(), 500 * Timedelta::NANOS_PER_MICRO);
+        assert_eq!(Timedelta::parse("1000ns").unwrap(), 1000);
+    }
+
+    #[test]
+    fn timedelta_parse_compound() {
+        use super::Timedelta;
+        let expected = Timedelta::NANOS_PER_DAY
+            + 2 * Timedelta::NANOS_PER_HOUR
+            + 30 * Timedelta::NANOS_PER_MIN;
+        assert_eq!(Timedelta::parse("1d 2h 30m").unwrap(), expected);
+        assert_eq!(Timedelta::parse("1d2h30m").unwrap(), expected);
+    }
+
+    #[test]
+    fn timedelta_parse_time_format() {
+        use super::Timedelta;
+        let expected = 1 * Timedelta::NANOS_PER_HOUR
+            + 30 * Timedelta::NANOS_PER_MIN
+            + 45 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(Timedelta::parse("01:30:45").unwrap(), expected);
+    }
+
+    #[test]
+    fn timedelta_parse_nat() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::parse("NaT").unwrap(), Timedelta::NAT);
+        assert_eq!(Timedelta::parse("nat").unwrap(), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_parse_negative() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::parse("-1d").unwrap(), -Timedelta::NANOS_PER_DAY);
+    }
+
+    #[test]
+    fn timedelta_components() {
+        use super::Timedelta;
+        let nanos = Timedelta::NANOS_PER_DAY
+            + Timedelta::NANOS_PER_HOUR
+            + Timedelta::NANOS_PER_MIN
+            + Timedelta::NANOS_PER_SEC
+            + Timedelta::NANOS_PER_MILLI
+            + 2 * Timedelta::NANOS_PER_MICRO
+            + 3;
+        let comp = Timedelta::components(nanos);
+        assert_eq!(comp.days, 1);
+        assert_eq!(comp.hours, 1);
+        assert_eq!(comp.minutes, 1);
+        assert_eq!(comp.seconds, 1);
+        assert_eq!(comp.milliseconds, 1);
+        assert_eq!(comp.microseconds, 2);
+        assert_eq!(comp.nanoseconds, 3);
+    }
+
+    #[test]
+    fn timedelta_total_seconds() {
+        use super::Timedelta;
+        let nanos = 90_000_000_000i64; // 90 seconds
+        assert!((Timedelta::total_seconds(nanos) - 90.0).abs() < 1e-9);
+        assert!(Timedelta::total_seconds(Timedelta::NAT).is_nan());
+    }
+
+    #[test]
+    fn timedelta_format_basic() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::format(Timedelta::NAT), "NaT");
+        assert_eq!(Timedelta::format(Timedelta::NANOS_PER_DAY), "1 days 00:00:00");
+        assert_eq!(
+            Timedelta::format(Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR),
+            "1 days 02:00:00"
+        );
+    }
+
+    #[test]
+    fn timedelta_scalar_dtype() {
+        let td = Scalar::Timedelta64(86400_000_000_000);
+        assert_eq!(td.dtype(), DType::Timedelta64);
+    }
+
+    #[test]
+    fn timedelta_scalar_is_missing() {
+        use super::Timedelta;
+        let valid = Scalar::Timedelta64(1000);
+        let nat = Scalar::Timedelta64(Timedelta::NAT);
+        assert!(!valid.is_missing());
+        assert!(nat.is_missing());
     }
 }

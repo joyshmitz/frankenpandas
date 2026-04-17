@@ -16,7 +16,7 @@ use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{NullKind, Scalar};
+use fp_types::{NullKind, Scalar, Timedelta};
 
 // ---------------------------------------------------------------------------
 // Strategy generators
@@ -209,6 +209,10 @@ fn poison_numeric_scalar(value: &Scalar) -> Scalar {
         Scalar::Null(_) => Scalar::Int64(1),
         Scalar::Bool(v) => Scalar::Bool(!v),
         Scalar::Utf8(v) => Scalar::Utf8(format!("{v}_poisoned")),
+        Scalar::Timedelta64(v) if *v != Timedelta::NAT => {
+            Scalar::Timedelta64(v.saturating_add(Timedelta::NANOS_PER_SEC))
+        }
+        Scalar::Timedelta64(_) => Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
     }
 }
 

@@ -6707,6 +6707,126 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: median metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Negating numeric values must negate `Series::median()`.
+    #[test]
+    fn prop_series_median_is_sign_symmetric(
+        series in arb_variable_numeric_series("median", 12),
+    ) {
+        let baseline = series
+            .median()
+            .expect("Series::median() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .median()
+            .expect("Series::median() must succeed after sign flip");
+        let expected = sign_flip_numeric_scalar(&baseline);
+        prop_assert!(
+            approx_equal_scalar(&flipped, &expected),
+            "series median(-x) must equal -median(x)"
+        );
+    }
+
+    /// Translating numeric values by `c` must shift `Series::median()` by `c`.
+    #[test]
+    fn prop_series_median_is_translation_covariant(
+        series in arb_variable_numeric_series("median", 12),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .median()
+            .expect("Series::median() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta)
+            .median()
+            .expect("Series::median() must succeed after translation");
+        let expected = shift_numeric_scalar(&baseline, delta);
+        prop_assert!(
+            approx_equal_scalar(&shifted, &expected),
+            "series median(x + c) must equal median(x) + c"
+        );
+    }
+
+    /// Scaling numeric values by a positive factor must scale `Series::median()` by the same factor.
+    #[test]
+    fn prop_series_median_scales_linearly(
+        series in arb_variable_numeric_series("median", 12),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .median()
+            .expect("Series::median() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor)
+            .median()
+            .expect("Series::median() must succeed after scaling");
+        let expected = scale_numeric_scalar(&baseline, factor);
+        prop_assert!(
+            approx_equal_scalar(&scaled, &expected),
+            "series median(kx) must equal k * median(x) for nonnegative k"
+        );
+    }
+
+    /// Negating numeric cells must negate every component of `DataFrame::median_agg()`.
+    #[test]
+    fn prop_dataframe_median_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped, &expected),
+            "dataframe median_agg(-x) must equal -median_agg(x) per column"
+        );
+    }
+
+    /// Translating numeric cells by `c` must shift every component of `DataFrame::median_agg()` by `c`.
+    #[test]
+    fn prop_dataframe_median_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta)
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted, &expected),
+            "dataframe median_agg(x + c) must equal median_agg(x) + c per column"
+        );
+    }
+
+    /// Scaling numeric cells by a positive factor must scale every component of `DataFrame::median_agg()`.
+    #[test]
+    fn prop_dataframe_median_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor)
+            .median_agg()
+            .expect("DataFrame::median_agg() must succeed after scaling");
+        let expected = scale_series(&baseline, factor);
+        prop_assert!(
+            approx_equal_series(&scaled, &expected),
+            "dataframe median_agg(kx) must equal k * median_agg(x) per column for nonnegative k"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: std / var metamorphic invariants
 // ---------------------------------------------------------------------------
 

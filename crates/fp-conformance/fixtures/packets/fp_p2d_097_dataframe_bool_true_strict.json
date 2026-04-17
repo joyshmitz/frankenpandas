@@ -1,0 +1,17 @@
+{
+  "packet_id": "FP-P2D-097",
+  "case_id": "dataframe_bool_true_strict",
+  "mode": "strict",
+  "operation": "dataframe_bool",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "bool", "value": true }
+      ]
+    }
+  },
+  "expected_bool": true
+}

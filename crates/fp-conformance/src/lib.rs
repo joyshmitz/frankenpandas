@@ -22,9 +22,9 @@ use fp_index::{
 };
 use fp_io::{
     ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
-    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, write_csv_string,
-    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
-    write_jsonl_string,
+    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
+    write_csv_string, write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes,
+    write_json_string, write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -3645,6 +3645,17 @@ fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+fn assert_parquet_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_parquet_bytes(frame)?;
+    let reparsed = read_parquet_bytes(&encoded)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::Io(std::io::Error::other(
+            "parquet round-trip drifted after parse/write/reparse",
+        )));
+    }
+    Ok(())
+}
+
 fn assert_feather_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     let encoded = write_feather_bytes(frame)?;
     let reparsed = read_feather_bytes(&encoded)?;
@@ -3780,6 +3791,28 @@ pub fn fuzz_csv_parse_bytes(input: &[u8]) -> Result<(), FpIoError> {
 pub fn fuzz_excel_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
     let frame = read_excel_bytes(input, &ExcelReadOptions::default())?;
     assert_excel_roundtrip(&frame)
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` Parquet reader.
+///
+/// Inputs use the same dual-mode envelope as the Arrow-backed IPC harnesses.
+/// Raw mode (`tag % 2 == 0`) feeds the remaining bytes directly into
+/// `read_parquet_bytes()`, where parser errors are acceptable but successful
+/// parses must round-trip. Synth mode projects bytes into a tiny typed
+/// `DataFrame`, serializes it with `write_parquet_bytes()`, then checks the
+/// reader against that valid payload.
+pub fn fuzz_parquet_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let Some((&mode, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    if mode % 2 == 0 {
+        let frame = read_parquet_bytes(payload)?;
+        assert_parquet_roundtrip(&frame)
+    } else {
+        let frame = fuzz_feather_frame_from_bytes(payload)?;
+        assert_parquet_roundtrip(&frame)
+    }
 }
 
 fn fuzz_feather_dtype_from_byte(byte: u8) -> DType {
@@ -14679,9 +14712,9 @@ mod tests {
         fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes,
         fuzz_fixture_parse_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
         fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
-        fuzz_scalar_cast_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -14890,6 +14923,55 @@ mod tests {
         assert!(
             matches!(err, fp_io::IoError::Excel(_)),
             "expected Excel parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_parquet_io_bytes_accepts_synthesized_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/parquet_io/synthesized_valid_seed.bin"
+        );
+        fuzz_parquet_io_bytes(seed).expect("synthesized parquet seed should parse");
+    }
+
+    #[test]
+    fn fuzz_parquet_io_bytes_accepts_runtime_raw_parquet_bytes() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["ints", "bools"],
+            vec![
+                (
+                    "ints",
+                    vec![
+                        fp_types::Scalar::Int64(5),
+                        fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        fp_types::Scalar::Int64(-1),
+                    ],
+                ),
+                (
+                    "bools",
+                    vec![
+                        fp_types::Scalar::Bool(true),
+                        fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        fp_types::Scalar::Bool(false),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+        let mut seed = vec![0];
+        seed.extend(fp_io::write_parquet_bytes(&frame).expect("write parquet bytes"));
+
+        fuzz_parquet_io_bytes(&seed).expect("raw parquet payload should parse");
+    }
+
+    #[test]
+    fn fuzz_parquet_io_bytes_reports_invalid_raw_bytes() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/parquet_io/invalid_text_seed.bin");
+        let err = fuzz_parquet_io_bytes(seed).expect_err("invalid parquet bytes should error");
+        assert!(
+            matches!(err, fp_io::IoError::Parquet(_)),
+            "expected Parquet parse error, got {err:?}"
         );
     }
 
@@ -15856,6 +15938,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-090 combine_first fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_abs_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-064", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-064"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-064 series_abs fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

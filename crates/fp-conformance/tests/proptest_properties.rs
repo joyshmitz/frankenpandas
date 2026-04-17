@@ -1361,6 +1361,67 @@ fn bool_values(series: &Series) -> Result<Vec<bool>, String> {
         .collect()
 }
 
+fn invert_bool_series(series: &Series) -> Result<Series, String> {
+    let values = bool_values(series)?
+        .into_iter()
+        .map(|flag| Scalar::Bool(!flag))
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        values,
+    )
+    .map_err(|err| format!("inverted bool series must construct: {err}"))
+}
+
+fn invert_bool_dataframe(df: &DataFrame) -> Result<DataFrame, String> {
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let source = Series::from_values(
+            name.clone(),
+            df.index().labels().to_vec(),
+            df.column(name)
+                .expect("dataframe column listed in order must exist")
+                .values()
+                .to_vec(),
+        )
+        .map_err(|err| format!("dataframe bool column must project into series: {err}"))?;
+        let inverted = invert_bool_series(&source)?;
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(inverted.values().to_vec())
+                .map_err(|err| format!("inverted bool dataframe column must construct: {err}"))?,
+        );
+    }
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .map_err(|err| format!("inverted bool dataframe must construct: {err}"))
+}
+
+fn all_series_bool_values(series: &Series, expected: bool) -> Result<bool, String> {
+    Ok(bool_values(series)?
+        .into_iter()
+        .all(|flag| flag == expected))
+}
+
+fn all_dataframe_bool_values(df: &DataFrame, expected: bool) -> Result<bool, String> {
+    for name in df.column_names() {
+        let series = Series::from_values(
+            name.clone(),
+            df.index().labels().to_vec(),
+            df.column(name)
+                .expect("dataframe column listed in order must exist")
+                .values()
+                .to_vec(),
+        )
+        .map_err(|err| format!("dataframe bool column must project into series: {err}"))?;
+        if !all_series_bool_values(&series, expected)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn dataframe_isin_via_series(df: &DataFrame, values: &[Scalar]) -> DataFrame {
     let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
     let mut columns = std::collections::BTreeMap::new();
@@ -6052,6 +6113,140 @@ proptest! {
         prop_assert!(
             all_then_any.equals(&direct_any),
             "dataframe dropna_columns(any) must equal dropna_columns(any) after dropna_columns(all)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: isna / notna metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// `Series::notna()` must be the boolean complement of `Series::isna()`.
+    #[test]
+    fn prop_series_notna_complements_isna(
+        series in arb_variable_numeric_series("isna", 12),
+    ) {
+        let isna = series
+            .isna()
+            .expect("Series::isna() must succeed for numeric inputs");
+        let notna = series
+            .notna()
+            .expect("Series::notna() must succeed for numeric inputs");
+        let expected = invert_bool_series(&isna)
+            .expect("complemented Series::isna() mask must construct");
+        prop_assert!(
+            approx_equal_series(&notna, &expected),
+            "series notna() must equal the boolean complement of isna()"
+        );
+    }
+
+    /// Negating numeric values must not change the `Series::isna()` mask.
+    #[test]
+    fn prop_series_isna_is_sign_flip_invariant(
+        series in arb_variable_numeric_series("isna", 12),
+    ) {
+        let baseline = series
+            .isna()
+            .expect("Series::isna() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .isna()
+            .expect("Series::isna() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_series(&baseline, &flipped),
+            "series isna(-x) must equal isna(x)"
+        );
+    }
+
+    /// Filling missing values in a Series with a concrete scalar must eliminate all missing positions.
+    #[test]
+    fn prop_series_fillna_eliminates_isna_positions(
+        series in arb_variable_numeric_series("isna", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let filled = series
+            .fillna(&Scalar::Int64(fill))
+            .expect("Series::fillna() must succeed for numeric inputs");
+        let isna = filled
+            .isna()
+            .expect("Series::isna() must succeed after fillna");
+        let notna = filled
+            .notna()
+            .expect("Series::notna() must succeed after fillna");
+        prop_assert!(
+            all_series_bool_values(&isna, false)
+                .expect("Series::isna() output must be boolean-valued"),
+            "series fillna(v).isna() must be all false"
+        );
+        prop_assert!(
+            all_series_bool_values(&notna, true)
+                .expect("Series::notna() output must be boolean-valued"),
+            "series fillna(v).notna() must be all true"
+        );
+    }
+
+    /// `DataFrame::notna()` must be the cellwise boolean complement of `DataFrame::isna()`.
+    #[test]
+    fn prop_dataframe_notna_complements_isna(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let isna = df
+            .isna()
+            .expect("DataFrame::isna() must succeed for numeric inputs");
+        let notna = df
+            .notna()
+            .expect("DataFrame::notna() must succeed for numeric inputs");
+        let expected = invert_bool_dataframe(&isna)
+            .expect("complemented DataFrame::isna() mask must construct");
+        prop_assert!(
+            approx_equal_dataframe(&notna, &expected),
+            "dataframe notna() must equal the cellwise boolean complement of isna()"
+        );
+    }
+
+    /// Negating numeric cells must not change the `DataFrame::isna()` mask.
+    #[test]
+    fn prop_dataframe_isna_is_sign_flip_invariant(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .isna()
+            .expect("DataFrame::isna() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .isna()
+            .expect("DataFrame::isna() must succeed after sign flip");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &flipped),
+            "dataframe isna(-x) must equal isna(x)"
+        );
+    }
+
+    /// Filling missing values in a DataFrame with a concrete scalar must eliminate all missing positions.
+    #[test]
+    fn prop_dataframe_fillna_eliminates_isna_positions(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let filled = df
+            .fillna(&Scalar::Int64(fill))
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        let isna = filled
+            .isna()
+            .expect("DataFrame::isna() must succeed after fillna");
+        let notna = filled
+            .notna()
+            .expect("DataFrame::notna() must succeed after fillna");
+        prop_assert!(
+            all_dataframe_bool_values(&isna, false)
+                .expect("DataFrame::isna() output must be boolean-valued"),
+            "dataframe fillna(v).isna() must be all false"
+        );
+        prop_assert!(
+            all_dataframe_bool_values(&notna, true)
+                .expect("DataFrame::notna() output must be boolean-valued"),
+            "dataframe fillna(v).notna() must be all true"
         );
     }
 }

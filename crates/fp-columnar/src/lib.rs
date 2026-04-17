@@ -912,6 +912,26 @@ impl Column {
     /// Returns a new column where every missing position is replaced
     /// by `fill_value`. The fill value is cast to the column's dtype.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Null {
+            let replacement_dtype = if fill_value.is_missing() {
+                DType::Null
+            } else {
+                fill_value.dtype()
+            };
+            let values = self
+                .values
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        fill_value.clone()
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+            return Self::new(replacement_dtype, values);
+        }
+
         let cast_fill = cast_scalar(fill_value, self.dtype)?;
         let values = self
             .values

@@ -13151,7 +13151,7 @@ impl DataFrame {
     ///
     /// Matches `df.fillna(value, limit=N)`.
     pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
-        self.apply_per_column(|s| s.fillna_limit(fill_value, limit))
+        self.apply_all_columns(|s| s.fillna_limit(fill_value, limit))
     }
 
     /// Fill missing values with per-column values.
@@ -46611,6 +46611,8 @@ mod tests {
         .unwrap();
         let limited = s.fillna_limit(&Scalar::Int64(0), s.len()).unwrap();
         let unbounded = s.fillna(&Scalar::Int64(0)).unwrap();
+        assert_eq!(limited.column().values(), &[Scalar::Int64(0)]);
+        assert_eq!(unbounded.column().values(), &[Scalar::Int64(0)]);
         assert_eq!(limited, unbounded);
     }
 
@@ -46677,6 +46679,8 @@ mod tests {
             .fillna_limit(&Scalar::Int64(0), df.index().len())
             .unwrap();
         let unbounded = df.fillna(&Scalar::Int64(0)).unwrap();
+        assert_eq!(limited.column("a").unwrap().values(), &[Scalar::Int64(0)]);
+        assert_eq!(unbounded.column("a").unwrap().values(), &[Scalar::Int64(0)]);
         assert_eq!(limited, unbounded);
     }
 

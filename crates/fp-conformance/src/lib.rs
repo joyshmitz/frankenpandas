@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use fp_columnar::Column;
+use fp_columnar::{ArithmeticOp, Column};
 use fp_frame::{
     ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
     cut, qcut, to_numeric,
@@ -3926,6 +3926,156 @@ fn fuzz_series_add_scalar_from_bytes(bytes: &[u8]) -> Scalar {
     }
 }
 
+fn fuzz_column_scalars_from_bytes(bytes: &[u8]) -> Vec<Scalar> {
+    bytes
+        .chunks(2)
+        .take(16)
+        .map(fuzz_series_add_scalar_from_bytes)
+        .collect()
+}
+
+fn fuzz_arithmetic_op_from_byte(byte: u8) -> ArithmeticOp {
+    match byte % 7 {
+        0 => ArithmeticOp::Add,
+        1 => ArithmeticOp::Sub,
+        2 => ArithmeticOp::Mul,
+        3 => ArithmeticOp::Div,
+        4 => ArithmeticOp::Mod,
+        5 => ArithmeticOp::Pow,
+        _ => ArithmeticOp::FloorDiv,
+    }
+}
+
+fn fuzz_expected_column_arith_dtype(
+    left: &Column,
+    right: &Column,
+    op: ArithmeticOp,
+) -> Result<DType, String> {
+    let mut out_dtype = common_dtype(left.dtype(), right.dtype())
+        .map_err(|err| format!("common dtype failed: {err:?}"))?;
+
+    if matches!(out_dtype, DType::Bool) {
+        out_dtype = DType::Int64;
+    }
+    if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) {
+        out_dtype = DType::Float64;
+    }
+    if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) && matches!(out_dtype, DType::Int64)
+    {
+        let has_zero_divisor = right
+            .values()
+            .iter()
+            .filter(|value| !value.is_missing())
+            .any(|value| matches!(cast_scalar(value, DType::Int64), Ok(Scalar::Int64(0))));
+        if has_zero_divisor {
+            out_dtype = DType::Float64;
+        }
+    }
+
+    Ok(out_dtype)
+}
+
+fn fuzz_column_arith_oracle_scalar(
+    left: &Scalar,
+    right: &Scalar,
+    op: ArithmeticOp,
+    out_dtype: DType,
+    preserves_nan_missing: bool,
+) -> Result<Scalar, String> {
+    if left.is_missing() || right.is_missing() {
+        return Ok(
+            if preserves_nan_missing && (left.is_nan() || right.is_nan()) {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::missing_for_dtype(out_dtype)
+            },
+        );
+    }
+
+    if matches!(out_dtype, DType::Int64) {
+        let lhs = match cast_scalar(left, DType::Int64)
+            .map_err(|err| format!("left int cast failed: {err:?}"))?
+        {
+            Scalar::Int64(value) => value,
+            other => {
+                return Err(format!(
+                    "left int cast produced non-Int64 scalar: {other:?}"
+                ));
+            }
+        };
+        let rhs = match cast_scalar(right, DType::Int64)
+            .map_err(|err| format!("right int cast failed: {err:?}"))?
+        {
+            Scalar::Int64(value) => value,
+            other => {
+                return Err(format!(
+                    "right int cast produced non-Int64 scalar: {other:?}"
+                ));
+            }
+        };
+
+        let result = match op {
+            ArithmeticOp::Add => lhs.wrapping_add(rhs),
+            ArithmeticOp::Sub => lhs.wrapping_sub(rhs),
+            ArithmeticOp::Mul => lhs.wrapping_mul(rhs),
+            ArithmeticOp::Mod => {
+                if lhs == i64::MIN && rhs == -1 {
+                    0
+                } else {
+                    lhs.rem_euclid(rhs)
+                }
+            }
+            ArithmeticOp::FloorDiv => {
+                if lhs == i64::MIN && rhs == -1 {
+                    i64::MIN
+                } else {
+                    lhs.div_euclid(rhs)
+                }
+            }
+            ArithmeticOp::Div | ArithmeticOp::Pow => {
+                return Err(format!(
+                    "int oracle received unsupported op {:?} for dtype {:?}",
+                    op, out_dtype
+                ));
+            }
+        };
+        return Ok(Scalar::Int64(result));
+    }
+
+    let lhs = left
+        .to_f64()
+        .map_err(|err| format!("left float cast failed: {err:?}"))?;
+    let rhs = right
+        .to_f64()
+        .map_err(|err| format!("right float cast failed: {err:?}"))?;
+    let result = match op {
+        ArithmeticOp::Add => lhs + rhs,
+        ArithmeticOp::Sub => lhs - rhs,
+        ArithmeticOp::Mul => lhs * rhs,
+        ArithmeticOp::Div => lhs / rhs,
+        ArithmeticOp::Mod => lhs % rhs,
+        ArithmeticOp::Pow => lhs.powf(rhs),
+        ArithmeticOp::FloorDiv => (lhs / rhs).floor(),
+    };
+    Ok(Scalar::Float64(result))
+}
+
+fn scalars_equivalent(actual: &Scalar, expected: &Scalar, preserves_nan_missing: bool) -> bool {
+    if (actual.is_nan() && expected.is_nan())
+        || (!preserves_nan_missing && actual.is_missing() && expected.is_missing())
+    {
+        true
+    } else {
+        actual == expected
+    }
+}
+
+fn column_arith_preserves_nan_missing(left: &Column, right: &Column, out_dtype: DType) -> bool {
+    !(matches!(out_dtype, DType::Int64)
+        && matches!(left.dtype(), DType::Int64)
+        && matches!(right.dtype(), DType::Int64))
+}
+
 fn fuzz_series_from_bytes(name: &str, bytes: &[u8]) -> Result<Series, FrameError> {
     let mut labels = Vec::new();
     let mut values = Vec::new();
@@ -4001,6 +4151,126 @@ fn swapped_join_type(join_type: JoinType) -> JoinType {
         JoinType::Outer => JoinType::Outer,
         JoinType::Cross => JoinType::Cross,
     }
+}
+
+/// Structure-aware fuzz entrypoint for `Column::binary_numeric()` invariants.
+///
+/// The first byte selects an `ArithmeticOp`; remaining bytes are split at `|`
+/// (or midpoint) into left/right payloads. These are projected into bounded
+/// numeric-or-missing `Column`s of matching length. The harness checks output
+/// length parity, dtype promotion rules, exact per-row scalar oracle agreement,
+/// missing/NaN propagation, and commutativity for `Add`/`Mul`.
+pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&op_tag, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let op = fuzz_arithmetic_op_from_byte(op_tag);
+    let (left_bytes, right_bytes) =
+        if let Some(split_at) = payload.iter().position(|byte| *byte == b'|') {
+            (&payload[..split_at], &payload[split_at + 1..])
+        } else {
+            payload.split_at(payload.len() / 2)
+        };
+
+    let mut left_values = fuzz_column_scalars_from_bytes(left_bytes);
+    let mut right_values = fuzz_column_scalars_from_bytes(right_bytes);
+    let shared_len = left_values.len().min(right_values.len());
+    left_values.truncate(shared_len);
+    right_values.truncate(shared_len);
+
+    let left = Column::from_values(left_values)
+        .map_err(|err| format!("left column projection failed: {err:?}"))?;
+    let right = Column::from_values(right_values)
+        .map_err(|err| format!("right column projection failed: {err:?}"))?;
+
+    let result = left
+        .binary_numeric(&right, op)
+        .map_err(|err| format!("column arithmetic unexpectedly failed: {err:?}"))?;
+
+    if result.len() != left.len() || result.len() != right.len() {
+        return Err(format!(
+            "column arithmetic length mismatch: op={op:?} left_len={} right_len={} result_len={}",
+            left.len(),
+            right.len(),
+            result.len()
+        ));
+    }
+
+    let expected_dtype = fuzz_expected_column_arith_dtype(&left, &right, op)?;
+    let preserves_nan_missing = column_arith_preserves_nan_missing(&left, &right, expected_dtype);
+    if result.dtype() != expected_dtype {
+        return Err(format!(
+            "column arithmetic dtype drifted: op={op:?} left_dtype={:?} right_dtype={:?} \
+             actual_dtype={:?} expected_dtype={expected_dtype:?}",
+            left.dtype(),
+            right.dtype(),
+            result.dtype()
+        ));
+    }
+
+    for (index, ((left_value, right_value), actual)) in left
+        .values()
+        .iter()
+        .zip(right.values().iter())
+        .zip(result.values().iter())
+        .enumerate()
+    {
+        let expected = fuzz_column_arith_oracle_scalar(
+            left_value,
+            right_value,
+            op,
+            expected_dtype,
+            preserves_nan_missing,
+        )?;
+        if !scalars_equivalent(actual, &expected, preserves_nan_missing) {
+            return Err(format!(
+                "column arithmetic oracle drifted at index={index}: op={op:?} \
+                 left={left_value:?} right={right_value:?} actual={actual:?} expected={expected:?}"
+            ));
+        }
+
+        if (left_value.is_missing() || right_value.is_missing()) && !actual.is_missing() {
+            return Err(format!(
+                "missing propagation failed at index={index}: op={op:?} left={left_value:?} right={right_value:?} actual={actual:?}"
+            ));
+        }
+        if preserves_nan_missing
+            && (left_value.is_nan() || right_value.is_nan())
+            && !actual.is_nan()
+        {
+            return Err(format!(
+                "NaN propagation failed at index={index}: op={op:?} left={left_value:?} right={right_value:?} actual={actual:?}"
+            ));
+        }
+    }
+
+    if matches!(op, ArithmeticOp::Add | ArithmeticOp::Mul) {
+        let reverse = right
+            .binary_numeric(&left, op)
+            .map_err(|err| format!("reverse column arithmetic unexpectedly failed: {err:?}"))?;
+        if result.dtype() != reverse.dtype() {
+            return Err(format!(
+                "commutative op changed dtype under reversal: op={op:?} forward_dtype={:?} reverse_dtype={:?}",
+                result.dtype(),
+                reverse.dtype()
+            ));
+        }
+        for (index, (forward, backward)) in result
+            .values()
+            .iter()
+            .zip(reverse.values().iter())
+            .enumerate()
+        {
+            if !scalars_equivalent(forward, backward, preserves_nan_missing) {
+                return Err(format!(
+                    "commutative op drifted under reversal at index={index}: op={op:?} forward={forward:?} reverse={backward:?}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Structure-aware fuzz entrypoint for `Series::add()` alignment semantics.
@@ -14242,12 +14512,12 @@ mod tests {
         SuiteOptions, append_phase2c_drift_history, build_ci_forensics_report,
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
-        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
-        fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
-        fuzz_scalar_cast_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
+        fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_excel_io_bytes,
+        fuzz_fixture_parse_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
+        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -14531,6 +14801,57 @@ mod tests {
             "../fixtures/adversarial/fuzz_corpus/series_add/missing_alignment_seed.bin"
         );
         fuzz_series_add_bytes(seed).expect("missing alignment seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_add_missing_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/column_arith/add_missing_seed.bin");
+        fuzz_column_arith_bytes(seed).expect("add-missing seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_sub_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/column_arith/sub_int_seed.bin");
+        fuzz_column_arith_bytes(seed).expect("sub seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_mixed_mul_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/column_arith/mixed_mul_seed.bin");
+        fuzz_column_arith_bytes(seed).expect("mixed-mul seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_div_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/column_arith/div_identity_seed.bin"
+        );
+        fuzz_column_arith_bytes(seed).expect("div seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_mod_zero_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/column_arith/mod_zero_divisor_seed.bin"
+        );
+        fuzz_column_arith_bytes(seed).expect("mod-zero seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_pow_seed() {
+        let seed = include_bytes!("../fixtures/adversarial/fuzz_corpus/column_arith/pow_seed.bin");
+        fuzz_column_arith_bytes(seed).expect("pow seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_column_arith_bytes_accepts_floor_div_zero_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/column_arith/floor_div_zero_divisor_seed.bin"
+        );
+        fuzz_column_arith_bytes(seed).expect("floor-div-zero seed should satisfy invariants");
     }
 
     #[test]

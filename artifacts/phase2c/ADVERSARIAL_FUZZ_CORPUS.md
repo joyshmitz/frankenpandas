@@ -148,6 +148,9 @@ Implemented entrypoint:
 - `fuzz_join_series` target: `fuzz/fuzz_targets/fuzz_join_series.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/join_series/`
 - selects a `JoinType` from the first byte, projects bounded numeric/missing `Series` pairs, and checks `join_series()` global, arena, and forced-fallback execution paths plus side-swapped dualities for non-cross joins
+- `fuzz_column_arith` target: `fuzz/fuzz_targets/fuzz_column_arith.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/column_arith/`
+- selects an `ArithmeticOp` from the first byte, projects bounded numeric/missing `Column` pairs, and checks `Column::binary_numeric()` against a per-row scalar oracle plus dtype promotion, NaN propagation, and commutativity for `Add`/`Mul`
 - `fuzz_groupby_sum` target: `fuzz/fuzz_targets/fuzz_groupby_sum.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/groupby_sum/`
 - splits inputs at `|`, projects Int64-or-null key series plus numeric value series, and checks `groupby_sum()` global, arena, and forced-fallback execution paths stay isomorphic under both `dropna` modes
@@ -404,6 +407,8 @@ crates/fp-conformance/
         series_add/
           ...
         join_series/
+          ...
+        column_arith/
           ...
         groupby_sum/
           ...

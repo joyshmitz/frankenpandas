@@ -75,6 +75,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_column_arith"
+path = "fuzz_targets/fuzz_column_arith.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_groupby_sum"
 path = "fuzz_targets/fuzz_groupby_sum.rs"
 test = false

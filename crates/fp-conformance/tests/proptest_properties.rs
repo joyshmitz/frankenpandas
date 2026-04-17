@@ -171,6 +171,29 @@ fn poison_numeric_scalar(value: &Scalar) -> Scalar {
     }
 }
 
+fn sign_flip_numeric_scalar_for_abs(value: &Scalar) -> Scalar {
+    match value {
+        Scalar::Int64(v) => Scalar::Int64(v.saturating_neg()),
+        Scalar::Float64(v) => Scalar::Float64(-v),
+        Scalar::Null(kind) => Scalar::Null(*kind),
+        other => other.clone(),
+    }
+}
+
+fn sign_flip_series_for_abs(series: &Series) -> Series {
+    let flipped_values = series
+        .values()
+        .iter()
+        .map(sign_flip_numeric_scalar_for_abs)
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        flipped_values,
+    )
+    .expect("sign-flipped series must construct")
+}
+
 fn poison_series_right_cells_for_combine_first(left: &Series, right: &Series) -> Series {
     let left_lookup: std::collections::BTreeMap<&IndexLabel, &Scalar> = left
         .index()
@@ -513,6 +536,68 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: abs metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series abs is idempotent.
+    #[test]
+    fn prop_series_abs_is_idempotent(series in arb_numeric_series("abs", 12)) {
+        let once = series.abs().expect("Series::abs() must succeed for numeric inputs");
+        let twice = once.abs().expect("Series::abs() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "series abs must be idempotent"
+        );
+    }
+
+    /// Flipping every numeric sign before abs must not change the observed result.
+    #[test]
+    fn prop_series_abs_is_sign_flip_invariant(series in arb_numeric_series("abs", 12)) {
+        let baseline = series.abs().expect("Series::abs() must succeed for numeric inputs");
+        let flipped = sign_flip_series_for_abs(&series);
+        let flipped_abs = flipped
+            .abs()
+            .expect("Series::abs() must succeed after sign flipping");
+        prop_assert!(
+            baseline.equals(&flipped_abs),
+            "series abs must ignore numeric sign"
+        );
+    }
+
+    /// DataFrame abs is idempotent.
+    #[test]
+    fn prop_dataframe_abs_is_idempotent(df in arb_numeric_dataframe(8)) {
+        let once = df.abs().expect("DataFrame::abs() must succeed for numeric inputs");
+        let twice = once
+            .abs()
+            .expect("DataFrame::abs() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe abs must be idempotent"
+        );
+    }
+
+    /// Multiplying every numeric cell by -1 before abs must not change the observed result.
+    #[test]
+    fn prop_dataframe_abs_is_sign_flip_invariant(df in arb_numeric_dataframe(8)) {
+        let baseline = df.abs().expect("DataFrame::abs() must succeed for numeric inputs");
+        let flipped = df
+            .mul_scalar(-1.0)
+            .expect("DataFrame::mul_scalar(-1.0) must succeed for numeric inputs");
+        let flipped_abs = flipped
+            .abs()
+            .expect("DataFrame::abs() must succeed after sign flipping");
+        prop_assert!(
+            baseline.equals(&flipped_abs),
+            "dataframe abs must ignore numeric sign"
+        );
     }
 }
 

@@ -1,0 +1,50 @@
+{
+  "packet_id": "FP-P2D-122",
+  "case_id": "series_replace_multiple_strict",
+  "mode": "strict",
+  "operation": "series_replace",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 5 }
+    ]
+  },
+  "replace_to_find": [
+    { "kind": "int64", "value": 1 },
+    { "kind": "int64", "value": 3 },
+    { "kind": "int64", "value": 5 }
+  ],
+  "replace_to_value": [
+    { "kind": "int64", "value": 10 },
+    { "kind": "int64", "value": 30 },
+    { "kind": "int64", "value": 50 }
+  ],
+  "expected_series": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 30 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 50 }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "packet_id": "FP-P2D-122",
+  "case_id": "series_replace_no_match_hardened",
+  "mode": "hardened",
+  "operation": "series_replace",
+  "left": {
+    "name": "x",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  },
+  "replace_to_find": [
+    { "kind": "int64", "value": 100 }
+  ],
+  "replace_to_value": [
+    { "kind": "int64", "value": 999 }
+  ],
+  "expected_series": {
+    "name": "x",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  }
+}

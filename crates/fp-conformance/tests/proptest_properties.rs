@@ -315,6 +315,48 @@ fn scale_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
         .expect("scaled dataframe must construct")
 }
 
+fn approx_equal_scalar(lhs: &Scalar, rhs: &Scalar) -> bool {
+    if lhs.is_missing() || rhs.is_missing() {
+        return lhs.is_missing() && rhs.is_missing();
+    }
+
+    match (lhs.to_f64(), rhs.to_f64()) {
+        (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => {
+            let tol = a.abs().max(b.abs()).max(1.0) * 1e-9;
+            (a - b).abs() <= tol
+        }
+        _ => lhs.semantic_eq(rhs),
+    }
+}
+
+fn approx_equal_series(lhs: &Series, rhs: &Series) -> bool {
+    lhs.name() == rhs.name()
+        && lhs.index().labels() == rhs.index().labels()
+        && lhs.len() == rhs.len()
+        && lhs
+            .values()
+            .iter()
+            .zip(rhs.values())
+            .all(|(left, right)| approx_equal_scalar(left, right))
+}
+
+fn approx_equal_dataframe(lhs: &DataFrame, rhs: &DataFrame) -> bool {
+    let lhs_columns = lhs.column_names();
+    let rhs_columns = rhs.column_names();
+    lhs.index().labels() == rhs.index().labels()
+        && lhs_columns == rhs_columns
+        && lhs_columns.into_iter().all(|name| {
+            let left = lhs.column(name).expect("column listed in order must exist");
+            let right = rhs.column(name).expect("column listed in order must exist");
+            left.values().len() == right.values().len()
+                && left
+                    .values()
+                    .iter()
+                    .zip(right.values())
+                    .all(|(left, right)| approx_equal_scalar(left, right))
+        })
+}
+
 fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
 }
@@ -2805,6 +2847,136 @@ proptest! {
         prop_assert!(
             ascending.equals(&expected),
             "dataframe sort_values(\"a\", ascending=true) must equal -sort_values(-x, \"a\", ascending=false)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: diff metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Translating a Series must not change its finite differences.
+    #[test]
+    fn prop_series_diff_is_translation_invariant(
+        series in arb_numeric_series("diff", 12),
+        periods in -3i64..=3,
+        delta in -10.0f64..10.0,
+    ) {
+        let original = series
+            .diff(periods)
+            .expect("Series::diff() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta);
+        let translated = shifted
+            .diff(periods)
+            .expect("Series::diff() must succeed after translation");
+        prop_assert!(
+            approx_equal_series(&original, &translated),
+            "series diff(x + c) must equal diff(x)"
+        );
+    }
+
+    /// Scaling a Series by a positive factor must scale its finite differences.
+    #[test]
+    fn prop_series_diff_scales_linearly(
+        series in arb_numeric_series("diff", 12),
+        periods in -3i64..=3,
+        factor in 0.25f64..5.0,
+    ) {
+        let original = series
+            .diff(periods)
+            .expect("Series::diff() must succeed for numeric inputs");
+        let scaled_input = scale_series(&series, factor);
+        let scaled_diff = scaled_input
+            .diff(periods)
+            .expect("Series::diff() must succeed after positive scaling");
+        let expected = scale_series(&original, factor);
+        prop_assert!(
+            approx_equal_series(&scaled_diff, &expected),
+            "series diff(kx) must equal k * diff(x) for positive k"
+        );
+    }
+
+    /// Negating a Series must negate its finite differences.
+    #[test]
+    fn prop_series_diff_is_sign_symmetric(
+        series in arb_numeric_series("diff", 12),
+        periods in -3i64..=3,
+    ) {
+        let original = series
+            .diff(periods)
+            .expect("Series::diff() must succeed for numeric inputs");
+        let flipped_input = sign_flip_series(&series);
+        let flipped_diff = flipped_input
+            .diff(periods)
+            .expect("Series::diff() must succeed after sign flipping");
+        let expected = sign_flip_series(&original);
+        prop_assert!(
+            flipped_diff.equals(&expected),
+            "series diff(-x) must equal -diff(x)"
+        );
+    }
+
+    /// Translating a DataFrame must not change per-column finite differences.
+    #[test]
+    fn prop_dataframe_diff_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in -3i64..=3,
+        delta in -10.0f64..10.0,
+    ) {
+        let original = df
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let translated = shifted
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed after translation");
+        prop_assert!(
+            approx_equal_dataframe(&original, &translated),
+            "dataframe diff(x + c) must equal diff(x)"
+        );
+    }
+
+    /// Scaling a DataFrame by a positive factor must scale per-column finite differences.
+    #[test]
+    fn prop_dataframe_diff_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        periods in -3i64..=3,
+        factor in 0.25f64..5.0,
+    ) {
+        let original = df
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed for numeric inputs");
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_diff = scaled_input
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed after positive scaling");
+        let expected = scale_dataframe(&original, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_diff, &expected),
+            "dataframe diff(kx) must equal k * diff(x) for positive k"
+        );
+    }
+
+    /// Negating a DataFrame must negate its per-column finite differences.
+    #[test]
+    fn prop_dataframe_diff_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+        periods in -3i64..=3,
+    ) {
+        let original = df
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed for numeric inputs");
+        let flipped_input = sign_flip_dataframe(&df);
+        let flipped_diff = flipped_input
+            .diff(periods)
+            .expect("DataFrame::diff() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&original);
+        prop_assert!(
+            flipped_diff.equals(&expected),
+            "dataframe diff(-x) must equal -diff(x)"
         );
     }
 }

@@ -1,0 +1,65 @@
+{
+  "packet_id": "FP-P2D-114",
+  "case_id": "dataframe_merge_ordered_overlap_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge_ordered",
+  "merge_on": "key",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "key": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "left_val": [
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "float64", "value": 200.0 }
+      ]
+    },
+    "column_order": ["key", "left_val"]
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "key": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "right_val": [
+        { "kind": "float64", "value": 2000.0 },
+        { "kind": "float64", "value": 3000.0 }
+      ]
+    },
+    "column_order": ["key", "right_val"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "key": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "left_val": [
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "float64", "value": 200.0 },
+        { "kind": "null", "value": "na_n" }
+      ],
+      "right_val": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 2000.0 },
+        { "kind": "float64", "value": 3000.0 }
+      ]
+    }
+  }
+}

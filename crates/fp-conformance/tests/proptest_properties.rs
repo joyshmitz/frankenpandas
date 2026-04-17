@@ -171,7 +171,7 @@ fn poison_numeric_scalar(value: &Scalar) -> Scalar {
     }
 }
 
-fn sign_flip_numeric_scalar_for_abs(value: &Scalar) -> Scalar {
+fn sign_flip_numeric_scalar(value: &Scalar) -> Scalar {
     match value {
         Scalar::Int64(v) => Scalar::Int64(v.saturating_neg()),
         Scalar::Float64(v) => Scalar::Float64(-v),
@@ -180,11 +180,11 @@ fn sign_flip_numeric_scalar_for_abs(value: &Scalar) -> Scalar {
     }
 }
 
-fn sign_flip_series_for_abs(series: &Series) -> Series {
+fn sign_flip_series(series: &Series) -> Series {
     let flipped_values = series
         .values()
         .iter()
-        .map(sign_flip_numeric_scalar_for_abs)
+        .map(sign_flip_numeric_scalar)
         .collect::<Vec<_>>();
     Series::from_values(
         series.name().to_owned(),
@@ -558,6 +558,94 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: round metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series round with the same precision is idempotent.
+    #[test]
+    fn prop_series_round_is_idempotent(
+        series in arb_numeric_series("round", 12),
+        decimals in -3i32..=6,
+    ) {
+        let once = series
+            .round(decimals)
+            .expect("Series::round() must succeed for numeric inputs");
+        let twice = once
+            .round(decimals)
+            .expect("Series::round() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "series round must be idempotent for fixed precision"
+        );
+    }
+
+    /// Negating every numeric value before rounding must negate the rounded result.
+    #[test]
+    fn prop_series_round_is_sign_symmetric(
+        series in arb_numeric_series("round", 12),
+        decimals in -3i32..=6,
+    ) {
+        let baseline = series
+            .round(decimals)
+            .expect("Series::round() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let flipped_rounded = flipped
+            .round(decimals)
+            .expect("Series::round() must succeed after sign flipping");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            flipped_rounded.equals(&expected),
+            "series round should commute with numeric sign flip"
+        );
+    }
+
+    /// DataFrame round with the same precision is idempotent.
+    #[test]
+    fn prop_dataframe_round_is_idempotent(
+        df in arb_numeric_dataframe(8),
+        decimals in -3i32..=6,
+    ) {
+        let once = df
+            .round(decimals)
+            .expect("DataFrame::round() must succeed for numeric inputs");
+        let twice = once
+            .round(decimals)
+            .expect("DataFrame::round() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe round must be idempotent for fixed precision"
+        );
+    }
+
+    /// Negating every numeric cell before rounding must negate the rounded result.
+    #[test]
+    fn prop_dataframe_round_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+        decimals in -3i32..=6,
+    ) {
+        let baseline = df
+            .round(decimals)
+            .expect("DataFrame::round() must succeed for numeric inputs");
+        let flipped = df
+            .mul_scalar(-1.0)
+            .expect("DataFrame::mul_scalar(-1.0) must succeed for numeric inputs");
+        let flipped_rounded = flipped
+            .round(decimals)
+            .expect("DataFrame::round() must succeed after sign flipping");
+        let expected = baseline
+            .mul_scalar(-1.0)
+            .expect("rounded dataframe must support numeric sign flipping");
+        prop_assert!(
+            flipped_rounded.equals(&expected),
+            "dataframe round should commute with numeric sign flip"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: clip metamorphic invariants
 // ---------------------------------------------------------------------------
 
@@ -675,7 +763,7 @@ proptest! {
     #[test]
     fn prop_series_abs_is_sign_flip_invariant(series in arb_numeric_series("abs", 12)) {
         let baseline = series.abs().expect("Series::abs() must succeed for numeric inputs");
-        let flipped = sign_flip_series_for_abs(&series);
+        let flipped = sign_flip_series(&series);
         let flipped_abs = flipped
             .abs()
             .expect("Series::abs() must succeed after sign flipping");

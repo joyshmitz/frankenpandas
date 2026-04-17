@@ -1767,10 +1767,14 @@ impl Series {
     /// Matches `s.sort_index(ascending=...)` for the current 1D IndexLabel
     /// model.
     pub fn sort_index(&self, ascending: bool) -> Result<Self, FrameError> {
-        let mut order = self.index.argsort();
-        if !ascending {
-            order.reverse();
-        }
+        let mut order = (0..self.len()).collect::<Vec<_>>();
+        order.sort_by(|&left, &right| {
+            if ascending {
+                self.index.labels()[left].cmp(&self.index.labels()[right])
+            } else {
+                self.index.labels()[right].cmp(&self.index.labels()[left])
+            }
+        });
         self.reorder_by_positions(&order)
     }
 
@@ -13667,10 +13671,14 @@ impl DataFrame {
     ///
     /// Matches `df.sort_index(ascending=...)` for 1D index labels.
     pub fn sort_index(&self, ascending: bool) -> Result<Self, FrameError> {
-        let mut order = self.index.argsort();
-        if !ascending {
-            order.reverse();
-        }
+        let mut order = (0..self.len()).collect::<Vec<_>>();
+        order.sort_by(|&left, &right| {
+            if ascending {
+                self.index.labels()[left].cmp(&self.index.labels()[right])
+            } else {
+                self.index.labels()[right].cmp(&self.index.labels()[left])
+            }
+        });
         self.reorder_rows_by_positions(&order)
     }
 
@@ -27935,6 +27943,30 @@ mod tests {
     }
 
     #[test]
+    fn series_sort_index_descending_is_stable_for_duplicate_labels() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(1),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+
+        let out = s.sort_index(false).unwrap();
+        assert_eq!(out.index().labels(), s.index().labels());
+        assert_eq!(out.values(), s.values());
+    }
+
+    #[test]
     fn series_sort_values_numeric_ascending_keeps_missing_last() {
         let s = Series::from_values(
             "vals",
@@ -29625,6 +29657,45 @@ mod tests {
         assert_eq!(
             desc.column("v").unwrap().values(),
             &[Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_index_descending_is_stable_for_duplicate_labels() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+            vec![0.into(), 0.into(), 0.into(), 0.into()],
+        )
+        .unwrap();
+
+        let out = df.sort_index(false).unwrap();
+        assert_eq!(out.index().labels(), df.index().labels());
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            df.column("a").unwrap().values()
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            df.column("b").unwrap().values()
         );
     }
 

@@ -253,6 +253,41 @@ fn sign_flip_dataframe(df: &DataFrame) -> DataFrame {
         .expect("sign-flipped dataframe must construct")
 }
 
+fn reverse_series(series: &Series) -> Series {
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().iter().cloned().rev().collect(),
+        series.values().iter().cloned().rev().collect(),
+    )
+    .expect("reversed series must construct")
+}
+
+fn reverse_dataframe_rows(df: &DataFrame) -> DataFrame {
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let values = df
+            .column(name)
+            .expect("column listed in order must exist")
+            .values()
+            .iter()
+            .cloned()
+            .rev()
+            .collect::<Vec<_>>();
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(values)
+                .expect("reversed dataframe column must construct"),
+        );
+    }
+    DataFrame::new_with_column_order(
+        Index::new(df.index().labels().iter().cloned().rev().collect()),
+        columns,
+        column_order,
+    )
+    .expect("reversed dataframe must construct")
+}
+
 fn negate_condition_scalar(value: &Scalar) -> Scalar {
     match value {
         Scalar::Bool(v) => Scalar::Bool(!v),
@@ -3481,6 +3516,188 @@ proptest! {
         prop_assert!(
             ascending.equals(&expected),
             "dataframe sort_values(\"a\", ascending=true) must equal -sort_values(-x, \"a\", ascending=false)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: sort_index metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series sort_index ascending is idempotent.
+    #[test]
+    fn prop_series_sort_index_ascending_is_idempotent(
+        series in arb_replace_numeric_series("sort_index", 12),
+    ) {
+        let once = series
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed");
+        let twice = once
+            .sort_index(true)
+            .expect("sorting an index-ascending Series again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "series sort_index(ascending=true) must be idempotent"
+        );
+    }
+
+    /// Series sort_index descending is idempotent.
+    #[test]
+    fn prop_series_sort_index_descending_is_idempotent(
+        series in arb_replace_numeric_series("sort_index", 12),
+    ) {
+        let once = series
+            .sort_index(false)
+            .expect("Series::sort_index(false) must succeed");
+        let twice = once
+            .sort_index(false)
+            .expect("sorting an index-descending Series again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "series sort_index(ascending=false) must be idempotent"
+        );
+    }
+
+    /// Negating values must commute with Series sort_index because the order depends only on the index.
+    #[test]
+    fn prop_series_sort_index_commutes_with_sign_flip(
+        series in arb_replace_numeric_series("sort_index", 12),
+    ) {
+        let baseline = series
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed");
+        let flipped_then_sorted = sign_flip_series(&series)
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed after sign flipping");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_then_sorted, &expected),
+            "series sort_index must commute with sign flipping"
+        );
+    }
+
+    /// With unique index labels, reversing the input rows must not change ascending sort_index output.
+    #[test]
+    fn prop_series_sort_index_unique_reverse_input_is_invariant(
+        series in arb_unique_numeric_series("sort_index_unique", 12),
+    ) {
+        let baseline = series
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed for unique-index inputs");
+        let reversed_sorted = reverse_series(&series)
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed after reversing unique-index input");
+        prop_assert!(
+            baseline.equals(&reversed_sorted),
+            "series sort_index(ascending=true) must ignore input row order when index labels are unique"
+        );
+    }
+
+    /// With unique index labels, descending sort_index must equal reversing the ascending result.
+    #[test]
+    fn prop_series_sort_index_unique_descending_is_reversed_ascending(
+        series in arb_unique_numeric_series("sort_index_unique", 12),
+    ) {
+        let ascending = series
+            .sort_index(true)
+            .expect("Series::sort_index(true) must succeed for unique-index inputs");
+        let descending = series
+            .sort_index(false)
+            .expect("Series::sort_index(false) must succeed for unique-index inputs");
+        let expected = reverse_series(&ascending);
+        prop_assert!(
+            descending.equals(&expected),
+            "series sort_index(ascending=false) must equal reversing sort_index(ascending=true) for unique-index inputs"
+        );
+    }
+
+    /// DataFrame sort_index ascending is idempotent.
+    #[test]
+    fn prop_dataframe_sort_index_ascending_is_idempotent(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let once = df
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed");
+        let twice = once
+            .sort_index(true)
+            .expect("sorting an index-ascending DataFrame again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe sort_index(ascending=true) must be idempotent"
+        );
+    }
+
+    /// DataFrame sort_index descending is idempotent.
+    #[test]
+    fn prop_dataframe_sort_index_descending_is_idempotent(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let once = df
+            .sort_index(false)
+            .expect("DataFrame::sort_index(false) must succeed");
+        let twice = once
+            .sort_index(false)
+            .expect("sorting an index-descending DataFrame again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe sort_index(ascending=false) must be idempotent"
+        );
+    }
+
+    /// Negating values must commute with DataFrame sort_index because the row order depends only on the index.
+    #[test]
+    fn prop_dataframe_sort_index_commutes_with_sign_flip(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed");
+        let flipped_then_sorted = sign_flip_dataframe(&df)
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_sorted, &expected),
+            "dataframe sort_index must commute with sign flipping"
+        );
+    }
+
+    /// With unique index labels, reversing the input rows must not change ascending sort_index output.
+    #[test]
+    fn prop_dataframe_sort_index_unique_reverse_input_is_invariant(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let baseline = df
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed for unique-index inputs");
+        let reversed_sorted = reverse_dataframe_rows(&df)
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed after reversing unique-index input");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &reversed_sorted),
+            "dataframe sort_index(ascending=true) must ignore input row order when index labels are unique"
+        );
+    }
+
+    /// With unique index labels, descending sort_index must equal reversing the ascending result.
+    #[test]
+    fn prop_dataframe_sort_index_unique_descending_is_reversed_ascending(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let ascending = df
+            .sort_index(true)
+            .expect("DataFrame::sort_index(true) must succeed for unique-index inputs");
+        let descending = df
+            .sort_index(false)
+            .expect("DataFrame::sort_index(false) must succeed for unique-index inputs");
+        let expected = reverse_dataframe_rows(&ascending);
+        prop_assert!(
+            approx_equal_dataframe(&descending, &expected),
+            "dataframe sort_index(ascending=false) must equal reversing sort_index(ascending=true) for unique-index inputs"
         );
     }
 }

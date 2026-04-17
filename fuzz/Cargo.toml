@@ -60,5 +60,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_series_add"
+path = "fuzz_targets/fuzz_series_add.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

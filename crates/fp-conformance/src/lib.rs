@@ -3902,6 +3902,117 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn fuzz_series_add_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    match tag % 6 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Null(NullKind::NaN),
+        2 => Scalar::Int64(i64::from(payload % 11) - 5),
+        3 => Scalar::Float64(match payload % 8 {
+            0 => 0.0,
+            1 => 1.0,
+            2 => -1.0,
+            3 => 2.5,
+            4 => f64::INFINITY,
+            5 => f64::NEG_INFINITY,
+            6 => f64::NAN,
+            _ => -0.0,
+        }),
+        4 => Scalar::Int64(i64::from(payload % 5)),
+        _ => Scalar::Float64(f64::from(i8::from_ne_bytes([payload])) / 8.0),
+    }
+}
+
+fn fuzz_series_from_bytes(name: &str, bytes: &[u8]) -> Result<Series, FrameError> {
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+
+    for chunk in bytes.chunks(3).take(12) {
+        let Some((&label_tag, scalar_bytes)) = chunk.split_first() else {
+            continue;
+        };
+        labels.push(fuzz_index_label_from_byte(label_tag));
+        values.push(fuzz_series_add_scalar_from_bytes(scalar_bytes));
+    }
+
+    Series::from_values(name, labels, values)
+}
+
+fn normalized_series_rows(series: &Series) -> Vec<String> {
+    let mut rows: Vec<_> = series
+        .index()
+        .labels()
+        .iter()
+        .zip(series.values().iter())
+        .map(|(label, value)| format!("{label:?}=>{value:?}"))
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+/// Structure-aware fuzz entrypoint for `Series::add()` alignment semantics.
+///
+/// Inputs are split at `|` (or midpoint when absent) and projected into small
+/// numeric/missing `Series` pairs. Addition must succeed, preserve index/value
+/// length parity, keep every input label in the union result, and remain
+/// commutative after normalizing away output row order and synthetic names.
+pub fn fuzz_series_add_bytes(input: &[u8]) -> Result<(), String> {
+    let (left_bytes, right_bytes) =
+        if let Some(split_at) = input.iter().position(|byte| *byte == b'|') {
+            (&input[..split_at], &input[split_at + 1..])
+        } else {
+            input.split_at(input.len() / 2)
+        };
+
+    let left = fuzz_series_from_bytes("left", left_bytes)
+        .map_err(|err| format!("left series projection failed: {err:?}"))?;
+    let right = fuzz_series_from_bytes("right", right_bytes)
+        .map_err(|err| format!("right series projection failed: {err:?}"))?;
+
+    let forward = left
+        .add(&right)
+        .map_err(|err| format!("left.add(right) unexpectedly failed: {err:?}"))?;
+    let reverse = right
+        .add(&left)
+        .map_err(|err| format!("right.add(left) unexpectedly failed: {err:?}"))?;
+
+    for (name, result) in [("forward", &forward), ("reverse", &reverse)] {
+        if result.index().len() != result.values().len() {
+            return Err(format!(
+                "{name} index/value length mismatch: index_len={} value_len={}",
+                result.index().len(),
+                result.values().len()
+            ));
+        }
+    }
+
+    let forward_labels = forward.index().labels();
+    for label in left.index().labels() {
+        if !forward_labels.contains(label) {
+            return Err(format!("forward result dropped left label {label:?}"));
+        }
+    }
+    for label in right.index().labels() {
+        if !forward_labels.contains(label) {
+            return Err(format!("forward result dropped right label {label:?}"));
+        }
+    }
+
+    let normalized_forward = normalized_series_rows(&forward);
+    let normalized_reverse = normalized_series_rows(&reverse);
+    if normalized_forward != normalized_reverse {
+        return Err(format!(
+            "series add lost commutativity after normalization: \
+             left={left:?} right={right:?} forward_rows={normalized_forward:?} \
+             reverse_rows={normalized_reverse:?}"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
 ///
 /// The same textual payload is exercised across all supported JSON orients plus
@@ -13753,7 +13864,7 @@ mod tests {
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
         fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes,
+        fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
         generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
         run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
@@ -14014,6 +14125,31 @@ mod tests {
         );
         fuzz_scalar_cast_bytes(seed)
             .expect("lossy float cast seed should still satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_series_add_bytes_accepts_unique_overlap_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/series_add/unique_overlap_seed.bin"
+        );
+        fuzz_series_add_bytes(seed).expect("unique-overlap seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_series_add_bytes_accepts_duplicate_cross_product_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/series_add/duplicate_cross_product_seed.bin"
+        );
+        fuzz_series_add_bytes(seed)
+            .expect("duplicate cross-product seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_series_add_bytes_accepts_missing_alignment_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/series_add/missing_alignment_seed.bin"
+        );
+        fuzz_series_add_bytes(seed).expect("missing alignment seed should satisfy invariants");
     }
 
     #[test]

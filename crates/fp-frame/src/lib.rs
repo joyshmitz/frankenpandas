@@ -21469,8 +21469,13 @@ impl DataFrame {
                 Some(c) => c,
                 None => return false,
             };
-            if sc.values() != oc.values() {
-                return false;
+            for (left, right) in sc.values().iter().zip(oc.values().iter()) {
+                if left.is_missing() && right.is_missing() {
+                    continue;
+                }
+                if left != right {
+                    return false;
+                }
             }
         }
         true
@@ -40850,6 +40855,28 @@ mod tests {
         )
         .unwrap();
         assert!(!df1.equals(&df3));
+    }
+
+    #[test]
+    fn df_equals_treats_missing_values_as_equal() {
+        let df1 = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::Null)],
+            )],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::NaN)],
+            )],
+        )
+        .unwrap();
+
+        assert!(df1.equals(&df2));
     }
 
     #[test]

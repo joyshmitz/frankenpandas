@@ -142,6 +142,9 @@ Implemented entrypoint:
 - `fuzz_index_align` target: `fuzz/fuzz_targets/fuzz_index_align.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/index_align/`
 - splits inputs at `|`, projects payload bytes onto small mixed `IndexLabel` domains, and checks outer-alignment multiplicity plus position invariants for `align_union()`
+- `fuzz_series_add` target: `fuzz/fuzz_targets/fuzz_series_add.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/series_add/`
+- splits inputs at `|`, projects bounded numeric/missing `Series` pairs, and checks `Series::add()` success, union-label preservation, index/value length parity, and commutativity after row normalization
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 
@@ -391,6 +394,8 @@ crates/fp-conformance/
           <crash_hash>.bin
           <crash_hash>.report.md
         scalar_cast/
+          ...
+        series_add/
           ...
     packets/                              # Promoted regression fixtures
       fp_p2c_{NNN}_fuzz_*.json

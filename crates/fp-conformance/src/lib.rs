@@ -38,8 +38,8 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, common_dtype, dropna, fill_na, nancount, nanmax, nanmean, nanmin,
-    nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, cast_scalar, cast_scalar_owned, common_dtype, dropna, fill_na,
+    nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -3641,6 +3641,49 @@ fn fuzz_dtype_from_byte(byte: u8) -> DType {
     }
 }
 
+fn fuzz_u64_from_bytes(bytes: &[u8]) -> u64 {
+    let mut padded = [0_u8; 8];
+    let copy_len = bytes.len().min(8);
+    padded[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    u64::from_le_bytes(padded)
+}
+
+fn fuzz_i64_from_bytes(bytes: &[u8]) -> i64 {
+    let mut padded = [0_u8; 8];
+    let copy_len = bytes.len().min(8);
+    padded[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    i64::from_le_bytes(padded)
+}
+
+fn fuzz_float64_from_bytes(bytes: &[u8]) -> f64 {
+    match bytes.first().copied().unwrap_or_default() % 8 {
+        0 => 0.0,
+        1 => 1.0,
+        2 => -1.0,
+        3 => 1.5,
+        4 => f64::INFINITY,
+        5 => f64::NEG_INFINITY,
+        6 => f64::NAN,
+        _ => f64::from_bits(fuzz_u64_from_bytes(bytes)),
+    }
+}
+
+fn fuzz_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let Some((&tag, payload)) = bytes.split_first() else {
+        return Scalar::Null(NullKind::Null);
+    };
+
+    match tag % 8 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Null(NullKind::NaN),
+        2 => Scalar::Null(NullKind::NaT),
+        3 => Scalar::Bool(payload.first().is_some_and(|byte| byte % 2 == 1)),
+        4 => Scalar::Int64(fuzz_i64_from_bytes(payload)),
+        5 => Scalar::Float64(fuzz_float64_from_bytes(payload)),
+        _ => Scalar::Utf8(String::from_utf8_lossy(&payload[..payload.len().min(12)]).into_owned()),
+    }
+}
+
 fn fuzz_index_label_from_byte(byte: u8) -> IndexLabel {
     match byte {
         b'0'..=b'9' => IndexLabel::Int64(i64::from((byte - b'0') % 4)),
@@ -3760,6 +3803,99 @@ pub fn fuzz_common_dtype_bytes(input: &[u8]) -> Result<(), String> {
                 "common_dtype compatibility mismatch: left={left:?} right={right:?} \
                  forward={left_result:?} reverse={right_result:?}"
             ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `fp-types` scalar casting semantics.
+///
+/// The first byte selects the target `DType`; remaining bytes project into a
+/// `Scalar`. Any cast error is acceptable, but owned/ref cast paths must agree,
+/// identity and missing casts must preserve their contracts, and successful
+/// casts must be idempotent for the chosen target dtype.
+pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&target_tag, scalar_bytes)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let target = fuzz_dtype_from_byte(target_tag);
+    let value = fuzz_scalar_from_bytes(scalar_bytes);
+    let owned = cast_scalar_owned(value.clone(), target);
+    let borrowed = cast_scalar(&value, target);
+
+    if format!("{owned:?}") != format!("{borrowed:?}") {
+        return Err(format!(
+            "owned/ref scalar cast mismatch: value={value:?} target={target:?} \
+             owned={owned:?} borrowed={borrowed:?}"
+        ));
+    }
+
+    match owned {
+        Ok(result) => {
+            if value.dtype() == target && result != value {
+                return Err(format!(
+                    "identity cast drifted: value={value:?} target={target:?} result={result:?}"
+                ));
+            }
+
+            if value.is_missing() {
+                let expected = Scalar::missing_for_dtype(target);
+                if result != expected {
+                    return Err(format!(
+                        "missing cast drifted: value={value:?} target={target:?} \
+                         result={result:?} expected={expected:?}"
+                    ));
+                }
+            }
+
+            if target == DType::Null && result != Scalar::Null(NullKind::Null) {
+                return Err(format!(
+                    "cast-to-null contract drifted: value={value:?} result={result:?}"
+                ));
+            }
+
+            if !value.is_missing() && target != DType::Null && result.is_missing() {
+                return Err(format!(
+                    "successful non-null cast produced missing sentinel: \
+                     value={value:?} target={target:?} result={result:?}"
+                ));
+            }
+
+            let owned_idempotent = cast_scalar_owned(result.clone(), target).map_err(|err| {
+                format!(
+                    "successful cast lost idempotence on owned path: \
+                     value={value:?} target={target:?} result={result:?} err={err:?}"
+                )
+            })?;
+            if owned_idempotent != result {
+                return Err(format!(
+                    "owned cast idempotence mismatch: value={value:?} target={target:?} \
+                     result={result:?} rerun={owned_idempotent:?}"
+                ));
+            }
+
+            let borrowed_idempotent = cast_scalar(&result, target).map_err(|err| {
+                format!(
+                    "successful cast lost idempotence on borrowed path: \
+                     value={value:?} target={target:?} result={result:?} err={err:?}"
+                )
+            })?;
+            if borrowed_idempotent != result {
+                return Err(format!(
+                    "borrowed cast idempotence mismatch: value={value:?} target={target:?} \
+                     result={result:?} rerun={borrowed_idempotent:?}"
+                ));
+            }
+        }
+        Err(err) => {
+            if value.dtype() == target || value.is_missing() || target == DType::Null {
+                return Err(format!(
+                    "cast unexpectedly failed for guaranteed-success contract: \
+                     value={value:?} target={target:?} err={err:?}"
+                ));
+            }
         }
     }
 
@@ -13617,9 +13753,9 @@ mod tests {
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
         fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_index_align_bytes, fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -13853,6 +13989,31 @@ mod tests {
             "../fixtures/adversarial/fuzz_corpus/common_dtype/incompatible_utf8_bool_seed.bin"
         );
         fuzz_common_dtype_bytes(seed).expect("incompatible seed should still preserve symmetry");
+    }
+
+    #[test]
+    fn fuzz_scalar_cast_bytes_accepts_identity_int64_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/scalar_cast/identity_int64_seed.bin"
+        );
+        fuzz_scalar_cast_bytes(seed).expect("identity cast seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_scalar_cast_bytes_accepts_missing_float_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/scalar_cast/missing_float_seed.bin"
+        );
+        fuzz_scalar_cast_bytes(seed).expect("missing float seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_scalar_cast_bytes_accepts_lossy_float_error_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/scalar_cast/lossy_float_to_int_seed.bin"
+        );
+        fuzz_scalar_cast_bytes(seed)
+            .expect("lossy float cast seed should still satisfy invariants");
     }
 
     #[test]

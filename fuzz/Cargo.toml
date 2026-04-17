@@ -47,6 +47,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_scalar_cast"
+path = "fuzz_targets/fuzz_scalar_cast.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_index_align"
 path = "fuzz_targets/fuzz_index_align.rs"
 test = false

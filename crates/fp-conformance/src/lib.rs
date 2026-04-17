@@ -16478,6 +16478,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_series_timedelta_total_seconds_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-093", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-093"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-093 series_timedelta_total_seconds fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn grouped_reports_are_partitioned_per_packet() {
         let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();

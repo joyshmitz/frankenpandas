@@ -719,6 +719,64 @@ fn bool_values(series: &Series) -> Result<Vec<bool>, String> {
         .collect()
 }
 
+fn dataframe_isin_via_series(df: &DataFrame, values: &[Scalar]) -> DataFrame {
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let source = Series::from_values(
+            name.clone(),
+            df.index().labels().to_vec(),
+            df.column(name)
+                .expect("dataframe column listed in order must exist")
+                .values()
+                .to_vec(),
+        )
+        .expect("columnwise series must construct");
+        let isin_result = source
+            .isin(values)
+            .expect("Series::isin() must succeed for dataframe column");
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(isin_result.values().to_vec())
+                .expect("columnwise isin result column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("columnwise isin dataframe must construct")
+}
+
+fn dataframe_isin_dict_via_series(
+    df: &DataFrame,
+    per_column: &std::collections::BTreeMap<String, Vec<Scalar>>,
+) -> DataFrame {
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let source = Series::from_values(
+            name.clone(),
+            df.index().labels().to_vec(),
+            df.column(name)
+                .expect("dataframe column listed in order must exist")
+                .values()
+                .to_vec(),
+        )
+        .expect("columnwise series must construct");
+        let allowed = per_column.get(name).cloned().unwrap_or_default();
+        let isin_result = source
+            .isin(&allowed)
+            .expect("Series::isin() must succeed for dataframe column dict values");
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(isin_result.values().to_vec())
+                .expect("columnwise isin_dict result column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("columnwise isin_dict dataframe must construct")
+}
+
 fn sorted_bounds(a: f64, b: f64) -> (f64, f64) {
     if a <= b { (a, b) } else { (b, a) }
 }
@@ -2861,6 +2919,10 @@ fn arb_replace_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataF
     })
 }
 
+fn arb_isin_test_values(max_len: usize) -> impl Strategy<Value = Vec<Scalar>> {
+    proptest::collection::vec(arb_replace_numeric_scalar(), 0..=max_len)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -3976,6 +4038,121 @@ proptest! {
         prop_assert!(
             all_then_any.equals(&direct_any),
             "dataframe dropna_columns(any) must equal dropna_columns(any) after dropna_columns(all)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: isin metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Reordering membership candidates must not change Series::isin.
+    #[test]
+    fn prop_series_isin_is_permutation_invariant(
+        series in arb_replace_numeric_series("isin", 12),
+        mut values in arb_isin_test_values(8),
+    ) {
+        let baseline = series
+            .isin(&values)
+            .expect("Series::isin() must succeed for numeric and missing values");
+        values.reverse();
+        let permuted = series
+            .isin(&values)
+            .expect("Series::isin() must succeed after candidate permutation");
+        prop_assert!(
+            baseline.equals(&permuted),
+            "series isin(values) must be invariant under value permutation"
+        );
+    }
+
+    /// Duplicating membership candidates must not change Series::isin.
+    #[test]
+    fn prop_series_isin_is_duplicate_invariant(
+        series in arb_replace_numeric_series("isin", 12),
+        values in arb_isin_test_values(8),
+    ) {
+        let baseline = series
+            .isin(&values)
+            .expect("Series::isin() must succeed for numeric and missing values");
+        let mut duplicated_values = values.clone();
+        duplicated_values.extend(values);
+        let duplicated = series
+            .isin(&duplicated_values)
+            .expect("Series::isin() must succeed after duplicating candidates");
+        prop_assert!(
+            baseline.equals(&duplicated),
+            "series isin(values) must be invariant under duplicate candidates"
+        );
+    }
+
+    /// Enlarging the candidate set can only turn false results into true ones for Series::isin.
+    #[test]
+    fn prop_series_isin_is_superset_monotone(
+        series in arb_replace_numeric_series("isin", 12),
+        base_values in arb_isin_test_values(6),
+        extra_values in arb_isin_test_values(6),
+    ) {
+        let baseline = series
+            .isin(&base_values)
+            .expect("Series::isin() must succeed for baseline candidates");
+        let mut superset = base_values.clone();
+        superset.extend(extra_values);
+        let expanded = series
+            .isin(&superset)
+            .expect("Series::isin() must succeed for superset candidates");
+        let baseline_values = bool_values(&baseline).expect("Series::isin() must produce bool output");
+        let expanded_values = bool_values(&expanded).expect("Series::isin() must produce bool output");
+        for (baseline_value, expanded_value) in baseline_values.into_iter().zip(expanded_values) {
+            prop_assert!(
+                !baseline_value || expanded_value,
+                "series isin superset expansion must not flip true back to false"
+            );
+        }
+    }
+
+    /// DataFrame::isin must agree with applying Series::isin column-wise.
+    #[test]
+    fn prop_dataframe_isin_matches_columnwise_series(
+        df in arb_replace_numeric_dataframe(8),
+        values in arb_isin_test_values(8),
+    ) {
+        let observed = df
+            .isin(&values)
+            .expect("DataFrame::isin() must succeed for numeric and missing values");
+        let expected = dataframe_isin_via_series(&df, &values);
+        prop_assert!(
+            approx_equal_dataframe(&observed, &expected),
+            "dataframe isin(values) must equal applying Series::isin(values) to each column"
+        );
+    }
+
+    /// DataFrame::isin_dict must agree with applying Series::isin on each column's own candidate set.
+    #[test]
+    fn prop_dataframe_isin_dict_matches_columnwise_series(
+        df in arb_replace_numeric_dataframe(8),
+        include_a in proptest::bool::ANY,
+        include_b in proptest::bool::ANY,
+        values_a in arb_isin_test_values(8),
+        values_b in arb_isin_test_values(8),
+    ) {
+        let mut per_column = std::collections::BTreeMap::new();
+        if include_a {
+            per_column.insert("a".to_string(), values_a);
+        }
+        if include_b {
+            per_column.insert("b".to_string(), values_b);
+        }
+
+        let observed = df
+            .isin_dict(&per_column)
+            .expect("DataFrame::isin_dict() must succeed for per-column values");
+        let expected = dataframe_isin_dict_via_series(&df, &per_column);
+        prop_assert!(
+            approx_equal_dataframe(&observed, &expected),
+            "dataframe isin_dict(per_column) must equal per-column Series::isin()"
         );
     }
 }

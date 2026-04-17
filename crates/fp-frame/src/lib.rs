@@ -3329,30 +3329,30 @@ impl Series {
     ///
     /// Matches `series.isin(values)`. Returns a boolean Series with the same
     /// index. Null elements produce `false` (matching pandas behavior).
+    fn scalar_isin_matches(value: &Scalar, test_values: &[Scalar]) -> bool {
+        if value.is_missing() {
+            return test_values.iter().any(Scalar::is_missing);
+        }
+
+        test_values.iter().any(|test_value| {
+            if test_value.is_missing() {
+                return false;
+            }
+
+            match (value, test_value) {
+                (Scalar::Int64(left), Scalar::Float64(right)) => (*left as f64) == *right,
+                (Scalar::Float64(left), Scalar::Int64(right)) => *left == (*right as f64),
+                _ => value == test_value,
+            }
+        })
+    }
+
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
         let values: Vec<Scalar> = self
             .column
             .values()
             .iter()
-            .map(|val| {
-                if val.is_missing() {
-                    // pandas: NaN.isin([NaN]) returns True only when NaN is in values
-                    let has_nan = test_values.iter().any(|tv| tv.is_missing());
-                    Scalar::Bool(has_nan)
-                } else {
-                    Scalar::Bool(test_values.iter().any(|tv| {
-                        if tv.is_missing() {
-                            return false;
-                        }
-                        // Compare numerically for Int64/Float64 cross-type
-                        match (val, tv) {
-                            (Scalar::Int64(a), Scalar::Float64(b)) => (*a as f64) == *b,
-                            (Scalar::Float64(a), Scalar::Int64(b)) => *a == (*b as f64),
-                            _ => val == tv,
-                        }
-                    }))
-                }
-            })
+            .map(|value| Scalar::Bool(Self::scalar_isin_matches(value, test_values)))
             .collect();
 
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), values)
@@ -21407,7 +21407,7 @@ impl DataFrame {
             let bools: Vec<Scalar> = col
                 .values()
                 .iter()
-                .map(|v| Scalar::Bool(values.contains(v)))
+                .map(|value| Scalar::Bool(Series::scalar_isin_matches(value, values)))
                 .collect();
             new_cols.insert(name.clone(), Column::from_values(bools)?);
         }
@@ -21429,13 +21429,7 @@ impl DataFrame {
             let bools: Vec<Scalar> = if let Some(allowed) = per_column.get(name) {
                 col.values()
                     .iter()
-                    .map(|v| {
-                        if v.is_missing() {
-                            Scalar::Bool(allowed.iter().any(|a| a.is_missing()))
-                        } else {
-                            Scalar::Bool(allowed.contains(v))
-                        }
-                    })
+                    .map(|value| Scalar::Bool(Series::scalar_isin_matches(value, allowed)))
                     .collect()
             } else {
                 vec![Scalar::Bool(false); col.len()]
@@ -40887,6 +40881,31 @@ mod tests {
     }
 
     #[test]
+    fn df_isin_handles_missing_and_cross_type_values() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Float64(f64::NAN)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .isin(&[
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+            ])
+            .unwrap();
+
+        assert_eq!(result.columns()["a"].values()[0], Scalar::Bool(true));
+        assert_eq!(result.columns()["a"].values()[1], Scalar::Bool(true));
+        assert_eq!(result.columns()["b"].values()[0], Scalar::Bool(true));
+        assert_eq!(result.columns()["b"].values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
     fn df_equals() {
         let df1 = DataFrame::from_dict(
             &["x"],
@@ -44655,6 +44674,31 @@ mod tests {
             result.columns["a"].values(),
             &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
         );
+    }
+
+    #[test]
+    fn dataframe_isin_dict_handles_missing_and_cross_type_values() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Float64(f64::NAN)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+
+        let mut per_column = BTreeMap::new();
+        per_column.insert("a".to_string(), vec![Scalar::Null(NullKind::NaN)]);
+        per_column.insert(
+            "b".to_string(),
+            vec![Scalar::Int64(2), Scalar::Float64(3.0)],
+        );
+
+        let result = df.isin_dict(&per_column).unwrap();
+        assert_eq!(result.columns["a"].values()[0], Scalar::Bool(false));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Bool(true));
+        assert_eq!(result.columns["b"].values()[0], Scalar::Bool(true));
+        assert_eq!(result.columns["b"].values()[1], Scalar::Bool(true));
     }
 
     // ── applymap_na_action ─────────────────────────────────────

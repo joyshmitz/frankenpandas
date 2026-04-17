@@ -242,6 +242,79 @@ fn shift_series(series: &Series, delta: f64) -> Series {
     .expect("shifted series must construct")
 }
 
+fn shift_dataframe(df: &DataFrame, delta: f64) -> DataFrame {
+    let mut shifted_columns = std::collections::BTreeMap::new();
+    let column_order = df
+        .column_names()
+        .into_iter()
+        .map(|name| {
+            let values = df
+                .column(name)
+                .expect("column listed in order must exist")
+                .values()
+                .iter()
+                .map(|value| shift_numeric_scalar(value, delta))
+                .collect::<Vec<_>>();
+            shifted_columns.insert(
+                name.clone(),
+                fp_columnar::Column::from_values(values)
+                    .expect("shifted dataframe column must construct"),
+            );
+            name.clone()
+        })
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(df.index().clone(), shifted_columns, column_order)
+        .expect("shifted dataframe must construct")
+}
+
+fn scale_numeric_scalar(value: &Scalar, factor: f64) -> Scalar {
+    match value {
+        Scalar::Int64(v) => Scalar::Float64(*v as f64 * factor),
+        Scalar::Float64(v) => Scalar::Float64(*v * factor),
+        Scalar::Null(kind) => Scalar::Null(*kind),
+        other => other.clone(),
+    }
+}
+
+fn scale_series(series: &Series, factor: f64) -> Series {
+    let scaled_values = series
+        .values()
+        .iter()
+        .map(|value| scale_numeric_scalar(value, factor))
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        scaled_values,
+    )
+    .expect("scaled series must construct")
+}
+
+fn scale_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
+    let mut scaled_columns = std::collections::BTreeMap::new();
+    let column_order = df
+        .column_names()
+        .into_iter()
+        .map(|name| {
+            let values = df
+                .column(name)
+                .expect("column listed in order must exist")
+                .values()
+                .iter()
+                .map(|value| scale_numeric_scalar(value, factor))
+                .collect::<Vec<_>>();
+            scaled_columns.insert(
+                name.clone(),
+                fp_columnar::Column::from_values(values)
+                    .expect("scaled dataframe column must construct"),
+            );
+            name.clone()
+        })
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(df.index().clone(), scaled_columns, column_order)
+        .expect("scaled dataframe must construct")
+}
+
 fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
 }
@@ -2732,6 +2805,132 @@ proptest! {
         prop_assert!(
             ascending.equals(&expected),
             "dataframe sort_values(\"a\", ascending=true) must equal -sort_values(-x, \"a\", ascending=false)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: rank metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series rank is invariant under translation.
+    #[test]
+    fn prop_series_rank_is_translation_invariant(
+        series in arb_variable_numeric_series("rank", 12),
+        ascending in proptest::bool::ANY,
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = series
+            .rank("average", ascending, "keep")
+            .expect("Series::rank() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta);
+        let shifted_rank = shifted
+            .rank("average", ascending, "keep")
+            .expect("Series::rank() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_rank),
+            "series rank must be invariant under translation"
+        );
+    }
+
+    /// Series rank is invariant under positive scaling.
+    #[test]
+    fn prop_series_rank_is_positive_scale_invariant(
+        series in arb_variable_numeric_series("rank", 12),
+        ascending in proptest::bool::ANY,
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = series
+            .rank("average", ascending, "keep")
+            .expect("Series::rank() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor);
+        let scaled_rank = scaled
+            .rank("average", ascending, "keep")
+            .expect("Series::rank() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_rank),
+            "series rank must be invariant under positive scaling"
+        );
+    }
+
+    /// Negating a Series swaps ascending and descending rank order.
+    #[test]
+    fn prop_series_rank_sign_flip_swaps_direction(
+        series in arb_variable_numeric_series("rank", 12),
+    ) {
+        let ascending_rank = series
+            .rank("average", true, "keep")
+            .expect("Series::rank(ascending=true) must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let descending_rank = flipped
+            .rank("average", false, "keep")
+            .expect("Series::rank(ascending=false) must succeed after sign flipping");
+        prop_assert!(
+            ascending_rank.equals(&descending_rank),
+            "series rank(x, ascending=true) must equal rank(-x, ascending=false)"
+        );
+    }
+
+    /// DataFrame rank is invariant under translation.
+    #[test]
+    fn prop_dataframe_rank_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        ascending in proptest::bool::ANY,
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = df
+            .rank("average", ascending, "keep")
+            .expect("DataFrame::rank() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let shifted_rank = shifted
+            .rank("average", ascending, "keep")
+            .expect("DataFrame::rank() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_rank),
+            "dataframe rank must be invariant under translation"
+        );
+    }
+
+    /// DataFrame rank is invariant under positive scaling.
+    #[test]
+    fn prop_dataframe_rank_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        ascending in proptest::bool::ANY,
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = df
+            .rank("average", ascending, "keep")
+            .expect("DataFrame::rank() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_rank = scaled
+            .rank("average", ascending, "keep")
+            .expect("DataFrame::rank() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_rank),
+            "dataframe rank must be invariant under positive scaling"
+        );
+    }
+
+    /// Negating a DataFrame swaps ascending and descending rank order.
+    #[test]
+    fn prop_dataframe_rank_sign_flip_swaps_direction(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let ascending_rank = df
+            .rank("average", true, "keep")
+            .expect("DataFrame::rank(ascending=true) must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let descending_rank = flipped
+            .rank("average", false, "keep")
+            .expect("DataFrame::rank(ascending=false) must succeed after sign flipping");
+        prop_assert!(
+            ascending_rank.equals(&descending_rank),
+            "dataframe rank(x, ascending=true) must equal rank(-x, ascending=false)"
         );
     }
 }

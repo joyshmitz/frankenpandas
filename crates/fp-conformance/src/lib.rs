@@ -20,8 +20,9 @@ use fp_index::{
     AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan,
 };
 use fp_io::{
-    IoError as FpIoError, JsonOrient, read_csv_str, read_json_str, read_jsonl_str,
-    write_csv_string, write_json_string, write_jsonl_string,
+    ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
+    read_json_str, read_jsonl_str, write_csv_string, write_excel_bytes, write_json_string,
+    write_jsonl_string,
 };
 use fp_join::{
     JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
@@ -3608,6 +3609,17 @@ fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_excel_bytes(frame)?;
+    let reparsed = read_excel_bytes(&encoded, &ExcelReadOptions::default())?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::Io(std::io::Error::other(
+            "excel round-trip drifted after parse/write/reparse",
+        )));
+    }
+    Ok(())
+}
+
 fn assert_json_roundtrip(frame: &DataFrame, orient: JsonOrient) -> Result<(), FpIoError> {
     let encoded = write_json_string(frame, orient)?;
     let reparsed = read_json_str(&encoded, orient)?;
@@ -3639,6 +3651,15 @@ pub fn fuzz_csv_parse_bytes(input: &[u8]) -> Result<(), FpIoError> {
     let input = String::from_utf8_lossy(input);
     let frame = read_csv_str(&input)?;
     assert_csv_roundtrip(&frame)
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` Excel reader.
+///
+/// Any parser error is acceptable, but successful parses must survive a
+/// write/reparse round-trip without panicking or drifting.
+pub fn fuzz_excel_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let frame = read_excel_bytes(input, &ExcelReadOptions::default())?;
+    assert_excel_roundtrip(&frame)
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
@@ -13294,9 +13315,9 @@ mod tests {
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_csv_parse_bytes,
-        fuzz_fixture_parse_bytes, fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        fuzz_excel_io_bytes, fuzz_fixture_parse_bytes, fuzz_json_io_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -13487,6 +13508,24 @@ mod tests {
         assert!(
             matches!(err, fp_io::IoError::DuplicateColumnName(_)),
             "expected duplicate header error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_excel_io_bytes_accepts_valid_seed_fixture() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/excel_io/simple_valid_seed.xlsx");
+        fuzz_excel_io_bytes(seed).expect("excel fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_excel_io_bytes_reports_invalid_workbook() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/excel_io/invalid_text_seed.bin");
+        let err = fuzz_excel_io_bytes(seed).expect_err("invalid workbook bytes should error");
+        assert!(
+            matches!(err, fp_io::IoError::Excel(_)),
+            "expected Excel parse error, got {err:?}"
         );
     }
 

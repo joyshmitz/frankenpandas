@@ -117,6 +117,7 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 | `fuzz_groupby_sum` | fp-groupby | `groupby_sum()` | `(Series, Series, GroupByOptions)` | ADV-4 |
 | `fuzz_fixture_parse` | fp-conformance | `serde_json::from_str::<PacketFixture>()` | `&[u8]` (raw JSON bytes) | ADV-5 |
 | `fuzz_json_io` | fp-io | `read_json_str()` / `read_jsonl_str()` | `&[u8]` (raw JSON / JSONL text bytes) | ADV-5 |
+| `fuzz_excel_io` | fp-io | `read_excel_bytes()` | `&[u8]` (raw workbook bytes) | ADV-1 |
 | `fuzz_column_arith` | fp-columnar | `Column::binary_numeric()` | `(Column, Column, BinaryOp)` | ADV-4 |
 
 Implemented entrypoint:
@@ -129,6 +130,9 @@ Implemented entrypoint:
 - `fuzz_json_io` target: `fuzz/fuzz_targets/fuzz_json_io.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_json_io/`
 - exercises all `JsonOrient` parse paths plus `read_jsonl_str()` with round-trip checks
+- `fuzz_excel_io` target: `fuzz/fuzz_targets/fuzz_excel_io.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/excel_io/`
+- exercises `read_excel_bytes()` with a write/reparse oracle via `write_excel_bytes()`
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 

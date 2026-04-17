@@ -32,5 +32,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_excel_io"
+path = "fuzz_targets/fuzz_excel_io.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -2623,6 +2623,120 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: sort_values metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series sort_values ascending is idempotent.
+    #[test]
+    fn prop_series_sort_values_ascending_is_idempotent(
+        series in arb_variable_numeric_series("sort_values", 12),
+    ) {
+        let once = series
+            .sort_values(true)
+            .expect("Series::sort_values(true) must succeed for numeric inputs");
+        let twice = once
+            .sort_values(true)
+            .expect("sorting an ascending Series again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "sorting a Series ascending twice must be idempotent"
+        );
+    }
+
+    /// Series sort_values descending is idempotent.
+    #[test]
+    fn prop_series_sort_values_descending_is_idempotent(
+        series in arb_variable_numeric_series("sort_values", 12),
+    ) {
+        let once = series
+            .sort_values(false)
+            .expect("Series::sort_values(false) must succeed for numeric inputs");
+        let twice = once
+            .sort_values(false)
+            .expect("sorting a descending Series again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "sorting a Series descending twice must be idempotent"
+        );
+    }
+
+    /// Negating a Series must turn ascending sort order into descending order after re-negating.
+    #[test]
+    fn prop_series_sort_values_ascending_descending_are_sign_dual(
+        series in arb_variable_numeric_series("sort_values", 12),
+    ) {
+        let ascending = series
+            .sort_values(true)
+            .expect("Series::sort_values(true) must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let descending_on_flipped = flipped
+            .sort_values(false)
+            .expect("Series::sort_values(false) must succeed after sign flipping");
+        let expected = sign_flip_series(&descending_on_flipped);
+        prop_assert!(
+            ascending.equals(&expected),
+            "series sort_values(ascending=true) must equal -sort_values(-x, ascending=false)"
+        );
+    }
+
+    /// DataFrame sort_values ascending is idempotent for a fixed numeric column.
+    #[test]
+    fn prop_dataframe_sort_values_ascending_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .sort_values("a", true)
+            .expect("DataFrame::sort_values(\"a\", true) must succeed for numeric inputs");
+        let twice = once
+            .sort_values("a", true)
+            .expect("sorting an ascending DataFrame again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "sorting a DataFrame ascending twice must be idempotent"
+        );
+    }
+
+    /// DataFrame sort_values descending is idempotent for a fixed numeric column.
+    #[test]
+    fn prop_dataframe_sort_values_descending_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .sort_values("a", false)
+            .expect("DataFrame::sort_values(\"a\", false) must succeed for numeric inputs");
+        let twice = once
+            .sort_values("a", false)
+            .expect("sorting a descending DataFrame again must succeed");
+        prop_assert!(
+            once.equals(&twice),
+            "sorting a DataFrame descending twice must be idempotent"
+        );
+    }
+
+    /// Negating a DataFrame must turn ascending sort order into descending order after re-negating.
+    #[test]
+    fn prop_dataframe_sort_values_ascending_descending_are_sign_dual(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let ascending = df
+            .sort_values("a", true)
+            .expect("DataFrame::sort_values(\"a\", true) must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let descending_on_flipped = flipped
+            .sort_values("a", false)
+            .expect("DataFrame::sort_values(\"a\", false) must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&descending_on_flipped);
+        prop_assert!(
+            ascending.equals(&expected),
+            "dataframe sort_values(\"a\", ascending=true) must equal -sort_values(-x, \"a\", ascending=false)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: cumulative extrema metamorphic invariants
 // ---------------------------------------------------------------------------
 

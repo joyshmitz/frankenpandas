@@ -9,7 +9,7 @@
 
 use proptest::prelude::*;
 
-use fp_frame::{DataFrame, Series};
+use fp_frame::{DataFrame, FrameError, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_join::{
@@ -340,6 +340,16 @@ fn approx_equal_series(lhs: &Series, rhs: &Series) -> bool {
             .all(|(left, right)| approx_equal_scalar(left, right))
 }
 
+fn same_series_payload(lhs: &Series, rhs: &Series) -> bool {
+    lhs.index().labels() == rhs.index().labels()
+        && lhs.len() == rhs.len()
+        && lhs
+            .values()
+            .iter()
+            .zip(rhs.values())
+            .all(|(left, right)| approx_equal_scalar(left, right))
+}
+
 fn approx_equal_dataframe(lhs: &DataFrame, rhs: &DataFrame) -> bool {
     let lhs_columns = lhs.column_names();
     let rhs_columns = rhs.column_names();
@@ -355,6 +365,17 @@ fn approx_equal_dataframe(lhs: &DataFrame, rhs: &DataFrame) -> bool {
                     .zip(right.values())
                     .all(|(left, right)| approx_equal_scalar(left, right))
         })
+}
+
+fn same_index_result(
+    lhs: &Result<IndexLabel, FrameError>,
+    rhs: &Result<IndexLabel, FrameError>,
+) -> bool {
+    match (lhs, rhs) {
+        (Ok(left), Ok(right)) => left == right,
+        (Err(_), Err(_)) => true,
+        _ => false,
+    }
 }
 
 fn reconstruct_pct_change_scalar(delta: &Scalar, previous: &Scalar) -> Scalar {
@@ -3799,6 +3820,282 @@ proptest! {
         prop_assert!(
             ascending_rank.equals(&descending_rank),
             "dataframe rank(x, ascending=true) must equal rank(-x, ascending=false)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: idxmax / idxmin metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series idxmax is invariant under translation.
+    #[test]
+    fn prop_series_idxmax_is_translation_invariant(
+        series in arb_numeric_series("idxmax", 12),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = series.idxmax();
+        let shifted = shift_series(&series, delta);
+        let shifted_idxmax = shifted.idxmax();
+        prop_assert!(
+            same_index_result(&shifted_idxmax, &baseline),
+            "series idxmax must be invariant under translation: baseline={baseline:?} shifted={shifted_idxmax:?}"
+        );
+    }
+
+    /// Series idxmin is invariant under translation.
+    #[test]
+    fn prop_series_idxmin_is_translation_invariant(
+        series in arb_numeric_series("idxmin", 12),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = series.idxmin();
+        let shifted = shift_series(&series, delta);
+        let shifted_idxmin = shifted.idxmin();
+        prop_assert!(
+            same_index_result(&shifted_idxmin, &baseline),
+            "series idxmin must be invariant under translation: baseline={baseline:?} shifted={shifted_idxmin:?}"
+        );
+    }
+
+    /// Series idxmax is invariant under positive scaling.
+    #[test]
+    fn prop_series_idxmax_is_positive_scale_invariant(
+        series in arb_numeric_series("idxmax", 12),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = series.idxmax();
+        let scaled = scale_series(&series, factor);
+        let scaled_idxmax = scaled.idxmax();
+        prop_assert!(
+            same_index_result(&scaled_idxmax, &baseline),
+            "series idxmax must be invariant under positive scaling: baseline={baseline:?} scaled={scaled_idxmax:?}"
+        );
+    }
+
+    /// Series idxmin is invariant under positive scaling.
+    #[test]
+    fn prop_series_idxmin_is_positive_scale_invariant(
+        series in arb_numeric_series("idxmin", 12),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = series.idxmin();
+        let scaled = scale_series(&series, factor);
+        let scaled_idxmin = scaled.idxmin();
+        prop_assert!(
+            same_index_result(&scaled_idxmin, &baseline),
+            "series idxmin must be invariant under positive scaling: baseline={baseline:?} scaled={scaled_idxmin:?}"
+        );
+    }
+
+    /// Negating a Series swaps idxmax and idxmin.
+    #[test]
+    fn prop_series_idxmax_idxmin_are_sign_dual(
+        series in arb_numeric_series("idxextrema", 12),
+    ) {
+        let idxmax = series.idxmax();
+        let flipped = sign_flip_series(&series);
+        let idxmin = flipped.idxmin();
+        prop_assert!(
+            same_index_result(&idxmin, &idxmax),
+            "series idxmax(x) must equal idxmin(-x): idxmax={idxmax:?} idxmin_neg={idxmin:?}"
+        );
+    }
+
+    /// DataFrame idxmax is invariant under translation.
+    #[test]
+    fn prop_dataframe_idxmax_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = df
+            .idxmax()
+            .expect("DataFrame::idxmax() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let shifted_idxmax = shifted
+            .idxmax()
+            .expect("DataFrame::idxmax() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_idxmax),
+            "dataframe idxmax must be invariant under translation"
+        );
+    }
+
+    /// DataFrame idxmin is invariant under translation.
+    #[test]
+    fn prop_dataframe_idxmin_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = df
+            .idxmin()
+            .expect("DataFrame::idxmin() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let shifted_idxmin = shifted
+            .idxmin()
+            .expect("DataFrame::idxmin() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_idxmin),
+            "dataframe idxmin must be invariant under translation"
+        );
+    }
+
+    /// DataFrame idxmax is invariant under positive scaling.
+    #[test]
+    fn prop_dataframe_idxmax_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = df
+            .idxmax()
+            .expect("DataFrame::idxmax() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_idxmax = scaled
+            .idxmax()
+            .expect("DataFrame::idxmax() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_idxmax),
+            "dataframe idxmax must be invariant under positive scaling"
+        );
+    }
+
+    /// DataFrame idxmin is invariant under positive scaling.
+    #[test]
+    fn prop_dataframe_idxmin_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = df
+            .idxmin()
+            .expect("DataFrame::idxmin() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_idxmin = scaled
+            .idxmin()
+            .expect("DataFrame::idxmin() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_idxmin),
+            "dataframe idxmin must be invariant under positive scaling"
+        );
+    }
+
+    /// Negating a DataFrame swaps idxmax and idxmin.
+    #[test]
+    fn prop_dataframe_idxmax_idxmin_are_sign_dual(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let idxmax = df
+            .idxmax()
+            .expect("DataFrame::idxmax() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let idxmin = flipped
+            .idxmin()
+            .expect("DataFrame::idxmin() must succeed after sign flipping");
+        prop_assert!(
+            same_series_payload(&idxmax, &idxmin),
+            "dataframe idxmax(x) must equal idxmin(-x)"
+        );
+    }
+
+    /// Axis-1 idxmax is invariant under translation.
+    #[test]
+    fn prop_dataframe_idxmax_axis1_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = df
+            .idxmax_axis1()
+            .expect("DataFrame::idxmax_axis1() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let shifted_idxmax = shifted
+            .idxmax_axis1()
+            .expect("DataFrame::idxmax_axis1() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_idxmax),
+            "dataframe idxmax_axis1 must be invariant under translation"
+        );
+    }
+
+    /// Axis-1 idxmin is invariant under translation.
+    #[test]
+    fn prop_dataframe_idxmin_axis1_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1e6_f64..1e6_f64,
+    ) {
+        let baseline = df
+            .idxmin_axis1()
+            .expect("DataFrame::idxmin_axis1() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let shifted_idxmin = shifted
+            .idxmin_axis1()
+            .expect("DataFrame::idxmin_axis1() must succeed after translation");
+        prop_assert!(
+            baseline.equals(&shifted_idxmin),
+            "dataframe idxmin_axis1 must be invariant under translation"
+        );
+    }
+
+    /// Axis-1 idxmax is invariant under positive scaling.
+    #[test]
+    fn prop_dataframe_idxmax_axis1_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = df
+            .idxmax_axis1()
+            .expect("DataFrame::idxmax_axis1() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_idxmax = scaled
+            .idxmax_axis1()
+            .expect("DataFrame::idxmax_axis1() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_idxmax),
+            "dataframe idxmax_axis1 must be invariant under positive scaling"
+        );
+    }
+
+    /// Axis-1 idxmin is invariant under positive scaling.
+    #[test]
+    fn prop_dataframe_idxmin_axis1_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        scale_raw in 1u16..1000u16,
+    ) {
+        let factor = f64::from(scale_raw) / 10.0;
+        let baseline = df
+            .idxmin_axis1()
+            .expect("DataFrame::idxmin_axis1() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_idxmin = scaled
+            .idxmin_axis1()
+            .expect("DataFrame::idxmin_axis1() must succeed after positive scaling");
+        prop_assert!(
+            baseline.equals(&scaled_idxmin),
+            "dataframe idxmin_axis1 must be invariant under positive scaling"
+        );
+    }
+
+    /// Negating a DataFrame swaps axis-1 idxmax and idxmin.
+    #[test]
+    fn prop_dataframe_idxmax_axis1_idxmin_axis1_are_sign_dual(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let idxmax = df
+            .idxmax_axis1()
+            .expect("DataFrame::idxmax_axis1() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let idxmin = flipped
+            .idxmin_axis1()
+            .expect("DataFrame::idxmin_axis1() must succeed after sign flipping");
+        prop_assert!(
+            same_series_payload(&idxmax, &idxmin),
+            "dataframe idxmax_axis1(x) must equal idxmin_axis1(-x)"
         );
     }
 }

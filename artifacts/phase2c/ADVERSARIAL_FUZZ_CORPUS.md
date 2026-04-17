@@ -121,6 +121,9 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 
 Implemented entrypoint:
 
+- `fuzz_csv_parse` target: `fuzz/fuzz_targets/fuzz_csv_parse.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/csv_parse/`
+- exercises `read_csv_str()` with parse/write/reparse checks via `write_csv_string()`
 - `fuzz_fixture_parse` target: `fuzz/fuzz_targets/fuzz_fixture_parse.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/`
 - `fuzz_json_io` target: `fuzz/fuzz_targets/fuzz_json_io.rs`

@@ -3597,6 +3597,17 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
     Ok(())
 }
 
+fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_csv_string(frame)?;
+    let reparsed = read_csv_str(&encoded)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::Io(std::io::Error::other(
+            "csv round-trip drifted after parse/write/reparse",
+        )));
+    }
+    Ok(())
+}
+
 fn assert_json_roundtrip(frame: &DataFrame, orient: JsonOrient) -> Result<(), FpIoError> {
     let encoded = write_json_string(frame, orient)?;
     let reparsed = read_json_str(&encoded, orient)?;
@@ -3618,6 +3629,16 @@ fn assert_jsonl_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
         ));
     }
     Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` CSV reader.
+///
+/// Any parser error is acceptable, but successful parses must survive a
+/// write/reparse round-trip without panicking or drifting.
+pub fn fuzz_csv_parse_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let input = String::from_utf8_lossy(input);
+    let frame = read_csv_str(&input)?;
+    assert_csv_roundtrip(&frame)
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
@@ -13272,14 +13293,15 @@ mod tests {
         SuiteOptions, append_phase2c_drift_history, build_ci_forensics_report,
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
-        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_fixture_parse_bytes,
-        fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
-        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
-        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_compat_closure_e2e_scenario_report,
-        write_compat_closure_final_evidence_pack, write_differential_validation_log,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_csv_parse_bytes,
+        fuzz_fixture_parse_bytes, fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline,
+        run_differential_by_id, run_differential_suite, run_e2e_suite,
+        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
+        write_differential_validation_log, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -13438,6 +13460,33 @@ mod tests {
         assert!(
             matches!(err, super::HarnessError::Json(_)),
             "expected JSON parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_csv_parse_bytes_accepts_simple_seed_fixture() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/csv_parse/simple_valid_seed.csv");
+        fuzz_csv_parse_bytes(seed).expect("simple csv fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_csv_parse_bytes_accepts_quoted_newline_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/csv_parse/quoted_newline_valid_seed.csv"
+        );
+        fuzz_csv_parse_bytes(seed).expect("quoted newline csv fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_csv_parse_bytes_reports_duplicate_headers() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/csv_parse/duplicate_headers_invalid_seed.csv"
+        );
+        let err = fuzz_csv_parse_bytes(seed).expect_err("duplicate csv headers should error");
+        assert!(
+            matches!(err, fp_io::IoError::DuplicateColumnName(_)),
+            "expected duplicate header error, got {err:?}"
         );
     }
 
@@ -14098,6 +14147,7 @@ mod tests {
 
     #[test]
     fn grouped_reports_are_partitioned_per_packet() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");
         let packet_ids: Vec<String> = reports
@@ -14124,6 +14174,7 @@ mod tests {
 
     #[test]
     fn packet_gate_enforcement_fails_when_report_is_not_green() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let mut reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");
         let report = reports.first_mut().expect("at least one packet");
@@ -14143,6 +14194,7 @@ mod tests {
 
     #[test]
     fn drift_history_append_emits_jsonl_rows() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");
         let history_path = append_phase2c_drift_history(&cfg, &reports).expect("history");
@@ -14161,6 +14213,7 @@ mod tests {
 
     #[test]
     fn parity_gate_evaluation_passes_for_packet_001() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let report =
             run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected).expect("report");
@@ -14170,6 +14223,7 @@ mod tests {
 
     #[test]
     fn parity_gate_evaluation_fails_for_injected_drift() {
+        let _artifact_guard = phase2c_artifact_test_lock();
         let cfg = HarnessConfig::default_paths();
         let mut report =
             run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected).expect("report");

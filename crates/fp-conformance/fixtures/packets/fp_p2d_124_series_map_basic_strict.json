@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-124",
+  "case_id": "series_map_basic_strict",
+  "mode": "strict",
+  "operation": "series_map",
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 1 }
+    ]
+  },
+  "replace_to_find": [
+    { "kind": "int64", "value": 1 },
+    { "kind": "int64", "value": 2 },
+    { "kind": "int64", "value": 3 }
+  ],
+  "replace_to_value": [
+    { "kind": "utf8", "value": "one" },
+    { "kind": "utf8", "value": "two" },
+    { "kind": "utf8", "value": "three" }
+  ],
+  "expected_series": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "one" },
+      { "kind": "utf8", "value": "two" },
+      { "kind": "utf8", "value": "three" },
+      { "kind": "utf8", "value": "one" }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "packet_id": "FP-P2D-124",
+  "case_id": "series_map_empty_hardened",
+  "mode": "hardened",
+  "operation": "series_map",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 6 }
+    ]
+  },
+  "replace_to_find": [],
+  "replace_to_value": [],
+  "expected_series": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "null", "value": "na_n" },
+      { "kind": "null", "value": "na_n" }
+    ]
+  }
+}

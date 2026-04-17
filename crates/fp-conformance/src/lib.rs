@@ -325,6 +325,8 @@ pub enum FixtureOperation {
     SeriesReplace,
     #[serde(rename = "series_update", alias = "series_update_default")]
     SeriesUpdate,
+    #[serde(rename = "series_map", alias = "series_map_default")]
+    SeriesMap,
     #[serde(rename = "series_diff", alias = "series_diff_default")]
     SeriesDiff,
     #[serde(rename = "series_shift", alias = "series_shift_default")]
@@ -578,6 +580,7 @@ impl FixtureOperation {
             Self::SeriesMask => "series_mask",
             Self::SeriesReplace => "series_replace",
             Self::SeriesUpdate => "series_update",
+            Self::SeriesMap => "series_map",
             Self::SeriesXs => "series_xs",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
@@ -1209,6 +1212,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
+        | FixtureOperation::SeriesMap
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
@@ -6155,6 +6159,44 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesMap => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let to_find = fixture
+                .replace_to_find
+                .as_ref()
+                .ok_or_else(|| "replace_to_find required for series_map".to_owned())?;
+            let to_value = fixture
+                .replace_to_value
+                .as_ref()
+                .ok_or_else(|| "replace_to_value required for series_map".to_owned())?;
+            let mapping: Vec<(Scalar, Scalar)> = to_find
+                .iter()
+                .zip(to_value.iter())
+                .map(|(f, v)| (f.clone(), v.clone()))
+                .collect();
+            let actual = series.map(&mapping).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_map error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_map to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_map to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_series or expected_error is required for series_map".to_owned()),
+            }
+        }
         FixtureOperation::SeriesIsNa => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -7967,6 +8009,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
+        | FixtureOperation::SeriesMap
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -8344,6 +8387,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
+        | FixtureOperation::SeriesMap
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -11913,9 +11957,53 @@ fn execute_and_compare_differential(
                         "expected series_update to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => {
-                    Err("expected_series or expected_error required for series_update".to_owned())
-                }
+                _ => Err("expected_series or expected_error required for series_update".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesMap => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let to_find = fixture
+                .replace_to_find
+                .as_ref()
+                .ok_or_else(|| "replace_to_find required for series_map".to_owned())?;
+            let to_value = fixture
+                .replace_to_value
+                .as_ref()
+                .ok_or_else(|| "replace_to_value required for series_map".to_owned())?;
+            let mapping: Vec<(Scalar, Scalar)> = to_find
+                .iter()
+                .zip(to_value.iter())
+                .map(|(f, v)| (f.clone(), v.clone()))
+                .collect();
+            let actual = series.map(&mapping).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_map.error",
+                        format!("expected series_map error containing '{substr}', got '{message}'"),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_map.error",
+                        "expected series_map to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_map.error",
+                        "expected series_map to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_map".to_owned()),
             }
         }
         FixtureOperation::SeriesIsNa => {
@@ -17581,6 +17669,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-123 series_update fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_map_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-124", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-124"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-124 series_map fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

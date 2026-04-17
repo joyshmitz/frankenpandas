@@ -9,7 +9,7 @@
 
 use proptest::prelude::*;
 
-use fp_frame::{DataFrame, FrameError, Series};
+use fp_frame::{DataFrame, DropNaHow, FrameError, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_join::{
@@ -3701,6 +3701,222 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&observed, &reconstructed),
             "dataframe pct_change_axis1 must match diff_axis1(periods) / shift_axis1(periods)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: dropna metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series dropna is idempotent.
+    #[test]
+    fn prop_series_dropna_is_idempotent(
+        series in arb_variable_numeric_series("dropna", 12),
+    ) {
+        let once = series
+            .dropna()
+            .expect("Series::dropna() must succeed for numeric inputs");
+        let twice = once
+            .dropna()
+            .expect("Series::dropna() must succeed on an already dropped series");
+        prop_assert!(
+            once.equals(&twice),
+            "series dropna() must be idempotent"
+        );
+    }
+
+    /// Translating a Series commutes with dropna because missingness is unchanged.
+    #[test]
+    fn prop_series_dropna_is_translation_covariant(
+        series in arb_variable_numeric_series("dropna", 12),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = series
+            .dropna()
+            .expect("Series::dropna() must succeed for numeric inputs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_result = shifted_input
+            .dropna()
+            .expect("Series::dropna() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_result, &expected),
+            "series dropna(x + c) must equal dropna(x) + c"
+        );
+    }
+
+    /// Negating a Series commutes with dropna because missingness is unchanged.
+    #[test]
+    fn prop_series_dropna_is_sign_symmetric(
+        series in arb_variable_numeric_series("dropna", 12),
+    ) {
+        let baseline = series
+            .dropna()
+            .expect("Series::dropna() must succeed for numeric inputs");
+        let flipped_input = sign_flip_series(&series);
+        let flipped_result = flipped_input
+            .dropna()
+            .expect("Series::dropna() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_result, &expected),
+            "series dropna(-x) must equal -dropna(x)"
+        );
+    }
+
+    /// Default DataFrame row-wise dropna is idempotent.
+    #[test]
+    fn prop_dataframe_dropna_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .dropna()
+            .expect("DataFrame::dropna() must succeed for numeric inputs");
+        let twice = once
+            .dropna()
+            .expect("DataFrame::dropna() must succeed on an already dropped frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe dropna() must be idempotent"
+        );
+    }
+
+    /// Translating numeric cells commutes with row-wise dropna.
+    #[test]
+    fn prop_dataframe_dropna_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .dropna()
+            .expect("DataFrame::dropna() must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_result = shifted_input
+            .dropna()
+            .expect("DataFrame::dropna() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe dropna(x + c) must equal dropna(x) + c"
+        );
+    }
+
+    /// Negating numeric cells commutes with row-wise dropna.
+    #[test]
+    fn prop_dataframe_dropna_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .dropna()
+            .expect("DataFrame::dropna() must succeed for numeric inputs");
+        let flipped_input = sign_flip_dataframe(&df);
+        let flipped_result = flipped_input
+            .dropna()
+            .expect("DataFrame::dropna() must succeed after sign flip");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_result, &expected),
+            "dataframe dropna(-x) must equal -dropna(x)"
+        );
+    }
+
+    /// Applying `how='all'` before default `how='any'` must not change the final result.
+    #[test]
+    fn prop_dataframe_dropna_any_after_all_matches_direct_any(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let all_then_any = df
+            .dropna_with_options(DropNaHow::All, None)
+            .expect("DataFrame::dropna_with_options(All) must succeed")
+            .dropna()
+            .expect("DataFrame::dropna() must succeed after how='all'");
+        let direct_any = df
+            .dropna()
+            .expect("DataFrame::dropna() must succeed for numeric inputs");
+        prop_assert!(
+            all_then_any.equals(&direct_any),
+            "dataframe dropna(any) must equal dropna(any) after dropna(all)"
+        );
+    }
+
+    /// Stronger row thresholds compose over weaker ones.
+    #[test]
+    fn prop_dataframe_dropna_threshold_composes_monotonically(
+        df in arb_numeric_dataframe(8),
+        (low_thresh, high_thresh) in (1usize..=2).prop_flat_map(|low| (Just(low), low..=2usize)),
+    ) {
+        let weaker = df
+            .dropna_with_threshold(low_thresh, None)
+            .expect("DataFrame::dropna_with_threshold() must succeed for weaker threshold");
+        let strong_after_weak = weaker
+            .dropna_with_threshold(high_thresh, None)
+            .expect("DataFrame::dropna_with_threshold() must succeed after weaker threshold");
+        let strong_direct = df
+            .dropna_with_threshold(high_thresh, None)
+            .expect("DataFrame::dropna_with_threshold() must succeed for stronger threshold");
+        prop_assert!(
+            strong_after_weak.equals(&strong_direct),
+            "dataframe stronger thresh must equal stronger thresh after weaker thresh"
+        );
+    }
+
+    /// Column-wise dropna is idempotent.
+    #[test]
+    fn prop_dataframe_dropna_columns_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed for numeric inputs");
+        let twice = once
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed on an already dropped frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe dropna_columns() must be idempotent"
+        );
+    }
+
+    /// Translating numeric cells commutes with column-wise dropna.
+    #[test]
+    fn prop_dataframe_dropna_columns_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_result = shifted_input
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe dropna_columns(x + c) must equal dropna_columns(x) + c"
+        );
+    }
+
+    /// Applying column-wise `how='all'` before default `how='any'` must not change the final columns kept.
+    #[test]
+    fn prop_dataframe_dropna_columns_any_after_all_matches_direct_any(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let all_then_any = df
+            .dropna_columns_with_options(DropNaHow::All, None)
+            .expect("DataFrame::dropna_columns_with_options(All) must succeed")
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed after how='all'");
+        let direct_any = df
+            .dropna_columns()
+            .expect("DataFrame::dropna_columns() must succeed for numeric inputs");
+        prop_assert!(
+            all_then_any.equals(&direct_any),
+            "dataframe dropna_columns(any) must equal dropna_columns(any) after dropna_columns(all)"
         );
     }
 }

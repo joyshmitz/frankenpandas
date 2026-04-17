@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-083",
+  "case_id": "series_to_numeric_mixed_strict",
+  "mode": "strict",
+  "operation": "series_to_numeric",
+  "left": {
+    "name": "vals",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "1" },
+      { "kind": "utf8", "value": "2.5" },
+      { "kind": "bool", "value": true }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.5 },
+      { "kind": "float64", "value": 1.0 }
+    ]
+  }
+}

@@ -423,6 +423,40 @@ fn reconstruct_pct_change_dataframe(df: &DataFrame, periods: usize) -> DataFrame
         .expect("reconstructed pct_change dataframe must construct")
 }
 
+fn reconstruct_pct_change_axis1_dataframe(df: &DataFrame, periods: i64) -> DataFrame {
+    let diff = df
+        .diff_axis1(periods)
+        .expect("DataFrame::diff_axis1() must succeed while reconstructing pct_change");
+    let shifted = df
+        .shift_axis1(periods)
+        .expect("DataFrame::shift_axis1() must succeed while reconstructing pct_change");
+
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let diff_col = diff
+            .column(name)
+            .expect("diff_axis1 dataframe column listed in order must exist");
+        let shifted_col = shifted
+            .column(name)
+            .expect("shift_axis1 dataframe column listed in order must exist");
+        let values = diff_col
+            .values()
+            .iter()
+            .zip(shifted_col.values())
+            .map(|(delta, previous)| reconstruct_pct_change_scalar(delta, previous))
+            .collect::<Vec<_>>();
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(values)
+                .expect("reconstructed pct_change_axis1 dataframe column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("reconstructed pct_change_axis1 dataframe must construct")
+}
+
 fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
 }
@@ -3161,6 +3195,130 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&observed, &reconstructed),
             "dataframe pct_change must match diff(periods) / shift(periods)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: axis1 diff and pct_change metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Translating every numeric cell must not change row-wise finite differences.
+    #[test]
+    fn prop_dataframe_diff_axis1_is_translation_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+        delta in -10.0f64..10.0,
+    ) {
+        let original = df
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta);
+        let translated = shifted
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed after translation");
+        prop_assert!(
+            approx_equal_dataframe(&original, &translated),
+            "dataframe diff_axis1(x + c) must equal diff_axis1(x)"
+        );
+    }
+
+    /// Scaling every numeric cell by a positive factor must scale row-wise finite differences.
+    #[test]
+    fn prop_dataframe_diff_axis1_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+        factor in 0.25f64..5.0,
+    ) {
+        let original = df
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed for numeric inputs");
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_diff = scaled_input
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed after positive scaling");
+        let expected = scale_dataframe(&original, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_diff, &expected),
+            "dataframe diff_axis1(kx) must equal k * diff_axis1(x) for positive k"
+        );
+    }
+
+    /// Negating every numeric cell must negate row-wise finite differences.
+    #[test]
+    fn prop_dataframe_diff_axis1_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+    ) {
+        let original = df
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let flipped_diff = flipped
+            .diff_axis1(periods)
+            .expect("DataFrame::diff_axis1() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&original);
+        prop_assert!(
+            flipped_diff.equals(&expected),
+            "dataframe diff_axis1(-x) must equal -diff_axis1(x)"
+        );
+    }
+
+    /// Scaling every numeric cell by a positive factor must not change row-wise pct_change.
+    #[test]
+    fn prop_dataframe_pct_change_axis1_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+        factor in 0.25f64..5.0,
+    ) {
+        let baseline = df
+            .pct_change_axis1(periods)
+            .expect("DataFrame::pct_change_axis1() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_change = scaled
+            .pct_change_axis1(periods)
+            .expect("DataFrame::pct_change_axis1() must succeed after positive scaling");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &scaled_change),
+            "dataframe pct_change_axis1(kx) must equal pct_change_axis1(x) for positive k"
+        );
+    }
+
+    /// Negating every numeric cell must not change row-wise pct_change.
+    #[test]
+    fn prop_dataframe_pct_change_axis1_is_sign_flip_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+    ) {
+        let baseline = df
+            .pct_change_axis1(periods)
+            .expect("DataFrame::pct_change_axis1() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let flipped_change = flipped
+            .pct_change_axis1(periods)
+            .expect("DataFrame::pct_change_axis1() must succeed after sign flipping");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &flipped_change),
+            "dataframe pct_change_axis1(-x) must equal pct_change_axis1(x)"
+        );
+    }
+
+    /// Row-wise pct_change must agree with diff_axis1(periods) / shift_axis1(periods).
+    #[test]
+    fn prop_dataframe_pct_change_axis1_matches_diff_over_shift(
+        df in arb_numeric_dataframe(8),
+        periods in prop_oneof![Just(-2i64), Just(-1i64), Just(1i64), Just(2i64)],
+    ) {
+        let observed = df
+            .pct_change_axis1(periods)
+            .expect("DataFrame::pct_change_axis1() must succeed for numeric inputs");
+        let reconstructed = reconstruct_pct_change_axis1_dataframe(&df, periods);
+        prop_assert!(
+            approx_equal_dataframe(&observed, &reconstructed),
+            "dataframe pct_change_axis1 must match diff_axis1(periods) / shift_axis1(periods)"
         );
     }
 }

@@ -3254,6 +3254,26 @@ fn arb_dataframe_take_columns_composition_case(
     })
 }
 
+fn arb_series_set_axis_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Vec<IndexLabel>)> {
+    (1..=max_len).prop_flat_map(move |len| (arb_numeric_series(name, len), arb_index_labels(len)))
+}
+
+fn arb_series_set_axis_composition_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Vec<IndexLabel>, Vec<IndexLabel>)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        (
+            arb_numeric_series(name, len),
+            arb_index_labels(len),
+            arb_index_labels(len),
+        )
+    })
+}
+
 fn arb_isin_test_values(max_len: usize) -> impl Strategy<Value = Vec<Scalar>> {
     proptest::collection::vec(arb_replace_numeric_scalar(), 0..=max_len)
 }
@@ -4222,6 +4242,75 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&direct, &via_intermediate),
             "dataframe column reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: set_axis metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Replacing the axis twice must collapse to the last label set.
+    #[test]
+    fn prop_series_set_axis_overwrite_composes(
+        (series, first_labels, second_labels) in arb_series_set_axis_composition_case("set_axis", 12),
+    ) {
+        let nested = series
+            .set_axis(first_labels)
+            .and_then(|renamed| renamed.set_axis(second_labels.clone()))
+            .expect("nested Series::set_axis() must succeed for matching lengths");
+        let direct = series
+            .set_axis(second_labels)
+            .expect("direct Series::set_axis() must succeed for matching lengths");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "series set_axis(labels1).set_axis(labels2) must equal set_axis(labels2)"
+        );
+    }
+
+    /// Replacing axis labels must commute with sign flipping because it does not inspect values.
+    #[test]
+    fn prop_series_set_axis_commutes_with_sign_flip(
+        (series, labels) in arb_series_set_axis_case("set_axis", 12),
+    ) {
+        let relabeled = series
+            .set_axis(labels.clone())
+            .expect("Series::set_axis() must succeed for matching lengths");
+        let flipped_then_relabeled = sign_flip_series(&series)
+            .set_axis(labels)
+            .expect("Series::set_axis() must succeed after sign flipping");
+        let expected = sign_flip_series(&relabeled);
+        prop_assert!(
+            approx_equal_series(&flipped_then_relabeled, &expected),
+            "series set_axis(labels) must commute with sign flipping"
+        );
+    }
+
+    /// Replacing axis labels must commute with renaming because the two operations touch disjoint metadata.
+    #[test]
+    fn prop_series_set_axis_commutes_with_rename(
+        (series, labels, new_name) in (1..=12usize).prop_flat_map(|len| {
+            (
+                arb_numeric_series("set_axis", len),
+                arb_index_labels(len),
+                "[a-z]{1,8}",
+            )
+        }),
+    ) {
+        let renamed_then_relabeled = series
+            .rename(&new_name)
+            .and_then(|renamed| renamed.set_axis(labels.clone()))
+            .expect("Series::rename().set_axis() must succeed");
+        let relabeled_then_renamed = series
+            .set_axis(labels)
+            .and_then(|renamed| renamed.rename(&new_name))
+            .expect("Series::set_axis().rename() must succeed");
+        prop_assert!(
+            approx_equal_series(&renamed_then_relabeled, &relabeled_then_renamed),
+            "series set_axis(labels) must commute with rename(name)"
         );
     }
 }

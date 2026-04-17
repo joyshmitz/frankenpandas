@@ -194,6 +194,54 @@ fn sign_flip_series(series: &Series) -> Series {
     .expect("sign-flipped series must construct")
 }
 
+fn shift_numeric_scalar(value: &Scalar, delta: f64) -> Scalar {
+    match value {
+        Scalar::Int64(v) => Scalar::Float64(*v as f64 + delta),
+        Scalar::Float64(v) => Scalar::Float64(*v + delta),
+        Scalar::Null(kind) => Scalar::Null(*kind),
+        other => other.clone(),
+    }
+}
+
+fn shift_series(series: &Series, delta: f64) -> Series {
+    let shifted_values = series
+        .values()
+        .iter()
+        .map(|value| shift_numeric_scalar(value, delta))
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        shifted_values,
+    )
+    .expect("shifted series must construct")
+}
+
+fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
+    prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
+}
+
+fn sign_flip_between_inclusive(inclusive: &str) -> &'static str {
+    match inclusive {
+        "both" => "both",
+        "neither" => "neither",
+        "left" => "right",
+        "right" => "left",
+        _ => "both",
+    }
+}
+
+fn bool_values(series: &Series) -> Result<Vec<bool>, String> {
+    series
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Bool(flag) => Ok(*flag),
+            other => Err(format!("expected bool series output, got {other:?}")),
+        })
+        .collect()
+}
+
 fn sorted_bounds(a: f64, b: f64) -> (f64, f64) {
     if a <= b { (a, b) } else { (b, a) }
 }
@@ -554,6 +602,118 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: between metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Inclusive-mode variants obey the expected boolean algebra:
+    /// both = left OR right, neither = left AND right.
+    #[test]
+    fn prop_series_between_inclusive_modes_form_expected_lattice(
+        series in arb_numeric_series("between", 12),
+        bound_a in -1e6_f64..1e6_f64,
+        bound_b in -1e6_f64..1e6_f64,
+    ) {
+        let (lower, upper) = sorted_bounds(bound_a, bound_b);
+        let left = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), "left")
+            .expect("Series::between(left) must succeed for numeric inputs");
+        let right = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), "right")
+            .expect("Series::between(right) must succeed for numeric inputs");
+        let both = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), "both")
+            .expect("Series::between(both) must succeed for numeric inputs");
+        let neither = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), "neither")
+            .expect("Series::between(neither) must succeed for numeric inputs");
+
+        let left_values = bool_values(&left).expect("between(left) must produce bool output");
+        let right_values = bool_values(&right).expect("between(right) must produce bool output");
+        let both_values = bool_values(&both).expect("between(both) must produce bool output");
+        let neither_values =
+            bool_values(&neither).expect("between(neither) must produce bool output");
+
+        for (idx, (((left_flag, right_flag), both_flag), neither_flag)) in left_values
+            .into_iter()
+            .zip(right_values)
+            .zip(both_values)
+            .zip(neither_values)
+            .enumerate()
+        {
+            prop_assert_eq!(
+                both_flag,
+                left_flag || right_flag,
+                "between(both) must equal between(left) OR between(right) at idx={}",
+                idx
+            );
+            prop_assert_eq!(
+                neither_flag,
+                left_flag && right_flag,
+                "between(neither) must equal between(left) AND between(right) at idx={}",
+                idx
+            );
+        }
+    }
+
+    /// Translating the series and both bounds by the same delta must preserve the result.
+    #[test]
+    fn prop_series_between_is_translation_invariant(
+        series in arb_numeric_series("between", 12),
+        bound_a in -1e6_f64..1e6_f64,
+        bound_b in -1e6_f64..1e6_f64,
+        delta in -1e3_f64..1e3_f64,
+        inclusive in arb_between_inclusive(),
+    ) {
+        let (lower, upper) = sorted_bounds(bound_a, bound_b);
+        let baseline = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), inclusive)
+            .expect("Series::between() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta);
+        let shifted_result = shifted
+            .between(
+                &Scalar::Float64(lower + delta),
+                &Scalar::Float64(upper + delta),
+                inclusive,
+            )
+            .expect("translated Series::between() must succeed for numeric inputs");
+        prop_assert!(
+            baseline.equals(&shifted_result),
+            "series between should be translation invariant for inclusive={inclusive}"
+        );
+    }
+
+    /// Negating the series and swapping/negating bounds must preserve the result,
+    /// with left/right inclusivity exchanged.
+    #[test]
+    fn prop_series_between_is_sign_symmetric(
+        series in arb_numeric_series("between", 12),
+        bound_a in -1e6_f64..1e6_f64,
+        bound_b in -1e6_f64..1e6_f64,
+        inclusive in arb_between_inclusive(),
+    ) {
+        let (lower, upper) = sorted_bounds(bound_a, bound_b);
+        let baseline = series
+            .between(&Scalar::Float64(lower), &Scalar::Float64(upper), inclusive)
+            .expect("Series::between() must succeed for numeric inputs");
+        let flipped_series = sign_flip_series(&series);
+        let flipped_result = flipped_series
+            .between(
+                &Scalar::Float64(-upper),
+                &Scalar::Float64(-lower),
+                sign_flip_between_inclusive(inclusive),
+            )
+            .expect("sign-flipped Series::between() must succeed for numeric inputs");
+        prop_assert!(
+            baseline.equals(&flipped_result),
+            "series between should commute with sign flip for inclusive={inclusive}"
+        );
     }
 }
 

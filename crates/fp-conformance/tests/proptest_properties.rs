@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 use fp_frame::{DataFrame, DropNaHow, FrameError, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
-use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
+use fp_index::{DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
 };
@@ -346,6 +346,37 @@ fn shift_dataframe(df: &DataFrame, delta: f64) -> DataFrame {
         .collect::<Vec<_>>();
     DataFrame::new_with_column_order(df.index().clone(), shifted_columns, column_order)
         .expect("shifted dataframe must construct")
+}
+
+fn shift_dataframe_column(df: &DataFrame, column_name: &str, delta: f64) -> DataFrame {
+    let mut shifted_columns = std::collections::BTreeMap::new();
+    let column_order = df
+        .column_names()
+        .into_iter()
+        .map(|name| {
+            let values = df
+                .column(name)
+                .expect("column listed in order must exist")
+                .values()
+                .iter()
+                .map(|value| {
+                    if name == column_name {
+                        shift_numeric_scalar(value, delta)
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            shifted_columns.insert(
+                name.clone(),
+                fp_columnar::Column::from_values(values)
+                    .expect("partially shifted dataframe column must construct"),
+            );
+            name.clone()
+        })
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(df.index().clone(), shifted_columns, column_order)
+        .expect("partially shifted dataframe must construct")
 }
 
 fn uniform_replace_dict(
@@ -4153,6 +4184,198 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&observed, &expected),
             "dataframe isin_dict(per_column) must equal per-column Series::isin()"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: duplicated / drop_duplicates metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Sign-flipping every numeric value preserves Series duplicate equivalence classes.
+    #[test]
+    fn prop_series_duplicated_is_sign_flip_invariant(
+        series in arb_replace_numeric_series("duplicated", 12),
+    ) {
+        let baseline = series
+            .duplicated()
+            .expect("Series::duplicated() must succeed for numeric and missing values");
+        let flipped = sign_flip_series(&series)
+            .duplicated()
+            .expect("Series::duplicated() must succeed after sign flip");
+        prop_assert!(
+            baseline.equals(&flipped),
+            "series duplicated(-x) must equal duplicated(x)"
+        );
+    }
+
+    /// Dropping duplicates twice is stable for Series.
+    #[test]
+    fn prop_series_drop_duplicates_is_idempotent(
+        series in arb_replace_numeric_series("drop_duplicates", 12),
+    ) {
+        let once = series
+            .drop_duplicates()
+            .expect("Series::drop_duplicates() must succeed for numeric and missing values");
+        let twice = once
+            .drop_duplicates()
+            .expect("Series::drop_duplicates() must stay stable after duplicates are removed");
+        prop_assert!(
+            approx_equal_series(&once, &twice),
+            "series drop_duplicates() must be idempotent"
+        );
+    }
+
+    /// Sign-flipping a Series commutes with dropping duplicates.
+    #[test]
+    fn prop_series_drop_duplicates_is_sign_flip_covariant(
+        series in arb_replace_numeric_series("drop_duplicates", 12),
+    ) {
+        let baseline = series
+            .drop_duplicates()
+            .expect("Series::drop_duplicates() must succeed for numeric and missing values");
+        let flipped_result = sign_flip_series(&series)
+            .drop_duplicates()
+            .expect("Series::drop_duplicates() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_result, &expected),
+            "series drop_duplicates(-x) must equal -drop_duplicates(x)"
+        );
+    }
+
+    /// A deduplicated Series must contain no further duplicates.
+    #[test]
+    fn prop_series_drop_duplicates_produces_unique_values(
+        series in arb_replace_numeric_series("drop_duplicates", 12),
+    ) {
+        let deduped = series
+            .drop_duplicates()
+            .expect("Series::drop_duplicates() must succeed for numeric and missing values");
+        let flags = bool_values(
+            &deduped
+                .duplicated()
+                .expect("Series::duplicated() must succeed on deduplicated values"),
+        )
+        .expect("Series::duplicated() must produce bool output");
+        prop_assert!(
+            flags.into_iter().all(|flag| !flag),
+            "series drop_duplicates() output must have no remaining duplicates"
+        );
+    }
+
+    /// Sign-flipping every numeric cell preserves full-row duplicate equivalence classes.
+    #[test]
+    fn prop_dataframe_duplicated_is_sign_flip_invariant(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .duplicated(None, DuplicateKeep::First)
+            .expect("DataFrame::duplicated() must succeed for numeric and missing values");
+        let flipped = sign_flip_dataframe(&df)
+            .duplicated(None, DuplicateKeep::First)
+            .expect("DataFrame::duplicated() must succeed after sign flip");
+        prop_assert!(
+            baseline.equals(&flipped),
+            "dataframe duplicated(-x) must equal duplicated(x)"
+        );
+    }
+
+    /// Duplicate detection on a subset must ignore translations to non-selected columns.
+    #[test]
+    fn prop_dataframe_duplicated_subset_ignores_unselected_column_translation(
+        df in arb_replace_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let subset = vec!["a".to_string()];
+        let baseline = df
+            .duplicated(Some(&subset), DuplicateKeep::First)
+            .expect("DataFrame::duplicated(subset) must succeed");
+        let shifted = shift_dataframe_column(&df, "b", delta)
+            .duplicated(Some(&subset), DuplicateKeep::First)
+            .expect("DataFrame::duplicated(subset) must ignore non-selected column changes");
+        prop_assert!(
+            baseline.equals(&shifted),
+            "dataframe duplicated(subset=['a']) must ignore changes to column b"
+        );
+    }
+
+    /// Dropping duplicated rows twice is stable for DataFrames.
+    #[test]
+    fn prop_dataframe_drop_duplicates_is_idempotent(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let once = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates() must succeed for numeric and missing values");
+        let twice = once
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates() must stay stable after duplicates are removed");
+        prop_assert!(
+            approx_equal_dataframe(&once, &twice),
+            "dataframe drop_duplicates() must be idempotent"
+        );
+    }
+
+    /// Sign-flipping every numeric cell commutes with dropping duplicated rows.
+    #[test]
+    fn prop_dataframe_drop_duplicates_is_sign_flip_covariant(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates() must succeed for numeric and missing values");
+        let flipped_result = sign_flip_dataframe(&df)
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates() must succeed after sign flip");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_result, &expected),
+            "dataframe drop_duplicates(-x) must equal -drop_duplicates(x)"
+        );
+    }
+
+    /// Subset-based row selection must ignore translations to non-selected columns.
+    #[test]
+    fn prop_dataframe_drop_duplicates_subset_ignores_unselected_column_translation(
+        df in arb_replace_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let subset = vec!["a".to_string()];
+        let baseline = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates(subset) must succeed");
+        let shifted_input = shift_dataframe_column(&df, "b", delta);
+        let shifted_result = shifted_input
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates(subset) must ignore non-selected column changes");
+        let expected = shift_dataframe_column(&baseline, "b", delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe drop_duplicates(subset=['a']) must ignore changes to column b except on kept rows"
+        );
+    }
+
+    /// A deduplicated DataFrame must contain no further duplicates.
+    #[test]
+    fn prop_dataframe_drop_duplicates_produces_unique_rows(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let deduped = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("DataFrame::drop_duplicates() must succeed for numeric and missing values");
+        let flags = bool_values(
+            &deduped
+                .duplicated(None, DuplicateKeep::First)
+                .expect("DataFrame::duplicated() must succeed on deduplicated rows"),
+        )
+        .expect("DataFrame::duplicated() must produce bool output");
+        prop_assert!(
+            flags.into_iter().all(|flag| !flag),
+            "dataframe drop_duplicates() output must have no remaining duplicated rows"
         );
     }
 }

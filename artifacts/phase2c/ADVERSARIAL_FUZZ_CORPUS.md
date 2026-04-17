@@ -118,6 +118,7 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 | `fuzz_fixture_parse` | fp-conformance | `serde_json::from_str::<PacketFixture>()` | `&[u8]` (raw JSON bytes) | ADV-5 |
 | `fuzz_json_io` | fp-io | `read_json_str()` / `read_jsonl_str()` | `&[u8]` (raw JSON / JSONL text bytes) | ADV-5 |
 | `fuzz_excel_io` | fp-io | `read_excel_bytes()` | `&[u8]` (raw workbook bytes) | ADV-1 |
+| `fuzz_parquet_io` | fp-io | `read_parquet_bytes()` | `&[u8]` (raw Parquet bytes or synthesized frame seed) | ADV-1 |
 | `fuzz_feather_io` | fp-io | `read_feather_bytes()` | `&[u8]` (raw Feather bytes or synthesized frame seed) | ADV-1 |
 | `fuzz_ipc_stream_io` | fp-io | `read_ipc_stream_bytes()` | `&[u8]` (raw Arrow IPC stream bytes or synthesized frame seed) | ADV-1 |
 | `fuzz_column_arith` | fp-columnar | `Column::binary_numeric()` | `(Column, Column, BinaryOp)` | ADV-4 |
@@ -135,6 +136,9 @@ Implemented entrypoint:
 - `fuzz_excel_io` target: `fuzz/fuzz_targets/fuzz_excel_io.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/excel_io/`
 - exercises `read_excel_bytes()` with a write/reparse oracle via `write_excel_bytes()`
+- `fuzz_parquet_io` target: `fuzz/fuzz_targets/fuzz_parquet_io.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/parquet_io/`
+- uses a dual-mode input envelope to either feed raw bytes into `read_parquet_bytes()` or synthesize a tiny typed `DataFrame`, serialize it with `write_parquet_bytes()`, and then verify Parquet round-trip stability
 - `fuzz_feather_io` target: `fuzz/fuzz_targets/fuzz_feather_io.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/feather_io/`
 - uses a dual-mode input envelope to either feed raw bytes into `read_feather_bytes()` or synthesize a tiny typed `DataFrame`, serialize it with `write_feather_bytes()`, and then verify Feather round-trip stability
@@ -412,6 +416,8 @@ crates/fp-conformance/
           <crash_hash>.report.md
         scalar_cast/
           ...
+        parquet_io/
+          ...
         feather_io/
           ...
         ipc_stream_io/
@@ -438,6 +444,7 @@ fuzz/                                     # cargo-fuzz workspace (future)
     fuzz_join_series.rs
     fuzz_groupby_sum.rs
     fuzz_fixture_parse.rs
+    fuzz_parquet_io.rs
     fuzz_feather_io.rs
     fuzz_ipc_stream_io.rs
     fuzz_column_arith.rs

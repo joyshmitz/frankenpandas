@@ -61,6 +61,26 @@ fn arb_numeric_values(len: usize) -> impl Strategy<Value = Vec<Scalar>> {
     proptest::collection::vec(arb_numeric_scalar(), len)
 }
 
+fn arb_condition_scalar() -> impl Strategy<Value = Scalar> {
+    prop_oneof![
+        4 => proptest::bool::ANY.prop_map(Scalar::Bool),
+        1 => Just(Scalar::Null(NullKind::Null)),
+        1 => Just(Scalar::Null(NullKind::NaN)),
+    ]
+}
+
+fn arb_condition_values(len: usize) -> impl Strategy<Value = Vec<Scalar>> {
+    proptest::collection::vec(arb_condition_scalar(), len)
+}
+
+fn arb_boolean_condition_scalar() -> impl Strategy<Value = Scalar> {
+    proptest::bool::ANY.prop_map(Scalar::Bool)
+}
+
+fn arb_boolean_condition_values(len: usize) -> impl Strategy<Value = Vec<Scalar>> {
+    proptest::collection::vec(arb_boolean_condition_scalar(), len)
+}
+
 /// Generate an arbitrary Series with numeric values and the given length.
 fn arb_numeric_series(name: &'static str, len: usize) -> impl Strategy<Value = Series> {
     (arb_index_labels(len), arb_numeric_values(len)).prop_filter_map(
@@ -217,6 +237,53 @@ fn sign_flip_dataframe(df: &DataFrame) -> DataFrame {
         .collect::<Vec<_>>();
     DataFrame::new_with_column_order(df.index().clone(), flipped_columns, column_order)
         .expect("sign-flipped dataframe must construct")
+}
+
+fn negate_condition_scalar(value: &Scalar) -> Scalar {
+    match value {
+        Scalar::Bool(v) => Scalar::Bool(!v),
+        Scalar::Null(kind) => Scalar::Null(*kind),
+        _ => Scalar::Null(NullKind::NaN),
+    }
+}
+
+fn negate_condition_series(series: &Series) -> Series {
+    let negated_values = series
+        .values()
+        .iter()
+        .map(negate_condition_scalar)
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        negated_values,
+    )
+    .expect("negated condition series must construct")
+}
+
+fn negate_condition_dataframe(df: &DataFrame) -> DataFrame {
+    let mut negated_columns = std::collections::BTreeMap::new();
+    let column_order = df
+        .column_names()
+        .into_iter()
+        .map(|name| {
+            let values = df
+                .column(name)
+                .expect("column listed in order must exist")
+                .values()
+                .iter()
+                .map(negate_condition_scalar)
+                .collect::<Vec<_>>();
+            negated_columns.insert(
+                name.clone(),
+                fp_columnar::Column::from_values(values)
+                    .expect("negated condition dataframe column must construct"),
+            );
+            name.clone()
+        })
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(df.index().clone(), negated_columns, column_order)
+        .expect("negated condition dataframe must construct")
 }
 
 fn shift_numeric_scalar(value: &Scalar, delta: f64) -> Scalar {
@@ -2558,6 +2625,176 @@ fn arb_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
     })
 }
 
+fn arb_aligned_where_series_triplet(
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Series, Series)> {
+    (1..=max_len).prop_flat_map(|len| {
+        (
+            arb_index_labels(len),
+            arb_numeric_values(len),
+            arb_condition_values(len),
+            arb_numeric_values(len),
+        )
+            .prop_filter_map(
+                "aligned where-series construction must succeed",
+                |(labels, data_values, cond_values, other_values)| {
+                    let data =
+                        Series::from_values("data".to_owned(), labels.clone(), data_values).ok()?;
+                    let cond =
+                        Series::from_values("cond".to_owned(), labels.clone(), cond_values).ok()?;
+                    let other =
+                        Series::from_values("other".to_owned(), labels, other_values).ok()?;
+                    Some((data, cond, other))
+                },
+            )
+    })
+}
+
+fn arb_aligned_where_dataframe_triplet(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, DataFrame, DataFrame)> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        (
+            arb_index_labels(nrows),
+            arb_numeric_values(nrows),
+            arb_numeric_values(nrows),
+            arb_condition_values(nrows),
+            arb_condition_values(nrows),
+            arb_numeric_values(nrows),
+            arb_numeric_values(nrows),
+        )
+            .prop_filter_map(
+                "aligned where-dataframe construction must succeed",
+                |(labels, data_a, data_b, cond_a, cond_b, other_a, other_b)| {
+                    let index = Index::new(labels);
+                    let mut data_cols = std::collections::BTreeMap::new();
+                    data_cols.insert(
+                        "a".to_string(),
+                        fp_columnar::Column::from_values(data_a).ok()?,
+                    );
+                    data_cols.insert(
+                        "b".to_string(),
+                        fp_columnar::Column::from_values(data_b).ok()?,
+                    );
+                    let data = DataFrame::new_with_column_order(
+                        index.clone(),
+                        data_cols,
+                        vec!["a".to_string(), "b".to_string()],
+                    )
+                    .ok()?;
+
+                    let mut cond_cols = std::collections::BTreeMap::new();
+                    cond_cols.insert(
+                        "a".to_string(),
+                        fp_columnar::Column::from_values(cond_a).ok()?,
+                    );
+                    cond_cols.insert(
+                        "b".to_string(),
+                        fp_columnar::Column::from_values(cond_b).ok()?,
+                    );
+                    let cond = DataFrame::new_with_column_order(
+                        index.clone(),
+                        cond_cols,
+                        vec!["a".to_string(), "b".to_string()],
+                    )
+                    .ok()?;
+
+                    let mut other_cols = std::collections::BTreeMap::new();
+                    other_cols.insert(
+                        "a".to_string(),
+                        fp_columnar::Column::from_values(other_a).ok()?,
+                    );
+                    other_cols.insert(
+                        "b".to_string(),
+                        fp_columnar::Column::from_values(other_b).ok()?,
+                    );
+                    let other = DataFrame::new_with_column_order(
+                        index,
+                        other_cols,
+                        vec!["a".to_string(), "b".to_string()],
+                    )
+                    .ok()?;
+
+                    Some((data, cond, other))
+                },
+            )
+    })
+}
+
+fn arb_aligned_boolean_where_series_pair(
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Series)> {
+    (1..=max_len).prop_flat_map(|len| {
+        (
+            arb_unique_index_labels(len),
+            arb_numeric_values(len),
+            arb_boolean_condition_values(len),
+        )
+            .prop_filter_map(
+                "aligned boolean where-series construction must succeed",
+                |(labels, data_values, cond_values)| {
+                    let data =
+                        Series::from_values("data".to_owned(), labels.clone(), data_values).ok()?;
+                    let cond = Series::from_values("cond".to_owned(), labels, cond_values).ok()?;
+                    Some((data, cond))
+                },
+            )
+    })
+}
+
+fn arb_aligned_boolean_where_dataframe_pair(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, DataFrame)> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        (
+            arb_unique_index_labels(nrows),
+            arb_numeric_values(nrows),
+            arb_numeric_values(nrows),
+            arb_boolean_condition_values(nrows),
+            arb_boolean_condition_values(nrows),
+        )
+            .prop_filter_map(
+                "aligned boolean where-dataframe construction must succeed",
+                |(labels, data_a, data_b, cond_a, cond_b)| {
+                    let index = Index::new(labels);
+                    let mut data_cols = std::collections::BTreeMap::new();
+                    data_cols.insert(
+                        "a".to_string(),
+                        fp_columnar::Column::from_values(data_a).ok()?,
+                    );
+                    data_cols.insert(
+                        "b".to_string(),
+                        fp_columnar::Column::from_values(data_b).ok()?,
+                    );
+                    let data = DataFrame::new_with_column_order(
+                        index.clone(),
+                        data_cols,
+                        vec!["a".to_string(), "b".to_string()],
+                    )
+                    .ok()?;
+
+                    let mut cond_cols = std::collections::BTreeMap::new();
+                    cond_cols.insert(
+                        "a".to_string(),
+                        fp_columnar::Column::from_values(cond_a).ok()?,
+                    );
+                    cond_cols.insert(
+                        "b".to_string(),
+                        fp_columnar::Column::from_values(cond_b).ok()?,
+                    );
+                    let cond = DataFrame::new_with_column_order(
+                        index,
+                        cond_cols,
+                        vec!["a".to_string(), "b".to_string()],
+                    )
+                    .ok()?;
+
+                    Some((data, cond))
+                },
+            )
+    })
+}
+
 fn arb_variable_numeric_series(
     name: &'static str,
     max_len: usize,
@@ -3694,6 +3931,224 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&shifted_fill, &expected),
             "dataframe bfill_axis1(x + c) must equal bfill_axis1(x) + c"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: where / mask metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Complementing a boolean-or-null condition swaps scalar where and mask.
+    #[test]
+    fn prop_series_where_and_mask_scalar_are_condition_duals(
+        (series, cond, _other) in arb_aligned_where_series_triplet(12),
+        fill in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let where_result = series
+            .where_cond(&cond, Some(&fill_scalar))
+            .expect("Series::where_cond() must succeed for aligned inputs");
+        let negated_cond = negate_condition_series(&cond);
+        let mask_result = series
+            .mask(&negated_cond, Some(&fill_scalar))
+            .expect("Series::mask() must succeed for complemented aligned inputs");
+        prop_assert!(
+            approx_equal_series(&where_result, &mask_result),
+            "series where(cond, fill) must equal mask(!cond, fill)"
+        );
+    }
+
+    /// Complementing a boolean-or-null condition swaps Series-valued where and mask.
+    #[test]
+    fn prop_series_where_and_mask_series_are_condition_duals(
+        (series, cond, other) in arb_aligned_where_series_triplet(12),
+    ) {
+        let where_result = series
+            .where_cond_series(&cond, &other)
+            .expect("Series::where_cond_series() must succeed for aligned inputs");
+        let negated_cond = negate_condition_series(&cond);
+        let mask_result = series
+            .mask_series(&negated_cond, &other)
+            .expect("Series::mask_series() must succeed for complemented aligned inputs");
+        prop_assert!(
+            approx_equal_series(&where_result, &mask_result),
+            "series where(cond, other) must equal mask(!cond, other)"
+        );
+    }
+
+    /// With unique labels and a purely boolean condition, using self as `other` is an identity for Series.
+    #[test]
+    fn prop_series_where_and_mask_with_self_are_identity_for_boolean_conditions(
+        (series, cond) in arb_aligned_boolean_where_series_pair(12),
+    ) {
+        let where_identity = series
+            .where_cond_series(&cond, &series)
+            .expect("Series::where_cond_series() must succeed for aligned boolean inputs");
+        let mask_identity = series
+            .mask_series(&cond, &series)
+            .expect("Series::mask_series() must succeed for aligned boolean inputs");
+        prop_assert!(
+            series.equals(&where_identity),
+            "series where(cond, self) must be identity for boolean conditions on uniquely labeled inputs"
+        );
+        prop_assert!(
+            series.equals(&mask_identity),
+            "series mask(cond, self) must be identity for boolean conditions on uniquely labeled inputs"
+        );
+    }
+
+    /// Translating both the data and scalar fill commutes with scalar where for Series.
+    #[test]
+    fn prop_series_where_is_translation_covariant(
+        (series, cond, _other) in arb_aligned_where_series_triplet(12),
+        fill in -10.0f64..10.0,
+        delta in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let baseline = series
+            .where_cond(&cond, Some(&fill_scalar))
+            .expect("Series::where_cond() must succeed for aligned inputs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_fill = Scalar::Float64(fill + delta);
+        let shifted_result = shifted_input
+            .where_cond(&cond, Some(&shifted_fill))
+            .expect("Series::where_cond() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_result, &expected),
+            "series where(x + c, cond, fill + c) must equal where(x, cond, fill) + c"
+        );
+    }
+
+    /// Translating both the data and scalar fill commutes with scalar mask for Series.
+    #[test]
+    fn prop_series_mask_is_translation_covariant(
+        (series, cond, _other) in arb_aligned_where_series_triplet(12),
+        fill in -10.0f64..10.0,
+        delta in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let baseline = series
+            .mask(&cond, Some(&fill_scalar))
+            .expect("Series::mask() must succeed for aligned inputs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_fill = Scalar::Float64(fill + delta);
+        let shifted_result = shifted_input
+            .mask(&cond, Some(&shifted_fill))
+            .expect("Series::mask() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_result, &expected),
+            "series mask(x + c, cond, fill + c) must equal mask(x, cond, fill) + c"
+        );
+    }
+
+    /// Complementing a boolean-or-null condition swaps scalar where and mask for DataFrames.
+    #[test]
+    fn prop_dataframe_where_and_mask_scalar_are_condition_duals(
+        (df, cond, _other) in arb_aligned_where_dataframe_triplet(8),
+        fill in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let where_result = df
+            .where_cond(&cond, Some(&fill_scalar))
+            .expect("DataFrame::where_cond() must succeed for aligned inputs");
+        let negated_cond = negate_condition_dataframe(&cond);
+        let mask_result = df
+            .mask(&negated_cond, Some(&fill_scalar))
+            .expect("DataFrame::mask() must succeed for complemented aligned inputs");
+        prop_assert!(
+            approx_equal_dataframe(&where_result, &mask_result),
+            "dataframe where(cond, fill) must equal mask(!cond, fill)"
+        );
+    }
+
+    /// Complementing a boolean-or-null condition swaps DataFrame-valued where and mask.
+    #[test]
+    fn prop_dataframe_where_and_mask_dataframe_are_condition_duals(
+        (df, cond, other) in arb_aligned_where_dataframe_triplet(8),
+    ) {
+        let where_result = df
+            .where_cond_df(&cond, &other)
+            .expect("DataFrame::where_cond_df() must succeed for aligned inputs");
+        let negated_cond = negate_condition_dataframe(&cond);
+        let mask_result = df
+            .mask_df_other(&negated_cond, &other)
+            .expect("DataFrame::mask_df_other() must succeed for complemented aligned inputs");
+        prop_assert!(
+            approx_equal_dataframe(&where_result, &mask_result),
+            "dataframe where(cond, other) must equal mask(!cond, other)"
+        );
+    }
+
+    /// With unique labels and a purely boolean condition, using self as `other` is an identity for DataFrames.
+    #[test]
+    fn prop_dataframe_where_and_mask_with_self_are_identity_for_boolean_conditions(
+        (df, cond) in arb_aligned_boolean_where_dataframe_pair(8),
+    ) {
+        let where_identity = df
+            .where_cond_df(&cond, &df)
+            .expect("DataFrame::where_cond_df() must succeed for aligned boolean inputs");
+        let mask_identity = df
+            .mask_df_other(&cond, &df)
+            .expect("DataFrame::mask_df_other() must succeed for aligned boolean inputs");
+        prop_assert!(
+            df.equals(&where_identity),
+            "dataframe where(cond, self) must be identity for boolean conditions on uniquely labeled inputs"
+        );
+        prop_assert!(
+            df.equals(&mask_identity),
+            "dataframe mask(cond, self) must be identity for boolean conditions on uniquely labeled inputs"
+        );
+    }
+
+    /// Translating both the data and scalar fill commutes with scalar where for DataFrames.
+    #[test]
+    fn prop_dataframe_where_is_translation_covariant(
+        (df, cond, _other) in arb_aligned_where_dataframe_triplet(8),
+        fill in -10.0f64..10.0,
+        delta in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let baseline = df
+            .where_cond(&cond, Some(&fill_scalar))
+            .expect("DataFrame::where_cond() must succeed for aligned inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = Scalar::Float64(fill + delta);
+        let shifted_result = shifted_input
+            .where_cond(&cond, Some(&shifted_fill))
+            .expect("DataFrame::where_cond() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe where(x + c, cond, fill + c) must equal where(x, cond, fill) + c"
+        );
+    }
+
+    /// Translating both the data and scalar fill commutes with scalar mask for DataFrames.
+    #[test]
+    fn prop_dataframe_mask_is_translation_covariant(
+        (df, cond, _other) in arb_aligned_where_dataframe_triplet(8),
+        fill in -10.0f64..10.0,
+        delta in -10.0f64..10.0,
+    ) {
+        let fill_scalar = Scalar::Float64(fill);
+        let baseline = df
+            .mask(&cond, Some(&fill_scalar))
+            .expect("DataFrame::mask() must succeed for aligned inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = Scalar::Float64(fill + delta);
+        let shifted_result = shifted_input
+            .mask(&cond, Some(&shifted_fill))
+            .expect("DataFrame::mask() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe mask(x + c, cond, fill + c) must equal mask(x, cond, fill) + c"
         );
     }
 }

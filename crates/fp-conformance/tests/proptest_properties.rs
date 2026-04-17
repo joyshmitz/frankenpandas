@@ -194,6 +194,31 @@ fn sign_flip_series(series: &Series) -> Series {
     .expect("sign-flipped series must construct")
 }
 
+fn sign_flip_dataframe(df: &DataFrame) -> DataFrame {
+    let mut flipped_columns = std::collections::BTreeMap::new();
+    let column_order = df
+        .column_names()
+        .into_iter()
+        .map(|name| {
+            let values = df
+                .column(name)
+                .expect("column listed in order must exist")
+                .values()
+                .iter()
+                .map(sign_flip_numeric_scalar)
+                .collect::<Vec<_>>();
+            flipped_columns.insert(
+                name.clone(),
+                fp_columnar::Column::from_values(values)
+                    .expect("sign-flipped dataframe column must construct"),
+            );
+            name.clone()
+        })
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(df.index().clone(), flipped_columns, column_order)
+        .expect("sign-flipped dataframe must construct")
+}
+
 fn shift_numeric_scalar(value: &Scalar, delta: f64) -> Scalar {
     match value {
         Scalar::Int64(v) => Scalar::Float64(*v as f64 + delta),
@@ -406,6 +431,37 @@ fn normalized_dataframe_rows(df: &DataFrame) -> Vec<String> {
         .collect::<Vec<_>>();
     rows.sort();
     rows
+}
+
+fn ordered_series_rows(series: &Series) -> Vec<String> {
+    series
+        .index()
+        .labels()
+        .iter()
+        .zip(series.values().iter())
+        .map(|(label, value)| format!("{label:?}|{value:?}"))
+        .collect()
+}
+
+fn ordered_dataframe_rows(df: &DataFrame) -> Vec<String> {
+    let column_names = df.column_names();
+    (0..df.index().len())
+        .map(|row_idx| {
+            let rendered_values = column_names
+                .iter()
+                .map(|name| {
+                    format!(
+                        "{name}:{:?}",
+                        df.column(name)
+                            .expect("column listed in order must exist")
+                            .values()[row_idx]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            format!("{:?}|{rendered_values}", df.index().labels()[row_idx])
+        })
+        .collect()
 }
 
 fn sample_count_from_hint(total: usize, replace: bool, hint: usize) -> usize {
@@ -2331,6 +2387,238 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: nlargest / nsmallest metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series nlargest must be prefix-monotone in n.
+    #[test]
+    fn prop_series_nlargest_is_prefix_monotone(
+        series in arb_variable_numeric_series("nlargest", 12),
+        hint_a in 0usize..32,
+        hint_b in 0usize..32,
+    ) {
+        let available = series.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n_small = 1 + (hint_a % available);
+        let n_large = n_small + (hint_b % (available - n_small + 1));
+        let small = series
+            .nlargest(n_small)
+            .expect("Series::nlargest() must succeed for numeric inputs");
+        let large = series
+            .nlargest(n_large)
+            .expect("Series::nlargest() must succeed for numeric inputs");
+        let small_rows = ordered_series_rows(&small);
+        let large_rows = ordered_series_rows(&large);
+        prop_assert_eq!(
+            small_rows,
+            large_rows[..n_small].to_vec(),
+            "series nlargest({}) must equal the prefix of nlargest({})",
+            n_small,
+            n_large
+        );
+    }
+
+    /// Series nsmallest must be prefix-monotone in n.
+    #[test]
+    fn prop_series_nsmallest_is_prefix_monotone(
+        series in arb_variable_numeric_series("nsmallest", 12),
+        hint_a in 0usize..32,
+        hint_b in 0usize..32,
+    ) {
+        let available = series.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n_small = 1 + (hint_a % available);
+        let n_large = n_small + (hint_b % (available - n_small + 1));
+        let small = series
+            .nsmallest(n_small)
+            .expect("Series::nsmallest() must succeed for numeric inputs");
+        let large = series
+            .nsmallest(n_large)
+            .expect("Series::nsmallest() must succeed for numeric inputs");
+        let small_rows = ordered_series_rows(&small);
+        let large_rows = ordered_series_rows(&large);
+        prop_assert_eq!(
+            small_rows,
+            large_rows[..n_small].to_vec(),
+            "series nsmallest({}) must equal the prefix of nsmallest({})",
+            n_small,
+            n_large
+        );
+    }
+
+    /// Negating a Series must turn nlargest into nsmallest after re-negating the output.
+    #[test]
+    fn prop_series_nlargest_nsmallest_are_sign_dual(
+        series in arb_variable_numeric_series("nlargest", 12),
+        hint in 0usize..32,
+    ) {
+        let available = series.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n = 1 + (hint % available);
+        let largest = series
+            .nlargest(n)
+            .expect("Series::nlargest() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let smallest_on_flipped = flipped
+            .nsmallest(n)
+            .expect("Series::nsmallest() must succeed after sign flipping");
+        let expected = sign_flip_series(&smallest_on_flipped);
+        prop_assert!(
+            largest.equals(&expected),
+            "series nlargest(x, n) must equal -nsmallest(-x, n)"
+        );
+    }
+
+    /// Negating a Series must turn nsmallest into nlargest after re-negating the output.
+    #[test]
+    fn prop_series_nsmallest_nlargest_are_sign_dual(
+        series in arb_variable_numeric_series("nsmallest", 12),
+        hint in 0usize..32,
+    ) {
+        let available = series.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n = 1 + (hint % available);
+        let smallest = series
+            .nsmallest(n)
+            .expect("Series::nsmallest() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let largest_on_flipped = flipped
+            .nlargest(n)
+            .expect("Series::nlargest() must succeed after sign flipping");
+        let expected = sign_flip_series(&largest_on_flipped);
+        prop_assert!(
+            smallest.equals(&expected),
+            "series nsmallest(x, n) must equal -nlargest(-x, n)"
+        );
+    }
+
+    /// DataFrame nlargest must be prefix-monotone in n for a fixed numeric column.
+    #[test]
+    fn prop_dataframe_nlargest_is_prefix_monotone(
+        df in arb_numeric_dataframe(8),
+        hint_a in 0usize..32,
+        hint_b in 0usize..32,
+    ) {
+        let column = df.column("a").expect("numeric dataframe must have column a");
+        let available = column.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n_small = 1 + (hint_a % available);
+        let n_large = n_small + (hint_b % (available - n_small + 1));
+        let small = df
+            .nlargest(n_small, "a")
+            .expect("DataFrame::nlargest() must succeed for numeric inputs");
+        let large = df
+            .nlargest(n_large, "a")
+            .expect("DataFrame::nlargest() must succeed for numeric inputs");
+        let small_rows = ordered_dataframe_rows(&small);
+        let large_rows = ordered_dataframe_rows(&large);
+        prop_assert_eq!(
+            small_rows,
+            large_rows[..n_small].to_vec(),
+            "dataframe nlargest({}) must equal the prefix of nlargest({})",
+            n_small,
+            n_large
+        );
+    }
+
+    /// DataFrame nsmallest must be prefix-monotone in n for a fixed numeric column.
+    #[test]
+    fn prop_dataframe_nsmallest_is_prefix_monotone(
+        df in arb_numeric_dataframe(8),
+        hint_a in 0usize..32,
+        hint_b in 0usize..32,
+    ) {
+        let column = df.column("a").expect("numeric dataframe must have column a");
+        let available = column.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n_small = 1 + (hint_a % available);
+        let n_large = n_small + (hint_b % (available - n_small + 1));
+        let small = df
+            .nsmallest(n_small, "a")
+            .expect("DataFrame::nsmallest() must succeed for numeric inputs");
+        let large = df
+            .nsmallest(n_large, "a")
+            .expect("DataFrame::nsmallest() must succeed for numeric inputs");
+        let small_rows = ordered_dataframe_rows(&small);
+        let large_rows = ordered_dataframe_rows(&large);
+        prop_assert_eq!(
+            small_rows,
+            large_rows[..n_small].to_vec(),
+            "dataframe nsmallest({}) must equal the prefix of nsmallest({})",
+            n_small,
+            n_large
+        );
+    }
+
+    /// Negating a DataFrame must turn nlargest into nsmallest on the same column after re-negating.
+    #[test]
+    fn prop_dataframe_nlargest_nsmallest_are_sign_dual(
+        df in arb_numeric_dataframe(8),
+        hint in 0usize..32,
+    ) {
+        let column = df.column("a").expect("numeric dataframe must have column a");
+        let available = column.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n = 1 + (hint % available);
+        let largest = df
+            .nlargest(n, "a")
+            .expect("DataFrame::nlargest() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let smallest_on_flipped = flipped
+            .nsmallest(n, "a")
+            .expect("DataFrame::nsmallest() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&smallest_on_flipped);
+        prop_assert!(
+            largest.equals(&expected),
+            "dataframe nlargest(x, n) must equal -nsmallest(-x, n)"
+        );
+    }
+
+    /// Negating a DataFrame must turn nsmallest into nlargest on the same column after re-negating.
+    #[test]
+    fn prop_dataframe_nsmallest_nlargest_are_sign_dual(
+        df in arb_numeric_dataframe(8),
+        hint in 0usize..32,
+    ) {
+        let column = df.column("a").expect("numeric dataframe must have column a");
+        let available = column.values().iter().filter(|value| !value.is_missing()).count();
+        if available == 0 {
+            return Ok(());
+        }
+        let n = 1 + (hint % available);
+        let smallest = df
+            .nsmallest(n, "a")
+            .expect("DataFrame::nsmallest() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let largest_on_flipped = flipped
+            .nlargest(n, "a")
+            .expect("DataFrame::nlargest() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&largest_on_flipped);
+        prop_assert!(
+            smallest.equals(&expected),
+            "dataframe nsmallest(x, n) must equal -nlargest(-x, n)"
+        );
     }
 }
 

@@ -428,6 +428,199 @@ fn rename_index_from_labels(df: &DataFrame, target_labels: &[IndexLabel]) -> Dat
     df.rename_index(&pairs)
 }
 
+fn arb_sorted_int_index_labels(len: usize) -> impl Strategy<Value = Vec<IndexLabel>> {
+    proptest::collection::btree_set(-100i64..100, len).prop_map(|labels| {
+        labels
+            .into_iter()
+            .map(IndexLabel::Int64)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn merged_truncate_before(
+    lhs: &Option<IndexLabel>,
+    rhs: &Option<IndexLabel>,
+) -> Option<IndexLabel> {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => Some(if left >= right {
+            left.clone()
+        } else {
+            right.clone()
+        }),
+        (Some(left), None) => Some(left.clone()),
+        (None, Some(right)) => Some(right.clone()),
+        (None, None) => None,
+    }
+}
+
+fn merged_truncate_after(lhs: &Option<IndexLabel>, rhs: &Option<IndexLabel>) -> Option<IndexLabel> {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => Some(if left <= right {
+            left.clone()
+        } else {
+            right.clone()
+        }),
+        (Some(left), None) => Some(left.clone()),
+        (None, Some(right)) => Some(right.clone()),
+        (None, None) => None,
+    }
+}
+
+fn arb_truncate_bounds(
+    min_label: i64,
+    max_label: i64,
+) -> impl Strategy<Value = (Option<IndexLabel>, Option<IndexLabel>)> {
+    let low = min_label.saturating_sub(2);
+    let high = max_label.saturating_add(2);
+    (
+        proptest::option::of(low..=high),
+        proptest::option::of(low..=high),
+    )
+        .prop_map(|(before, after)| (before.map(IndexLabel::Int64), after.map(IndexLabel::Int64)))
+}
+
+fn arb_sorted_int_series(name: &'static str, len: usize) -> impl Strategy<Value = Series> {
+    (arb_sorted_int_index_labels(len), arb_numeric_values(len)).prop_filter_map(
+        "sorted int-index series construction must succeed",
+        move |(labels, values)| Series::from_values(name.to_owned(), labels, values).ok(),
+    )
+}
+
+fn arb_sorted_int_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        let idx_labels = arb_sorted_int_index_labels(nrows);
+        let col_a = arb_numeric_values(nrows);
+        let col_b = arb_numeric_values(nrows);
+        (idx_labels, col_a, col_b).prop_filter_map(
+            "sorted int-index dataframe construction must succeed",
+            move |(labels, va, vb)| {
+                let index = Index::new(labels);
+                let col_a = fp_columnar::Column::from_values(va).ok()?;
+                let col_b = fp_columnar::Column::from_values(vb).ok()?;
+                let mut cols = std::collections::BTreeMap::new();
+                cols.insert("a".to_string(), col_a);
+                cols.insert("b".to_string(), col_b);
+                DataFrame::new_with_column_order(
+                    index,
+                    cols,
+                    vec!["a".to_string(), "b".to_string()],
+                )
+                .ok()
+            },
+        )
+    })
+}
+
+fn arb_series_truncate_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Option<IndexLabel>, Option<IndexLabel>)> {
+    (1..=max_len)
+        .prop_flat_map(move |len| {
+            arb_sorted_int_series(name, len).prop_flat_map(move |series| {
+                let labels = series.index().labels();
+                let min_label = match labels.first() {
+                    Some(IndexLabel::Int64(value)) => *value,
+                    _ => unreachable!("sorted truncate labels must be Int64"),
+                };
+                let max_label = match labels.last() {
+                    Some(IndexLabel::Int64(value)) => *value,
+                    _ => unreachable!("sorted truncate labels must be Int64"),
+                };
+                (Just(series), arb_truncate_bounds(min_label, max_label))
+            })
+        })
+        .prop_map(|(series, (before, after))| (series, before, after))
+}
+
+fn arb_series_truncate_composition_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<
+    Value = (
+        Series,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+    ),
+> {
+    (1..=max_len)
+        .prop_flat_map(move |len| {
+            arb_sorted_int_series(name, len).prop_flat_map(move |series| {
+                let labels = series.index().labels();
+                let min_label = match labels.first() {
+                    Some(IndexLabel::Int64(value)) => *value,
+                    _ => unreachable!("sorted truncate labels must be Int64"),
+                };
+                let max_label = match labels.last() {
+                    Some(IndexLabel::Int64(value)) => *value,
+                    _ => unreachable!("sorted truncate labels must be Int64"),
+                };
+                (
+                    Just(series),
+                    arb_truncate_bounds(min_label, max_label),
+                    arb_truncate_bounds(min_label, max_label),
+                )
+            })
+        })
+        .prop_map(|(series, (before_a, after_a), (before_b, after_b))| {
+            (series, before_a, after_a, before_b, after_b)
+        })
+}
+
+fn arb_dataframe_truncate_case(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, Option<IndexLabel>, Option<IndexLabel>)> {
+    arb_sorted_int_dataframe(max_rows)
+        .prop_flat_map(|df| {
+            let labels = df.index().labels();
+            let min_label = match labels.first() {
+                Some(IndexLabel::Int64(value)) => *value,
+                _ => unreachable!("sorted truncate labels must be Int64"),
+            };
+            let max_label = match labels.last() {
+                Some(IndexLabel::Int64(value)) => *value,
+                _ => unreachable!("sorted truncate labels must be Int64"),
+            };
+            (Just(df), arb_truncate_bounds(min_label, max_label))
+        })
+        .prop_map(|(df, (before, after))| (df, before, after))
+}
+
+fn arb_dataframe_truncate_composition_case(
+    max_rows: usize,
+) -> impl Strategy<
+    Value = (
+        DataFrame,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+        Option<IndexLabel>,
+    ),
+> {
+    arb_sorted_int_dataframe(max_rows)
+        .prop_flat_map(|df| {
+            let labels = df.index().labels();
+            let min_label = match labels.first() {
+                Some(IndexLabel::Int64(value)) => *value,
+                _ => unreachable!("sorted truncate labels must be Int64"),
+            };
+            let max_label = match labels.last() {
+                Some(IndexLabel::Int64(value)) => *value,
+                _ => unreachable!("sorted truncate labels must be Int64"),
+            };
+            (
+                Just(df),
+                arb_truncate_bounds(min_label, max_label),
+                arb_truncate_bounds(min_label, max_label),
+            )
+        })
+        .prop_map(|(df, (before_a, after_a), (before_b, after_b))| {
+            (df, before_a, after_a, before_b, after_b)
+        })
+}
+
 fn normalize_take_position(idx: i64, len: usize) -> usize {
     let len_i64 = i64::try_from(len).expect("take length must fit in i64");
     let resolved = if idx < 0 {
@@ -4286,6 +4479,118 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&direct, &via_intermediate),
             "dataframe column reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: truncate metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Truncating a Series with open bounds must be identity.
+    #[test]
+    fn prop_series_truncate_open_bounds_is_identity(
+        series in (1..=12usize).prop_flat_map(|len| arb_sorted_int_series("truncate", len)),
+    ) {
+        let truncated = series
+            .truncate(None, None)
+            .expect("Series::truncate(None, None) must succeed");
+        prop_assert!(
+            approx_equal_series(&truncated, &series),
+            "series truncate(None, None) must be identity"
+        );
+    }
+
+    /// Series truncate must commute with sign flipping because bounds only inspect the index.
+    #[test]
+    fn prop_series_truncate_commutes_with_sign_flip(
+        (series, before, after) in arb_series_truncate_case("truncate", 12),
+    ) {
+        let truncated = series
+            .truncate(before.as_ref(), after.as_ref())
+            .expect("Series::truncate() must succeed for sorted int labels");
+        let flipped_then_truncated = sign_flip_series(&series)
+            .truncate(before.as_ref(), after.as_ref())
+            .expect("Series::truncate() must succeed after sign flipping");
+        let expected = sign_flip_series(&truncated);
+        prop_assert!(
+            approx_equal_series(&flipped_then_truncated, &expected),
+            "series truncate must commute with sign flipping"
+        );
+    }
+
+    /// Nested Series truncates must collapse to the directly intersected bounds.
+    #[test]
+    fn prop_series_truncate_composes(
+        (series, before_a, after_a, before_b, after_b) in arb_series_truncate_composition_case("truncate", 12),
+    ) {
+        let nested = series
+            .truncate(before_a.as_ref(), after_a.as_ref())
+            .and_then(|truncated| truncated.truncate(before_b.as_ref(), after_b.as_ref()))
+            .expect("nested Series::truncate() must succeed for sorted int labels");
+        let direct_before = merged_truncate_before(&before_a, &before_b);
+        let direct_after = merged_truncate_after(&after_a, &after_b);
+        let direct = series
+            .truncate(direct_before.as_ref(), direct_after.as_ref())
+            .expect("direct composed Series::truncate() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "nested series truncates must equal directly truncating with intersected bounds"
+        );
+    }
+
+    /// Truncating a DataFrame with open bounds must be identity.
+    #[test]
+    fn prop_dataframe_truncate_open_bounds_is_identity(
+        df in arb_sorted_int_dataframe(8),
+    ) {
+        let truncated = df
+            .truncate(None, None)
+            .expect("DataFrame::truncate(None, None) must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&truncated, &df),
+            "dataframe truncate(None, None) must be identity"
+        );
+    }
+
+    /// DataFrame truncate must commute with sign flipping because bounds only inspect the index.
+    #[test]
+    fn prop_dataframe_truncate_commutes_with_sign_flip(
+        (df, before, after) in arb_dataframe_truncate_case(8),
+    ) {
+        let truncated = df
+            .truncate(before.as_ref(), after.as_ref())
+            .expect("DataFrame::truncate() must succeed for sorted int labels");
+        let flipped_then_truncated = sign_flip_dataframe(&df)
+            .truncate(before.as_ref(), after.as_ref())
+            .expect("DataFrame::truncate() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&truncated);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_truncated, &expected),
+            "dataframe truncate must commute with sign flipping"
+        );
+    }
+
+    /// Nested DataFrame truncates must collapse to the directly intersected bounds.
+    #[test]
+    fn prop_dataframe_truncate_composes(
+        (df, before_a, after_a, before_b, after_b) in arb_dataframe_truncate_composition_case(8),
+    ) {
+        let nested = df
+            .truncate(before_a.as_ref(), after_a.as_ref())
+            .and_then(|truncated| truncated.truncate(before_b.as_ref(), after_b.as_ref()))
+            .expect("nested DataFrame::truncate() must succeed for sorted int labels");
+        let direct_before = merged_truncate_before(&before_a, &before_b);
+        let direct_after = merged_truncate_after(&after_a, &after_b);
+        let direct = df
+            .truncate(direct_before.as_ref(), direct_after.as_ref())
+            .expect("direct composed DataFrame::truncate() must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "nested dataframe truncates must equal directly truncating with intersected bounds"
         );
     }
 }

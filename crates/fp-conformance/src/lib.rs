@@ -12967,9 +12967,9 @@ fn execute_and_compare_differential(
                         "expected series_to_frame to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => Err(
-                    "expected_frame or expected_error required for series_to_frame".to_owned(),
-                ),
+                _ => {
+                    Err("expected_frame or expected_error required for series_to_frame".to_owned())
+                }
             }
         }
         FixtureOperation::SeriesExtractDf => {

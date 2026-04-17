@@ -260,6 +260,8 @@ pub enum FixtureOperation {
     SeriesRound,
     #[serde(rename = "series_cumsum", alias = "series_cumsum_default")]
     SeriesCumsum,
+    #[serde(rename = "series_cumprod", alias = "series_cumprod_default")]
+    SeriesCumprod,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -506,6 +508,7 @@ impl FixtureOperation {
             Self::SeriesAbs => "series_abs",
             Self::SeriesRound => "series_round",
             Self::SeriesCumsum => "series_cumsum",
+            Self::SeriesCumprod => "series_cumprod",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1089,6 +1092,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCumsum
+        | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -6216,6 +6220,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCumsum
+        | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7582,6 +7587,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCumsum
+        | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7940,6 +7946,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCumsum
+        | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9461,6 +9468,7 @@ fn execute_series_module_utility_fixture_operation(
             series.round(decimals).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesCumsum => series.cumsum().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesCumprod => series.cumprod().map_err(|err| err.to_string()),
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
         }
@@ -11608,6 +11616,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCumsum
+        | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -16000,6 +16009,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-066 series_cumsum fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_cumprod_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-067", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-067"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-067 series_cumprod fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

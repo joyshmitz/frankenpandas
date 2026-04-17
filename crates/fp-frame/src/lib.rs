@@ -1836,14 +1836,15 @@ impl Series {
     /// Matches `series.fillna(value, limit=N)`.
     pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
         let vals = self.column.values();
+        let filled = self.column.fillna(fill_value)?;
         let mut out = Vec::with_capacity(vals.len());
         let mut consecutive_fills: usize = 0;
 
-        for val in vals {
+        for (i, val) in vals.iter().enumerate() {
             if val.is_missing() {
                 consecutive_fills += 1;
                 if consecutive_fills <= limit {
-                    out.push(fill_value.clone());
+                    out.push(filled.values()[i].clone());
                 } else {
                     out.push(val.clone());
                 }
@@ -46470,6 +46471,19 @@ mod tests {
     }
 
     #[test]
+    fn test_series_fillna_limit_matches_fillna_on_null_dtype() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into()],
+            vec![Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let limited = s.fillna_limit(&Scalar::Int64(0), s.len()).unwrap();
+        let unbounded = s.fillna(&Scalar::Int64(0)).unwrap();
+        assert_eq!(limited, unbounded);
+    }
+
+    #[test]
     fn test_df_where_cond_df() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -46522,6 +46536,17 @@ mod tests {
         assert_eq!(result.columns["a"].values()[1], Scalar::Float64(0.0)); // filled
         assert!(result.columns["a"].values()[2].is_missing()); // limit exceeded
         assert!(result.columns["a"].values()[3].is_missing()); // limit exceeded
+    }
+
+    #[test]
+    fn test_df_fillna_limit_matches_fillna_on_null_dtype() {
+        let df =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Null(NullKind::Null)])]).unwrap();
+        let limited = df
+            .fillna_limit(&Scalar::Int64(0), df.index().len())
+            .unwrap();
+        let unbounded = df.fillna(&Scalar::Int64(0)).unwrap();
+        assert_eq!(limited, unbounded);
     }
 
     #[test]

@@ -3706,6 +3706,264 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: fillna metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Filling missing values with the same scalar twice must be idempotent for Series.
+    #[test]
+    fn prop_series_fillna_is_idempotent(
+        series in arb_variable_numeric_series("fillna", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let once = series
+            .fillna(&fill_scalar)
+            .expect("Series::fillna() must succeed for numeric inputs");
+        let twice = once
+            .fillna(&fill_scalar)
+            .expect("Series::fillna() must succeed on an already filled series");
+        prop_assert!(
+            once.equals(&twice),
+            "series fillna(v) must be idempotent"
+        );
+    }
+
+    /// Translating a Series and its scalar fill value by the same offset commutes with fillna.
+    #[test]
+    fn prop_series_fillna_is_translation_covariant(
+        series in arb_variable_numeric_series("fillna", 12),
+        fill in -1_000i64..1_000i64,
+        delta in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let baseline = series
+            .fillna(&fill_scalar)
+            .expect("Series::fillna() must succeed for numeric inputs");
+        let delta = delta as f64;
+        let shifted_input = shift_series(&series, delta);
+        let shifted_fill = shift_numeric_scalar(&fill_scalar, delta);
+        let shifted_result = shifted_input
+            .fillna(&shifted_fill)
+            .expect("Series::fillna() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_result, &expected),
+            "series fillna(x + c, v + c) must equal fillna(x, v) + c"
+        );
+    }
+
+    /// Negating both a Series and its scalar fill value commutes with fillna.
+    #[test]
+    fn prop_series_fillna_is_sign_symmetric(
+        series in arb_variable_numeric_series("fillna", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let baseline = series
+            .fillna(&fill_scalar)
+            .expect("Series::fillna() must succeed for numeric inputs");
+        let flipped_input = sign_flip_series(&series);
+        let flipped_fill = sign_flip_numeric_scalar(&fill_scalar);
+        let flipped_result = flipped_input
+            .fillna(&flipped_fill)
+            .expect("Series::fillna() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_result, &expected),
+            "series fillna(-x, -v) must equal -fillna(x, v)"
+        );
+    }
+
+    /// A zero fill limit must leave Series unchanged.
+    #[test]
+    fn prop_series_fillna_limit_zero_is_identity(
+        series in arb_variable_numeric_series("fillna", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let result = series
+            .fillna_limit(&fill_scalar, 0)
+            .expect("Series::fillna_limit(..., 0) must succeed");
+        prop_assert!(
+            series.equals(&result),
+            "series fillna_limit(v, 0) must be identity"
+        );
+    }
+
+    /// Any limit at least as large as the Series length must match unbounded fillna.
+    #[test]
+    fn prop_series_fillna_limit_len_matches_unbounded_fillna(
+        series in arb_variable_numeric_series("fillna", 12),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let limited = series
+            .fillna_limit(&fill_scalar, series.len())
+            .expect("Series::fillna_limit() must succeed for a saturating limit");
+        let unbounded = series
+            .fillna(&fill_scalar)
+            .expect("Series::fillna() must succeed for numeric inputs");
+        prop_assert!(
+            limited.equals(&unbounded),
+            "series fillna_limit(v, len) must equal fillna(v)"
+        );
+    }
+
+    /// Filling missing values with the same scalar twice must be idempotent for DataFrames.
+    #[test]
+    fn prop_dataframe_fillna_is_idempotent(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let once = df
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        let twice = once
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed on an already filled frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe fillna(v) must be idempotent"
+        );
+    }
+
+    /// Translating a DataFrame and its scalar fill value by the same offset commutes with fillna.
+    #[test]
+    fn prop_dataframe_fillna_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+        delta in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let baseline = df
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        let delta = delta as f64;
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = shift_numeric_scalar(&fill_scalar, delta);
+        let shifted_result = shifted_input
+            .fillna(&shifted_fill)
+            .expect("DataFrame::fillna() must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_result, &expected),
+            "dataframe fillna(x + c, v + c) must equal fillna(x, v) + c"
+        );
+    }
+
+    /// Negating both a DataFrame and its scalar fill value commutes with fillna.
+    #[test]
+    fn prop_dataframe_fillna_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let baseline = df
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        let flipped_input = sign_flip_dataframe(&df);
+        let flipped_fill = sign_flip_numeric_scalar(&fill_scalar);
+        let flipped_result = flipped_input
+            .fillna(&flipped_fill)
+            .expect("DataFrame::fillna() must succeed after sign flip");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_result, &expected),
+            "dataframe fillna(-x, -v) must equal -fillna(x, v)"
+        );
+    }
+
+    /// A zero fill limit must leave DataFrames unchanged.
+    #[test]
+    fn prop_dataframe_fillna_limit_zero_is_identity(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let result = df
+            .fillna_limit(&fill_scalar, 0)
+            .expect("DataFrame::fillna_limit(..., 0) must succeed");
+        prop_assert!(
+            df.equals(&result),
+            "dataframe fillna_limit(v, 0) must be identity"
+        );
+    }
+
+    /// Any limit at least as large as the row count must match unbounded fillna for DataFrames.
+    #[test]
+    fn prop_dataframe_fillna_limit_row_count_matches_unbounded_fillna(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let limited = df
+            .fillna_limit(&fill_scalar, df.index().len())
+            .expect("DataFrame::fillna_limit() must succeed for a saturating limit");
+        let unbounded = df
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        prop_assert!(
+            limited.equals(&unbounded),
+            "dataframe fillna_limit(v, row_count) must equal fillna(v)"
+        );
+    }
+
+    /// A uniform per-column fill map must agree with scalar fillna.
+    #[test]
+    fn prop_dataframe_fillna_dict_constant_map_matches_scalar_fill(
+        df in arb_numeric_dataframe(8),
+        fill in -1_000i64..1_000i64,
+    ) {
+        let fill_scalar = Scalar::Int64(fill);
+        let mut fill_map = std::collections::BTreeMap::new();
+        for name in df.column_names() {
+            fill_map.insert(name.clone(), fill_scalar.clone());
+        }
+        let dict_filled = df
+            .fillna_dict(&fill_map)
+            .expect("DataFrame::fillna_dict() must succeed for existing columns");
+        let scalar_filled = df
+            .fillna(&fill_scalar)
+            .expect("DataFrame::fillna() must succeed for numeric inputs");
+        prop_assert!(
+            dict_filled.equals(&scalar_filled),
+            "dataframe fillna_dict(constant_map) must equal scalar fillna"
+        );
+    }
+
+    /// fillna(method=...) aliases must agree with direct directional fill methods.
+    #[test]
+    fn prop_dataframe_fillna_method_aliases_match_directional_fill(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let ffill_alias = df
+            .fillna_method("ffill")
+            .expect("DataFrame::fillna_method(\"ffill\") must succeed");
+        let ffill_direct = df
+            .ffill(None)
+            .expect("DataFrame::ffill(None) must succeed for numeric inputs");
+        let bfill_alias = df
+            .fillna_method("bfill")
+            .expect("DataFrame::fillna_method(\"bfill\") must succeed");
+        let bfill_direct = df
+            .bfill(None)
+            .expect("DataFrame::bfill(None) must succeed for numeric inputs");
+        prop_assert!(
+            ffill_alias.equals(&ffill_direct),
+            "dataframe fillna_method(\"ffill\") must equal ffill(None)"
+        );
+        prop_assert!(
+            bfill_alias.equals(&bfill_direct),
+            "dataframe fillna_method(\"bfill\") must equal bfill(None)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: ffill / bfill metamorphic invariants
 // ---------------------------------------------------------------------------
 

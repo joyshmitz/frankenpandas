@@ -18772,7 +18772,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-129", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-129"));
         assert!(
-            report.fixture_count >= 5,
+            report.fixture_count >= 9,
             "expected FP-P2D-129 io round-trip fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

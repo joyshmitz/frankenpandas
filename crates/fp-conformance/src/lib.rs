@@ -19876,11 +19876,11 @@ mod tests {
     fn packet_filter_runs_dataframe_skew_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
-            run_packet_by_id(&cfg, "FP-P2D-150", OracleMode::FixtureExpected).expect("report");
-        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-150"));
+            run_packet_by_id(&cfg, "FP-P2D-167", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-167"));
         assert!(
-            report.fixture_count >= 1,
-            "expected FP-P2D-150 dataframe skew fixtures"
+            report.fixture_count >= 2,
+            "expected FP-P2D-167 dataframe skew fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
@@ -19892,8 +19892,21 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-151", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-151"));
         assert!(
-            report.fixture_count >= 2,
-            "expected FP-P2D-151 dataframe kurtosis/prod fixtures"
+            report.fixture_count >= 1,
+            "expected FP-P2D-151 dataframe kurtosis fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_prod_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-168", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-168"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-168 dataframe prod fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

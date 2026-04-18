@@ -86,6 +86,34 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
     })
 }
 
+fn dtype_memory_width(dtype: DType) -> usize {
+    match dtype {
+        DType::Bool => 1,
+        DType::Int64 | DType::Float64 | DType::Timedelta64 => 8,
+        DType::Utf8 => std::mem::size_of::<usize>(),
+        DType::Null => 0,
+    }
+}
+
+fn column_memory_usage_bytes(column: &Column) -> usize {
+    column.len() * dtype_memory_width(column.dtype())
+}
+
+fn index_label_memory_usage_bytes(label: &IndexLabel) -> usize {
+    match label {
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+        IndexLabel::Utf8(_) => std::mem::size_of::<usize>(),
+    }
+}
+
+fn index_memory_usage_bytes(index: &Index) -> usize {
+    index
+        .labels()
+        .iter()
+        .map(index_label_memory_usage_bytes)
+        .sum()
+}
+
 fn saturating_i64_to_usize(value: i64) -> usize {
     if value < 0 {
         0
@@ -4297,9 +4325,7 @@ impl Series {
     ///
     /// Matches `pd.Series.memory_usage()`. Includes index and values.
     pub fn memory_usage(&self) -> usize {
-        let index_bytes = std::mem::size_of_val(self.index.labels());
-        let values_bytes = std::mem::size_of_val(self.column.values());
-        index_bytes + values_bytes
+        index_memory_usage_bytes(&self.index) + column_memory_usage_bytes(&self.column)
     }
 
     /// Return true if the Series contains any NaN or null values.
@@ -4315,7 +4341,7 @@ impl Series {
     /// Matches `pd.Series.nbytes`. Does not include the index.
     #[must_use]
     pub fn nbytes(&self) -> usize {
-        std::mem::size_of_val(self.column.values())
+        column_memory_usage_bytes(&self.column)
     }
 
     /// Pass the Series through a function.
@@ -19325,13 +19351,13 @@ impl DataFrame {
     /// Matches `pd.DataFrame.memory_usage()`. Returns a Series with column
     /// names as index and byte estimates as values. Includes the index.
     pub fn memory_usage(&self) -> Result<Series, FrameError> {
-        let index_bytes = std::mem::size_of_val(self.index.labels());
+        let index_bytes = index_memory_usage_bytes(&self.index);
         let mut labels = vec![IndexLabel::from("Index")];
         let mut values = vec![Scalar::Int64(index_bytes as i64)];
 
         for col_name in &self.column_order {
             let col = &self.columns[col_name];
-            let bytes = std::mem::size_of_val(col.values());
+            let bytes = column_memory_usage_bytes(col);
             labels.push(IndexLabel::from(col_name.as_str()));
             values.push(Scalar::Int64(bytes as i64));
         }
@@ -38764,7 +38790,7 @@ mod tests {
         .unwrap();
 
         let bytes = s.memory_usage();
-        assert!(bytes > 0);
+        assert_eq!(bytes, 32);
     }
 
     // ── str: find, rfind, casefold, swapcase, partition, rpartition ──
@@ -39000,13 +39026,10 @@ mod tests {
         .unwrap();
 
         let mem = df.memory_usage().unwrap();
-        // Should have 3 entries: Index, a, b
         assert_eq!(mem.len(), 3);
-        // All values should be positive Int64
-        for v in mem.values() {
-            let n = expect_int64(v);
-            assert!(n > 0);
-        }
+        assert_eq!(expect_int64(&mem.values()[0]), 16);
+        assert_eq!(expect_int64(&mem.values()[1]), 16);
+        assert_eq!(expect_int64(&mem.values()[2]), 16);
     }
 
     // ── DatetimeAccessor extensions ──
@@ -41004,7 +41027,7 @@ mod tests {
             vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
         )
         .unwrap();
-        assert!(s.nbytes() > 0);
+        assert_eq!(s.nbytes(), 16);
     }
 
     #[test]

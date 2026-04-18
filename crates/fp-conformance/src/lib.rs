@@ -484,6 +484,11 @@ pub enum FixtureOperation {
     DataFrameInsert,
     #[serde(rename = "dataframe_assign", alias = "data_frame_assign")]
     DataFrameAssign,
+    #[serde(
+        rename = "dataframe_rename_columns",
+        alias = "data_frame_rename_columns"
+    )]
+    DataFrameRenameColumns,
     #[serde(rename = "dataframe_duplicated", alias = "data_frame_duplicated")]
     DataFrameDuplicated,
     #[serde(
@@ -742,6 +747,7 @@ impl FixtureOperation {
             Self::DataFrameResetIndex => "dataframe_reset_index",
             Self::DataFrameInsert => "dataframe_insert",
             Self::DataFrameAssign => "dataframe_assign",
+            Self::DataFrameRenameColumns => "dataframe_rename_columns",
             Self::DataFrameDuplicated => "dataframe_duplicated",
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
@@ -855,6 +861,12 @@ pub struct FixtureExpectedDataFrame {
 pub struct FixtureColumnAssignment {
     pub name: String,
     pub values: Vec<Scalar>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureColumnRename {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1028,6 +1040,8 @@ pub struct PacketFixture {
     pub insert_values: Option<Vec<Scalar>>,
     #[serde(default)]
     pub assignments: Option<Vec<FixtureColumnAssignment>>,
+    #[serde(default)]
+    pub rename_columns: Option<Vec<FixtureColumnRename>>,
     #[serde(default)]
     pub subset: Option<Vec<String>>,
     #[serde(default)]
@@ -1464,6 +1478,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
+        | FixtureOperation::DataFrameRenameColumns
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
@@ -2089,6 +2104,8 @@ struct OracleRequest {
     insert_values: Option<Vec<Scalar>>,
     #[serde(default)]
     assignments: Option<Vec<FixtureColumnAssignment>>,
+    #[serde(default)]
+    rename_columns: Option<Vec<FixtureColumnRename>>,
     #[serde(default)]
     subset: Option<Vec<String>>,
     #[serde(default)]
@@ -8042,6 +8059,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
+        | FixtureOperation::DataFrameRenameColumns
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -8575,6 +8593,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
+        | FixtureOperation::DataFrameRenameColumns
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -8733,6 +8752,7 @@ fn capture_live_oracle_expected(
         insert_column: fixture.insert_column.clone(),
         insert_values: fixture.insert_values.clone(),
         assignments: fixture.assignments.clone(),
+        rename_columns: fixture.rename_columns.clone(),
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
@@ -9016,6 +9036,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
+        | FixtureOperation::DataFrameRenameColumns
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -10851,6 +10872,20 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                 .map(|(name, column)| (name.as_str(), column.clone()))
                 .collect();
             frame.assign(assignments).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameRenameColumns => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let rename_payloads = fixture.rename_columns.as_ref().ok_or_else(|| {
+                "rename_columns are required for dataframe_rename_columns".to_owned()
+            })?;
+            let rename_pairs: Vec<(&str, &str)> = rename_payloads
+                .iter()
+                .map(|rename| (rename.from.as_str(), rename.to.as_str()))
+                .collect();
+            frame
+                .rename_columns(&rename_pairs)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameDropDuplicates => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -15009,6 +15044,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
+        | FixtureOperation::DataFrameRenameColumns
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -19074,6 +19110,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-134 dataframe assign fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_rename_columns_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-135", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-135"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-135 dataframe rename_columns fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

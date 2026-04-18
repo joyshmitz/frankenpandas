@@ -2867,6 +2867,32 @@ def op_dataframe_assign(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_rename_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    renames = payload.get("rename_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_rename_columns requires frame payload")
+    if not isinstance(renames, list) or not renames:
+        raise OracleError("dataframe_rename_columns requires non-empty rename_columns list")
+
+    mapping: dict[str, str] = {}
+    for rename in renames:
+        if not isinstance(rename, dict):
+            raise OracleError("dataframe_rename_columns entries must be objects")
+        source = rename.get("from")
+        target = rename.get("to")
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise OracleError("dataframe_rename_columns entries require string from/to")
+        mapping[source] = target
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.rename(columns=mapping)
+    except Exception as exc:
+        raise OracleError(f"dataframe_rename_columns failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3584,6 +3610,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_insert(pd, payload)
     if op in {"dataframe_assign", "data_frame_assign"}:
         return op_dataframe_assign(pd, payload)
+    if op in {"dataframe_rename_columns", "data_frame_rename_columns"}:
+        return op_dataframe_rename_columns(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

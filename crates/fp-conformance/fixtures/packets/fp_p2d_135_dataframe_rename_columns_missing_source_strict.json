@@ -1,0 +1,43 @@
+{
+  "packet_id": "FP-P2D-135",
+  "case_id": "dataframe_rename_columns_missing_source_strict",
+  "mode": "strict",
+  "operation": "dataframe_rename_columns",
+  "rename_columns": [
+    { "from": "missing", "to": "ignored" }
+  ],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    }
+  }
+}

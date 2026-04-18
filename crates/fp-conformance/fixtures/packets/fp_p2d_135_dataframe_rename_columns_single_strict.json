@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-135",
+  "case_id": "dataframe_rename_columns_single_strict",
+  "mode": "strict",
+  "operation": "dataframe_rename_columns",
+  "rename_columns": [
+    { "from": "old_name", "to": "new_name" }
+  ],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["old_name"],
+    "columns": {
+      "old_name": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["new_name"],
+    "columns": {
+      "new_name": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  }
+}

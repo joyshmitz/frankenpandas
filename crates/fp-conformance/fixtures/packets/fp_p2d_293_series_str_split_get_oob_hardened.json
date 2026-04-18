@@ -1,0 +1,37 @@
+{
+  "packet_id": "FP-P2D-293",
+  "case_id": "series_str_split_get_oob_hardened",
+  "mode": "hardened",
+  "operation": "series_str_split_get",
+  "str_split_pat": "_",
+  "str_split_n": 5,
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "a_b_c" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "single" },
+      { "kind": "utf8", "value": "a_b_c_d_e_f" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "f" }
+    ]
+  }
+}

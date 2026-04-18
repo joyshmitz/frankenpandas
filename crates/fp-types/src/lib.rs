@@ -10,6 +10,7 @@ pub enum DType {
     Bool,
     Int64,
     Float64,
+    #[serde(alias = "string", alias = "str")]
     Utf8,
     Timedelta64,
 }
@@ -29,6 +30,7 @@ pub enum Scalar {
     Bool(bool),
     Int64(i64),
     Float64(f64),
+    #[serde(alias = "string", alias = "str")]
     Utf8(String),
     Timedelta64(i64),
 }
@@ -1284,5 +1286,23 @@ mod tests {
         let nat = Scalar::Timedelta64(Timedelta::NAT);
         assert!(!valid.is_missing());
         assert!(nat.is_missing());
+    }
+
+    #[test]
+    fn dtype_utf8_deserializes_legacy_aliases() {
+        let dtype: DType = serde_json::from_str("\"str\"").unwrap();
+        assert_eq!(dtype, DType::Utf8);
+
+        let dtype: DType = serde_json::from_str("\"string\"").unwrap();
+        assert_eq!(dtype, DType::Utf8);
+    }
+
+    #[test]
+    fn scalar_utf8_deserializes_legacy_aliases() {
+        let scalar: Scalar = serde_json::from_str(r#"{"kind":"str","value":"x"}"#).unwrap();
+        assert_eq!(scalar, Scalar::Utf8("x".to_owned()));
+
+        let scalar: Scalar = serde_json::from_str(r#"{"kind":"string","value":"y"}"#).unwrap();
+        assert_eq!(scalar, Scalar::Utf8("y".to_owned()));
     }
 }

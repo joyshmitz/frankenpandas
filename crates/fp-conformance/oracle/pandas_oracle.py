@@ -2174,6 +2174,22 @@ def op_dataframe_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_memory_usage(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_memory_usage requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    index = payload.get("memory_usage_index", True)
+    deep = payload.get("memory_usage_deep", False)
+
+    try:
+        out = frame.memory_usage(index=index, deep=deep)
+    except Exception as exc:
+        raise OracleError(f"dataframe_memory_usage failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4171,6 +4187,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_quantile(pd, payload)
     if op in {"dataframe_value_counts", "data_frame_value_counts"}:
         return op_dataframe_value_counts(pd, payload)
+    if op in {"dataframe_memory_usage", "data_frame_memory_usage"}:
+        return op_dataframe_memory_usage(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

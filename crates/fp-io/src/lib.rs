@@ -1826,7 +1826,7 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
                             // Leave NaT cells empty (Excel convention).
                         } else {
                             worksheet
-                                .write_string(excel_row, excel_col, &Timedelta::format(*v))
+                                .write_string(excel_row, excel_col, Timedelta::format(*v))
                                 .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
                         }
                     }

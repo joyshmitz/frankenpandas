@@ -232,6 +232,21 @@ pub enum FixtureOperation {
     DropNa,
     // FP-P2C-008: IO round-trip
     CsvRoundTrip,
+    #[serde(rename = "json_round_trip", alias = "json_round_trip_default")]
+    JsonRoundTrip,
+    #[serde(rename = "jsonl_round_trip", alias = "jsonl_round_trip_default")]
+    JsonlRoundTrip,
+    #[serde(rename = "parquet_round_trip", alias = "parquet_round_trip_default")]
+    ParquetRoundTrip,
+    #[serde(rename = "feather_round_trip", alias = "feather_round_trip_default")]
+    FeatherRoundTrip,
+    #[serde(rename = "excel_round_trip", alias = "excel_round_trip_default")]
+    ExcelRoundTrip,
+    #[serde(
+        rename = "ipc_stream_round_trip",
+        alias = "ipc_stream_round_trip_default"
+    )]
+    IpcStreamRoundTrip,
     // FP-P2C-009: Storage invariants
     ColumnDtypeCheck,
     // FP-P2C-010: loc/iloc
@@ -600,6 +615,12 @@ impl FixtureOperation {
             Self::FillNa => "fill_na",
             Self::DropNa => "drop_na",
             Self::CsvRoundTrip => "csv_round_trip",
+            Self::JsonRoundTrip => "json_round_trip",
+            Self::JsonlRoundTrip => "jsonl_round_trip",
+            Self::ParquetRoundTrip => "parquet_round_trip",
+            Self::FeatherRoundTrip => "feather_round_trip",
+            Self::ExcelRoundTrip => "excel_round_trip",
+            Self::IpcStreamRoundTrip => "ipc_stream_round_trip",
             Self::ColumnDtypeCheck => "column_dtype_check",
             Self::SeriesFilter => "series_filter",
             Self::SeriesHead => "series_head",
@@ -975,6 +996,20 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
+    pub json_input: Option<String>,
+    #[serde(default)]
+    pub json_orient: Option<String>,
+    #[serde(default)]
+    pub jsonl_input: Option<String>,
+    #[serde(default)]
+    pub parquet_input_base64: Option<String>,
+    #[serde(default)]
+    pub feather_input_base64: Option<String>,
+    #[serde(default)]
+    pub excel_input_base64: Option<String>,
+    #[serde(default)]
+    pub ipc_stream_input_base64: Option<String>,
+    #[serde(default)]
     pub loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     pub iloc_positions: Option<Vec<i64>>,
@@ -1312,7 +1347,13 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns => &["CC-002", "CC-005"],
-        FixtureOperation::CsvRoundTrip => &["CC-006"],
+        FixtureOperation::CsvRoundTrip
+        | FixtureOperation::JsonRoundTrip
+        | FixtureOperation::JsonlRoundTrip
+        | FixtureOperation::ParquetRoundTrip
+        | FixtureOperation::FeatherRoundTrip
+        | FixtureOperation::ExcelRoundTrip
+        | FixtureOperation::IpcStreamRoundTrip => &["CC-006"],
         FixtureOperation::ColumnDtypeCheck => &["CC-001"],
         FixtureOperation::SeriesFilter
         | FixtureOperation::SeriesHead
@@ -5789,6 +5830,30 @@ fn run_fixture_operation(
                 }
             }
         }
+        FixtureOperation::JsonRoundTrip => {
+            let actual = execute_json_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "json_round_trip")
+        }
+        FixtureOperation::JsonlRoundTrip => {
+            let actual = execute_jsonl_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "jsonl_round_trip")
+        }
+        FixtureOperation::ParquetRoundTrip => {
+            let actual = execute_parquet_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "parquet_round_trip")
+        }
+        FixtureOperation::FeatherRoundTrip => {
+            let actual = execute_feather_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "feather_round_trip")
+        }
+        FixtureOperation::ExcelRoundTrip => {
+            let actual = execute_excel_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "excel_round_trip")
+        }
+        FixtureOperation::IpcStreamRoundTrip => {
+            let actual = execute_ipc_stream_round_trip_fixture_operation(fixture);
+            run_bool_round_trip_match(actual, expected, "ipc_stream_round_trip")
+        }
         FixtureOperation::ColumnDtypeCheck => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -8462,7 +8527,14 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
-        FixtureOperation::DataFrameBool | FixtureOperation::CsvRoundTrip => fixture
+        FixtureOperation::DataFrameBool
+        | FixtureOperation::CsvRoundTrip
+        | FixtureOperation::JsonRoundTrip
+        | FixtureOperation::JsonlRoundTrip
+        | FixtureOperation::ParquetRoundTrip
+        | FixtureOperation::FeatherRoundTrip
+        | FixtureOperation::ExcelRoundTrip
+        | FixtureOperation::IpcStreamRoundTrip => fixture
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| {
@@ -8869,7 +8941,13 @@ fn capture_live_oracle_expected(
             .ok_or_else(|| {
                 HarnessError::FixtureFormat("oracle omitted expected_scalar".to_owned())
             }),
-        FixtureOperation::CsvRoundTrip => response
+        FixtureOperation::CsvRoundTrip
+        | FixtureOperation::JsonRoundTrip
+        | FixtureOperation::JsonlRoundTrip
+        | FixtureOperation::ParquetRoundTrip
+        | FixtureOperation::FeatherRoundTrip
+        | FixtureOperation::ExcelRoundTrip
+        | FixtureOperation::IpcStreamRoundTrip => response
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
@@ -9909,6 +9987,156 @@ fn dataframes_semantically_equal(left: &DataFrame, right: &DataFrame) -> bool {
         }
     }
     true
+}
+
+fn run_bool_round_trip_match(
+    actual: Result<bool, String>,
+    expected: ResolvedExpected,
+    op_name: &str,
+) -> Result<(), String> {
+    match expected {
+        ResolvedExpected::Bool(value) => {
+            let round_trip_ok = actual?;
+            if round_trip_ok != value {
+                return Err(format!(
+                    "{op_name} mismatch: actual={round_trip_ok}, expected={value}"
+                ));
+            }
+            Ok(())
+        }
+        ResolvedExpected::ErrorContains(substr) => match actual {
+            Err(message) if message.contains(&substr) => Ok(()),
+            Err(message) => Err(format!(
+                "expected {op_name} error containing '{substr}', got '{message}'"
+            )),
+            Ok(_) => Err(format!(
+                "expected {op_name} to fail with error containing '{substr}'"
+            )),
+        },
+        ResolvedExpected::ErrorAny => match actual {
+            Err(_) => Ok(()),
+            Ok(_) => Err(format!("expected {op_name} to fail")),
+        },
+        _ => Err(format!(
+            "expected_bool or expected_error is required for {op_name}"
+        )),
+    }
+}
+
+fn diff_bool_round_trip_result(
+    actual: Result<bool, String>,
+    expected: ResolvedExpected,
+    op_name: &str,
+) -> Result<Vec<DriftRecord>, String> {
+    match expected {
+        ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, op_name)),
+        ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+            Err(message) if message.contains(&substr) => Vec::new(),
+            Err(message) => vec![make_drift_record(
+                ComparisonCategory::Value,
+                DriftLevel::Critical,
+                &format!("{op_name}.error"),
+                format!("expected {op_name} error containing '{substr}', got '{message}'"),
+            )],
+            Ok(_) => vec![make_drift_record(
+                ComparisonCategory::Value,
+                DriftLevel::Critical,
+                &format!("{op_name}.error"),
+                format!("expected {op_name} to fail but operation succeeded"),
+            )],
+        }),
+        ResolvedExpected::ErrorAny => Ok(match actual {
+            Err(_) => Vec::new(),
+            Ok(_) => vec![make_drift_record(
+                ComparisonCategory::Value,
+                DriftLevel::Critical,
+                &format!("{op_name}.error"),
+                format!("expected {op_name} to fail but operation succeeded"),
+            )],
+        }),
+        _ => Err(format!(
+            "expected_bool or expected_error required for {op_name}"
+        )),
+    }
+}
+
+fn execute_json_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let json_input = fixture
+        .json_input
+        .as_ref()
+        .ok_or_else(|| "json_input is required for json_round_trip".to_owned())?;
+    let orient = fixture
+        .json_orient
+        .as_deref()
+        .map(parse_json_orient)
+        .transpose()?
+        .unwrap_or(JsonOrient::Records);
+    let df =
+        read_json_str(json_input, orient).map_err(|err| format!("json parse failed: {err}"))?;
+    let output =
+        write_json_string(&df, orient).map_err(|err| format!("json write failed: {err}"))?;
+    let reparsed =
+        read_json_str(&output, orient).map_err(|err| format!("json reparse failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&df, &reparsed))
+}
+
+fn parse_json_orient(s: &str) -> Result<JsonOrient, String> {
+    match s {
+        "records" => Ok(JsonOrient::Records),
+        "columns" => Ok(JsonOrient::Columns),
+        "index" => Ok(JsonOrient::Index),
+        "split" => Ok(JsonOrient::Split),
+        "values" => Ok(JsonOrient::Values),
+        _ => Err(format!("unknown json orient: {s}")),
+    }
+}
+
+fn execute_jsonl_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let jsonl_input = fixture
+        .jsonl_input
+        .as_ref()
+        .ok_or_else(|| "jsonl_input is required for jsonl_round_trip".to_owned())?;
+    let df = read_jsonl_str(jsonl_input).map_err(|err| format!("jsonl parse failed: {err}"))?;
+    let output = write_jsonl_string(&df).map_err(|err| format!("jsonl write failed: {err}"))?;
+    let reparsed = read_jsonl_str(&output).map_err(|err| format!("jsonl reparse failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&df, &reparsed))
+}
+
+fn execute_parquet_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let frame = build_dataframe(require_frame(fixture)?)?;
+    let bytes =
+        write_parquet_bytes(&frame).map_err(|err| format!("parquet write failed: {err}"))?;
+    let reparsed =
+        read_parquet_bytes(&bytes).map_err(|err| format!("parquet read failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&frame, &reparsed))
+}
+
+fn execute_feather_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let frame = build_dataframe(require_frame(fixture)?)?;
+    let bytes =
+        write_feather_bytes(&frame).map_err(|err| format!("feather write failed: {err}"))?;
+    let reparsed =
+        read_feather_bytes(&bytes).map_err(|err| format!("feather read failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&frame, &reparsed))
+}
+
+fn execute_excel_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
+    let frame = build_dataframe(require_frame(fixture)?)?;
+    let bytes = write_excel_bytes(&frame).map_err(|err| format!("excel write failed: {err}"))?;
+    let reparsed = read_excel_bytes(&bytes, &ExcelReadOptions::default())
+        .map_err(|err| format!("excel read failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&frame, &reparsed))
+}
+
+fn execute_ipc_stream_round_trip_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<bool, String> {
+    let frame = build_dataframe(require_frame(fixture)?)?;
+    let bytes =
+        write_ipc_stream_bytes(&frame).map_err(|err| format!("ipc_stream write failed: {err}"))?;
+    let reparsed =
+        read_ipc_stream_bytes(&bytes).map_err(|err| format!("ipc_stream read failed: {err}"))?;
+    Ok(dataframes_semantically_equal(&frame, &reparsed))
 }
 
 const INDEX_MERGE_KEY_COLUMN: &str = "__index_key";
@@ -11898,36 +12126,31 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::CsvRoundTrip => {
             let actual = execute_csv_round_trip_fixture_operation(fixture);
-            match expected {
-                ResolvedExpected::Bool(value) => Ok(diff_bool(actual?, value, "csv_round_trip")),
-                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
-                    Err(message) if message.contains(&substr) => Vec::new(),
-                    Err(message) => vec![make_drift_record(
-                        ComparisonCategory::Value,
-                        DriftLevel::Critical,
-                        "csv_round_trip.error",
-                        format!(
-                            "expected csv_round_trip error containing '{substr}', got '{message}'"
-                        ),
-                    )],
-                    Ok(_) => vec![make_drift_record(
-                        ComparisonCategory::Value,
-                        DriftLevel::Critical,
-                        "csv_round_trip.error",
-                        "expected csv_round_trip to fail but operation succeeded".to_owned(),
-                    )],
-                }),
-                ResolvedExpected::ErrorAny => Ok(match actual {
-                    Err(_) => Vec::new(),
-                    Ok(_) => vec![make_drift_record(
-                        ComparisonCategory::Value,
-                        DriftLevel::Critical,
-                        "csv_round_trip.error",
-                        "expected csv_round_trip to fail but operation succeeded".to_owned(),
-                    )],
-                }),
-                _ => Err("expected_bool or expected_error required for csv_round_trip".to_owned()),
-            }
+            diff_bool_round_trip_result(actual, expected, "csv_round_trip")
+        }
+        FixtureOperation::JsonRoundTrip => {
+            let actual = execute_json_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "json_round_trip")
+        }
+        FixtureOperation::JsonlRoundTrip => {
+            let actual = execute_jsonl_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "jsonl_round_trip")
+        }
+        FixtureOperation::ParquetRoundTrip => {
+            let actual = execute_parquet_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "parquet_round_trip")
+        }
+        FixtureOperation::FeatherRoundTrip => {
+            let actual = execute_feather_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "feather_round_trip")
+        }
+        FixtureOperation::ExcelRoundTrip => {
+            let actual = execute_excel_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "excel_round_trip")
+        }
+        FixtureOperation::IpcStreamRoundTrip => {
+            let actual = execute_ipc_stream_round_trip_fixture_operation(fixture);
+            diff_bool_round_trip_result(actual, expected, "ipc_stream_round_trip")
         }
         FixtureOperation::ColumnDtypeCheck => {
             let left = require_left_series(fixture)?;
@@ -18533,11 +18756,11 @@ mod tests {
     fn packet_filter_runs_dataframe_reshape_dummy_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
-            run_packet_by_id(&cfg, "FP-P2D-127", OracleMode::FixtureExpected).expect("report");
-        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-127"));
+            run_packet_by_id(&cfg, "FP-P2D-128", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-128"));
         assert!(
             report.fixture_count >= 10,
-            "expected FP-P2D-127 reshape/dummy fixtures"
+            "expected FP-P2D-128 reshape/dummy fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

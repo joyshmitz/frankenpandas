@@ -10,6 +10,7 @@ asupersync = ["fp-runtime/asupersync"]
 
 [dependencies]
 fp-columnar = { path = "../fp-columnar" }
+fp-expr = { path = "../fp-expr" }
 fp-frame = { path = "../fp-frame" }
 fp-groupby = { path = "../fp-groupby" }
 fp-index = { path = "../fp-index" }
@@ -25,7 +26,6 @@ sha2 = "0.10.9"
 thiserror = { workspace = true }
 
 [dev-dependencies]
-fp-expr = { path = "../fp-expr" }
 fp-io = { path = "../fp-io" }
 fp-join = { path = "../fp-join" }
 proptest = "1.10.0"

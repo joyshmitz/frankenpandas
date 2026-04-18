@@ -544,6 +544,7 @@ name = "fp-conformance"
 version = "0.1.0"
 dependencies = [
  "fp-columnar",
+ "fp-expr",
  "fp-frame",
  "fp-groupby",
  "fp-index",
@@ -556,6 +557,19 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "fp-expr"
+version = "0.1.0"
+dependencies = [
+ "fp-columnar",
+ "fp-frame",
+ "fp-index",
+ "fp-runtime",
+ "fp-types",
+ "serde",
  "thiserror",
 ]
 
@@ -600,6 +614,7 @@ dependencies = [
 name = "fp-index"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fp-types",
  "serde",
  "thiserror",

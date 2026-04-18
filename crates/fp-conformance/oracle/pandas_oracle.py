@@ -1736,6 +1736,174 @@ def op_dataframe_query(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def required_string_payload(payload: dict[str, Any], key: str, op_name: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or value.strip() == "":
+        raise OracleError(f"{op_name} requires non-empty {key}")
+    return value.strip()
+
+
+def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_pivot_table requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    values = parse_optional_string_list(payload, "pivot_values", "dataframe_pivot_table")
+    if not values:
+        raise OracleError("dataframe_pivot_table requires pivot_values")
+    index = required_string_payload(payload, "pivot_index", "dataframe_pivot_table")
+    columns = required_string_payload(payload, "pivot_columns", "dataframe_pivot_table")
+    aggfunc = required_string_payload(payload, "pivot_aggfunc", "dataframe_pivot_table")
+
+    kwargs: dict[str, Any] = {
+        "values": values[0] if len(values) == 1 else values,
+        "index": index,
+        "columns": columns,
+        "aggfunc": aggfunc,
+        "sort": False,
+        "dropna": False,
+        "margins": bool(payload.get("pivot_margins", False)),
+    }
+    if payload.get("fill_value") is not None:
+        kwargs["fill_value"] = scalar_from_json(payload["fill_value"])
+    margins_name = payload.get("pivot_margins_name")
+    if margins_name is not None:
+        kwargs["margins_name"] = str(margins_name)
+
+    try:
+        out = frame.pivot_table(**kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_pivot_table failed: {exc}") from exc
+
+    if hasattr(out.columns, "to_flat_index"):
+        flattened = []
+        for name in out.columns.to_flat_index():
+            if isinstance(name, tuple):
+                flattened.append("_".join(str(part) for part in name if str(part) != ""))
+            else:
+                flattened.append(str(name))
+        out = out.copy()
+        out.columns = flattened
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_stack(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_stack requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.stack(dropna=False)
+    except TypeError:
+        out = frame.stack()
+    except Exception as exc:
+        raise OracleError(f"dataframe_stack failed: {exc}") from exc
+
+    labels = []
+    for row_key, column_key in out.index.tolist():
+        labels.append({"kind": "utf8", "value": f"{row_key}|{column_key}"})
+    return {
+        "expected_frame": {
+            "index": labels,
+            "columns": {"value": [scalar_to_json(value) for value in out.tolist()]},
+            "column_order": ["value"],
+        }
+    }
+
+
+def op_series_unstack(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_unstack requires left payload")
+
+    labels = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    tuples = []
+    for label in labels:
+        text = str(label)
+        if ", " not in text:
+            raise OracleError("series_unstack index labels must contain ', '")
+        row_key, column_key = text.split(", ", 1)
+        tuples.append((row_key.strip(), column_key.strip()))
+
+    series = pd.Series(values, index=pd.MultiIndex.from_tuples(tuples), name=left.get("name"))
+    try:
+        out = series.unstack()
+    except Exception as exc:
+        raise OracleError(f"series_unstack failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_crosstab(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    if left is None or right is None:
+        raise OracleError("dataframe_crosstab requires left and right series payloads")
+
+    index_values = [scalar_from_json(item) for item in left["values"]]
+    column_values = [scalar_from_json(item) for item in right["values"]]
+    try:
+        out = pd.crosstab(index_values, column_values, dropna=True)
+    except Exception as exc:
+        raise OracleError(f"dataframe_crosstab failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_crosstab_normalize(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    if left is None or right is None:
+        raise OracleError(
+            "dataframe_crosstab_normalize requires left and right series payloads"
+        )
+
+    normalize = required_string_payload(
+        payload, "crosstab_normalize", "dataframe_crosstab_normalize"
+    )
+    index_values = [scalar_from_json(item) for item in left["values"]]
+    column_values = [scalar_from_json(item) for item in right["values"]]
+    try:
+        out = pd.crosstab(index_values, column_values, normalize=normalize, dropna=True)
+    except Exception as exc:
+        raise OracleError(f"dataframe_crosstab_normalize failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_get_dummies requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    columns = parse_optional_string_list(payload, "dummy_columns", "dataframe_get_dummies")
+    kwargs: dict[str, Any] = {"dtype": int}
+    if columns:
+        kwargs["columns"] = columns
+    try:
+        out = pd.get_dummies(frame, **kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_get_dummies failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_series_str_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_get_dummies requires left payload")
+    sep = payload.get("string_sep", "|")
+    if not isinstance(sep, str):
+        raise OracleError("series_str_get_dummies string_sep must be a string")
+
+    series = fixture_series_from_payload(pd, left, "series_str_get_dummies")
+    try:
+        out = series.str.get_dummies(sep=sep)
+    except Exception as exc:
+        raise OracleError(f"series_str_get_dummies failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def rust_debug_index_label(value: Any) -> str:
     if isinstance(value, int):
         return f"Int64({value})"
@@ -3005,6 +3173,20 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_eval(pd, payload)
     if op in {"dataframe_query", "data_frame_query"}:
         return op_dataframe_query(pd, payload)
+    if op in {"dataframe_pivot_table", "data_frame_pivot_table"}:
+        return op_dataframe_pivot_table(pd, payload)
+    if op in {"dataframe_stack", "data_frame_stack"}:
+        return op_dataframe_stack(pd, payload)
+    if op in {"series_unstack", "series_unstack_default"}:
+        return op_series_unstack(pd, payload)
+    if op in {"dataframe_crosstab", "data_frame_crosstab"}:
+        return op_dataframe_crosstab(pd, payload)
+    if op in {"dataframe_crosstab_normalize", "data_frame_crosstab_normalize"}:
+        return op_dataframe_crosstab_normalize(pd, payload)
+    if op in {"dataframe_get_dummies", "data_frame_get_dummies"}:
+        return op_dataframe_get_dummies(pd, payload)
+    if op in {"series_str_get_dummies", "series_str_get_dummies_default"}:
+        return op_series_str_get_dummies(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

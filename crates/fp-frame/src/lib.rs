@@ -1189,9 +1189,10 @@ impl Series {
         for (a, b) in self.values().iter().zip(other.values().iter()) {
             let result = match (a, b) {
                 (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => {
-                    if *ns1 == fp_types::Timedelta::NAT || *ns2 == fp_types::Timedelta::NAT {
-                        Scalar::Null(NullKind::NaN)
-                    } else if *ns2 == 0 {
+                    if *ns1 == fp_types::Timedelta::NAT
+                        || *ns2 == fp_types::Timedelta::NAT
+                        || *ns2 == 0
+                    {
                         Scalar::Null(NullKind::NaN)
                     } else {
                         Scalar::Float64(*ns1 as f64 / *ns2 as f64)
@@ -11585,6 +11586,7 @@ fn resolve_timedelta_unit(unit: Option<&str>) -> Result<i64, FrameError> {
 }
 
 /// Parse a timedelta string into normalized format.
+#[allow(dead_code)]
 fn parse_timedelta_string(s: &str) -> Scalar {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -11663,6 +11665,7 @@ fn parse_hms(s: &str) -> Option<f64> {
 }
 
 /// Parse natural language durations: "5 days", "3 hours", "30 minutes", "45 seconds".
+#[allow(dead_code)]
 fn parse_natural_duration(s: &str) -> Option<f64> {
     let lower = s.to_lowercase();
     let parts: Vec<&str> = lower.split_whitespace().collect();
@@ -11681,6 +11684,7 @@ fn parse_natural_duration(s: &str) -> Option<f64> {
 }
 
 /// Format total seconds as "X days HH:MM:SS" normalized timedelta string.
+#[allow(dead_code)]
 fn format_timedelta_seconds(total_secs: f64) -> Scalar {
     let negative = total_secs < 0.0;
     let abs_secs = total_secs.abs();

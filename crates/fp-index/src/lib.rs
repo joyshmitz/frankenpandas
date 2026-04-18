@@ -53,7 +53,7 @@ pub fn format_datetime_ns(nanos: i64) -> String {
     let secs = nanos / 1_000_000_000;
     let subsec_nanos = (nanos % 1_000_000_000).unsigned_abs() as u32;
     let dt = chrono::DateTime::from_timestamp(secs, subsec_nanos)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 

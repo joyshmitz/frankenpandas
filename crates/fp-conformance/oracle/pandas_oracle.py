@@ -1994,6 +1994,22 @@ def op_dataframe_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_mean requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("mean_axis", 0)
+    skipna = payload.get("mean_skipna", True)
+
+    try:
+        out = frame.mean(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_mean failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3969,6 +3985,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_prod(pd, payload)
     if op in {"dataframe_sum", "data_frame_sum"}:
         return op_dataframe_sum(pd, payload)
+    if op in {"dataframe_mean", "data_frame_mean"}:
+        return op_dataframe_mean(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

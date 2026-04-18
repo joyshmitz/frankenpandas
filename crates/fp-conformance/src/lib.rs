@@ -323,6 +323,8 @@ pub enum FixtureOperation {
     DataFrameProd,
     #[serde(rename = "dataframe_sum", alias = "dataframe_sum_default")]
     DataFrameSum,
+    #[serde(rename = "dataframe_mean", alias = "dataframe_mean_default")]
+    DataFrameMean,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -721,6 +723,7 @@ impl FixtureOperation {
             Self::DataFrameKurtosis => "dataframe_kurtosis",
             Self::DataFrameProd => "dataframe_prod",
             Self::DataFrameSum => "dataframe_sum",
+            Self::DataFrameMean => "dataframe_mean",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1454,6 +1457,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameSum
+        | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6841,7 +6845,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
-        | FixtureOperation::DataFrameSum => {
+        | FixtureOperation::DataFrameSum
+        | FixtureOperation::DataFrameMean => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6855,6 +6860,7 @@ fn run_fixture_operation(
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -8686,6 +8692,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameSum
+        | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9155,6 +9162,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameSum
+        | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13758,7 +13766,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
-        | FixtureOperation::DataFrameSum => {
+        | FixtureOperation::DataFrameSum
+        | FixtureOperation::DataFrameMean => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -13772,6 +13781,7 @@ fn execute_and_compare_differential(
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {

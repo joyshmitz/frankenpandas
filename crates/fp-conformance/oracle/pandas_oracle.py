@@ -2124,6 +2124,22 @@ def op_dataframe_all(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_nunique(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_nunique requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("nunique_axis", 0)
+    dropna = payload.get("nunique_dropna", True)
+
+    try:
+        out = frame.nunique(axis=axis, dropna=dropna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_nunique failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4115,6 +4131,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_any(pd, payload)
     if op in {"dataframe_all", "data_frame_all"}:
         return op_dataframe_all(pd, payload)
+    if op in {"dataframe_nunique", "data_frame_nunique"}:
+        return op_dataframe_nunique(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

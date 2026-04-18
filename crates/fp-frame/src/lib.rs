@@ -220,6 +220,115 @@ fn scalar_key_skip_missing(value: &Scalar) -> Option<ScalarKey<'_>> {
     }
 }
 
+fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
+    match (left, right) {
+        (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs == rhs,
+        (Scalar::Bool(lhs), Scalar::Int64(rhs)) | (Scalar::Int64(rhs), Scalar::Bool(lhs)) => {
+            i64::from(*lhs) == *rhs
+        }
+        (Scalar::Bool(lhs), Scalar::Float64(rhs)) | (Scalar::Float64(rhs), Scalar::Bool(lhs)) => {
+            *rhs == i64::from(*lhs) as f64
+        }
+        (Scalar::Int64(lhs), Scalar::Int64(rhs)) => lhs == rhs,
+        (Scalar::Int64(lhs), Scalar::Float64(rhs)) | (Scalar::Float64(rhs), Scalar::Int64(lhs)) => {
+            *rhs == *lhs as f64
+        }
+        (Scalar::Float64(lhs), Scalar::Float64(rhs)) => {
+            (lhs.is_nan() && rhs.is_nan()) || lhs == rhs
+        }
+        (Scalar::Null(lhs), Scalar::Null(rhs)) => lhs == rhs,
+        (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs)) => lhs == rhs,
+        (Scalar::Utf8(lhs), Scalar::Utf8(rhs)) => lhs == rhs,
+        _ => false,
+    }
+}
+
+fn distinct_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
+    let mut distinct = Vec::new();
+    for value in values {
+        if dropna && value.is_missing() {
+            continue;
+        }
+        if !distinct
+            .iter()
+            .any(|existing| grouped_scalar_eq(existing, value))
+        {
+            distinct.push(value.clone());
+        }
+    }
+    distinct
+}
+
+fn mode_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
+    let mut counts: Vec<(Scalar, usize)> = Vec::new();
+    for value in values {
+        if dropna && value.is_missing() {
+            continue;
+        }
+        if let Some((_, count)) = counts
+            .iter_mut()
+            .find(|(existing, _)| grouped_scalar_eq(existing, value))
+        {
+            *count += 1;
+        } else {
+            counts.push((value.clone(), 1));
+        }
+    }
+
+    let max_count = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
+    if max_count == 0 {
+        return Vec::new();
+    }
+
+    let mut modes: Vec<Scalar> = counts
+        .into_iter()
+        .filter(|(_, count)| *count == max_count)
+        .map(|(value, _)| value)
+        .collect();
+    modes.sort_by(|left, right| {
+        scalar_key_cmp(
+            &scalar_key_allow_missing(left),
+            &scalar_key_allow_missing(right),
+        )
+    });
+    modes
+}
+
+fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
+    let mut saw_bool = false;
+    let mut saw_int = false;
+    let mut saw_float = false;
+    let mut saw_missing = false;
+
+    for value in values {
+        match value {
+            Scalar::Bool(_) => saw_bool = true,
+            Scalar::Int64(_) => saw_int = true,
+            Scalar::Float64(_) => saw_float = true,
+            Scalar::Null(_) => saw_missing = true,
+            _ => return None,
+        }
+    }
+
+    if saw_float || saw_missing || (saw_bool && saw_int) {
+        Some(DType::Float64)
+    } else if saw_bool {
+        Some(DType::Bool)
+    } else if saw_int {
+        Some(DType::Int64)
+    } else {
+        None
+    }
+}
+
+fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
+    if let Some(dtype) = mode_output_dtype(&values) {
+        Ok(Column::new(dtype, values)?)
+    } else {
+        Ok(Column::from_values(values)?)
+    }
+}
+
 fn null_kind_rank(kind: NullKind) -> u8 {
     match kind {
         NullKind::Null => 0,
@@ -2683,7 +2792,15 @@ impl Series {
     /// Matches `pd.Series.nunique()`.
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.unique().len()
+        self.nunique_with_dropna(true)
+    }
+
+    /// Count of unique values with explicit null counting control.
+    ///
+    /// Matches `pd.Series.nunique(dropna=...)`.
+    #[must_use]
+    pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        distinct_values(self.column.values(), dropna).len()
     }
 
     /// Map values using a dict-like mapping. Unmapped values become NaN.
@@ -3325,28 +3442,14 @@ impl Series {
     /// Matches `pd.Series.mode()`. Returns a new Series containing
     /// all values tied for the highest frequency, sorted ascending.
     pub fn mode(&self) -> Result<Self, FrameError> {
-        let mut counts: HashMap<ScalarKey<'_>, (Scalar, usize)> = HashMap::new();
-        for val in self.column.values() {
-            if let Some(key) = scalar_key_skip_missing(val) {
-                counts
-                    .entry(key)
-                    .and_modify(|(_, c)| *c += 1)
-                    .or_insert_with(|| (val.clone(), 1));
-            }
-        }
-        let max_count = counts.values().map(|(_, c)| *c).max().unwrap_or(0);
-        if max_count == 0 {
-            let idx = Index::new(Vec::new());
-            let col = Column::from_values(Vec::new())?;
-            return Self::new(self.name.clone(), idx, col);
-        }
-        let mut modes: Vec<Scalar> = counts
-            .into_values()
-            .filter(|(_, c)| *c == max_count)
-            .map(|(v, _)| v)
-            .collect();
-        // Sort modes for deterministic output
-        modes.sort_by(|a, b| a.semantic_cmp(b));
+        self.mode_with_dropna(true)
+    }
+
+    /// Most frequently occurring value(s) with explicit null counting control.
+    ///
+    /// Matches `pd.Series.mode(dropna=...)`.
+    pub fn mode_with_dropna(&self, dropna: bool) -> Result<Self, FrameError> {
+        let modes = mode_values(self.column.values(), dropna);
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
         Self::from_values(self.name.clone(), labels, modes)
     }
@@ -19317,6 +19420,13 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.nunique()`.
     pub fn nunique(&self) -> Result<Series, FrameError> {
+        self.nunique_with_dropna(true)
+    }
+
+    /// Count of unique values per column with explicit null counting control.
+    ///
+    /// Matches `pd.DataFrame.nunique(dropna=...)`.
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Result<Series, FrameError> {
         let labels: Vec<IndexLabel> = self
             .column_order
             .iter()
@@ -19327,13 +19437,7 @@ impl DataFrame {
             .iter()
             .map(|n| {
                 let col = &self.columns[n];
-                let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
-                for v in col.values() {
-                    if let Some(key) = scalar_key_skip_missing(v) {
-                        seen.insert(key);
-                    }
-                }
-                Scalar::Int64(seen.len() as i64)
+                Scalar::Int64(distinct_values(col.values(), dropna).len() as i64)
             })
             .collect();
         Series::from_values("nunique".to_string(), labels, values)
@@ -19345,20 +19449,36 @@ impl DataFrame {
     /// - axis=0 (default): unique count per column (same as `nunique()`)
     /// - axis=1: unique count per row
     pub fn nunique_axis(&self, axis: usize) -> Result<Series, FrameError> {
+        self.nunique_axis_with_dropna(axis, true)
+    }
+
+    /// Count unique values with axis parameter and explicit null counting control.
+    ///
+    /// Matches `pd.DataFrame.nunique(axis=..., dropna=...)`.
+    pub fn nunique_axis_with_dropna(
+        &self,
+        axis: usize,
+        dropna: bool,
+    ) -> Result<Series, FrameError> {
         if axis == 0 {
-            return self.nunique();
+            return self.nunique_with_dropna(dropna);
+        }
+        if axis != 1 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "axis must be 0 or 1, got {axis}"
+            )));
         }
         // axis=1: count unique values per row
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
-            for col_name in &self.column_order {
-                let val = &self.columns[col_name].values()[row_idx];
-                if let Some(key) = scalar_key_skip_missing(val) {
-                    seen.insert(key);
-                }
-            }
-            values.push(Scalar::Int64(seen.len() as i64));
+            let row_values = self
+                .column_order
+                .iter()
+                .map(|col_name| self.columns[col_name].values()[row_idx].clone())
+                .collect::<Vec<_>>();
+            values.push(Scalar::Int64(
+                distinct_values(&row_values, dropna).len() as i64
+            ));
         }
         Series::from_values("nunique".to_owned(), self.index.labels().to_vec(), values)
     }
@@ -19367,7 +19487,14 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.nunique(axis=1)`.
     pub fn nunique_axis1(&self) -> Result<Series, FrameError> {
-        self.nunique_axis(1)
+        self.nunique_axis_with_dropna(1, true)
+    }
+
+    /// Count unique values per row with explicit null counting control.
+    ///
+    /// Matches `pd.DataFrame.nunique(axis=1, dropna=...)`.
+    pub fn nunique_axis1_with_dropna(&self, dropna: bool) -> Result<Series, FrameError> {
+        self.nunique_axis_with_dropna(1, dropna)
     }
 
     /// Index label of the minimum value per numeric column.
@@ -19597,33 +19724,132 @@ impl DataFrame {
     /// Mode per column.
     ///
     /// Matches `pd.DataFrame.mode()`. Returns a DataFrame where each column
-    /// contains its mode value. Only the first mode is kept when there are ties.
+    /// contains its mode values, padded with `NaN` when columns have fewer modes.
     pub fn mode(&self) -> Result<Self, FrameError> {
-        let mut column_modes = Vec::new();
+        self.mode_with_options(0, false, true)
+    }
+
+    /// Mode over columns or rows with pandas-compatible options.
+    ///
+    /// Matches `pd.DataFrame.mode(axis=..., numeric_only=..., dropna=...)`.
+    pub fn mode_with_options(
+        &self,
+        axis: usize,
+        numeric_only: bool,
+        dropna: bool,
+    ) -> Result<Self, FrameError> {
+        match axis {
+            0 => self.mode_axis0(numeric_only, dropna),
+            1 => self.mode_axis1(numeric_only, dropna),
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "axis must be 0 or 1, got {axis}"
+            ))),
+        }
+    }
+
+    fn mode_axis0(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
+        let selected_columns = self
+            .column_order
+            .iter()
+            .filter(|name| {
+                !numeric_only
+                    || matches!(
+                        self.columns[name.as_str()].dtype(),
+                        DType::Bool | DType::Int64 | DType::Float64
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut column_modes = Vec::with_capacity(selected_columns.len());
         let mut max_modes = 0;
 
-        for name in &self.column_order {
-            let s = self.column_as_series(name)?;
-            let modes = s.mode()?;
+        for name in &selected_columns {
+            let series = self.column_as_series(name)?;
+            let modes = series.mode_with_dropna(dropna)?;
             max_modes = max_modes.max(modes.len());
             column_modes.push((name.clone(), modes));
         }
 
+        let mut result_cols = BTreeMap::new();
         if max_modes == 0 {
-            return Self::new(Index::new(Vec::new()), BTreeMap::new());
+            for name in &selected_columns {
+                let dtype = self.columns[name.as_str()].dtype();
+                result_cols.insert(name.clone(), Column::new(dtype, Vec::new())?);
+            }
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                result_cols,
+                selected_columns,
+            );
         }
 
-        let mut result_cols = BTreeMap::new();
         for (name, modes) in column_modes {
-            let mut vals = modes.column().values().to_vec();
-            while vals.len() < max_modes {
-                vals.push(Scalar::Null(NullKind::NaN));
+            let mut values = modes.column().values().to_vec();
+            while values.len() < max_modes {
+                values.push(Scalar::Null(NullKind::NaN));
             }
-            result_cols.insert(name, Column::from_values(vals)?);
+            result_cols.insert(name, build_mode_column(values)?);
         }
 
         let labels: Vec<IndexLabel> = (0..max_modes).map(|i| (i as i64).into()).collect();
-        Self::new_with_column_order(Index::new(labels), result_cols, self.column_order.clone())
+        Self::new_with_column_order(Index::new(labels), result_cols, selected_columns)
+    }
+
+    fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
+        let selected_columns = self
+            .column_order
+            .iter()
+            .filter(|name| {
+                !numeric_only
+                    || matches!(
+                        self.columns[name.as_str()].dtype(),
+                        DType::Bool | DType::Int64 | DType::Float64
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if selected_columns.is_empty() {
+            return Self::new_with_column_order(self.index.clone(), BTreeMap::new(), Vec::new());
+        }
+
+        let mut row_modes = Vec::with_capacity(self.len());
+        let mut max_modes = 0;
+        for row_idx in 0..self.len() {
+            let row_values = selected_columns
+                .iter()
+                .map(|name| self.columns[name.as_str()].values()[row_idx].clone())
+                .collect::<Vec<_>>();
+            let modes = mode_values(&row_values, dropna);
+            max_modes = max_modes.max(modes.len());
+            row_modes.push(modes);
+        }
+
+        if max_modes == 0 {
+            return Self::new_with_column_order(self.index.clone(), BTreeMap::new(), Vec::new());
+        }
+
+        let mode_columns = (0..max_modes).map(|i| i.to_string()).collect::<Vec<_>>();
+        let padded_rows = row_modes
+            .into_iter()
+            .map(|mut modes| {
+                while modes.len() < max_modes {
+                    modes.push(Scalar::Null(NullKind::NaN));
+                }
+                modes
+            })
+            .collect::<Vec<_>>();
+        let mut result_cols = BTreeMap::new();
+        for (col_idx, name) in mode_columns.iter().enumerate() {
+            let values = padded_rows
+                .iter()
+                .map(|row| row[col_idx].clone())
+                .collect::<Vec<_>>();
+            result_cols.insert(name.clone(), build_mode_column(values)?);
+        }
+
+        Self::new_with_column_order(self.index.clone(), result_cols, mode_columns)
     }
 
     /// Internal: reduce each numeric column to a single scalar via the named function.
@@ -27148,6 +27374,44 @@ mod tests {
     }
 
     #[test]
+    fn series_nunique_dropna_false_counts_missing_values() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.nunique_with_dropna(false), 2);
+    }
+
+    #[test]
+    fn series_nunique_merges_exact_numeric_equals() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Bool(true), Scalar::Int64(1), Scalar::Float64(1.0)],
+        )
+        .unwrap();
+
+        assert_eq!(s.nunique(), 1);
+    }
+
+    #[test]
     fn series_shift_positive() {
         let s = Series::from_values(
             "vals",
@@ -32126,9 +32390,15 @@ mod tests {
 
         let ranked = s.rank_with_pct("dense", true, "keep", true).unwrap();
         assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
-        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12));
-        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12));
-        assert!(matches!(ranked.values()[3], Scalar::Float64(v) if (v - (2.0 / 3.0)).abs() < 1e-12));
+        assert!(
+            matches!(ranked.values()[1], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12)
+        );
+        assert!(
+            matches!(ranked.values()[2], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12)
+        );
+        assert!(
+            matches!(ranked.values()[3], Scalar::Float64(v) if (v - (2.0 / 3.0)).abs() < 1e-12)
+        );
     }
 
     #[test]
@@ -32335,16 +32605,24 @@ mod tests {
         ])
         .unwrap();
 
-        let ranked = df
-            .rank_axis1_with_pct("dense", true, "keep", true)
-            .unwrap();
+        let ranked = df.rank_axis1_with_pct("dense", true, "keep", true).unwrap();
 
-        assert!(matches!(ranked.columns["a"].values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
-        assert!(matches!(ranked.columns["b"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
-        assert!(matches!(ranked.columns["c"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
+        assert!(
+            matches!(ranked.columns["a"].values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12)
+        );
+        assert!(
+            matches!(ranked.columns["b"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12)
+        );
+        assert!(
+            matches!(ranked.columns["c"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12)
+        );
         assert!(ranked.columns["a"].values()[1].is_missing());
-        assert!(matches!(ranked.columns["b"].values()[1], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
-        assert!(matches!(ranked.columns["c"].values()[1], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(
+            matches!(ranked.columns["b"].values()[1], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12)
+        );
+        assert!(
+            matches!(ranked.columns["c"].values()[1], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12)
+        );
     }
 
     // ── melt tests ──
@@ -35434,6 +35712,48 @@ mod tests {
         assert_eq!(result.len(), 2);
     }
 
+    #[test]
+    fn series_mode_dropna_false_counts_missing_values() {
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::from).collect(),
+            vec![
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(4),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let result = s.mode_with_dropna(false).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.values()[0], Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn series_mode_dropna_false_sorts_missing_last() {
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::from).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let result = s.mode_with_dropna(false).unwrap();
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(1), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
     // ── DataFrame.shape tests ──
 
     #[test]
@@ -35637,6 +35957,37 @@ mod tests {
         .unwrap();
         let result = df.nunique().unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn dataframe_nunique_dropna_false_counts_missing_values() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.nunique_with_dropna(false).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Int64(2));
     }
 
     // ── DataFrame.all / .any tests ──
@@ -39384,6 +39735,42 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Int64(2));
     }
 
+    #[test]
+    fn df_nunique_axis1_dropna_false_counts_missing_values() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]),
+                (
+                    "b",
+                    vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+                ),
+                ("c", vec![Scalar::Float64(1.0), Scalar::Float64(1.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.nunique_axis_with_dropna(1, false).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn df_nunique_axis1_merges_exact_numeric_equals() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Bool(true)]),
+                ("b", vec![Scalar::Int64(1)]),
+                ("c", vec![Scalar::Float64(1.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.nunique_axis1().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+    }
+
     // ── astype_safe ──
 
     #[test]
@@ -42140,6 +42527,209 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(2));
         assert_eq!(result.columns()["y"].values()[0], Scalar::Utf8("b".into()));
+    }
+
+    #[test]
+    fn df_mode_dropna_false_counts_missing_values() {
+        let df = DataFrame::from_tuples_with_index(
+            vec![
+                vec![
+                    Scalar::Utf8("bird".into()),
+                    Scalar::Int64(2),
+                    Scalar::Float64(2.0),
+                ],
+                vec![
+                    Scalar::Utf8("mammal".into()),
+                    Scalar::Int64(4),
+                    Scalar::Null(NullKind::NaN),
+                ],
+                vec![
+                    Scalar::Utf8("arthropod".into()),
+                    Scalar::Int64(8),
+                    Scalar::Float64(0.0),
+                ],
+                vec![
+                    Scalar::Utf8("bird".into()),
+                    Scalar::Int64(2),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            ],
+            &["species", "legs", "wings"],
+            vec![
+                "falcon".into(),
+                "horse".into(),
+                "spider".into(),
+                "ostrich".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode_with_options(0, false, false).unwrap();
+        assert_eq!(result.shape(), (1, 3));
+        assert_eq!(
+            result.column("species").unwrap().values()[0],
+            Scalar::Utf8("bird".into())
+        );
+        assert_eq!(result.column("legs").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(
+            result.column("wings").unwrap().values()[0],
+            Scalar::Null(NullKind::NaN)
+        );
+    }
+
+    #[test]
+    fn df_mode_numeric_only_includes_bool_and_skips_utf8() {
+        let df = DataFrame::from_dict(
+            &["x", "flag", "label"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "flag",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode_with_options(0, true, true).unwrap();
+        assert_eq!(result.column_names(), vec!["x", "flag"]);
+        assert_eq!(result.shape(), (1, 2));
+        assert_eq!(result.column("x").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(
+            result.column("flag").unwrap().values()[0],
+            Scalar::Bool(true)
+        );
+    }
+
+    #[test]
+    fn df_mode_axis1_numeric_only_matches_pandas_example() {
+        let df = DataFrame::from_tuples_with_index(
+            vec![
+                vec![
+                    Scalar::Utf8("bird".into()),
+                    Scalar::Int64(2),
+                    Scalar::Float64(2.0),
+                ],
+                vec![
+                    Scalar::Utf8("mammal".into()),
+                    Scalar::Int64(4),
+                    Scalar::Null(NullKind::NaN),
+                ],
+                vec![
+                    Scalar::Utf8("arthropod".into()),
+                    Scalar::Int64(8),
+                    Scalar::Float64(0.0),
+                ],
+                vec![
+                    Scalar::Utf8("bird".into()),
+                    Scalar::Int64(2),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            ],
+            &["species", "legs", "wings"],
+            vec![
+                "falcon".into(),
+                "horse".into(),
+                "spider".into(),
+                "ostrich".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode_with_options(1, true, true).unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("falcon".into()),
+                IndexLabel::Utf8("horse".into()),
+                IndexLabel::Utf8("spider".into()),
+                IndexLabel::Utf8("ostrich".into()),
+            ]
+        );
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(2.0),
+            ]
+        );
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+    }
+
+    #[test]
+    fn df_mode_axis0_all_missing_keeps_columns() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+                ),
+                (
+                    "y",
+                    vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode_with_options(0, false, true).unwrap();
+        assert_eq!(result.shape(), (0, 2));
+        assert_eq!(result.column_names(), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn df_mode_axis1_all_missing_keeps_index() {
+        let df = DataFrame::from_tuples_with_index(
+            vec![
+                vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+                vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+            ],
+            &["x", "y"],
+            vec!["r0".into(), "r1".into()],
+        )
+        .unwrap();
+
+        let result = df.mode_with_options(1, false, true).unwrap();
+        assert_eq!(result.shape(), (2, 0));
+        assert!(result.column_names().is_empty());
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Utf8("r0".into()), IndexLabel::Utf8("r1".into())]
+        );
     }
 
     // ── Series: rename, set_axis, truncate, combine ──

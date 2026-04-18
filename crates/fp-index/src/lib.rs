@@ -35,6 +35,17 @@ impl From<String> for IndexLabel {
     }
 }
 
+impl IndexLabel {
+    #[must_use]
+    fn is_missing(&self) -> bool {
+        match self {
+            Self::Timedelta64(value) => *value == Timedelta::NAT,
+            Self::Datetime64(value) => *value == i64::MIN,
+            Self::Int64(_) | Self::Utf8(_) => false,
+        }
+    }
+}
+
 impl fmt::Display for IndexLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -542,7 +553,23 @@ impl Index {
 
     #[must_use]
     pub fn drop_duplicates(&self) -> Self {
-        self.unique()
+        self.drop_duplicates_keep(DuplicateKeep::First)
+    }
+
+    /// Drop duplicated labels with explicit keep behavior.
+    ///
+    /// Matches `pd.Index.drop_duplicates(keep=...)`.
+    #[must_use]
+    pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Self {
+        let duplicated = self.duplicated(keep);
+        let labels = self
+            .labels
+            .iter()
+            .zip(duplicated)
+            .filter(|(_, is_duplicated)| !is_duplicated)
+            .map(|(label, _)| label.clone())
+            .collect();
+        self.propagate_name(Self::new(labels))
     }
 
     // ── Pandas Index Model: set operations ─────────────────────────────
@@ -706,7 +733,19 @@ impl Index {
     /// Matches `pd.Index.nunique()`.
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.unique().len()
+        self.nunique_with_dropna(true)
+    }
+
+    /// Number of unique labels with explicit missing-value control.
+    ///
+    /// Matches `pd.Index.nunique(dropna=...)`.
+    #[must_use]
+    pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        self.unique()
+            .labels
+            .iter()
+            .filter(|label| !dropna || !label.is_missing())
+            .count()
     }
 
     // ── Pandas Index Model: transformation ───────────────────────────
@@ -787,32 +826,38 @@ impl Index {
         ))
     }
 
-    /// Fill missing-like labels (in our model, only Int64/Utf8 exist, so this
-    /// is a no-op). Provided for API parity with `pd.Index.fillna()`.
+    /// Fill missing labels with the provided scalar.
+    ///
+    /// Matches `pd.Index.fillna(value)`.
     #[must_use]
     pub fn fillna(&self, value: &IndexLabel) -> Self {
-        // IndexLabel has no null variant; this replaces placeholder-sentinel labels.
-        // Since we don't have null labels, return a clone. Provided for API parity.
-        let _ = value;
-        self.clone()
+        self.propagate_name(Self::new(
+            self.labels
+                .iter()
+                .map(|label| {
+                    if label.is_missing() {
+                        value.clone()
+                    } else {
+                        label.clone()
+                    }
+                })
+                .collect(),
+        ))
     }
 
-    /// Check which positions have null-like labels. Since IndexLabel has no
-    /// null variant, this always returns all-false.
-    ///
     /// Matches `pd.Index.isna()`.
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
-        vec![false; self.labels.len()]
+        self.labels.iter().map(IndexLabel::is_missing).collect()
     }
 
-    /// Check which positions have non-null labels. Since IndexLabel has no
-    /// null variant, this always returns all-true.
-    ///
     /// Matches `pd.Index.notna()`.
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
-        vec![true; self.labels.len()]
+        self.labels
+            .iter()
+            .map(|label| !label.is_missing())
+            .collect()
     }
 
     /// Where: replace labels at false positions with a fill value.
@@ -1793,6 +1838,7 @@ pub enum MultiIndexOrIndex {
 #[cfg(test)]
 mod tests {
     use super::{Index, IndexLabel, MultiIndex, align_union, validate_alignment_plan};
+    use fp_types::Timedelta;
 
     #[test]
     fn union_alignment_preserves_left_then_right_unseen_order() {
@@ -2232,6 +2278,55 @@ mod tests {
     fn drop_duplicates_equals_unique() {
         let index = Index::from_i64(vec![3, 1, 3, 2, 1]);
         assert_eq!(index.drop_duplicates(), index.unique());
+    }
+
+    #[test]
+    fn index_drop_duplicates_keep_last() {
+        let index = Index::new(vec![
+            "llama".into(),
+            "cow".into(),
+            "llama".into(),
+            "beetle".into(),
+            "llama".into(),
+            "hippo".into(),
+        ])
+        .set_names(Some("animals"));
+
+        let deduped = index.drop_duplicates_keep(DuplicateKeep::Last);
+
+        assert_eq!(
+            deduped.labels(),
+            &[
+                IndexLabel::from("cow"),
+                IndexLabel::from("beetle"),
+                IndexLabel::from("llama"),
+                IndexLabel::from("hippo"),
+            ]
+        );
+        assert_eq!(deduped.name(), Some("animals"));
+    }
+
+    #[test]
+    fn index_drop_duplicates_keep_none_discards_all_duplicates() {
+        let index = Index::new(vec![
+            "llama".into(),
+            "cow".into(),
+            "llama".into(),
+            "beetle".into(),
+            "llama".into(),
+            "hippo".into(),
+        ]);
+
+        let deduped = index.drop_duplicates_keep(DuplicateKeep::None);
+
+        assert_eq!(
+            deduped.labels(),
+            &[
+                IndexLabel::from("cow"),
+                IndexLabel::from("beetle"),
+                IndexLabel::from("hippo"),
+            ]
+        );
     }
 
     #[test]
@@ -2793,6 +2888,24 @@ mod tests {
         assert_eq!(idx.nunique(), 2);
     }
 
+    #[test]
+    fn index_nunique_dropna_false_counts_timedelta_nat_once() {
+        let idx = Index::from_timedelta64(vec![Timedelta::NAT, Timedelta::NAT, 5]);
+        assert_eq!(idx.nunique(), 1);
+        assert_eq!(idx.nunique_with_dropna(false), 2);
+    }
+
+    #[test]
+    fn index_nunique_dropna_false_counts_datetime_nat_once() {
+        let idx = Index::new(vec![
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Datetime64(1_700_000_000_000_000_000),
+        ]);
+        assert_eq!(idx.nunique(), 1);
+        assert_eq!(idx.nunique_with_dropna(false), 2);
+    }
+
     // ── Index: map/rename/drop/astype ──
 
     #[test]
@@ -2839,6 +2952,58 @@ mod tests {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
         assert_eq!(idx.isna(), vec![false, false]);
         assert_eq!(idx.notna(), vec![true, true]);
+    }
+
+    #[test]
+    fn index_isna_notna_detects_datetimelike_nat() {
+        let datetime_idx = Index::new(vec![
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Datetime64(1_700_000_000_000_000_000),
+        ]);
+        assert_eq!(datetime_idx.isna(), vec![true, false]);
+        assert_eq!(datetime_idx.notna(), vec![false, true]);
+
+        let timedelta_idx = Index::from_timedelta64(vec![Timedelta::NAT, 5]);
+        assert_eq!(timedelta_idx.isna(), vec![true, false]);
+        assert_eq!(timedelta_idx.notna(), vec![false, true]);
+    }
+
+    #[test]
+    fn index_fillna_replaces_datetime_nat_and_preserves_name() {
+        let idx = Index::new(vec![
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Datetime64(1_700_000_000_000_000_000),
+            IndexLabel::Datetime64(i64::MIN),
+        ])
+        .set_name("when");
+
+        let filled = idx.fillna(&IndexLabel::Datetime64(1_800_000_000_000_000_000));
+
+        assert_eq!(
+            filled.labels(),
+            &[
+                IndexLabel::Datetime64(1_800_000_000_000_000_000),
+                IndexLabel::Datetime64(1_700_000_000_000_000_000),
+                IndexLabel::Datetime64(1_800_000_000_000_000_000),
+            ]
+        );
+        assert_eq!(filled.name(), Some("when"));
+    }
+
+    #[test]
+    fn index_fillna_replaces_timedelta_nat() {
+        let idx = Index::from_timedelta64(vec![Timedelta::NAT, 5, Timedelta::NAT]);
+
+        let filled = idx.fillna(&IndexLabel::Timedelta64(42));
+
+        assert_eq!(
+            filled.labels(),
+            &[
+                IndexLabel::Timedelta64(42),
+                IndexLabel::Timedelta64(5),
+                IndexLabel::Timedelta64(42),
+            ]
+        );
     }
 
     #[test]

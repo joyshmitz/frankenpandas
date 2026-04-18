@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, mem::size_of};
+use std::{cmp::Ordering, collections::HashMap, mem::size_of};
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
@@ -13,11 +13,15 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupByOptions {
     pub dropna: bool,
+    pub sort: bool,
 }
 
 impl Default for GroupByOptions {
     fn default() -> Self {
-        Self { dropna: true }
+        Self {
+            dropna: true,
+            sort: true,
+        }
     }
 }
 
@@ -155,7 +159,12 @@ fn groupby_sum_with_global_allocator(
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
     if let Some((out_index, out_values)) =
-        try_groupby_sum_dense_int64(aligned_keys_values, aligned_values_values, options.dropna)
+        try_groupby_sum_dense_int64(
+            aligned_keys_values,
+            aligned_values_values,
+            options.dropna,
+            options.sort,
+        )
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new("sum", Index::new(out_index), out_column)?);
@@ -190,6 +199,14 @@ fn groupby_sum_with_global_allocator(
         }
     }
 
+    if options.sort {
+        sort_group_ordering_by(aligned_keys_values, &mut ordering, |key| {
+            slot.get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
     emit_groupby_result(aligned_keys_values, &ordering, &mut slot)
 }
 
@@ -203,6 +220,7 @@ fn groupby_sum_with_arena(
         aligned_keys_values,
         aligned_values_values,
         options.dropna,
+        options.sort,
     ) {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new("sum", Index::new(out_index), out_column)?);
@@ -236,6 +254,14 @@ fn groupby_sum_with_arena(
         if let Ok(v) = value.to_f64() {
             entry.1 += v;
         }
+    }
+
+    if options.sort {
+        sort_group_ordering_by(aligned_keys_values, ordering.as_mut_slice(), |key| {
+            slot.get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
     }
 
     emit_groupby_result(aligned_keys_values, ordering.as_slice(), &mut slot)
@@ -309,6 +335,30 @@ impl<'a> GroupKeyRef<'a> {
     }
 }
 
+fn compare_group_labels(left: &Scalar, right: &Scalar) -> Ordering {
+    match (left.is_missing(), right.is_missing()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.semantic_cmp(right),
+    }
+}
+
+fn sort_group_ordering_by<'a, F>(
+    source_keys: &[Scalar],
+    ordering: &mut [GroupKeyRef<'a>],
+    source_idx_for: F,
+) where
+    F: Fn(&GroupKeyRef<'a>) -> usize,
+{
+    ordering.sort_by(|left, right| {
+        compare_group_labels(
+            &source_keys[source_idx_for(left)],
+            &source_keys[source_idx_for(right)],
+        )
+    });
+}
+
 const DENSE_INT_KEY_RANGE_LIMIT: i128 = 65_536;
 
 /// Scan keys and return (min, max, saw_any_int). Returns None if a non-Int64,
@@ -340,6 +390,7 @@ fn try_groupby_sum_dense_int64(
     keys: &[Scalar],
     values: &[Scalar],
     dropna: bool,
+    sort: bool,
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
     let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
 
@@ -381,11 +432,22 @@ fn try_groupby_sum_dense_int64(
 
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
-    for key in ordering {
-        let raw = i128::from(key) - i128::from(min_key);
-        let bucket = usize::try_from(raw).ok()?;
-        out_index.push(IndexLabel::Int64(key));
-        out_values.push(Scalar::Float64(sums[bucket]));
+    if sort {
+        for (bucket, was_seen) in seen.iter().enumerate() {
+            if !*was_seen {
+                continue;
+            }
+            let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(Scalar::Float64(sums[bucket]));
+        }
+    } else {
+        for key in ordering {
+            let raw = i128::from(key) - i128::from(min_key);
+            let bucket = usize::try_from(raw).ok()?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(Scalar::Float64(sums[bucket]));
+        }
     }
 
     Some((out_index, out_values))
@@ -397,6 +459,7 @@ fn try_groupby_sum_dense_int64_arena(
     keys: &[Scalar],
     values: &[Scalar],
     dropna: bool,
+    sort: bool,
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
     let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
 
@@ -443,11 +506,22 @@ fn try_groupby_sum_dense_int64_arena(
     // Copy results out of arena into global-allocated output.
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
-    for key in ordering.iter().copied() {
-        let raw = i128::from(key) - i128::from(min_key);
-        let bucket = usize::try_from(raw).ok()?;
-        out_index.push(IndexLabel::Int64(key));
-        out_values.push(Scalar::Float64(sums[bucket]));
+    if sort {
+        for (bucket, was_seen) in seen.iter().enumerate() {
+            if !*was_seen {
+                continue;
+            }
+            let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(Scalar::Float64(sums[bucket]));
+        }
+    } else {
+        for key in ordering.iter().copied() {
+            let raw = i128::from(key) - i128::from(min_key);
+            let bucket = usize::try_from(raw).ok()?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(Scalar::Float64(sums[bucket]));
+        }
     }
 
     Some((out_index, out_values))
@@ -478,9 +552,9 @@ pub enum AggFunc {
 /// Generic groupby aggregation supporting all standard aggregation functions.
 ///
 /// Matches `df.groupby(keys).agg(func)` semantics:
-/// - Groups by key values, preserving first-seen key order.
+/// - Groups by key values, sorting by group label by default.
 /// - Applies the specified aggregation to each group's values.
-/// - Respects `dropna` option for null keys.
+/// - Respects `dropna` and `sort` options for null keys and group ordering.
 ///
 /// For Sum, the optimized `groupby_sum()` with dense Int64 and arena paths
 /// is preferred; this function uses the generic HashMap path for all ops.
@@ -534,6 +608,15 @@ pub fn groupby_agg(
         if !value.is_missing() {
             entry.1.push(value.clone());
         }
+    }
+
+    if options.sort {
+        sort_group_ordering_by(key_vals, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
     }
 
     // Apply aggregation function to each group.
@@ -1167,7 +1250,7 @@ mod tests {
     use fp_frame::Series;
 
     #[test]
-    fn groupby_sum_respects_first_seen_key_order() {
+    fn groupby_sum_sorts_keys_by_default() {
         let keys = Series::from_values(
             "key",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -1197,6 +1280,49 @@ mod tests {
             &keys,
             &values,
             GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(out.values(), &[Scalar::Float64(6.0), Scalar::Float64(4.0)]);
+    }
+
+    #[test]
+    fn groupby_sum_sort_false_preserves_first_seen_key_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .expect("keys");
+
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
@@ -1264,7 +1390,10 @@ mod tests {
         let out = groupby_sum(
             &keys,
             &values,
-            GroupByOptions::default(),
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
@@ -1334,7 +1463,10 @@ mod tests {
         let out = groupby_sum(
             &keys,
             &values,
-            GroupByOptions::default(),
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
@@ -1346,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_sum_int_dense_path_preserves_first_seen_order() {
+    fn groupby_sum_int_dense_path_sorts_keys_by_default() {
         let keys = Series::from_values(
             "key",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -1383,6 +1515,59 @@ mod tests {
 
         assert_eq!(
             out.index().labels(),
+            &[(-2_i64).into(), 5_i64.into(), 10_i64.into()]
+        );
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Float64(4.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_sum_int_dense_path_preserves_first_seen_order_when_sort_disabled() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(5),
+                Scalar::Int64(10),
+                Scalar::Int64(-2),
+            ],
+        )
+        .expect("keys");
+
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+
+        assert_eq!(
+            out.index().labels(),
             &[10_i64.into(), 5_i64.into(), (-2_i64).into()]
         );
         assert_eq!(
@@ -1396,13 +1581,13 @@ mod tests {
     }
 
     #[test]
-    fn groupby_sum_dropna_false_keeps_null_group_via_generic_fallback() {
+    fn groupby_sum_dropna_false_keeps_null_group_sorted_last() {
         let keys = Series::from_values(
             "key",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
-                Scalar::Int64(10),
                 Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
                 Scalar::Int64(10),
             ],
         )
@@ -1419,14 +1604,17 @@ mod tests {
         let out = groupby_sum(
             &keys,
             &values,
-            GroupByOptions { dropna: false },
+            GroupByOptions {
+                dropna: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &[10_i64.into(), "<null>".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(2.0)]);
+        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(1.0)]);
     }
 
     // --- AG-08-T: GroupBy Clone Elimination Tests ---
@@ -1462,7 +1650,10 @@ mod tests {
         let out = groupby_sum(
             &keys,
             &values,
-            GroupByOptions::default(),
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
@@ -1586,7 +1777,10 @@ mod tests {
         let out = groupby_sum(
             &keys,
             &values,
-            GroupByOptions::default(),
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
             &RuntimePolicy::strict(),
             &mut ledger,
         )
@@ -1664,23 +1858,23 @@ mod tests {
         )
         .expect("generic groupby");
 
-        // Both should produce the same sums in the same first-seen order
+        // Both should produce the same sums in the same sorted order.
         assert_eq!(dense_out.values(), generic_out.values());
         // Dense produces IndexLabel::Int64(5), generic produces IndexLabel::Utf8("5")
-        // So we verify ordering is the same (first=5/key_5, second=3/key_3)
+        // So we verify ordering is the same after sorting.
         assert_eq!(
             dense_out.index().labels().len(),
             generic_out.index().labels().len()
         );
         assert_eq!(
             dense_out.index().labels(),
-            &[IndexLabel::Int64(5), IndexLabel::Int64(3)]
+            &[IndexLabel::Int64(3), IndexLabel::Int64(5)]
         );
         assert_eq!(
             generic_out.index().labels(),
             &[
-                IndexLabel::Utf8("5".to_owned()),
-                IndexLabel::Utf8("3".to_owned())
+                IndexLabel::Utf8("3".to_owned()),
+                IndexLabel::Utf8("5".to_owned())
             ]
         );
     }
@@ -2205,7 +2399,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_agg_preserves_first_seen_order() {
+    fn groupby_agg_sorts_keys_by_default() {
         let keys = Series::from_values(
             "key",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -2239,7 +2433,47 @@ mod tests {
         )
         .unwrap();
 
-        // First-seen order: c, a, b
+        assert_eq!(out.index().labels(), &["a".into(), "b".into(), "c".into()]);
+    }
+
+    #[test]
+    fn groupby_agg_sort_false_preserves_first_seen_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions {
+                sort: false,
+                ..GroupByOptions::default()
+            },
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
         assert_eq!(out.index().labels(), &["c".into(), "a".into(), "b".into()]);
     }
 

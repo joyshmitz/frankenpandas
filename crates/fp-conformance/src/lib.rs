@@ -534,6 +534,12 @@ pub enum FixtureOperation {
     SeriesStrIndexOf,
     #[serde(rename = "series_str_rindex_of", alias = "series_str_rindex_of_default")]
     SeriesStrRindexOf,
+    #[serde(rename = "series_str_split_count", alias = "series_str_split_count_default")]
+    SeriesStrSplitCount,
+    #[serde(rename = "series_str_rsplit_get", alias = "series_str_rsplit_get_default")]
+    SeriesStrRsplitGet,
+    #[serde(rename = "series_str_split_regex_get", alias = "series_str_split_regex_get_default")]
+    SeriesStrSplitRegexGet,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -1022,6 +1028,9 @@ impl FixtureOperation {
             Self::SeriesStrExpandtabs => "series_str_expandtabs",
             Self::SeriesStrIndexOf => "series_str_index_of",
             Self::SeriesStrRindexOf => "series_str_rindex_of",
+            Self::SeriesStrSplitCount => "series_str_split_count",
+            Self::SeriesStrRsplitGet => "series_str_rsplit_get",
+            Self::SeriesStrSplitRegexGet => "series_str_split_regex_get",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1881,6 +1890,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrExpandtabs
         | FixtureOperation::SeriesStrIndexOf
         | FixtureOperation::SeriesStrRindexOf
+        | FixtureOperation::SeriesStrSplitCount
+        | FixtureOperation::SeriesStrRsplitGet
+        | FixtureOperation::SeriesStrSplitRegexGet
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7698,6 +7710,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrExpandtabs
         | FixtureOperation::SeriesStrIndexOf
         | FixtureOperation::SeriesStrRindexOf
+        | FixtureOperation::SeriesStrSplitCount
+        | FixtureOperation::SeriesStrRsplitGet
+        | FixtureOperation::SeriesStrSplitRegexGet
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9292,6 +9307,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrExpandtabs
         | FixtureOperation::SeriesStrIndexOf
         | FixtureOperation::SeriesStrRindexOf
+        | FixtureOperation::SeriesStrSplitCount
+        | FixtureOperation::SeriesStrRsplitGet
+        | FixtureOperation::SeriesStrSplitRegexGet
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9860,6 +9878,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrExpandtabs
         | FixtureOperation::SeriesStrIndexOf
         | FixtureOperation::SeriesStrRindexOf
+        | FixtureOperation::SeriesStrSplitCount
+        | FixtureOperation::SeriesStrRsplitGet
+        | FixtureOperation::SeriesStrSplitRegexGet
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12620,6 +12641,20 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesStrRindexOf => {
             let sub = fixture.str_sub.as_deref().unwrap_or("");
             series.str().rindex_of(sub).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrSplitCount => {
+            let pat = fixture.str_split_pat.as_deref().unwrap_or("");
+            series.str().split_count(pat).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrRsplitGet => {
+            let pat = fixture.str_split_pat.as_deref().unwrap_or("");
+            let n = fixture.str_split_n.unwrap_or(0);
+            series.str().rsplit_get(pat, n).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrSplitRegexGet => {
+            let pat = fixture.regex_pattern.as_deref().unwrap_or("");
+            let n = fixture.str_split_n.unwrap_or(0);
+            series.str().split_regex_get(pat, n).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -15401,6 +15436,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrExpandtabs
         | FixtureOperation::SeriesStrIndexOf
         | FixtureOperation::SeriesStrRindexOf
+        | FixtureOperation::SeriesStrSplitCount
+        | FixtureOperation::SeriesStrRsplitGet
+        | FixtureOperation::SeriesStrSplitRegexGet
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

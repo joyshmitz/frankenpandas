@@ -2156,6 +2156,24 @@ def op_dataframe_quantile(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_value_counts requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    normalize = payload.get("value_counts_normalize", False)
+    sort = payload.get("value_counts_sort", True)
+    ascending = payload.get("value_counts_ascending", False)
+    dropna = payload.get("value_counts_dropna", True)
+
+    try:
+        out = frame.value_counts(normalize=normalize, sort=sort, ascending=ascending, dropna=dropna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_value_counts failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4151,6 +4169,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_nunique(pd, payload)
     if op in {"dataframe_quantile", "data_frame_quantile"}:
         return op_dataframe_quantile(pd, payload)
+    if op in {"dataframe_value_counts", "data_frame_value_counts"}:
+        return op_dataframe_value_counts(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

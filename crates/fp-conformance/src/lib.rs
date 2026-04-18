@@ -343,6 +343,8 @@ pub enum FixtureOperation {
     DataFrameNunique,
     #[serde(rename = "dataframe_quantile", alias = "dataframe_quantile_default")]
     DataFrameQuantile,
+    #[serde(rename = "dataframe_value_counts", alias = "dataframe_value_counts_default")]
+    DataFrameValueCounts,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -751,6 +753,7 @@ impl FixtureOperation {
             Self::DataFrameAll => "dataframe_all",
             Self::DataFrameNunique => "dataframe_nunique",
             Self::DataFrameQuantile => "dataframe_quantile",
+            Self::DataFrameValueCounts => "dataframe_value_counts",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1494,6 +1497,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
         | FixtureOperation::DataFrameQuantile
+        | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6891,7 +6895,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
-        | FixtureOperation::DataFrameQuantile => {
+        | FixtureOperation::DataFrameQuantile
+        | FixtureOperation::DataFrameValueCounts => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6915,6 +6920,7 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => frame.nunique().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameQuantile => frame.quantile(0.5).map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameValueCounts => frame.value_counts().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -8756,6 +8762,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
         | FixtureOperation::DataFrameQuantile
+        | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9235,6 +9242,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
         | FixtureOperation::DataFrameQuantile
+        | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13848,7 +13856,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
-        | FixtureOperation::DataFrameQuantile => {
+        | FixtureOperation::DataFrameQuantile
+        | FixtureOperation::DataFrameValueCounts => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -13872,6 +13881,7 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => frame.nunique().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameQuantile => frame.quantile(0.5).map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameValueCounts => frame.value_counts().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {

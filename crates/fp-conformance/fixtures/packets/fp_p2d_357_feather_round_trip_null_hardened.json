@@ -1,0 +1,27 @@
+{
+  "packet_id": "FP-P2D-357",
+  "case_id": "feather_round_trip_null_hardened",
+  "mode": "hardened",
+  "operation": "feather_round_trip",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "nums": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 3.5 }
+      ],
+      "strs": [
+        { "kind": "utf8", "value": "hello" },
+        { "kind": "utf8", "value": "" },
+        { "kind": "null", "value": "null" }
+      ]
+    },
+    "column_order": ["nums", "strs"]
+  },
+  "expected_bool": true
+}

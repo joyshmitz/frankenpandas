@@ -1,0 +1,27 @@
+{
+  "packet_id": "FP-P2D-358",
+  "case_id": "excel_round_trip_null_hardened",
+  "mode": "hardened",
+  "operation": "excel_round_trip",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "values": [
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 300.0 }
+      ],
+      "labels": [
+        { "kind": "null", "value": "null" },
+        { "kind": "utf8", "value": "middle" },
+        { "kind": "utf8", "value": "end" }
+      ]
+    },
+    "column_order": ["values", "labels"]
+  },
+  "expected_bool": true
+}

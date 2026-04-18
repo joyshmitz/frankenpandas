@@ -333,6 +333,8 @@ pub enum FixtureOperation {
     DataFrameMin,
     #[serde(rename = "dataframe_max", alias = "dataframe_max_default")]
     DataFrameMax,
+    #[serde(rename = "dataframe_median", alias = "dataframe_median_default")]
+    DataFrameMedian,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -736,6 +738,7 @@ impl FixtureOperation {
             Self::DataFrameVar => "dataframe_var",
             Self::DataFrameMin => "dataframe_min",
             Self::DataFrameMax => "dataframe_max",
+            Self::DataFrameMedian => "dataframe_median",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1474,6 +1477,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameVar
         | FixtureOperation::DataFrameMin
         | FixtureOperation::DataFrameMax
+        | FixtureOperation::DataFrameMedian
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6866,7 +6870,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameStd
         | FixtureOperation::DataFrameVar
         | FixtureOperation::DataFrameMin
-        | FixtureOperation::DataFrameMax => {
+        | FixtureOperation::DataFrameMax
+        | FixtureOperation::DataFrameMedian => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6885,6 +6890,7 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => frame.median_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -8721,6 +8727,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameVar
         | FixtureOperation::DataFrameMin
         | FixtureOperation::DataFrameMax
+        | FixtureOperation::DataFrameMedian
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9195,6 +9202,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameVar
         | FixtureOperation::DataFrameMin
         | FixtureOperation::DataFrameMax
+        | FixtureOperation::DataFrameMedian
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13803,7 +13811,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameStd
         | FixtureOperation::DataFrameVar
         | FixtureOperation::DataFrameMin
-        | FixtureOperation::DataFrameMax => {
+        | FixtureOperation::DataFrameMax
+        | FixtureOperation::DataFrameMedian => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -13822,6 +13831,7 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => frame.median_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {

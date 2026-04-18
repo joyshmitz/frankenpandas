@@ -2076,6 +2076,22 @@ def op_dataframe_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_median(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_median requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("median_axis", 0)
+    skipna = payload.get("median_skipna", True)
+
+    try:
+        out = frame.median(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_median failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4061,6 +4077,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_min(pd, payload)
     if op in {"dataframe_max", "data_frame_max"}:
         return op_dataframe_max(pd, payload)
+    if op in {"dataframe_median", "data_frame_median"}:
+        return op_dataframe_median(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

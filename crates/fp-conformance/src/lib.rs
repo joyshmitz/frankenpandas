@@ -546,6 +546,12 @@ pub enum FixtureOperation {
     SeriesStrCountLiteral,
     #[serde(rename = "series_str_findall", alias = "series_str_findall_default")]
     SeriesStrFindall,
+    #[serde(rename = "series_str_contains_any", alias = "series_str_contains_any_default")]
+    SeriesStrContainsAny,
+    #[serde(rename = "series_str_startswith_any", alias = "series_str_startswith_any_default")]
+    SeriesStrStartswithAny,
+    #[serde(rename = "series_str_endswith_any", alias = "series_str_endswith_any_default")]
+    SeriesStrEndswithAny,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -1040,6 +1046,9 @@ impl FixtureOperation {
             Self::SeriesStrCountMatches => "series_str_count_matches",
             Self::SeriesStrCountLiteral => "series_str_count_literal",
             Self::SeriesStrFindall => "series_str_findall",
+            Self::SeriesStrContainsAny => "series_str_contains_any",
+            Self::SeriesStrStartswithAny => "series_str_startswith_any",
+            Self::SeriesStrEndswithAny => "series_str_endswith_any",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1531,6 +1540,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_findall_sep: Option<String>,
     #[serde(default)]
+    pub str_patterns: Option<Vec<String>>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1907,6 +1918,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrCountMatches
         | FixtureOperation::SeriesStrCountLiteral
         | FixtureOperation::SeriesStrFindall
+        | FixtureOperation::SeriesStrContainsAny
+        | FixtureOperation::SeriesStrStartswithAny
+        | FixtureOperation::SeriesStrEndswithAny
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7730,6 +7744,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrCountMatches
         | FixtureOperation::SeriesStrCountLiteral
         | FixtureOperation::SeriesStrFindall
+        | FixtureOperation::SeriesStrContainsAny
+        | FixtureOperation::SeriesStrStartswithAny
+        | FixtureOperation::SeriesStrEndswithAny
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9330,6 +9347,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrCountMatches
         | FixtureOperation::SeriesStrCountLiteral
         | FixtureOperation::SeriesStrFindall
+        | FixtureOperation::SeriesStrContainsAny
+        | FixtureOperation::SeriesStrStartswithAny
+        | FixtureOperation::SeriesStrEndswithAny
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9904,6 +9924,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrCountMatches
         | FixtureOperation::SeriesStrCountLiteral
         | FixtureOperation::SeriesStrFindall
+        | FixtureOperation::SeriesStrContainsAny
+        | FixtureOperation::SeriesStrStartswithAny
+        | FixtureOperation::SeriesStrEndswithAny
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12692,6 +12715,30 @@ fn execute_series_module_utility_fixture_operation(
             let sep = fixture.str_findall_sep.as_deref().unwrap_or(",");
             series.str().findall(pat, sep).map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesStrContainsAny => {
+            let pats: Vec<&str> = fixture
+                .str_patterns
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            series.str().contains_any(&pats).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrStartswithAny => {
+            let pats: Vec<&str> = fixture
+                .str_patterns
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            series.str().startswith_any(&pats).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrEndswithAny => {
+            let pats: Vec<&str> = fixture
+                .str_patterns
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            series.str().endswith_any(&pats).map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtDay => series.dt().day().map_err(|err| err.to_string()),
@@ -15478,6 +15525,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrCountMatches
         | FixtureOperation::SeriesStrCountLiteral
         | FixtureOperation::SeriesStrFindall
+        | FixtureOperation::SeriesStrContainsAny
+        | FixtureOperation::SeriesStrStartswithAny
+        | FixtureOperation::SeriesStrEndswithAny
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

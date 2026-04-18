@@ -500,6 +500,14 @@ pub enum FixtureOperation {
     SeriesStrRepeat,
     #[serde(rename = "series_str_count", alias = "series_str_count_default")]
     SeriesStrCount,
+    #[serde(rename = "series_str_wrap", alias = "series_str_wrap_default")]
+    SeriesStrWrap,
+    #[serde(rename = "series_str_normalize", alias = "series_str_normalize_default")]
+    SeriesStrNormalize,
+    #[serde(rename = "series_str_fullmatch", alias = "series_str_fullmatch_default")]
+    SeriesStrFullmatch,
+    #[serde(rename = "series_str_match", alias = "series_str_match_default")]
+    SeriesStrMatch,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -931,6 +939,10 @@ impl FixtureOperation {
             Self::SeriesStrGet => "series_str_get",
             Self::SeriesStrRepeat => "series_str_repeat",
             Self::SeriesStrCount => "series_str_count",
+            Self::SeriesStrWrap => "series_str_wrap",
+            Self::SeriesStrNormalize => "series_str_normalize",
+            Self::SeriesStrFullmatch => "series_str_fullmatch",
+            Self::SeriesStrMatch => "series_str_match",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1378,6 +1390,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_repeat_n: Option<usize>,
     #[serde(default)]
+    pub str_wrap_width: Option<usize>,
+    #[serde(default)]
+    pub str_normalize_form: Option<String>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1727,6 +1743,10 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrGet
         | FixtureOperation::SeriesStrRepeat
         | FixtureOperation::SeriesStrCount
+        | FixtureOperation::SeriesStrWrap
+        | FixtureOperation::SeriesStrNormalize
+        | FixtureOperation::SeriesStrFullmatch
+        | FixtureOperation::SeriesStrMatch
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7506,6 +7526,10 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrGet
         | FixtureOperation::SeriesStrRepeat
         | FixtureOperation::SeriesStrCount
+        | FixtureOperation::SeriesStrWrap
+        | FixtureOperation::SeriesStrNormalize
+        | FixtureOperation::SeriesStrFullmatch
+        | FixtureOperation::SeriesStrMatch
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9063,6 +9087,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrGet
         | FixtureOperation::SeriesStrRepeat
         | FixtureOperation::SeriesStrCount
+        | FixtureOperation::SeriesStrWrap
+        | FixtureOperation::SeriesStrNormalize
+        | FixtureOperation::SeriesStrFullmatch
+        | FixtureOperation::SeriesStrMatch
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9594,6 +9622,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrGet
         | FixtureOperation::SeriesStrRepeat
         | FixtureOperation::SeriesStrCount
+        | FixtureOperation::SeriesStrWrap
+        | FixtureOperation::SeriesStrNormalize
+        | FixtureOperation::SeriesStrFullmatch
+        | FixtureOperation::SeriesStrMatch
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12225,6 +12257,36 @@ fn execute_series_module_utility_fixture_operation(
                 .as_deref()
                 .ok_or_else(|| "regex_pattern required for series_str_count".to_owned())?;
             series.str().count(pat).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrWrap => {
+            let width = fixture
+                .str_wrap_width
+                .ok_or_else(|| "str_wrap_width required for series_str_wrap".to_owned())?;
+            series.str().wrap(width).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrNormalize => {
+            let form = fixture
+                .str_normalize_form
+                .as_deref()
+                .ok_or_else(|| "str_normalize_form required for series_str_normalize".to_owned())?;
+            series.str().normalize(form).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrFullmatch => {
+            let pat = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_fullmatch".to_owned())?;
+            series.str().fullmatch(pat).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrMatch => {
+            let pat = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_match".to_owned())?;
+            series
+                .str()
+                .match_regex(pat)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -14913,6 +14975,10 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrGet
         | FixtureOperation::SeriesStrRepeat
         | FixtureOperation::SeriesStrCount
+        | FixtureOperation::SeriesStrWrap
+        | FixtureOperation::SeriesStrNormalize
+        | FixtureOperation::SeriesStrFullmatch
+        | FixtureOperation::SeriesStrMatch
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

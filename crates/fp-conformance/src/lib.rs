@@ -528,6 +528,12 @@ pub enum FixtureOperation {
     SeriesStrDecode,
     #[serde(rename = "series_str_translate", alias = "series_str_translate_default")]
     SeriesStrTranslate,
+    #[serde(rename = "series_str_expandtabs", alias = "series_str_expandtabs_default")]
+    SeriesStrExpandtabs,
+    #[serde(rename = "series_str_index_of", alias = "series_str_index_of_default")]
+    SeriesStrIndexOf,
+    #[serde(rename = "series_str_rindex_of", alias = "series_str_rindex_of_default")]
+    SeriesStrRindexOf,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -1013,6 +1019,9 @@ impl FixtureOperation {
             Self::SeriesStrEncode => "series_str_encode",
             Self::SeriesStrDecode => "series_str_decode",
             Self::SeriesStrTranslate => "series_str_translate",
+            Self::SeriesStrExpandtabs => "series_str_expandtabs",
+            Self::SeriesStrIndexOf => "series_str_index_of",
+            Self::SeriesStrRindexOf => "series_str_rindex_of",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1500,6 +1509,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_translate_to: Option<String>,
     #[serde(default)]
+    pub str_expandtabs_size: Option<usize>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1867,6 +1878,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrEncode
         | FixtureOperation::SeriesStrDecode
         | FixtureOperation::SeriesStrTranslate
+        | FixtureOperation::SeriesStrExpandtabs
+        | FixtureOperation::SeriesStrIndexOf
+        | FixtureOperation::SeriesStrRindexOf
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7681,6 +7695,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrEncode
         | FixtureOperation::SeriesStrDecode
         | FixtureOperation::SeriesStrTranslate
+        | FixtureOperation::SeriesStrExpandtabs
+        | FixtureOperation::SeriesStrIndexOf
+        | FixtureOperation::SeriesStrRindexOf
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9272,6 +9289,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrEncode
         | FixtureOperation::SeriesStrDecode
         | FixtureOperation::SeriesStrTranslate
+        | FixtureOperation::SeriesStrExpandtabs
+        | FixtureOperation::SeriesStrIndexOf
+        | FixtureOperation::SeriesStrRindexOf
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9837,6 +9857,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrEncode
         | FixtureOperation::SeriesStrDecode
         | FixtureOperation::SeriesStrTranslate
+        | FixtureOperation::SeriesStrExpandtabs
+        | FixtureOperation::SeriesStrIndexOf
+        | FixtureOperation::SeriesStrRindexOf
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12585,6 +12608,18 @@ fn execute_series_module_utility_fixture_operation(
                 .as_deref()
                 .unwrap_or("");
             series.str().translate(from, to).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrExpandtabs => {
+            let tabsize = fixture.str_expandtabs_size.unwrap_or(8);
+            series.str().expandtabs(tabsize).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIndexOf => {
+            let sub = fixture.str_sub.as_deref().unwrap_or("");
+            series.str().index_of(sub).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrRindexOf => {
+            let sub = fixture.str_sub.as_deref().unwrap_or("");
+            series.str().rindex_of(sub).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -15363,6 +15398,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrEncode
         | FixtureOperation::SeriesStrDecode
         | FixtureOperation::SeriesStrTranslate
+        | FixtureOperation::SeriesStrExpandtabs
+        | FixtureOperation::SeriesStrIndexOf
+        | FixtureOperation::SeriesStrRindexOf
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -21714,6 +21752,262 @@ mod tests {
 
         let actual = super::execute_dataframe_merge_ordered_fixture_operation(&fixture)
             .expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_merge_asof_allow_exact_matches_false_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-056",
+            "case_id": "dataframe_merge_asof_allow_exact_matches_false_live",
+            "mode": "strict",
+            "operation": "dataframe_merge_asof",
+            "oracle_source": "live_legacy_pandas",
+            "merge_on": "time",
+            "direction": "backward",
+            "allow_exact_matches": false,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["time", "val"],
+                "columns": {
+                    "time": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 },
+                        { "kind": "float64", "value": 30.0 }
+                    ]
+                }
+            },
+            "frame_right": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["time", "quote"],
+                "columns": {
+                    "time": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "quote": [
+                        { "kind": "float64", "value": 100.0 },
+                        { "kind": "float64", "value": 200.0 },
+                        { "kind": "float64", "value": 300.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping merge_asof exact-match oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_dataframe_merge_asof_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_merge_asof_forward_tolerance_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-056",
+            "case_id": "dataframe_merge_asof_forward_tolerance_live",
+            "mode": "strict",
+            "operation": "dataframe_merge_asof",
+            "oracle_source": "live_legacy_pandas",
+            "merge_on": "time",
+            "direction": "forward",
+            "tolerance": 2.5,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["time", "val"],
+                "columns": {
+                    "time": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 5 },
+                        { "kind": "int64", "value": 10 }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 50.0 },
+                        { "kind": "float64", "value": 100.0 }
+                    ]
+                }
+            },
+            "frame_right": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["time", "quote"],
+                "columns": {
+                    "time": [
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 6 },
+                        { "kind": "int64", "value": 15 }
+                    ],
+                    "quote": [
+                        { "kind": "float64", "value": 200.0 },
+                        { "kind": "float64", "value": 600.0 },
+                        { "kind": "float64", "value": 1500.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping merge_asof forward+tolerance oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_dataframe_merge_asof_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_merge_asof_by_group_and_no_exact_matches_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-056",
+            "case_id": "dataframe_merge_asof_by_group_no_exact_live",
+            "mode": "strict",
+            "operation": "dataframe_merge_asof",
+            "oracle_source": "live_legacy_pandas",
+            "merge_on": "time",
+            "direction": "backward",
+            "allow_exact_matches": false,
+            "by": ["group"],
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "column_order": ["group", "time", "val"],
+                "columns": {
+                    "group": [
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "B" },
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "B" }
+                    ],
+                    "time": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 },
+                        { "kind": "int64", "value": 5 }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 },
+                        { "kind": "float64", "value": 30.0 },
+                        { "kind": "float64", "value": 50.0 }
+                    ]
+                }
+            },
+            "frame_right": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "column_order": ["group", "time", "quote"],
+                "columns": {
+                    "group": [
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "B" },
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "B" }
+                    ],
+                    "time": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 4 },
+                        { "kind": "int64", "value": 4 }
+                    ],
+                    "quote": [
+                        { "kind": "float64", "value": 100.0 },
+                        { "kind": "float64", "value": 200.0 },
+                        { "kind": "float64", "value": 400.0 },
+                        { "kind": "float64", "value": 450.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping grouped merge_asof oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_dataframe_merge_asof_fixture_operation(&fixture).expect("actual frame");
         super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 

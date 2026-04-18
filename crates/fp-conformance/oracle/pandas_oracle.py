@@ -1816,6 +1816,31 @@ def op_dataframe_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_describe requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    percentiles = payload.get("describe_percentiles")
+    include = payload.get("describe_include")
+    exclude = payload.get("describe_exclude")
+
+    kwargs: dict[str, Any] = {}
+    if percentiles is not None:
+        kwargs["percentiles"] = percentiles
+    if include is not None:
+        kwargs["include"] = include
+    if exclude is not None:
+        kwargs["exclude"] = exclude
+
+    try:
+        out = frame.describe(**kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_describe failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3771,6 +3796,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_clip(pd, payload)
     if op in {"dataframe_abs", "data_frame_abs"}:
         return op_dataframe_abs(pd, payload)
+    if op in {"dataframe_describe", "data_frame_describe"}:
+        return op_dataframe_describe(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

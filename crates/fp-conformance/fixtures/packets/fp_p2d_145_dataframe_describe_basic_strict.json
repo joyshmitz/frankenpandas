@@ -1,0 +1,67 @@
+{
+  "packet_id": "FP-P2D-145",
+  "case_id": "dataframe_describe_basic_strict",
+  "mode": "strict",
+  "operation": "dataframe_describe",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": 5.0 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 20.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 40.0 },
+        { "kind": "float64", "value": 50.0 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "count" },
+      { "kind": "utf8", "value": "mean" },
+      { "kind": "utf8", "value": "std" },
+      { "kind": "utf8", "value": "min" },
+      { "kind": "utf8", "value": "25%" },
+      { "kind": "utf8", "value": "50%" },
+      { "kind": "utf8", "value": "75%" },
+      { "kind": "utf8", "value": "max" }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 5.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 1.5811388300841898 },
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": 5.0 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 5.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 15.811388300841896 },
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 20.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 40.0 },
+        { "kind": "float64", "value": 50.0 }
+      ]
+    }
+  }
+}

@@ -6685,11 +6685,13 @@ fn run_fixture_operation(
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
             let actual = match fixture.operation {
-                FixtureOperation::DataFrameMode => frame.mode(),
-                FixtureOperation::DataFrameCumsum => frame.cumsum(),
-                FixtureOperation::DataFrameCumprod => frame.cumprod(),
-                FixtureOperation::DataFrameCummax => frame.cummax(),
-                FixtureOperation::DataFrameCummin => frame.cummin(),
+                FixtureOperation::DataFrameMode => frame.mode().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameCumsum => frame.cumsum().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameCumprod => {
+                    frame.cumprod().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameCummax => frame.cummax().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameCummin => frame.cummin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAstype => {
                     let dtype_spec = fixture
                         .constructor_dtype

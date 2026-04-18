@@ -29,7 +29,7 @@
     ],
     "values": [
       { "kind": "float64", "value": 2.0 },
-      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "na_n" },
       { "kind": "float64", "value": 8.0 },
       { "kind": "null", "value": "na_n" }
     ]

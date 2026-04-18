@@ -522,6 +522,12 @@ pub enum FixtureOperation {
     SeriesStrIstitle,
     #[serde(rename = "series_str_casefold", alias = "series_str_casefold_default")]
     SeriesStrCasefold,
+    #[serde(rename = "series_str_encode", alias = "series_str_encode_default")]
+    SeriesStrEncode,
+    #[serde(rename = "series_str_decode", alias = "series_str_decode_default")]
+    SeriesStrDecode,
+    #[serde(rename = "series_str_translate", alias = "series_str_translate_default")]
+    SeriesStrTranslate,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -1004,6 +1010,9 @@ impl FixtureOperation {
             Self::SeriesStrIsdecimal => "series_str_isdecimal",
             Self::SeriesStrIstitle => "series_str_istitle",
             Self::SeriesStrCasefold => "series_str_casefold",
+            Self::SeriesStrEncode => "series_str_encode",
+            Self::SeriesStrDecode => "series_str_decode",
+            Self::SeriesStrTranslate => "series_str_translate",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1487,6 +1496,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_join_sep: Option<String>,
     #[serde(default)]
+    pub str_translate_from: Option<String>,
+    #[serde(default)]
+    pub str_translate_to: Option<String>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1851,6 +1864,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrIsdecimal
         | FixtureOperation::SeriesStrIstitle
         | FixtureOperation::SeriesStrCasefold
+        | FixtureOperation::SeriesStrEncode
+        | FixtureOperation::SeriesStrDecode
+        | FixtureOperation::SeriesStrTranslate
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7662,6 +7678,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrIsdecimal
         | FixtureOperation::SeriesStrIstitle
         | FixtureOperation::SeriesStrCasefold
+        | FixtureOperation::SeriesStrEncode
+        | FixtureOperation::SeriesStrDecode
+        | FixtureOperation::SeriesStrTranslate
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9250,6 +9269,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrIsdecimal
         | FixtureOperation::SeriesStrIstitle
         | FixtureOperation::SeriesStrCasefold
+        | FixtureOperation::SeriesStrEncode
+        | FixtureOperation::SeriesStrDecode
+        | FixtureOperation::SeriesStrTranslate
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9812,6 +9834,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrIsdecimal
         | FixtureOperation::SeriesStrIstitle
         | FixtureOperation::SeriesStrCasefold
+        | FixtureOperation::SeriesStrEncode
+        | FixtureOperation::SeriesStrDecode
+        | FixtureOperation::SeriesStrTranslate
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12543,6 +12568,23 @@ fn execute_series_module_utility_fixture_operation(
         }
         FixtureOperation::SeriesStrCasefold => {
             series.str().casefold().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrEncode => {
+            series.str().encode("utf-8").map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrDecode => {
+            series.str().decode("utf-8").map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrTranslate => {
+            let from = fixture
+                .str_translate_from
+                .as_deref()
+                .unwrap_or("");
+            let to = fixture
+                .str_translate_to
+                .as_deref()
+                .unwrap_or("");
+            series.str().translate(from, to).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -15318,6 +15360,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrIsdecimal
         | FixtureOperation::SeriesStrIstitle
         | FixtureOperation::SeriesStrCasefold
+        | FixtureOperation::SeriesStrEncode
+        | FixtureOperation::SeriesStrDecode
+        | FixtureOperation::SeriesStrTranslate
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

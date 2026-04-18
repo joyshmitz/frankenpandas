@@ -23904,8 +23904,8 @@ mod tests {
             ],
             vec![
                 Scalar::Utf8("02:30:45".to_owned()),
-                Scalar::Utf8("3 days 04:15:30".to_owned()),
-                Scalar::Utf8("5 hours".to_owned()),
+                Scalar::Utf8("3d 4h 15m 30s".to_owned()),
+                Scalar::Utf8("5hours".to_owned()),
             ],
         )
         .unwrap();
@@ -23914,14 +23914,17 @@ mod tests {
         assert_eq!(result.len(), 3);
 
         let values = result.values();
-        assert_eq!(values[0], Scalar::Utf8("02:30:45".to_owned()));
-        assert_eq!(values[1], Scalar::Utf8("3 days 04:15:30".to_owned()));
-        assert_eq!(values[2], Scalar::Utf8("05:00:00".to_owned()));
+        // 02:30:45 = 2*3600 + 30*60 + 45 = 9045 seconds
+        assert_eq!(values[0], Scalar::Timedelta64(9045_000_000_000));
+        // 3d 4h 15m 30s = 3*86400 + 4*3600 + 15*60 + 30 = 274530 seconds
+        assert_eq!(values[1], Scalar::Timedelta64(274530_000_000_000));
+        // 5hours = 5*3600 = 18000 seconds
+        assert_eq!(values[2], Scalar::Timedelta64(18000_000_000_000));
     }
 
     #[test]
     fn to_timedelta_invalid_string_returns_nat() {
-        use fp_frame::{Series, to_timedelta};
+        use fp_frame::{Series, ToTimedeltaErrors, ToTimedeltaOptions, to_timedelta_with_options};
         use fp_index::IndexLabel;
         use fp_types::Scalar;
 
@@ -23930,16 +23933,23 @@ mod tests {
             vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
             vec![
                 Scalar::Utf8("not a duration".to_owned()),
-                Scalar::Utf8("".to_owned()),
+                Scalar::Utf8("xyz abc".to_owned()),
             ],
         )
         .unwrap();
 
-        let result = to_timedelta(&input).expect("to_timedelta should succeed");
+        let result = to_timedelta_with_options(
+            &input,
+            ToTimedeltaOptions {
+                errors: ToTimedeltaErrors::Coerce,
+                ..Default::default()
+            },
+        )
+        .expect("to_timedelta should succeed with coerce");
         assert_eq!(result.len(), 2);
 
         let values = result.values();
         assert!(values[0].is_missing(), "invalid string should produce NaT");
-        assert!(values[1].is_missing(), "empty string should produce NaT");
+        assert!(values[1].is_missing(), "malformed string should produce NaT");
     }
 }

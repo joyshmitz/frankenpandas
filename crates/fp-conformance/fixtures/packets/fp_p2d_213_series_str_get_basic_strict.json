@@ -1,0 +1,32 @@
+{
+  "packet_id": "FP-P2D-213",
+  "case_id": "series_str_get_basic_strict",
+  "mode": "strict",
+  "operation": "series_str_get",
+  "str_get_index": 0,
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "str", "value": "hello" },
+      { "kind": "str", "value": "world" },
+      { "kind": "str", "value": "abc" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "str", "value": "h" },
+      { "kind": "str", "value": "w" },
+      { "kind": "str", "value": "a" }
+    ]
+  }
+}

@@ -1629,21 +1629,23 @@ fn parse_excel_rows(
     }
 
     // Extract headers.
-    let (headers, data_rows) = if options.has_headers {
+    let (headers, header_generated, data_rows) = if options.has_headers {
         let header_row = &rows[0];
-        let headers: Vec<String> = header_row
+        let header_pairs: Vec<(String, bool)> = header_row
             .iter()
             .enumerate()
             .map(|(i, cell)| match cell {
-                calamine::Data::String(s) if !s.is_empty() => s.clone(),
-                _ => format!("column_{i}"),
+                calamine::Data::String(s) if !s.is_empty() => (s.clone(), false),
+                _ => (format!("column_{i}"), true),
             })
             .collect();
-        (headers, &rows[1..])
+        let (headers, header_generated): (Vec<_>, Vec<_>) = header_pairs.into_iter().unzip();
+        (headers, header_generated, &rows[1..])
     } else {
         let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
         let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
-        (headers, rows.as_slice())
+        let header_generated = vec![true; ncols];
+        (headers, header_generated, rows.as_slice())
     };
     reject_duplicate_headers(&headers)?;
 
@@ -1672,6 +1674,14 @@ fn parse_excel_rows(
         None
     };
 
+    let index_name = index_col_idx.and_then(|idx_pos| {
+        if options.has_headers && !header_generated[idx_pos] {
+            Some(headers[idx_pos].clone())
+        } else {
+            None
+        }
+    });
+
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
 
@@ -1691,7 +1701,7 @@ fn parse_excel_rows(
                 scalar_to_index_label(excel_cell_to_scalar(cell))
             })
             .collect();
-        Index::new(idx_labels)
+        Index::new(idx_labels).set_names(index_name.as_deref())
     } else {
         Index::from_i64((0..data_rows.len() as i64).collect())
     };
@@ -1775,7 +1785,84 @@ pub fn write_excel(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+fn write_excel_index_label(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    excel_row: u32,
+    excel_col: u16,
+    label: &IndexLabel,
+) -> Result<(), IoError> {
+    match label {
+        IndexLabel::Int64(v) => {
+            worksheet
+                .write_number(excel_row, excel_col, *v as f64)
+                .map_err(|e| IoError::Excel(format!("write index int: {e}")))?;
+        }
+        IndexLabel::Utf8(s) => {
+            worksheet
+                .write_string(excel_row, excel_col, s.as_str())
+                .map_err(|e| IoError::Excel(format!("write index string: {e}")))?;
+        }
+        IndexLabel::Timedelta64(v) => {
+            if *v != Timedelta::NAT {
+                worksheet
+                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .map_err(|e| IoError::Excel(format!("write index timedelta: {e}")))?;
+            }
+        }
+        IndexLabel::Datetime64(v) => {
+            if *v != i64::MIN {
+                worksheet
+                    .write_string(excel_row, excel_col, label.to_string())
+                    .map_err(|e| IoError::Excel(format!("write index datetime: {e}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_excel_scalar(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    excel_row: u32,
+    excel_col: u16,
+    scalar: &Scalar,
+) -> Result<(), IoError> {
+    match scalar {
+        Scalar::Int64(v) => {
+            worksheet
+                .write_number(excel_row, excel_col, *v as f64)
+                .map_err(|e| IoError::Excel(format!("write int: {e}")))?;
+        }
+        Scalar::Float64(v) if !v.is_nan() => {
+            worksheet
+                .write_number(excel_row, excel_col, *v)
+                .map_err(|e| IoError::Excel(format!("write float: {e}")))?;
+        }
+        Scalar::Bool(b) => {
+            worksheet
+                .write_boolean(excel_row, excel_col, *b)
+                .map_err(|e| IoError::Excel(format!("write bool: {e}")))?;
+        }
+        Scalar::Utf8(s) => {
+            worksheet
+                .write_string(excel_row, excel_col, s.as_str())
+                .map_err(|e| IoError::Excel(format!("write string: {e}")))?;
+        }
+        Scalar::Timedelta64(v) => {
+            if *v != Timedelta::NAT {
+                worksheet
+                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
+            }
+        }
+        Scalar::Float64(_) | Scalar::Null(_) => {}
+    }
+    Ok(())
+}
+
 /// Write a DataFrame to Excel (.xlsx) bytes in memory.
+///
+/// Matches pandas `DataFrame.to_excel()` default index behavior by emitting
+/// the index as the first worksheet column.
 pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     use rust_xlsxwriter::Workbook;
 
@@ -1785,9 +1872,12 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     let col_names = frame.column_names();
 
     // Write headers.
+    worksheet
+        .write_string(0, 0, frame.index().name().unwrap_or(""))
+        .map_err(|e| IoError::Excel(format!("write index header: {e}")))?;
     for (col_idx, name) in col_names.iter().enumerate() {
         worksheet
-            .write_string(0, col_idx as u16, name.as_str())
+            .write_string(0, (col_idx + 1) as u16, name.as_str())
             .map_err(|e| IoError::Excel(format!("write header: {e}")))?;
     }
 
@@ -1795,45 +1885,14 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     let nrows = frame.index().len();
     for row_idx in 0..nrows {
         let excel_row = (row_idx + 1) as u32; // +1 for header row
+        if let Some(label) = frame.index().labels().get(row_idx) {
+            write_excel_index_label(worksheet, excel_row, 0, label)?;
+        }
         for (col_idx, name) in col_names.iter().enumerate() {
             if let Some(col) = frame.column(name)
                 && let Some(scalar) = col.value(row_idx)
             {
-                let excel_col = col_idx as u16;
-                match scalar {
-                    Scalar::Int64(v) => {
-                        worksheet
-                            .write_number(excel_row, excel_col, *v as f64)
-                            .map_err(|e| IoError::Excel(format!("write int: {e}")))?;
-                    }
-                    Scalar::Float64(v) if !v.is_nan() => {
-                        worksheet
-                            .write_number(excel_row, excel_col, *v)
-                            .map_err(|e| IoError::Excel(format!("write float: {e}")))?;
-                    }
-                    Scalar::Bool(b) => {
-                        worksheet
-                            .write_boolean(excel_row, excel_col, *b)
-                            .map_err(|e| IoError::Excel(format!("write bool: {e}")))?;
-                    }
-                    Scalar::Utf8(s) => {
-                        worksheet
-                            .write_string(excel_row, excel_col, s.as_str())
-                            .map_err(|e| IoError::Excel(format!("write string: {e}")))?;
-                    }
-                    Scalar::Timedelta64(v) => {
-                        if *v == Timedelta::NAT {
-                            // Leave NaT cells empty (Excel convention).
-                        } else {
-                            worksheet
-                                .write_string(excel_row, excel_col, Timedelta::format(*v))
-                                .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
-                        }
-                    }
-                    Scalar::Float64(_) | Scalar::Null(_) => {
-                        // Leave NaN and null cells empty (Excel convention).
-                    }
-                }
+                write_excel_scalar(worksheet, excel_row, (col_idx + 1) as u16, scalar)?;
             }
         }
     }
@@ -3332,9 +3391,17 @@ mod tests {
         let bytes = super::write_excel_bytes(&frame).expect("write excel");
         assert!(!bytes.is_empty());
 
-        let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
-            .expect("read excel");
+        let frame2 = super::read_excel_bytes(
+            &bytes,
+            &super::ExcelReadOptions {
+                index_col: Some("column_0".into()),
+                ..Default::default()
+            },
+        )
+        .expect("read excel");
         assert_eq!(frame2.index().len(), 3);
+        assert_eq!(frame2.index().labels(), frame.index().labels());
+        assert_eq!(frame2.index().name(), None);
         // Excel preserves the write-time column order (ints, floats, names).
         assert_eq!(
             frame2
@@ -3371,9 +3438,16 @@ mod tests {
         let path = dir.join("fp_io_test_excel_roundtrip.xlsx");
 
         super::write_excel(&frame, &path).expect("write excel file");
-        let frame2 =
-            super::read_excel(&path, &super::ExcelReadOptions::default()).expect("read excel file");
+        let frame2 = super::read_excel(
+            &path,
+            &super::ExcelReadOptions {
+                index_col: Some("column_0".into()),
+                ..Default::default()
+            },
+        )
+        .expect("read excel file");
         assert_eq!(frame2.index().len(), 3);
+        assert_eq!(frame2.index().labels(), frame.index().labels());
         assert_eq!(
             frame2.column("ints").unwrap().values()[0],
             Scalar::Int64(10)
@@ -3409,8 +3483,14 @@ mod tests {
                 .unwrap();
 
         let bytes = super::write_excel_bytes(&frame).expect("write");
-        let frame2 =
-            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+        let frame2 = super::read_excel_bytes(
+            &bytes,
+            &super::ExcelReadOptions {
+                index_col: Some("column_0".into()),
+                ..Default::default()
+            },
+        )
+        .expect("read");
 
         // Non-null values round-trip.
         assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Int64(1));
@@ -3446,8 +3526,14 @@ mod tests {
         .unwrap();
 
         let bytes = super::write_excel_bytes(&frame).expect("write");
-        let frame2 =
-            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+        let frame2 = super::read_excel_bytes(
+            &bytes,
+            &super::ExcelReadOptions {
+                index_col: Some("column_0".into()),
+                ..Default::default()
+            },
+        )
+        .expect("read");
 
         assert_eq!(
             frame2.column("flags").unwrap().values()[0],
@@ -3494,6 +3580,62 @@ mod tests {
         // With has_headers=false, column names are auto-generated.
         assert_eq!(frame2.index().len(), 2);
         assert!(frame2.column("column_0").is_some());
+    }
+
+    #[test]
+    fn excel_default_read_exposes_written_index_as_first_column() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes(&frame).expect("write excel");
+
+        let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
+            .expect("read excel");
+
+        let order: Vec<&str> = frame2
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(order, vec!["column_0", "ints", "floats", "names"]);
+        assert_eq!(
+            frame2.column("column_0").unwrap().values(),
+            &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2),]
+        );
+    }
+
+    #[test]
+    fn excel_named_index_roundtrip_preserves_index_name() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(10), IndexLabel::Int64(20)]).set_name("row_id"),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_excel_bytes(&frame).expect("write excel");
+        let frame2 = super::read_excel_bytes(
+            &bytes,
+            &super::ExcelReadOptions {
+                index_col: Some("row_id".into()),
+                ..Default::default()
+            },
+        )
+        .expect("read excel");
+
+        assert_eq!(frame2.index().labels(), frame.index().labels());
+        assert_eq!(frame2.index().name(), Some("row_id"));
+        assert!(frame2.column("row_id").is_none());
+        assert_eq!(
+            frame2.column("vals").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
     }
 
     #[test]

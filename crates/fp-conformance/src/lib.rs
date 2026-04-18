@@ -19860,6 +19860,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_dataframe_mean_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-153", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-153"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-153 dataframe mean fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_dataframe_std_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
@@ -19881,6 +19894,45 @@ mod tests {
         assert!(
             report.fixture_count >= 1,
             "expected FP-P2D-155 dataframe var fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_min_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-156", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-156"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-156 dataframe min fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_max_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-157", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-157"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-157 dataframe max fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_median_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-158", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-158"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-158 dataframe median fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

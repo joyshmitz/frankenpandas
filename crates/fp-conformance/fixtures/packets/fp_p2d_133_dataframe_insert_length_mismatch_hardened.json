@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-133",
+  "case_id": "dataframe_insert_length_mismatch_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_insert",
+  "insert_loc": 1,
+  "insert_column": "b",
+  "insert_values": [
+    { "kind": "int64", "value": 9 }
+  ],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  },
+  "expected_error_contains": "does not match"
+}

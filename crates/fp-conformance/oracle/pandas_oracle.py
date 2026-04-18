@@ -2816,6 +2816,30 @@ def op_dataframe_reset_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_insert(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    loc = payload.get("insert_loc")
+    column = payload.get("insert_column")
+    values = payload.get("insert_values")
+    if frame_payload is None:
+        raise OracleError("dataframe_insert requires frame payload")
+    if not isinstance(loc, int) or isinstance(loc, bool) or loc < 0:
+        raise OracleError("dataframe_insert requires non-negative integer insert_loc")
+    if not isinstance(column, str) or column.strip() == "":
+        raise OracleError("dataframe_insert requires insert_column string payload")
+    if not isinstance(values, list):
+        raise OracleError("dataframe_insert requires insert_values list payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    parsed_values = [scalar_from_json(value) for value in values]
+    try:
+        out = frame.copy()
+        out.insert(loc=loc, column=column, value=parsed_values)
+    except Exception as exc:
+        raise OracleError(f"dataframe_insert failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3529,6 +3553,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_set_index(pd, payload)
     if op in {"dataframe_reset_index", "data_frame_reset_index"}:
         return op_dataframe_reset_index(pd, payload)
+    if op in {"dataframe_insert", "data_frame_insert"}:
+        return op_dataframe_insert(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

@@ -1962,6 +1962,22 @@ def op_dataframe_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_json(out)}
 
 
+def op_dataframe_prod(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_prod requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("prod_axis", 0)
+    skipna = payload.get("prod_skipna", True)
+
+    try:
+        out = frame.prod(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_prod failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3933,6 +3949,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_skew(pd, payload)
     if op in {"dataframe_kurtosis", "data_frame_kurtosis"}:
         return op_dataframe_kurtosis(pd, payload)
+    if op in {"dataframe_prod", "data_frame_prod"}:
+        return op_dataframe_prod(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

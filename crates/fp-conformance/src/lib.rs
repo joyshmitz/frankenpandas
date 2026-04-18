@@ -319,6 +319,8 @@ pub enum FixtureOperation {
     DataFrameSkew,
     #[serde(rename = "dataframe_kurtosis", alias = "dataframe_kurtosis_default")]
     DataFrameKurtosis,
+    #[serde(rename = "dataframe_prod", alias = "dataframe_prod_default")]
+    DataFrameProd,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -715,6 +717,7 @@ impl FixtureOperation {
             Self::DataFrameSem => "dataframe_sem",
             Self::DataFrameSkew => "dataframe_skew",
             Self::DataFrameKurtosis => "dataframe_kurtosis",
+            Self::DataFrameProd => "dataframe_prod",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1446,6 +1449,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameSem
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
+        | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6831,7 +6835,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
         | FixtureOperation::DataFrameSkew
-        | FixtureOperation::DataFrameKurtosis => {
+        | FixtureOperation::DataFrameKurtosis
+        | FixtureOperation::DataFrameProd => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6843,6 +6848,7 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
+                FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -8672,6 +8678,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameSem
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
+        | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9139,6 +9146,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameSem
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
+        | FixtureOperation::DataFrameProd
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13740,7 +13748,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
         | FixtureOperation::DataFrameSkew
-        | FixtureOperation::DataFrameKurtosis => {
+        | FixtureOperation::DataFrameKurtosis
+        | FixtureOperation::DataFrameProd => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -13752,6 +13761,7 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
+                FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -19674,8 +19684,8 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-151", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-151"));
         assert!(
-            report.fixture_count >= 1,
-            "expected FP-P2D-151 dataframe kurtosis fixtures"
+            report.fixture_count >= 2,
+            "expected FP-P2D-151 dataframe kurtosis/prod fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

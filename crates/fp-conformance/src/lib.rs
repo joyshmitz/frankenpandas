@@ -18147,6 +18147,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_series_add_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2C-003", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-003"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2C-003 series_add fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_index_monotonic_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =

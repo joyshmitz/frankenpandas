@@ -2860,6 +2860,58 @@ def op_dataframe_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def _resolve_topn_payload(
+    payload: dict[str, Any], op_name: str
+) -> tuple[Any, int, str, str]:
+    frame_payload = payload.get("frame")
+    n = payload.get("nlargest_n")
+    sort_column = payload.get("sort_column")
+    keep = payload.get("keep", "first")
+
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise OracleError(f"{op_name} requires non-negative integer nlargest_n")
+    if not isinstance(sort_column, str) or sort_column.strip() == "":
+        raise OracleError(f"{op_name} requires sort_column string payload")
+    if keep is None:
+        keep = "first"
+    if keep not in {"first", "last", "all"}:
+        raise OracleError(f"{op_name} keep must be one of first|last|all")
+
+    return frame_payload, n, sort_column.strip(), keep
+
+
+def op_dataframe_nlargest(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload, n, sort_column, keep = _resolve_topn_payload(
+        payload, "dataframe_nlargest"
+    )
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.nlargest(n=n, columns=sort_column, keep=keep)
+    except KeyError as exc:
+        raise OracleError(
+            f"dataframe_nlargest column '{sort_column}' not found"
+        ) from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload, n, sort_column, keep = _resolve_topn_payload(
+        payload, "dataframe_nsmallest"
+    )
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.nsmallest(n=n, columns=sort_column, keep=keep)
+    except KeyError as exc:
+        raise OracleError(
+            f"dataframe_nsmallest column '{sort_column}' not found"
+        ) from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -3481,6 +3533,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:
         return op_dataframe_sort_values(pd, payload)
+    if op in {"dataframe_nlargest", "data_frame_nlargest"}:
+        return op_dataframe_nlargest(pd, payload)
+    if op in {"dataframe_nsmallest", "data_frame_nsmallest"}:
+        return op_dataframe_nsmallest(pd, payload)
     if op in {"dataframe_merge", "data_frame_merge"}:
         return op_dataframe_merge(pd, payload)
     if op in {"dataframe_merge_index", "data_frame_merge_index"}:

@@ -492,6 +492,10 @@ pub enum FixtureOperation {
     DataFrameSortIndex,
     #[serde(rename = "dataframe_sort_values", alias = "data_frame_sort_values")]
     DataFrameSortValues,
+    #[serde(rename = "dataframe_nlargest", alias = "data_frame_nlargest")]
+    DataFrameNlargest,
+    #[serde(rename = "dataframe_nsmallest", alias = "data_frame_nsmallest")]
+    DataFrameNsmallest,
     #[serde(rename = "dataframe_diff", alias = "data_frame_diff")]
     DataFrameDiff,
     #[serde(rename = "dataframe_shift", alias = "data_frame_shift")]
@@ -736,6 +740,8 @@ impl FixtureOperation {
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
             Self::DataFrameSortValues => "dataframe_sort_values",
+            Self::DataFrameNlargest => "dataframe_nlargest",
+            Self::DataFrameNsmallest => "dataframe_nsmallest",
             Self::DataFrameDiff => "dataframe_diff",
             Self::DataFrameShift => "dataframe_shift",
             Self::DataFramePctChange => "dataframe_pct_change",
@@ -1440,6 +1446,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameNlargest
+        | FixtureOperation::DataFrameNsmallest
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
@@ -8005,6 +8013,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameNlargest
+        | FixtureOperation::DataFrameNsmallest
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
@@ -8539,6 +8549,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameNlargest
+        | FixtureOperation::DataFrameNsmallest
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
@@ -8972,6 +8984,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameNlargest
+        | FixtureOperation::DataFrameNsmallest
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
@@ -9491,10 +9505,17 @@ fn require_end_time(fixture: &PacketFixture) -> Result<&str, String> {
 }
 
 fn require_sort_column(fixture: &PacketFixture) -> Result<&str, String> {
+    require_sort_column_for(fixture, "dataframe_sort_values")
+}
+
+fn require_sort_column_for<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a str, String> {
     fixture
         .sort_column
         .as_deref()
-        .ok_or_else(|| "sort_column is required for dataframe_sort_values".to_owned())
+        .ok_or_else(|| format!("sort_column is required for {operation_name}"))
 }
 
 fn require_set_index_column(fixture: &PacketFixture) -> Result<&str, String> {
@@ -10462,6 +10483,32 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     resolve_sort_ascending(fixture),
                 )
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameNlargest => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let n = fixture
+                .nlargest_n
+                .ok_or_else(|| "nlargest_n required for dataframe_nlargest".to_owned())?;
+            let column = require_sort_column_for(fixture, "dataframe_nlargest")?;
+            match fixture.keep.as_deref() {
+                Some(keep) => frame.nlargest_keep(n, column, keep),
+                None => frame.nlargest(n, column),
+            }
+            .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameNsmallest => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let n = fixture
+                .nlargest_n
+                .ok_or_else(|| "nlargest_n required for dataframe_nsmallest".to_owned())?;
+            let column = require_sort_column_for(fixture, "dataframe_nsmallest")?;
+            match fixture.keep.as_deref() {
+                Some(keep) => frame.nsmallest_keep(n, column, keep),
+                None => frame.nsmallest(n, column),
+            }
+            .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameDiff => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -14881,6 +14928,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameNlargest
+        | FixtureOperation::DataFrameNsmallest
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
@@ -18902,6 +18951,19 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-131 dataframe transpose fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_topn_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-132", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-132"));
+        assert!(
+            report.fixture_count >= 6,
+            "expected FP-P2D-132 dataframe top-N fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

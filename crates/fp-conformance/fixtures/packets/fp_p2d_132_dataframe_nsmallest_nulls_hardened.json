@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-132",
+  "case_id": "dataframe_nsmallest_nulls_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_nsmallest",
+  "sort_column": "score",
+  "nlargest_n": 3,
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" },
+      { "kind": "utf8", "value": "r3" },
+      { "kind": "utf8", "value": "r4" }
+    ],
+    "column_order": ["score", "label"],
+    "columns": {
+      "score": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": 1 }
+      ],
+      "label": [
+        { "kind": "utf8", "value": "two" },
+        { "kind": "utf8", "value": "missing" },
+        { "kind": "utf8", "value": "five" },
+        { "kind": "utf8", "value": "one" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r4" },
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r3" }
+    ],
+    "column_order": ["score", "label"],
+    "columns": {
+      "score": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 5 }
+      ],
+      "label": [
+        { "kind": "utf8", "value": "one" },
+        { "kind": "utf8", "value": "two" },
+        { "kind": "utf8", "value": "five" }
+      ]
+    }
+  }
+}

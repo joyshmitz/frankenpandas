@@ -221,7 +221,7 @@ def build_groupby_composite_key_series(
 
 
 def op_series_binary_numeric(
-    payload: dict[str, Any], operation: str
+    pd, payload: dict[str, Any], operation: str
 ) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
@@ -255,19 +255,19 @@ def op_series_binary_numeric(
 
 
 def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    return op_series_binary_numeric(payload, "series_add")
+    return op_series_binary_numeric(pd, payload, "series_add")
 
 
 def op_series_sub(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    return op_series_binary_numeric(payload, "series_sub")
+    return op_series_binary_numeric(pd, payload, "series_sub")
 
 
 def op_series_mul(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    return op_series_binary_numeric(payload, "series_mul")
+    return op_series_binary_numeric(pd, payload, "series_mul")
 
 
 def op_series_div(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    return op_series_binary_numeric(payload, "series_div")
+    return op_series_binary_numeric(pd, payload, "series_div")
 
 
 def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2757,7 +2757,7 @@ def op_dataframe_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.duplicated(subset=subset, keep=keep)
     except Exception as exc:
         raise OracleError(f"dataframe_duplicated failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:

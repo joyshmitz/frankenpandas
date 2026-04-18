@@ -677,6 +677,14 @@ pub enum FixtureOperation {
     SeriesRollingSum,
     #[serde(rename = "series_rolling_std", alias = "series_rolling_std_default")]
     SeriesRollingStd,
+    #[serde(rename = "series_rolling_min", alias = "series_rolling_min_default")]
+    SeriesRollingMin,
+    #[serde(rename = "series_rolling_max", alias = "series_rolling_max_default")]
+    SeriesRollingMax,
+    #[serde(rename = "series_rolling_var", alias = "series_rolling_var_default")]
+    SeriesRollingVar,
+    #[serde(rename = "series_rolling_count", alias = "series_rolling_count_default")]
+    SeriesRollingCount,
     #[serde(
         rename = "series_expanding_count",
         alias = "series_expanding_count_default"
@@ -944,6 +952,10 @@ impl FixtureOperation {
             Self::SeriesRollingMean => "series_rolling_mean",
             Self::SeriesRollingSum => "series_rolling_sum",
             Self::SeriesRollingStd => "series_rolling_std",
+            Self::SeriesRollingMin => "series_rolling_min",
+            Self::SeriesRollingMax => "series_rolling_max",
+            Self::SeriesRollingVar => "series_rolling_var",
+            Self::SeriesRollingCount => "series_rolling_count",
             Self::SeriesExpandingCount => "series_expanding_count",
             Self::SeriesExpandingQuantile => "series_expanding_quantile",
             Self::SeriesEwmMean => "series_ewm_mean",
@@ -1723,6 +1735,10 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesRollingMean
         | FixtureOperation::SeriesRollingSum
         | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesRollingMin
+        | FixtureOperation::SeriesRollingMax
+        | FixtureOperation::SeriesRollingVar
+        | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
         | FixtureOperation::SeriesEwmMean
@@ -8490,6 +8506,10 @@ fn run_fixture_operation(
         FixtureOperation::SeriesRollingMean
         | FixtureOperation::SeriesRollingSum
         | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesRollingMin
+        | FixtureOperation::SeriesRollingMax
+        | FixtureOperation::SeriesRollingVar
+        | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
         | FixtureOperation::SeriesEwmMean
@@ -8924,6 +8944,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesRollingMean
         | FixtureOperation::SeriesRollingSum
         | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesRollingMin
+        | FixtureOperation::SeriesRollingMax
+        | FixtureOperation::SeriesRollingVar
+        | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
         | FixtureOperation::SeriesEwmMean
@@ -9425,6 +9449,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesRollingMean
         | FixtureOperation::SeriesRollingSum
         | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesRollingMin
+        | FixtureOperation::SeriesRollingMax
+        | FixtureOperation::SeriesRollingVar
+        | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
         | FixtureOperation::SeriesEwmMean
@@ -10838,6 +10866,58 @@ fn execute_series_window_fixture_operation(
                 series
                     .rolling(window_size, min_periods)
                     .std()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingMin => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .min()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .min()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingMax => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .max()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .max()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingVar => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .var()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .var()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingCount => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .count()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .count()
                     .map_err(|err| err.to_string())
             }
         }
@@ -15939,6 +16019,10 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesRollingMean
         | FixtureOperation::SeriesRollingSum
         | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesRollingMin
+        | FixtureOperation::SeriesRollingMax
+        | FixtureOperation::SeriesRollingVar
+        | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
         | FixtureOperation::SeriesEwmMean

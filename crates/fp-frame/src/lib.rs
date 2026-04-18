@@ -1126,6 +1126,220 @@ impl Series {
         self.binary_op_with_policy(other, ArithmeticOp::Pow, policy, ledger)
     }
 
+    // ── Timedelta Arithmetic ──
+
+    /// Add two Timedelta64 Series element-wise.
+    ///
+    /// Matches `td1 + td2` in pandas for timedelta Series.
+    pub fn td_add(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_binary_op(other, |a, b| a.saturating_add(b), "td_add")
+    }
+
+    /// Subtract Timedelta64 Series element-wise.
+    ///
+    /// Matches `td1 - td2` in pandas for timedelta Series.
+    pub fn td_sub(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_binary_op(other, |a, b| a.saturating_sub(b), "td_sub")
+    }
+
+    /// Multiply Timedelta64 Series by a numeric scalar.
+    ///
+    /// Matches `td * scalar` in pandas.
+    pub fn td_mul_scalar(&self, scalar: f64) -> Result<Self, FrameError> {
+        self.td_scalar_op(scalar, |ns, s| ((ns as f64) * s).round() as i64)
+    }
+
+    /// Divide Timedelta64 Series by a numeric scalar.
+    ///
+    /// Matches `td / scalar` in pandas.
+    pub fn td_div_scalar(&self, scalar: f64) -> Result<Self, FrameError> {
+        if scalar == 0.0 {
+            return Err(FrameError::CompatibilityRejected(
+                "division by zero".to_owned(),
+            ));
+        }
+        self.td_scalar_op(scalar, |ns, s| ((ns as f64) / s).round() as i64)
+    }
+
+    /// Floor-divide Timedelta64 Series by a numeric scalar.
+    ///
+    /// Matches `td // scalar` in pandas.
+    pub fn td_floordiv_scalar(&self, scalar: i64) -> Result<Self, FrameError> {
+        if scalar == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "division by zero".to_owned(),
+            ));
+        }
+        self.td_scalar_op(scalar as f64, |ns, s| ns / (s as i64))
+    }
+
+    /// Divide Timedelta64 by Timedelta64 to get a numeric ratio.
+    ///
+    /// Matches `td1 / td2` in pandas (returns float).
+    pub fn td_ratio(&self, other: &Self) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for (a, b) in self.values().iter().zip(other.values().iter()) {
+            let result = match (a, b) {
+                (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => {
+                    if *ns1 == fp_types::Timedelta::NAT || *ns2 == fp_types::Timedelta::NAT {
+                        Scalar::Null(NullKind::NaN)
+                    } else if *ns2 == 0 {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(*ns1 as f64 / *ns2 as f64)
+                    }
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            };
+            out.push(result);
+        }
+        Self::from_values(format!("{}_ratio", self.name), self.index.labels().to_vec(), out)
+    }
+
+    /// Modulo of Timedelta64 Series by another Timedelta64.
+    ///
+    /// Matches `td1 % td2` in pandas.
+    pub fn td_mod(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_binary_op(other, |a, b| if b == 0 { fp_types::Timedelta::NAT } else { a % b }, "td_mod")
+    }
+
+    /// Negate Timedelta64 Series (unary minus).
+    ///
+    /// Matches `-td` in pandas.
+    pub fn td_neg(&self) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for v in self.values() {
+            let result = match v {
+                Scalar::Timedelta64(ns) => {
+                    if *ns == fp_types::Timedelta::NAT {
+                        Scalar::Timedelta64(fp_types::Timedelta::NAT)
+                    } else {
+                        Scalar::Timedelta64(-*ns)
+                    }
+                }
+                _ => v.clone(),
+            };
+            out.push(result);
+        }
+        Self::from_values(format!("-{}", self.name), self.index.labels().to_vec(), out)
+    }
+
+    /// Absolute value of Timedelta64 Series.
+    ///
+    /// Matches `td.abs()` or `abs(td)` in pandas.
+    pub fn td_abs(&self) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for v in self.values() {
+            let result = match v {
+                Scalar::Timedelta64(ns) => {
+                    if *ns == fp_types::Timedelta::NAT {
+                        Scalar::Timedelta64(fp_types::Timedelta::NAT)
+                    } else {
+                        Scalar::Timedelta64(ns.abs())
+                    }
+                }
+                _ => v.clone(),
+            };
+            out.push(result);
+        }
+        Self::from_values(format!("abs({})", self.name), self.index.labels().to_vec(), out)
+    }
+
+    fn td_binary_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
+    where
+        F: Fn(i64, i64) -> i64,
+    {
+        let mut out = Vec::with_capacity(self.len());
+        for (a, b) in self.values().iter().zip(other.values().iter()) {
+            let result = match (a, b) {
+                (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => {
+                    if *ns1 == fp_types::Timedelta::NAT || *ns2 == fp_types::Timedelta::NAT {
+                        Scalar::Timedelta64(fp_types::Timedelta::NAT)
+                    } else {
+                        Scalar::Timedelta64(op(*ns1, *ns2))
+                    }
+                }
+                _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+            };
+            out.push(result);
+        }
+        Self::from_values(format!("{}_{}", self.name, name), self.index.labels().to_vec(), out)
+    }
+
+    fn td_scalar_op<F>(&self, scalar: f64, op: F) -> Result<Self, FrameError>
+    where
+        F: Fn(i64, f64) -> i64,
+    {
+        let mut out = Vec::with_capacity(self.len());
+        for v in self.values() {
+            let result = match v {
+                Scalar::Timedelta64(ns) => {
+                    if *ns == fp_types::Timedelta::NAT {
+                        Scalar::Timedelta64(fp_types::Timedelta::NAT)
+                    } else {
+                        Scalar::Timedelta64(op(*ns, scalar))
+                    }
+                }
+                _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+            };
+            out.push(result);
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    // ── Timedelta Comparison ──
+
+    /// Compare Timedelta64 Series: less than.
+    pub fn td_lt(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a < b, "lt")
+    }
+
+    /// Compare Timedelta64 Series: less than or equal.
+    pub fn td_le(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a <= b, "le")
+    }
+
+    /// Compare Timedelta64 Series: greater than.
+    pub fn td_gt(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a > b, "gt")
+    }
+
+    /// Compare Timedelta64 Series: greater than or equal.
+    pub fn td_ge(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a >= b, "ge")
+    }
+
+    /// Compare Timedelta64 Series: equality.
+    pub fn td_eq(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a == b, "eq")
+    }
+
+    /// Compare Timedelta64 Series: inequality.
+    pub fn td_ne(&self, other: &Self) -> Result<Self, FrameError> {
+        self.td_cmp_op(other, |a, b| a != b, "ne")
+    }
+
+    fn td_cmp_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
+    where
+        F: Fn(i64, i64) -> bool,
+    {
+        let mut out = Vec::with_capacity(self.len());
+        for (a, b) in self.values().iter().zip(other.values().iter()) {
+            let result = match (a, b) {
+                (Scalar::Timedelta64(ns1), Scalar::Timedelta64(ns2)) => {
+                    if *ns1 == fp_types::Timedelta::NAT || *ns2 == fp_types::Timedelta::NAT {
+                        Scalar::Bool(false)
+                    } else {
+                        Scalar::Bool(op(*ns1, *ns2))
+                    }
+                }
+                _ => Scalar::Bool(false),
+            };
+            out.push(result);
+        }
+        Self::from_values(format!("{}_{}", self.name, name), self.index.labels().to_vec(), out)
+    }
+
     /// Return the number of elements in this Series.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -49278,6 +49492,188 @@ mod tests {
         .unwrap();
         let result = super::timedelta_total_seconds(&s).unwrap();
         assert_eq!(result.values()[0], Scalar::Float64(183600.0)); // 2*86400 + 3*3600
+    }
+
+    // ── Timedelta arithmetic tests ──
+
+    #[test]
+    fn td_add_two_series() {
+        use fp_types::Timedelta;
+        let s1 = Series::from_values(
+            "td1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_DAY),
+                Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "td2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(6 * Timedelta::NANOS_PER_HOUR),
+            ],
+        )
+        .unwrap();
+        let result = s1.td_add(&s2).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR)
+        );
+        assert_eq!(
+            result.values()[1],
+            Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY + 6 * Timedelta::NANOS_PER_HOUR)
+        );
+    }
+
+    #[test]
+    fn td_sub_two_series() {
+        use fp_types::Timedelta;
+        let s1 = Series::from_values(
+            "td1",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "td2",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(12 * Timedelta::NANOS_PER_HOUR)],
+        )
+        .unwrap();
+        let result = s1.td_sub(&s2).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY - 12 * Timedelta::NANOS_PER_HOUR)
+        );
+    }
+
+    #[test]
+    fn td_mul_scalar() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s.td_mul_scalar(2.5).unwrap();
+        let expected = (Timedelta::NANOS_PER_DAY as f64 * 2.5).round() as i64;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected));
+    }
+
+    #[test]
+    fn td_div_scalar() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s.td_div_scalar(2.0).unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(Timedelta::NANOS_PER_DAY / 2)
+        );
+    }
+
+    #[test]
+    fn td_ratio_returns_float() {
+        use fp_types::Timedelta;
+        let s1 = Series::from_values(
+            "td1",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "td2",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s1.td_ratio(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn td_neg() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s.td_neg().unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(-Timedelta::NANOS_PER_DAY)
+        );
+    }
+
+    #[test]
+    fn td_abs() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(-Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s.td_abs().unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)
+        );
+    }
+
+    #[test]
+    fn td_lt_comparison() {
+        use fp_types::Timedelta;
+        let s1 = Series::from_values(
+            "td1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_DAY),
+                Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "td2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_DAY),
+            ],
+        )
+        .unwrap();
+        let result = s1.td_lt(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn td_with_nat_propagates() {
+        use fp_types::Timedelta;
+        let s1 = Series::from_values(
+            "td1",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NAT)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "td2",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)],
+        )
+        .unwrap();
+        let result = s1.td_add(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Timedelta64(Timedelta::NAT));
     }
 
     // ── to_datetime tests ──

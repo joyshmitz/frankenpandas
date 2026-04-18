@@ -29,8 +29,8 @@
   "expected_series": {
     "index": [
       { "kind": "utf8", "value": "1, 1" },
-      { "kind": "utf8", "value": "1, 2" },
-      { "kind": "utf8", "value": "2, 2" }
+      { "kind": "utf8", "value": "2, 2" },
+      { "kind": "utf8", "value": "1, 2" }
     ],
     "values": [
       { "kind": "int64", "value": 2 },

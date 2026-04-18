@@ -23,9 +23,9 @@
       { "kind": "utf8", "value": "c" }
     ],
     "values": [
-      { "kind": "utf8", "value": "1 days 00:00:00" },
-      { "kind": "utf8", "value": "02:00:00" },
-      { "kind": "utf8", "value": "00:30:00" }
+      { "kind": "timedelta64", "value": 86400000000000 },
+      { "kind": "timedelta64", "value": 7200000000000 },
+      { "kind": "timedelta64", "value": 1800000000000 }
     ]
   }
 }

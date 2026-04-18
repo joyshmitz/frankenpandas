@@ -11226,33 +11226,99 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     Scalar::Null(NullKind::NaT)
 }
 
-/// Convert a Series of strings or numbers to timedelta (duration) representations.
+/// Error handling mode for to_timedelta conversions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToTimedeltaErrors {
+    #[default]
+    Raise,
+    Coerce,
+    Ignore,
+}
+
+/// Options for to_timedelta conversion.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToTimedeltaOptions<'a> {
+    pub unit: Option<&'a str>,
+    pub errors: ToTimedeltaErrors,
+}
+
+/// Convert a Series of strings or numbers to Timedelta64 representation.
 ///
 /// Matches `pd.to_timedelta(series)`. Parses various duration formats:
 ///
-/// - "1 days 02:03:04" (pandas default timedelta string)
+/// - "1 days 02:03:04", "1d 2h 30m" (compound durations)
 /// - "02:03:04" (HH:MM:SS)
-/// - "5 days", "3 hours", "30 minutes", "45 seconds" (natural language)
-/// - Int64/Float64: interpreted as seconds
+/// - "5d", "3h", "30m", "45s" (unit suffixes)
+/// - Int64/Float64: interpreted as seconds by default
 ///
-/// Returns a Series of Utf8 strings in "X days HH:MM:SS" normalized format.
+/// Returns a Series with Timedelta64 scalars (nanoseconds).
 /// Missing/unparseable values become NaT.
 pub fn to_timedelta(series: &Series) -> Result<Series, FrameError> {
+    to_timedelta_with_options(series, ToTimedeltaOptions::default())
+}
+
+/// Convert numeric values to timedelta using explicit unit.
+///
+/// Matches `pd.to_timedelta(series, unit=...)`.
+pub fn to_timedelta_with_unit(series: &Series, unit: &str) -> Result<Series, FrameError> {
+    to_timedelta_with_options(
+        series,
+        ToTimedeltaOptions {
+            unit: Some(unit),
+            ..ToTimedeltaOptions::default()
+        },
+    )
+}
+
+/// Convert to timedelta with explicit options.
+///
+/// Supports `unit=` for numeric interpretation and `errors=` for handling
+/// unparseable values.
+pub fn to_timedelta_with_options(
+    series: &Series,
+    options: ToTimedeltaOptions<'_>,
+) -> Result<Series, FrameError> {
+    let nanos_per_unit = resolve_timedelta_unit(options.unit)?;
     let mut converted = Vec::with_capacity(series.len());
 
-    for val in series.values() {
+    for (i, val) in series.values().iter().enumerate() {
         let result = match val {
-            Scalar::Null(_) => Scalar::Null(NullKind::NaT),
-            Scalar::Int64(secs) => format_timedelta_seconds(*secs as f64),
-            Scalar::Float64(secs) => {
-                if secs.is_nan() || secs.is_infinite() {
-                    Scalar::Null(NullKind::NaT)
+            Scalar::Null(_) => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+            Scalar::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+            Scalar::Int64(v) => {
+                let nanos = (*v).saturating_mul(nanos_per_unit);
+                Scalar::Timedelta64(nanos)
+            }
+            Scalar::Float64(v) => {
+                if v.is_nan() || v.is_infinite() {
+                    Scalar::Timedelta64(fp_types::Timedelta::NAT)
                 } else {
-                    format_timedelta_seconds(*secs)
+                    let nanos = (*v * nanos_per_unit as f64).round() as i64;
+                    Scalar::Timedelta64(nanos)
                 }
             }
-            Scalar::Utf8(s) => parse_timedelta_string(s),
-            _ => Scalar::Null(NullKind::NaT),
+            Scalar::Utf8(s) => match fp_types::Timedelta::parse(s) {
+                Ok(ns) => Scalar::Timedelta64(ns),
+                Err(_) => match options.errors {
+                    ToTimedeltaErrors::Raise => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "cannot parse '{}' as timedelta at index {}",
+                            s, i
+                        )));
+                    }
+                    ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    ToTimedeltaErrors::Ignore => val.clone(),
+                },
+            },
+            Scalar::Bool(_) => match options.errors {
+                ToTimedeltaErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(
+                        "cannot convert bool to timedelta".to_owned(),
+                    ));
+                }
+                ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                ToTimedeltaErrors::Ignore => val.clone(),
+            },
         };
         converted.push(result);
     }
@@ -11262,6 +11328,34 @@ pub fn to_timedelta(series: &Series) -> Result<Series, FrameError> {
         series.index().labels().to_vec(),
         converted,
     )
+}
+
+/// Resolve timedelta unit string to nanoseconds multiplier.
+fn resolve_timedelta_unit(unit: Option<&str>) -> Result<i64, FrameError> {
+    use fp_types::Timedelta;
+    match unit {
+        None | Some("s") | Some("S") | Some("sec") | Some("second") | Some("seconds") => {
+            Ok(Timedelta::NANOS_PER_SEC)
+        }
+        Some("D") | Some("d") | Some("day") | Some("days") => Ok(Timedelta::NANOS_PER_DAY),
+        Some("h") | Some("H") | Some("hr") | Some("hour") | Some("hours") => {
+            Ok(Timedelta::NANOS_PER_HOUR)
+        }
+        Some("m") | Some("min") | Some("minute") | Some("minutes") | Some("T") => {
+            Ok(Timedelta::NANOS_PER_MIN)
+        }
+        Some("ms") | Some("L") | Some("milli") | Some("millis") | Some("millisecond")
+        | Some("milliseconds") => Ok(Timedelta::NANOS_PER_MILLI),
+        Some("us") | Some("U") | Some("micro") | Some("micros") | Some("microsecond")
+        | Some("microseconds") => Ok(Timedelta::NANOS_PER_MICRO),
+        Some("ns") | Some("N") | Some("nano") | Some("nanos") | Some("nanosecond")
+        | Some("nanoseconds") => Ok(1),
+        Some("W") | Some("w") | Some("week") | Some("weeks") => Ok(Timedelta::NANOS_PER_DAY * 7),
+        Some(other) => Err(FrameError::CompatibilityRejected(format!(
+            "invalid timedelta unit: '{}'",
+            other
+        ))),
+    }
 }
 
 /// Parse a timedelta string into normalized format.
@@ -11382,14 +11476,20 @@ fn format_timedelta_seconds(total_secs: f64) -> Scalar {
 
 /// Convert a timedelta-like Series to total seconds as Float64.
 ///
-/// Matches `pd.Series.dt.total_seconds()`. Parses the timedelta string
-/// format produced by `to_timedelta()` and returns the total duration
-/// in seconds.
+/// Matches `pd.Series.dt.total_seconds()`. Works with Timedelta64 scalars
+/// or parses timedelta strings and returns the total duration in seconds.
 pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
     let mut result = Vec::with_capacity(series.len());
 
     for val in series.values() {
         let secs = match val {
+            Scalar::Timedelta64(ns) => {
+                if *ns == fp_types::Timedelta::NAT {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(fp_types::Timedelta::total_seconds(*ns))
+                }
+            }
             Scalar::Utf8(s) => {
                 if let Some(total) = parse_pandas_timedelta(s) {
                     Scalar::Float64(total)
@@ -48984,6 +49084,7 @@ mod tests {
 
     #[test]
     fn to_timedelta_hms_string() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "td",
             vec![0_i64.into()],
@@ -48991,53 +49092,74 @@ mod tests {
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("02:30:45".into()));
+        let expected_ns = 2 * Timedelta::NANOS_PER_HOUR
+            + 30 * Timedelta::NANOS_PER_MIN
+            + 45 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
 
     #[test]
     fn to_timedelta_days_hms_string() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "td",
             vec![0_i64.into()],
-            vec![Scalar::Utf8("3 days 04:15:30".into())],
+            vec![Scalar::Utf8("3d 4h 15m 30s".into())],
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("3 days 04:15:30".into()));
+        let expected_ns = 3 * Timedelta::NANOS_PER_DAY
+            + 4 * Timedelta::NANOS_PER_HOUR
+            + 15 * Timedelta::NANOS_PER_MIN
+            + 30 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
 
     #[test]
     fn to_timedelta_days_only() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "td",
             vec![0_i64.into()],
-            vec![Scalar::Utf8("5 days".into())],
+            vec![Scalar::Utf8("5d".into())],
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("5 days 00:00:00".into()));
+        let expected_ns = 5 * Timedelta::NANOS_PER_DAY;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
 
     #[test]
     fn to_timedelta_natural_language() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "td",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![
-                Scalar::Utf8("3 hours".into()),
-                Scalar::Utf8("30 minutes".into()),
-                Scalar::Utf8("45 seconds".into()),
+                Scalar::Utf8("3h".into()),
+                Scalar::Utf8("30m".into()),
+                Scalar::Utf8("45s".into()),
             ],
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("03:00:00".into()));
-        assert_eq!(result.values()[1], Scalar::Utf8("00:30:00".into()));
-        assert_eq!(result.values()[2], Scalar::Utf8("00:00:45".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(3 * Timedelta::NANOS_PER_HOUR)
+        );
+        assert_eq!(
+            result.values()[1],
+            Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN)
+        );
+        assert_eq!(
+            result.values()[2],
+            Scalar::Timedelta64(45 * Timedelta::NANOS_PER_SEC)
+        );
     }
 
     #[test]
     fn to_timedelta_from_seconds_int() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "secs",
             vec![0_i64.into()],
@@ -49045,11 +49167,13 @@ mod tests {
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("01:01:01".into()));
+        let expected_ns = 3661 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
 
     #[test]
     fn to_timedelta_from_seconds_large() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "secs",
             vec![0_i64.into()],
@@ -49057,11 +49181,13 @@ mod tests {
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("1 days 01:01:01".into()));
+        let expected_ns = 90061 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
 
     #[test]
     fn to_timedelta_negative_seconds() {
+        use fp_types::Timedelta;
         let s = Series::from_values(
             "td",
             vec![0_i64.into()],
@@ -49069,7 +49195,8 @@ mod tests {
         )
         .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("-01:01:01".into()));
+        let expected_ns = -3661 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
 
         // Round-trip: total_seconds should give back -3661
         let total = super::timedelta_total_seconds(&result).unwrap();
@@ -49078,10 +49205,55 @@ mod tests {
 
     #[test]
     fn to_timedelta_null_produces_nat() {
+        use fp_types::Timedelta;
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Null(NullKind::Null)])
             .unwrap();
         let result = super::to_timedelta(&s).unwrap();
-        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[0], Scalar::Timedelta64(Timedelta::NAT));
+    }
+
+    #[test]
+    fn to_timedelta_with_unit_days() {
+        use fp_types::Timedelta;
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(2)]).unwrap();
+        let result = super::to_timedelta_with_unit(&s, "D").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(2 * Timedelta::NANOS_PER_DAY)
+        );
+    }
+
+    #[test]
+    fn to_timedelta_with_unit_hours() {
+        use fp_types::Timedelta;
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(1.5)]).unwrap();
+        let result = super::to_timedelta_with_unit(&s, "h").unwrap();
+        let expected_ns = (1.5 * Timedelta::NANOS_PER_HOUR as f64).round() as i64;
+        assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
+    }
+
+    #[test]
+    fn to_timedelta_errors_coerce() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("1d".into()), Scalar::Utf8("invalid".into())],
+        )
+        .unwrap();
+        let result = super::to_timedelta_with_options(
+            &s,
+            super::ToTimedeltaOptions {
+                errors: super::ToTimedeltaErrors::Coerce,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)
+        );
+        assert_eq!(result.values()[1], Scalar::Timedelta64(Timedelta::NAT));
     }
 
     #[test]

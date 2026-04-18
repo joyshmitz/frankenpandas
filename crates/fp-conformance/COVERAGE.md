@@ -10,7 +10,7 @@
 | Series Arithmetic | 5 | 13 | ✅ Core |
 | Series Aggregation | 6 | 24 | ✅ Core |
 | Series Selection | 6 | 26 | ✅ Core |
-| Series Transform | 4 | 12 | ✅ Core |
+| Series Transform | 4 | 15 | ✅ Core |
 | DataFrame Constructor | 6 | 84 | ✅ Core |
 | DataFrame Selection | 4 | 35 | ✅ Core |
 | DataFrame Merge/Join | 3 | 48 | ✅ Core |
@@ -22,11 +22,11 @@
 | NaN Aggregations | 7 | 17 | ✅ Core |
 | Window Functions | 5 | 5 | ⚠️ Started |
 | IO Round-Trip | 5 | 24 | ⚠️ Started |
-| **Total** | **214** | **808** | **Partial** |
+| **Total** | **214** | **811** | **Partial** |
 
 ## Operation Coverage Detail
 
-### Series Operations (Fixtures: 75)
+### Series Operations (Fixtures: 78)
 
 | Operation | Fixtures | Status | Notes |
 |-----------|:--------:|:------:|-------|
@@ -52,6 +52,8 @@
 | series_value_counts | 4 | ✅ | Frequency counts |
 | series_join | 4 | ✅ | Join types |
 | series_concat | 2 | ⚠️ | Needs more cases |
+| series_diff | 4 | ✅ | Positive, negative, period, and null-aware cases |
+| series_pct_change | 2 | ⚠️ | Period 1 and 2 cases |
 
 ### DataFrame Operations (Fixtures: 274)
 
@@ -240,7 +242,7 @@ python3 crates/fp-conformance/oracle/pandas_oracle.py \
 ## Next Actions
 
 1. **High priority:** Add more GroupBy edge case fixtures
-2. **High priority:** Add Series diff/pct_change fixtures
+2. **High priority:** Add Series shift/diff/pct_change dtype and error fixtures
 3. **Medium:** Add broader stack/unstack and pivot edge-case fixtures
 4. **Medium:** Expand rolling/expanding/EWM window parameter fixtures
 5. **Low:** Add SQL round-trip conformance and broader IO option matrices

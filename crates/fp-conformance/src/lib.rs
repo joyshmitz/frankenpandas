@@ -18817,7 +18817,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-060", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-060"));
         assert!(
-            report.fixture_count >= 2,
+            report.fixture_count >= 4,
             "expected FP-P2D-060 series_diff fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
@@ -18843,7 +18843,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-062", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-062"));
         assert!(
-            report.fixture_count >= 1,
+            report.fixture_count >= 2,
             "expected FP-P2D-062 series_pct_change fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

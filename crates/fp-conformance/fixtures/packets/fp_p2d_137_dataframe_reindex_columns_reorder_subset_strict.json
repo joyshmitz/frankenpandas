@@ -6,8 +6,8 @@
   "reindex_columns": ["c", "a"],
   "frame": {
     "index": [
-      { "kind": "string", "value": "r1" },
-      { "kind": "string", "value": "r2" }
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
     ],
     "column_order": ["a", "b", "c"],
     "columns": {
@@ -16,8 +16,8 @@
         { "kind": "int64", "value": 2 }
       ],
       "b": [
-        { "kind": "string", "value": "x" },
-        { "kind": "string", "value": "y" }
+        { "kind": "utf8", "value": "x" },
+        { "kind": "utf8", "value": "y" }
       ],
       "c": [
         { "kind": "bool", "value": true },
@@ -27,8 +27,8 @@
   },
   "expected_frame": {
     "index": [
-      { "kind": "string", "value": "r1" },
-      { "kind": "string", "value": "r2" }
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
     ],
     "column_order": ["c", "a"],
     "columns": {

@@ -6,8 +6,8 @@
   "reindex_columns": [],
   "frame": {
     "index": [
-      { "kind": "string", "value": "r1" },
-      { "kind": "string", "value": "r2" }
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
     ],
     "column_order": ["a", "b"],
     "columns": {
@@ -23,8 +23,8 @@
   },
   "expected_frame": {
     "index": [
-      { "kind": "string", "value": "r1" },
-      { "kind": "string", "value": "r2" }
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
     ],
     "column_order": [],
     "columns": {}

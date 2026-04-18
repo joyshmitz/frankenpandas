@@ -305,6 +305,8 @@ pub enum FixtureOperation {
     DataFrameAbs,
     #[serde(rename = "dataframe_describe", alias = "dataframe_describe_default")]
     DataFrameDescribe,
+    #[serde(rename = "dataframe_corr", alias = "dataframe_corr_default")]
+    DataFrameCorr,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -694,6 +696,7 @@ impl FixtureOperation {
             Self::DataFrameClip => "dataframe_clip",
             Self::DataFrameAbs => "dataframe_abs",
             Self::DataFrameDescribe => "dataframe_describe",
+            Self::DataFrameCorr => "dataframe_corr",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1037,6 +1040,10 @@ pub struct PacketFixture {
     pub rank_na_option: Option<String>,
     #[serde(default)]
     pub rank_axis: Option<usize>,
+    #[serde(default)]
+    pub corr_method: Option<String>,
+    #[serde(default)]
+    pub corr_min_periods: Option<usize>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -1414,6 +1421,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameClip
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
+        | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -2132,6 +2140,10 @@ struct OracleRequest {
     pub rank_na_option: Option<String>,
     #[serde(default)]
     pub rank_axis: Option<usize>,
+    #[serde(default)]
+    pub corr_method: Option<String>,
+    #[serde(default)]
+    pub corr_min_periods: Option<usize>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -6800,6 +6812,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameClip
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
+        | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameRound => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -6827,6 +6840,7 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameDescribe => {
                     frame.describe().map_err(|err| err.to_string())
                 }
+                FixtureOperation::DataFrameCorr => execute_dataframe_corr_fixture(&frame, fixture),
                 FixtureOperation::DataFrameRound => {
                     let decimals = fixture.round_decimals.unwrap_or(0);
                     frame.round(decimals).map_err(|err| err.to_string())
@@ -8646,6 +8660,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameClip
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
+        | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
@@ -8823,6 +8838,8 @@ fn capture_live_oracle_expected(
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
         rank_axis: fixture.rank_axis,
+        corr_method: fixture.corr_method.clone(),
+        corr_min_periods: fixture.corr_min_periods,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
@@ -9104,6 +9121,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameClip
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
+        | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
@@ -10548,6 +10566,23 @@ fn execute_dataframe_window_fixture_operation(
     }
 }
 
+fn execute_dataframe_corr_fixture(
+    frame: &DataFrame,
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    match (fixture.corr_method.as_deref(), fixture.corr_min_periods) {
+        (None, None) => frame.corr(),
+        (None, Some(min_periods)) | (Some("pearson"), Some(min_periods)) => {
+            frame.corr_min_periods(min_periods)
+        }
+        (Some(method), None) => frame.corr_method(method),
+        (Some(method), Some(_)) => Err(FrameError::CompatibilityRejected(format!(
+            "dataframe_corr min_periods with method '{method}' is not supported"
+        ))),
+    }
+    .map_err(|err| err.to_string())
+}
+
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
         FixtureOperation::SeriesPartitionDf => {
@@ -10879,6 +10914,11 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.describe().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCorr => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            execute_dataframe_corr_fixture(&frame, fixture)
         }
         FixtureOperation::DataFrameRound => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -15267,6 +15307,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameClip
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
+        | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
@@ -19447,6 +19488,19 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-143 dataframe mask_df fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_corr_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-146", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-146"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-146 dataframe corr fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

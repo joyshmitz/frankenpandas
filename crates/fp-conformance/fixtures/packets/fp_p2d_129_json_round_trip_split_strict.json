@@ -1,0 +1,9 @@
+{
+  "packet_id": "FP-P2D-129",
+  "case_id": "json_round_trip_split_strict",
+  "mode": "strict",
+  "operation": "json_round_trip",
+  "json_input": "{\"columns\": [\"A\", \"B\"], \"index\": [0, 1, 2], \"data\": [[1, 10], [2, 20], [3, 30]]}",
+  "json_orient": "split",
+  "expected_bool": true
+}

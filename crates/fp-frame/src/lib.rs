@@ -282,6 +282,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
+        IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
     }
 }
 
@@ -289,6 +290,7 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Utf8(v.to_string()),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
+        IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
     }
 }
 
@@ -327,6 +329,7 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
     match label {
         IndexLabel::Int64(v) => Value::from(*v),
         IndexLabel::Utf8(v) => Value::String(v.clone()),
+        IndexLabel::Timedelta64(ns) => Value::String(Timedelta::format(*ns)),
     }
 }
 
@@ -334,6 +337,7 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
     match label {
         IndexLabel::Int64(v) => v.to_string(),
         IndexLabel::Utf8(v) => v.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
     }
 }
 
@@ -367,7 +371,7 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
 fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, FrameError> {
     let date_str = match label {
         IndexLabel::Utf8(s) => s.clone(),
-        IndexLabel::Int64(_) => {
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
             ));
@@ -382,7 +386,7 @@ fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, F
 fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, FrameError> {
     let date_str = match label {
         IndexLabel::Utf8(s) => s.clone(),
-        IndexLabel::Int64(_) => {
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
             ));
@@ -714,6 +718,7 @@ impl Series {
             .map(|l| match l {
                 IndexLabel::Int64(v) => v.to_string().len(),
                 IndexLabel::Utf8(s) => s.len(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns).len(),
             })
             .max()
             .unwrap_or(0);
@@ -722,6 +727,7 @@ impl Series {
             let lbl_str = match label {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
             };
             let val_str = match val {
                 Scalar::Null(_) => "NaN".to_string(),
@@ -4341,6 +4347,7 @@ impl Series {
             let key_str = match lbl {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Int64(i) => i.to_string(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
             };
             if let Some((row, col)) = key_str.split_once(", ") {
                 let row_key = row.trim().to_string();
@@ -4446,6 +4453,7 @@ impl Series {
                 let idx = match label {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => csv_escape(s, sep),
+                    IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
                 };
                 out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep)));
             } else {
@@ -6466,7 +6474,7 @@ impl Resample<'_> {
     fn bucket_key(label: &IndexLabel, freq: &str) -> Option<String> {
         let s = match label {
             IndexLabel::Utf8(s) => s.as_str(),
-            IndexLabel::Int64(_) => return None,
+            IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => return None,
         };
         // Parse date components from ISO-ish format "YYYY-MM-DD..." or "YYYY-MM-DDTHH:..."
         let date_part = s
@@ -11559,6 +11567,7 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
         .map(|l| match l {
             IndexLabel::Int64(v) => Scalar::Int64(*v),
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+            IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
         })
         .collect();
     let n = values.len();
@@ -11579,6 +11588,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
         .map(|l| match l {
             IndexLabel::Int64(v) => Scalar::Int64(*v),
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+            IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
         })
         .collect();
     Series::from_values(series_name.to_string(), index.labels().to_vec(), values)
@@ -11767,6 +11777,7 @@ pub fn concat_dataframes_with_keys(
             let composite = match label {
                 IndexLabel::Int64(v) => format!("{key}|{v}"),
                 IndexLabel::Utf8(s) => format!("{key}|{s}"),
+                IndexLabel::Timedelta64(ns) => format!("{key}|{}", Timedelta::format(*ns)),
             };
             labels.push(IndexLabel::Utf8(composite));
         }
@@ -14145,6 +14156,7 @@ impl DataFrame {
         let name = match row_label {
             IndexLabel::Int64(v) => v.to_string(),
             IndexLabel::Utf8(s) => s.clone(),
+            IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         };
 
         // Try direct construction first. If dtypes are incompatible (e.g.,
@@ -14693,6 +14705,7 @@ impl DataFrame {
                         let rendered = match label {
                             IndexLabel::Int64(n) => n.to_string(),
                             IndexLabel::Utf8(s) => s,
+                            IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                         };
                         (rendered, *c)
                     })
@@ -14900,6 +14913,7 @@ impl DataFrame {
             let col_name = match &self.index.labels()[row_idx] {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Utf8(v) => v.clone(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
             };
 
             let mut row_values = Vec::with_capacity(n_cols);
@@ -15212,6 +15226,7 @@ impl DataFrame {
             row.push(match lbl {
                 IndexLabel::Int64(n) => Scalar::Int64(*n),
                 IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             });
             for col_name in &self.column_order {
                 row.push(
@@ -15567,6 +15582,7 @@ impl DataFrame {
                 let name = match label {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => s,
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                 };
                 col_names.push(name);
             }
@@ -17397,6 +17413,7 @@ impl DataFrame {
                 cells.push(match label {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => s.clone(),
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 });
             }
             for name in &self.column_order {
@@ -17472,6 +17489,7 @@ impl DataFrame {
                 let idx_str = match label {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => escape_html(s),
+                    IndexLabel::Timedelta64(ns) => escape_html(&Timedelta::format(*ns)),
                 };
                 out.push_str(&format!("      <th>{idx_str}</th>\n"));
             }
@@ -17677,6 +17695,7 @@ impl DataFrame {
                             match label {
                                 IndexLabel::Int64(v) => Scalar::Int64(*v),
                                 IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                             },
                         )
                     })
@@ -17723,6 +17742,7 @@ impl DataFrame {
                             match label {
                                 IndexLabel::Int64(v) => Scalar::Int64(*v),
                                 IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                             },
                         )
                     })
@@ -17804,6 +17824,7 @@ impl DataFrame {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
                     IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    IndexLabel::Timedelta64(ns) => out.push_str(&csv_escape(&Timedelta::format(*ns), sep)),
                 }
                 out.push(sep);
             }
@@ -17876,6 +17897,7 @@ impl DataFrame {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
                     IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    IndexLabel::Timedelta64(ns) => out.push_str(&csv_escape(&Timedelta::format(*ns), sep)),
                 }
                 out.push(sep);
             }
@@ -18069,6 +18091,7 @@ impl DataFrame {
                 .map(|l| match l {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => s.clone(),
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 })
                 .collect();
             col_data.push(("", idx_cells));
@@ -18207,6 +18230,7 @@ impl DataFrame {
                 parts.push(match &self.index.labels()[row_idx] {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => s.clone(),
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 });
             }
             for c in &col_order {
@@ -18260,6 +18284,7 @@ impl DataFrame {
                 .map(|l| match l {
                     IndexLabel::Int64(v) => v.to_string(),
                     IndexLabel::Utf8(s) => s.clone(),
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 })
                 .collect();
             col_cells.push(idx_cells);
@@ -18485,6 +18510,7 @@ impl DataFrame {
                 let label_str = match row_label {
                     IndexLabel::Int64(v) => format!("{v}|{col_name}"),
                     IndexLabel::Utf8(v) => format!("{v}|{col_name}"),
+                    IndexLabel::Timedelta64(ns) => format!("{}|{col_name}", Timedelta::format(*ns)),
                 };
                 new_labels.push(IndexLabel::Utf8(label_str));
                 values.push(self.columns[col_name].values()[row].clone());
@@ -18527,6 +18553,7 @@ impl DataFrame {
             let label_str = match label {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Int64(v) => v.to_string(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
             };
             let sep_pos = label_str.rfind('|').ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!(
@@ -21408,6 +21435,7 @@ impl DataFrame {
                 let label_str = match label {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Int64(v) => v.to_string(),
+                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 };
                 let matches = if let Some(items) = items {
                     items.contains(&label_str.as_str())
@@ -23470,6 +23498,7 @@ impl DataFrameGroupBy<'_> {
                 let label_str = match &group_label {
                     IndexLabel::Utf8(g) => format!("{g}|{stat}"),
                     IndexLabel::Int64(g) => format!("{g}|{stat}"),
+                    IndexLabel::Timedelta64(ns) => format!("{}|{stat}", Timedelta::format(*ns)),
                 };
                 out_labels.push(IndexLabel::Utf8(label_str));
             }
@@ -23562,6 +23591,7 @@ impl DataFrameGroupBy<'_> {
             let label_str = match &label {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Int64(v) => v.to_string(),
+                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
             };
             if label_str == name {
                 return self.df.take_rows_by_positions(row_indices);

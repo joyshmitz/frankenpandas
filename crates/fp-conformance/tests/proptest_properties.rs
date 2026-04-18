@@ -2583,7 +2583,7 @@ proptest! {
         if let Ok(result) = groupby_sum(&keys, &values, opts, &policy, &mut ledger) {
             for (i, label) in result.index().labels().iter().enumerate() {
                 match label {
-                    IndexLabel::Int64(_) | IndexLabel::Utf8(_) => {},
+                    IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => {},
                 }
                 // All labels should be valid (non-null) when dropna=true.
                 // IndexLabel doesn't have a null variant, so this is inherently satisfied

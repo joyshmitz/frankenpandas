@@ -10157,6 +10157,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
+        IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
     }
 }
 

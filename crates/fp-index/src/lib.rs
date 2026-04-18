@@ -4,6 +4,7 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::fmt;
 
+use fp_types::Timedelta;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -12,6 +13,7 @@ use thiserror::Error;
 pub enum IndexLabel {
     Int64(i64),
     Utf8(String),
+    Timedelta64(i64),
 }
 
 impl From<i64> for IndexLabel {
@@ -37,6 +39,7 @@ impl fmt::Display for IndexLabel {
         match self {
             Self::Int64(v) => write!(f, "{v}"),
             Self::Utf8(v) => write!(f, "{v}"),
+            Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
         }
     }
 }
@@ -53,6 +56,8 @@ enum SortOrder {
     AscendingInt64,
     /// All labels are `Utf8` and strictly ascending (no duplicates).
     AscendingUtf8,
+    /// All labels are `Timedelta64` and strictly ascending (no duplicates).
+    AscendingTimedelta64,
 }
 
 /// Detect the sort order of the label slice.
@@ -61,6 +66,7 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
         return match labels.first() {
             Some(IndexLabel::Int64(_)) | None => SortOrder::AscendingInt64,
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
+            Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
         };
     }
 
@@ -91,6 +97,23 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
         });
         if is_sorted {
             return SortOrder::AscendingUtf8;
+        }
+    }
+
+    // Check if all Timedelta64 and strictly ascending.
+    let all_td = labels
+        .iter()
+        .all(|l| matches!(l, IndexLabel::Timedelta64(_)));
+    if all_td {
+        let is_sorted = labels.windows(2).all(|w| {
+            if let (IndexLabel::Timedelta64(a), IndexLabel::Timedelta64(b)) = (&w[0], &w[1]) {
+                a < b
+            } else {
+                false
+            }
+        });
+        if is_sorted {
+            return SortOrder::AscendingTimedelta64;
         }
     }
 
@@ -154,6 +177,11 @@ impl Index {
     #[must_use]
     pub fn from_utf8(values: Vec<String>) -> Self {
         Self::new(values.into_iter().map(IndexLabel::from).collect())
+    }
+
+    #[must_use]
+    pub fn from_timedelta64(nanos: Vec<i64>) -> Self {
+        Self::new(nanos.into_iter().map(IndexLabel::Timedelta64).collect())
     }
 
     #[must_use]
@@ -310,6 +338,21 @@ impl Index {
                         .binary_search_by(|label| {
                             if let IndexLabel::Utf8(v) = label {
                                 v.as_str().cmp(target.as_str())
+                            } else {
+                                std::cmp::Ordering::Less
+                            }
+                        })
+                        .ok()
+                } else {
+                    None
+                }
+            }
+            SortOrder::AscendingTimedelta64 => {
+                if let IndexLabel::Timedelta64(target) = needle {
+                    self.labels
+                        .binary_search_by(|label| {
+                            if let IndexLabel::Timedelta64(v) = label {
+                                v.cmp(target)
                             } else {
                                 std::cmp::Ordering::Less
                             }
@@ -666,6 +709,7 @@ impl Index {
                     IndexLabel::Utf8(s) => s
                         .parse::<i64>()
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
+                    IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
                 })
                 .collect(),
         ))
@@ -682,6 +726,7 @@ impl Index {
                 .map(|l| match l {
                     IndexLabel::Int64(v) => IndexLabel::Utf8(v.to_string()),
                     IndexLabel::Utf8(_) => l.clone(),
+                    IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                 })
                 .collect(),
         ))
@@ -1190,6 +1235,82 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
         union_index: union,
         positions,
     }
+}
+
+// ── TimedeltaIndex helpers ──────────────────────────────────────────────
+
+/// Error for timedelta_range parameter combinations.
+#[derive(Debug, Clone, Error)]
+pub enum TimedeltaRangeError {
+    #[error("must specify at least two of start, end, periods")]
+    InsufficientParams,
+    #[error("freq must be positive")]
+    NonPositiveFreq,
+    #[error("cannot compute range: end < start with positive freq")]
+    InvalidRange,
+}
+
+/// Create a TimedeltaIndex with evenly spaced values.
+///
+/// Analogous to `pd.timedelta_range()`. Must specify at least two of:
+/// start, end, periods. Frequency defaults to 1 day (86_400_000_000_000 ns).
+///
+/// # Examples
+/// ```
+/// use fp_index::timedelta_range;
+/// use fp_types::Timedelta;
+///
+/// let idx = timedelta_range(
+///     Some(Timedelta::NANOS_PER_DAY),
+///     None,
+///     Some(3),
+///     Timedelta::NANOS_PER_DAY,
+///     None,
+/// ).unwrap();
+/// assert_eq!(idx.len(), 3);
+/// ```
+pub fn timedelta_range(
+    start: Option<i64>,
+    end: Option<i64>,
+    periods: Option<usize>,
+    freq: i64,
+    name: Option<&str>,
+) -> Result<Index, TimedeltaRangeError> {
+    if freq <= 0 {
+        return Err(TimedeltaRangeError::NonPositiveFreq);
+    }
+
+    let (start_ns, count) = match (start, end, periods) {
+        (Some(s), Some(e), None) => {
+            if e < s {
+                return Err(TimedeltaRangeError::InvalidRange);
+            }
+            let n = ((e - s) / freq + 1) as usize;
+            (s, n)
+        }
+        (Some(s), None, Some(p)) => (s, p),
+        (None, Some(e), Some(p)) => {
+            let s = e - (p.saturating_sub(1) as i64) * freq;
+            (s, p)
+        }
+        (Some(s), Some(_e), Some(p)) => {
+            if p == 0 {
+                (s, 0)
+            } else if p == 1 {
+                (s, 1)
+            } else {
+                (s, p)
+            }
+        }
+        _ => return Err(TimedeltaRangeError::InsufficientParams),
+    };
+
+    let nanos: Vec<i64> = (0..count).map(|i| start_ns + (i as i64) * freq).collect();
+    let mut idx = Index::from_timedelta64(nanos);
+    if let Some(n) = name {
+        idx = idx.set_name(n);
+    }
+    Ok(idx)
 }
 
 // ── MultiIndex ──────────────────────────────────────────────────────────

@@ -489,6 +489,8 @@ pub enum FixtureOperation {
         alias = "data_frame_rename_columns"
     )]
     DataFrameRenameColumns,
+    #[serde(rename = "dataframe_reindex", alias = "data_frame_reindex")]
+    DataFrameReindex,
     #[serde(rename = "dataframe_duplicated", alias = "data_frame_duplicated")]
     DataFrameDuplicated,
     #[serde(
@@ -748,6 +750,7 @@ impl FixtureOperation {
             Self::DataFrameInsert => "dataframe_insert",
             Self::DataFrameAssign => "dataframe_assign",
             Self::DataFrameRenameColumns => "dataframe_rename_columns",
+            Self::DataFrameReindex => "dataframe_reindex",
             Self::DataFrameDuplicated => "dataframe_duplicated",
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
@@ -1042,6 +1045,8 @@ pub struct PacketFixture {
     pub assignments: Option<Vec<FixtureColumnAssignment>>,
     #[serde(default)]
     pub rename_columns: Option<Vec<FixtureColumnRename>>,
+    #[serde(default)]
+    pub reindex_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     pub subset: Option<Vec<String>>,
     #[serde(default)]
@@ -1479,6 +1484,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameRenameColumns
+        | FixtureOperation::DataFrameReindex
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
@@ -2106,6 +2112,8 @@ struct OracleRequest {
     assignments: Option<Vec<FixtureColumnAssignment>>,
     #[serde(default)]
     rename_columns: Option<Vec<FixtureColumnRename>>,
+    #[serde(default)]
+    reindex_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     subset: Option<Vec<String>>,
     #[serde(default)]
@@ -8060,6 +8068,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameRenameColumns
+        | FixtureOperation::DataFrameReindex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -8594,6 +8603,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameRenameColumns
+        | FixtureOperation::DataFrameReindex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -8753,6 +8763,7 @@ fn capture_live_oracle_expected(
         insert_values: fixture.insert_values.clone(),
         assignments: fixture.assignments.clone(),
         rename_columns: fixture.rename_columns.clone(),
+        reindex_labels: fixture.reindex_labels.clone(),
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
@@ -9037,6 +9048,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameRenameColumns
+        | FixtureOperation::DataFrameReindex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -10886,6 +10898,15 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             frame
                 .rename_columns(&rename_pairs)
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameReindex => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let labels = fixture
+                .reindex_labels
+                .clone()
+                .ok_or_else(|| "reindex_labels are required for dataframe_reindex".to_owned())?;
+            frame.reindex(labels).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameDropDuplicates => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -15045,6 +15066,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameInsert
         | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameRenameColumns
+        | FixtureOperation::DataFrameReindex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -19123,6 +19145,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-135 dataframe rename_columns fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_reindex_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-136", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-136"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-136 dataframe reindex fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

@@ -2893,6 +2893,23 @@ def op_dataframe_rename_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_reindex(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    labels = payload.get("reindex_labels")
+    if frame_payload is None:
+        raise OracleError("dataframe_reindex requires frame payload")
+    if not isinstance(labels, list):
+        raise OracleError("dataframe_reindex requires reindex_labels list")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    parsed_labels = [label_from_json(label) for label in labels]
+    try:
+        out = frame.reindex(parsed_labels)
+    except Exception as exc:
+        raise OracleError(f"dataframe_reindex failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3612,6 +3629,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_assign(pd, payload)
     if op in {"dataframe_rename_columns", "data_frame_rename_columns"}:
         return op_dataframe_rename_columns(pd, payload)
+    if op in {"dataframe_reindex", "data_frame_reindex"}:
+        return op_dataframe_reindex(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

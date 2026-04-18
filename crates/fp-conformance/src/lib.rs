@@ -536,6 +536,20 @@ pub enum FixtureOperation {
     SeriesDtSecond,
     #[serde(rename = "series_dt_dayofweek", alias = "series_dt_dayofweek_default")]
     SeriesDtDayofweek,
+    #[serde(rename = "series_dt_quarter", alias = "series_dt_quarter_default")]
+    SeriesDtQuarter,
+    #[serde(rename = "series_dt_dayofyear", alias = "series_dt_dayofyear_default")]
+    SeriesDtDayofyear,
+    #[serde(rename = "series_dt_weekofyear", alias = "series_dt_weekofyear_default")]
+    SeriesDtWeekofyear,
+    #[serde(rename = "series_dt_is_month_start", alias = "series_dt_is_month_start_default")]
+    SeriesDtIsMonthStart,
+    #[serde(rename = "series_dt_is_month_end", alias = "series_dt_is_month_end_default")]
+    SeriesDtIsMonthEnd,
+    #[serde(rename = "series_dt_is_year_start", alias = "series_dt_is_year_start_default")]
+    SeriesDtIsYearStart,
+    #[serde(rename = "series_dt_is_year_end", alias = "series_dt_is_year_end_default")]
+    SeriesDtIsYearEnd,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -971,6 +985,13 @@ impl FixtureOperation {
             Self::SeriesDtMinute => "series_dt_minute",
             Self::SeriesDtSecond => "series_dt_second",
             Self::SeriesDtDayofweek => "series_dt_dayofweek",
+            Self::SeriesDtQuarter => "series_dt_quarter",
+            Self::SeriesDtDayofyear => "series_dt_dayofyear",
+            Self::SeriesDtWeekofyear => "series_dt_weekofyear",
+            Self::SeriesDtIsMonthStart => "series_dt_is_month_start",
+            Self::SeriesDtIsMonthEnd => "series_dt_is_month_end",
+            Self::SeriesDtIsYearStart => "series_dt_is_year_start",
+            Self::SeriesDtIsYearEnd => "series_dt_is_year_end",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1794,6 +1815,13 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtDayofweek
+        | FixtureOperation::SeriesDtQuarter
+        | FixtureOperation::SeriesDtDayofyear
+        | FixtureOperation::SeriesDtWeekofyear
+        | FixtureOperation::SeriesDtIsMonthStart
+        | FixtureOperation::SeriesDtIsMonthEnd
+        | FixtureOperation::SeriesDtIsYearStart
+        | FixtureOperation::SeriesDtIsYearEnd
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -7583,7 +7611,14 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtHour
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
-        | FixtureOperation::SeriesDtDayofweek => {
+        | FixtureOperation::SeriesDtDayofweek
+        | FixtureOperation::SeriesDtQuarter
+        | FixtureOperation::SeriesDtDayofyear
+        | FixtureOperation::SeriesDtWeekofyear
+        | FixtureOperation::SeriesDtIsMonthStart
+        | FixtureOperation::SeriesDtIsMonthEnd
+        | FixtureOperation::SeriesDtIsYearStart
+        | FixtureOperation::SeriesDtIsYearEnd => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -9152,6 +9187,13 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtDayofweek
+        | FixtureOperation::SeriesDtQuarter
+        | FixtureOperation::SeriesDtDayofyear
+        | FixtureOperation::SeriesDtWeekofyear
+        | FixtureOperation::SeriesDtIsMonthStart
+        | FixtureOperation::SeriesDtIsMonthEnd
+        | FixtureOperation::SeriesDtIsYearStart
+        | FixtureOperation::SeriesDtIsYearEnd
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9694,6 +9736,13 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtDayofweek
+        | FixtureOperation::SeriesDtQuarter
+        | FixtureOperation::SeriesDtDayofyear
+        | FixtureOperation::SeriesDtWeekofyear
+        | FixtureOperation::SeriesDtIsMonthStart
+        | FixtureOperation::SeriesDtIsMonthEnd
+        | FixtureOperation::SeriesDtIsYearStart
+        | FixtureOperation::SeriesDtIsYearEnd
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -12408,6 +12457,27 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtDayofweek => {
             series.dt().dayofweek().map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesDtQuarter => {
+            series.dt().quarter().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtDayofyear => {
+            series.dt().dayofyear().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtWeekofyear => {
+            series.dt().weekofyear().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsMonthStart => {
+            series.dt().is_month_start().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsMonthEnd => {
+            series.dt().is_month_end().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsYearStart => {
+            series.dt().is_year_start().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsYearEnd => {
+            series.dt().is_year_end().map_err(|err| err.to_string())
+        }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
@@ -15103,7 +15173,14 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtHour
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
-        | FixtureOperation::SeriesDtDayofweek => {
+        | FixtureOperation::SeriesDtDayofweek
+        | FixtureOperation::SeriesDtQuarter
+        | FixtureOperation::SeriesDtDayofyear
+        | FixtureOperation::SeriesDtWeekofyear
+        | FixtureOperation::SeriesDtIsMonthStart
+        | FixtureOperation::SeriesDtIsMonthEnd
+        | FixtureOperation::SeriesDtIsYearStart
+        | FixtureOperation::SeriesDtIsYearEnd => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {

@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-229",
+  "case_id": "series_dt_weekofyear_basic_strict",
+  "mode": "strict",
+  "operation": "series_dt_weekofyear",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "datetime64", "value": "2024-01-01T00:00:00" },
+      { "kind": "datetime64", "value": "2024-01-08T00:00:00" },
+      { "kind": "datetime64", "value": "2024-12-31T00:00:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 }
+    ]
+  }
+}

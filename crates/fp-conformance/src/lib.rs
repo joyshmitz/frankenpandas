@@ -516,6 +516,12 @@ pub enum FixtureOperation {
     SeriesStrSplitGet,
     #[serde(rename = "series_str_join", alias = "series_str_join_default")]
     SeriesStrJoin,
+    #[serde(rename = "series_str_isdecimal", alias = "series_str_isdecimal_default")]
+    SeriesStrIsdecimal,
+    #[serde(rename = "series_str_istitle", alias = "series_str_istitle_default")]
+    SeriesStrIstitle,
+    #[serde(rename = "series_str_casefold", alias = "series_str_casefold_default")]
+    SeriesStrCasefold,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -955,6 +961,9 @@ impl FixtureOperation {
             Self::SeriesStrRemovesuffix => "series_str_removesuffix",
             Self::SeriesStrSplitGet => "series_str_split_get",
             Self::SeriesStrJoin => "series_str_join",
+            Self::SeriesStrIsdecimal => "series_str_isdecimal",
+            Self::SeriesStrIstitle => "series_str_istitle",
+            Self::SeriesStrCasefold => "series_str_casefold",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1775,6 +1784,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrRemovesuffix
         | FixtureOperation::SeriesStrSplitGet
         | FixtureOperation::SeriesStrJoin
+        | FixtureOperation::SeriesStrIsdecimal
+        | FixtureOperation::SeriesStrIstitle
+        | FixtureOperation::SeriesStrCasefold
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7562,6 +7574,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrRemovesuffix
         | FixtureOperation::SeriesStrSplitGet
         | FixtureOperation::SeriesStrJoin
+        | FixtureOperation::SeriesStrIsdecimal
+        | FixtureOperation::SeriesStrIstitle
+        | FixtureOperation::SeriesStrCasefold
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9127,6 +9142,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrRemovesuffix
         | FixtureOperation::SeriesStrSplitGet
         | FixtureOperation::SeriesStrJoin
+        | FixtureOperation::SeriesStrIsdecimal
+        | FixtureOperation::SeriesStrIstitle
+        | FixtureOperation::SeriesStrCasefold
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9666,6 +9684,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrRemovesuffix
         | FixtureOperation::SeriesStrSplitGet
         | FixtureOperation::SeriesStrJoin
+        | FixtureOperation::SeriesStrIsdecimal
+        | FixtureOperation::SeriesStrIstitle
+        | FixtureOperation::SeriesStrCasefold
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12369,6 +12390,15 @@ fn execute_series_module_utility_fixture_operation(
                 .ok_or_else(|| "str_join_sep required for series_str_join".to_owned())?;
             series.str().join(from, sep).map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesStrIsdecimal => {
+            series.str().isdecimal().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIstitle => {
+            series.str().istitle().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrCasefold => {
+            series.str().casefold().map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtDay => series.dt().day().map_err(|err| err.to_string()),
@@ -15064,6 +15094,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrRemovesuffix
         | FixtureOperation::SeriesStrSplitGet
         | FixtureOperation::SeriesStrJoin
+        | FixtureOperation::SeriesStrIsdecimal
+        | FixtureOperation::SeriesStrIstitle
+        | FixtureOperation::SeriesStrCasefold
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

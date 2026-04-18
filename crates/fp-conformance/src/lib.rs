@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fp_columnar::{ArithmeticOp, Column};
+use fp_expr::{eval_str_with_locals, query_str_with_locals};
 use fp_frame::{
     ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
     cut, qcut, to_numeric,
@@ -18,7 +19,8 @@ use fp_groupby::{
     groupby_sum_with_options, groupby_var,
 };
 use fp_index::{
-    AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan,
+    AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, format_datetime_ns,
+    validate_alignment_plan,
 };
 use fp_io::{
     ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
@@ -415,6 +417,10 @@ pub enum FixtureOperation {
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
     DataFrameTail,
+    #[serde(rename = "dataframe_eval", alias = "data_frame_eval")]
+    DataFrameEval,
+    #[serde(rename = "dataframe_query", alias = "data_frame_query")]
+    DataFrameQuery,
     #[serde(rename = "dataframe_xs", alias = "data_frame_xs")]
     DataFrameXs,
     #[serde(rename = "dataframe_isna", alias = "data_frame_isna")]
@@ -616,6 +622,8 @@ impl FixtureOperation {
             Self::DataFrameBool => "dataframe_bool",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
+            Self::DataFrameEval => "dataframe_eval",
+            Self::DataFrameQuery => "dataframe_query",
             Self::DataFrameXs => "dataframe_xs",
             Self::DataFrameIsNa => "dataframe_isna",
             Self::DataFrameNotNa => "dataframe_notna",
@@ -750,6 +758,10 @@ pub struct PacketFixture {
     pub groupby_columns: Option<Vec<String>>,
     #[serde(default)]
     pub frame: Option<FixtureDataFrame>,
+    #[serde(default)]
+    pub expr: Option<String>,
+    #[serde(default)]
+    pub locals: Option<BTreeMap<String, Scalar>>,
     #[serde(default)]
     pub frame_right: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -1249,6 +1261,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameBool
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameEval
+        | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
@@ -1763,6 +1777,10 @@ struct OracleRequest {
     #[serde(default)]
     groupby_columns: Option<Vec<String>>,
     frame: Option<FixtureDataFrame>,
+    #[serde(default)]
+    expr: Option<String>,
+    #[serde(default)]
+    locals: Option<BTreeMap<String, Scalar>>,
     frame_right: Option<FixtureDataFrame>,
     #[serde(default)]
     dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
@@ -7649,6 +7667,56 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameEval => {
+            let actual = execute_dataframe_eval_fixture_operation(fixture, policy, ledger);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_eval error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_eval to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_eval to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for dataframe_eval".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameQuery => {
+            let actual = execute_dataframe_query_fixture_operation(fixture, policy, ledger);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_query error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_query to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_query to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_query".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
@@ -8073,6 +8141,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
         | FixtureOperation::DataFrameAsof
+        | FixtureOperation::DataFrameEval
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
@@ -8115,6 +8184,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
         | FixtureOperation::DataFrameCumprod
@@ -8228,6 +8298,8 @@ fn capture_live_oracle_expected(
         groupby_keys: fixture.groupby_keys.clone(),
         groupby_columns: fixture.groupby_columns.clone(),
         frame: fixture.frame.clone(),
+        expr: fixture.expr.clone(),
+        locals: fixture.locals.clone(),
         frame_right: fixture.frame_right.clone(),
         dict_columns: fixture.dict_columns.clone(),
         column_order: fixture.column_order.clone(),
@@ -8452,6 +8524,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
         | FixtureOperation::DataFrameAsof
+        | FixtureOperation::DataFrameEval
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
@@ -8494,6 +8567,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
         | FixtureOperation::DataFrameCumprod
@@ -8578,6 +8652,17 @@ fn require_frame(fixture: &PacketFixture) -> Result<&FixtureDataFrame, String> {
         .frame
         .as_ref()
         .ok_or_else(|| "missing frame fixture payload".to_owned())
+}
+
+fn require_expr<'a>(fixture: &'a PacketFixture, operation: &str) -> Result<&'a str, String> {
+    let expr = fixture
+        .expr
+        .as_deref()
+        .ok_or_else(|| format!("{operation} requires expr payload"))?;
+    if expr.trim().is_empty() {
+        return Err(format!("{operation} requires non-empty expr payload"));
+    }
+    Ok(expr)
 }
 
 fn require_frame_right(fixture: &PacketFixture) -> Result<&FixtureDataFrame, String> {
@@ -9544,6 +9629,30 @@ fn dataframes_semantically_equal(left: &DataFrame, right: &DataFrame) -> bool {
 
 const INDEX_MERGE_KEY_COLUMN: &str = "__index_key";
 
+fn execute_dataframe_eval_fixture_operation(
+    fixture: &PacketFixture,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let expr = require_expr(fixture, "dataframe_eval")?;
+    let locals = fixture.locals.clone().unwrap_or_default();
+    eval_str_with_locals(expr, &frame, &locals, policy, ledger).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_query_fixture_operation(
+    fixture: &PacketFixture,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let expr = require_expr(fixture, "dataframe_query")?;
+    let locals = fixture.locals.clone().unwrap_or_default();
+    query_str_with_locals(expr, &frame, &locals, policy, ledger).map_err(|err| err.to_string())
+}
+
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
         FixtureOperation::SeriesPartitionDf => {
@@ -10158,6 +10267,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
         IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
+        IndexLabel::Datetime64(value) => Scalar::Utf8(format_datetime_ns(*value)),
     }
 }
 
@@ -13862,6 +13972,76 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_tail".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameEval => {
+            let actual = execute_dataframe_eval_fixture_operation(fixture, policy, ledger);
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_eval.error",
+                        format!(
+                            "expected dataframe_eval error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_eval.error",
+                        "expected dataframe_eval to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_eval.error",
+                        "expected dataframe_eval to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_series or expected_error required for dataframe_eval".to_owned())
+                }
+            }
+        }
+        FixtureOperation::DataFrameQuery => {
+            let actual = execute_dataframe_query_fixture_operation(fixture, policy, ledger);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_query.error",
+                        format!(
+                            "expected dataframe_query error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_query.error",
+                        "expected dataframe_query to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_query.error",
+                        "expected dataframe_query to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_frame or expected_error required for dataframe_query".to_owned())
+                }
             }
         }
         FixtureOperation::DataFrameMerge
@@ -17776,6 +17956,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-125 series_to_frame fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_eval_query_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-126", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-126"));
+        assert!(
+            report.fixture_count >= 5,
+            "expected FP-P2D-126 dataframe eval/query fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

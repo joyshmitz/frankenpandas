@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-126",
+  "case_id": "dataframe_query_non_boolean_mask_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_query",
+  "expr": "a + b",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ]
+    },
+    "column_order": ["a", "b"]
+  },
+  "expected_error_contains": "boolean mask required for query-style filter"
+}

@@ -1692,6 +1692,50 @@ def dataframe_to_json(frame) -> dict[str, Any]:
     }
 
 
+def require_expr_payload(payload: dict[str, Any], op_name: str) -> str:
+    expr = payload.get("expr")
+    if not isinstance(expr, str) or expr.strip() == "":
+        raise OracleError(f"{op_name} requires non-empty expr")
+    return expr
+
+
+def locals_from_payload(payload: dict[str, Any], op_name: str) -> dict[str, Any]:
+    locals_raw = payload.get("locals") or {}
+    if not isinstance(locals_raw, dict):
+        raise OracleError(f"{op_name} locals must be an object")
+    return {str(name): scalar_from_json(value) for name, value in locals_raw.items()}
+
+
+def op_dataframe_eval(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_eval requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    expr = require_expr_payload(payload, "dataframe_eval")
+    local_dict = locals_from_payload(payload, "dataframe_eval")
+    try:
+        out = frame.eval(expr, local_dict=local_dict)
+    except Exception as exc:
+        raise OracleError(f"dataframe_eval failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_query(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_query requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    expr = require_expr_payload(payload, "dataframe_query")
+    local_dict = locals_from_payload(payload, "dataframe_query")
+    try:
+        out = frame.query(expr, local_dict=local_dict)
+    except Exception as exc:
+        raise OracleError(f"dataframe_query failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def rust_debug_index_label(value: Any) -> str:
     if isinstance(value, int):
         return f"Int64({value})"
@@ -2957,6 +3001,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         "data_frame_constructor_2d",
     }:
         return op_dataframe_constructor_list_like(pd, payload)
+    if op in {"dataframe_eval", "data_frame_eval"}:
+        return op_dataframe_eval(pd, payload)
+    if op in {"dataframe_query", "data_frame_query"}:
+        return op_dataframe_query(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

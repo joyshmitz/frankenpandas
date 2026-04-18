@@ -1,0 +1,21 @@
+{
+  "packet_id": "FP-P2D-126",
+  "case_id": "dataframe_eval_missing_column_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_eval",
+  "expr": "a + missing",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["a"]
+  },
+  "expected_error_contains": "unknown series reference: missing"
+}

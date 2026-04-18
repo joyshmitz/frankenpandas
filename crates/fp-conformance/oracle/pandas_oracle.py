@@ -2140,6 +2140,22 @@ def op_dataframe_nunique(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_quantile(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_quantile requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    q = payload.get("quantile_q", 0.5)
+    axis = payload.get("quantile_axis", 0)
+
+    try:
+        out = frame.quantile(q=q, axis=axis)
+    except Exception as exc:
+        raise OracleError(f"dataframe_quantile failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4133,6 +4149,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_all(pd, payload)
     if op in {"dataframe_nunique", "data_frame_nunique"}:
         return op_dataframe_nunique(pd, payload)
+    if op in {"dataframe_quantile", "data_frame_quantile"}:
+        return op_dataframe_quantile(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

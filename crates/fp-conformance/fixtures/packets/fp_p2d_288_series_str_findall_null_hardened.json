@@ -1,0 +1,37 @@
+{
+  "packet_id": "FP-P2D-288",
+  "case_id": "series_str_findall_null_hardened",
+  "mode": "hardened",
+  "operation": "series_str_findall",
+  "regex_pattern": "[a-z]+",
+  "str_findall_sep": ",",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "hello world" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "123" },
+      { "kind": "utf8", "value": "" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "hello,world" },
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" }
+    ]
+  }
+}

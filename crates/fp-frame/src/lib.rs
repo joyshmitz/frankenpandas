@@ -19437,7 +19437,7 @@ impl DataFrame {
         for name in &self.column_order {
             let s = self.column_as_series(name)?;
             match s.idxmin() {
-                Ok(label) => values.push(Scalar::Utf8(format!("{label:?}"))),
+                Ok(label) => values.push(index_label_to_scalar(&label)),
                 Err(_) => values.push(Scalar::Null(NullKind::NaN)),
             }
         }
@@ -19457,7 +19457,7 @@ impl DataFrame {
         for name in &self.column_order {
             let s = self.column_as_series(name)?;
             match s.idxmax() {
-                Ok(label) => values.push(Scalar::Utf8(format!("{label:?}"))),
+                Ok(label) => values.push(index_label_to_scalar(&label)),
                 Err(_) => values.push(Scalar::Null(NullKind::NaN)),
             }
         }
@@ -36060,9 +36060,11 @@ mod tests {
         .unwrap();
         let idxmin = df.idxmin().unwrap();
         assert_eq!(idxmin.len(), 1);
+        assert_eq!(idxmin.values()[0], Scalar::Int64(1));
 
         let idxmax = df.idxmax().unwrap();
         assert_eq!(idxmax.len(), 1);
+        assert_eq!(idxmax.values()[0], Scalar::Int64(0));
     }
 
     // ── DataFrame element-wise ops preserve non-numeric columns ──

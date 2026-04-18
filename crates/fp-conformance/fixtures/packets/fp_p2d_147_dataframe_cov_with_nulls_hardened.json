@@ -35,10 +35,10 @@
     "columns": {
       "a": [
         { "kind": "float64", "value": 2.333333333333333 },
-        { "kind": "float64", "value": 4.5 }
+        { "kind": "float64", "value": 9.0 }
       ],
       "b": [
-        { "kind": "float64", "value": 4.5 },
+        { "kind": "float64", "value": 9.0 },
         { "kind": "float64", "value": 9.333333333333334 }
       ]
     }

@@ -18794,6 +18794,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_dataframe_melt_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-063", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-063"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-063 dataframe_melt fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_combine_first_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
@@ -19842,6 +19855,32 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-143 dataframe mask_df fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_describe_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-145", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-145"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-145 dataframe_describe fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_idx_extrema_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-148", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-148"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-148 dataframe idxmin/idxmax fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

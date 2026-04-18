@@ -331,6 +331,8 @@ pub enum FixtureOperation {
     SeriesMap,
     #[serde(rename = "series_to_frame", alias = "series_to_frame_default")]
     SeriesToFrame,
+    #[serde(rename = "series_unstack", alias = "series_unstack_default")]
+    SeriesUnstack,
     #[serde(rename = "series_diff", alias = "series_diff_default")]
     SeriesDiff,
     #[serde(rename = "series_shift", alias = "series_shift_default")]
@@ -355,6 +357,11 @@ pub enum FixtureOperation {
     SeriesExtractDf,
     #[serde(rename = "series_extractall", alias = "series_str_extractall")]
     SeriesExtractAll,
+    #[serde(
+        rename = "series_str_get_dummies",
+        alias = "series_str_get_dummies_default"
+    )]
+    SeriesStrGetDummies,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -470,6 +477,19 @@ pub enum FixtureOperation {
     DataFramePctChange,
     #[serde(rename = "dataframe_melt", alias = "data_frame_melt")]
     DataFrameMelt,
+    #[serde(rename = "dataframe_pivot_table", alias = "data_frame_pivot_table")]
+    DataFramePivotTable,
+    #[serde(rename = "dataframe_stack", alias = "data_frame_stack")]
+    DataFrameStack,
+    #[serde(rename = "dataframe_crosstab", alias = "data_frame_crosstab")]
+    DataFrameCrosstab,
+    #[serde(
+        rename = "dataframe_crosstab_normalize",
+        alias = "data_frame_crosstab_normalize"
+    )]
+    DataFrameCrosstabNormalize,
+    #[serde(rename = "dataframe_get_dummies", alias = "data_frame_get_dummies")]
+    DataFrameGetDummies,
     // FP-P2D-014: DataFrame merge/join/concat parity matrix
     #[serde(rename = "dataframe_merge", alias = "data_frame_merge")]
     DataFrameMerge,
@@ -502,6 +522,44 @@ pub enum FixtureOperation {
     GroupByVar,
     #[serde(rename = "groupby_median", alias = "group_by_median")]
     GroupByMedian,
+    // Window operations (rolling, expanding, ewm)
+    #[serde(rename = "series_rolling_mean", alias = "series_rolling_mean_default")]
+    SeriesRollingMean,
+    #[serde(rename = "series_rolling_sum", alias = "series_rolling_sum_default")]
+    SeriesRollingSum,
+    #[serde(rename = "series_rolling_std", alias = "series_rolling_std_default")]
+    SeriesRollingStd,
+    #[serde(
+        rename = "series_expanding_count",
+        alias = "series_expanding_count_default"
+    )]
+    SeriesExpandingCount,
+    #[serde(
+        rename = "series_expanding_quantile",
+        alias = "series_expanding_quantile_default"
+    )]
+    SeriesExpandingQuantile,
+    #[serde(rename = "series_ewm_mean", alias = "series_ewm_mean_default")]
+    SeriesEwmMean,
+    // Resample operations
+    #[serde(rename = "series_resample_sum", alias = "series_resample_sum_default")]
+    SeriesResampleSum,
+    #[serde(
+        rename = "series_resample_mean",
+        alias = "series_resample_mean_default"
+    )]
+    SeriesResampleMean,
+    #[serde(
+        rename = "series_resample_count",
+        alias = "series_resample_count_default"
+    )]
+    SeriesResampleCount,
+    #[serde(rename = "dataframe_rolling_mean", alias = "data_frame_rolling_mean")]
+    DataFrameRollingMean,
+    #[serde(rename = "dataframe_resample_sum", alias = "data_frame_resample_sum")]
+    DataFrameResampleSum,
+    #[serde(rename = "dataframe_resample_mean", alias = "data_frame_resample_mean")]
+    DataFrameResampleMean,
 }
 
 impl FixtureOperation {
@@ -590,6 +648,7 @@ impl FixtureOperation {
             Self::SeriesUpdate => "series_update",
             Self::SeriesMap => "series_map",
             Self::SeriesToFrame => "series_to_frame",
+            Self::SeriesUnstack => "series_unstack",
             Self::SeriesXs => "series_xs",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
@@ -600,6 +659,7 @@ impl FixtureOperation {
             Self::SeriesRpartitionDf => "series_rpartition_df",
             Self::SeriesExtractDf => "series_extract_df",
             Self::SeriesExtractAll => "series_extractall",
+            Self::SeriesStrGetDummies => "series_str_get_dummies",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -645,6 +705,11 @@ impl FixtureOperation {
             Self::DataFrameShift => "dataframe_shift",
             Self::DataFramePctChange => "dataframe_pct_change",
             Self::DataFrameMelt => "dataframe_melt",
+            Self::DataFramePivotTable => "dataframe_pivot_table",
+            Self::DataFrameStack => "dataframe_stack",
+            Self::DataFrameCrosstab => "dataframe_crosstab",
+            Self::DataFrameCrosstabNormalize => "dataframe_crosstab_normalize",
+            Self::DataFrameGetDummies => "dataframe_get_dummies",
             Self::DataFrameMerge => "dataframe_merge",
             Self::DataFrameMergeIndex => "dataframe_merge_index",
             Self::DataFrameMergeAsof => "dataframe_merge_asof",
@@ -663,6 +728,18 @@ impl FixtureOperation {
             Self::SeriesDiff => "series_diff",
             Self::SeriesShift => "series_shift",
             Self::SeriesPctChange => "series_pct_change",
+            Self::SeriesRollingMean => "series_rolling_mean",
+            Self::SeriesRollingSum => "series_rolling_sum",
+            Self::SeriesRollingStd => "series_rolling_std",
+            Self::SeriesExpandingCount => "series_expanding_count",
+            Self::SeriesExpandingQuantile => "series_expanding_quantile",
+            Self::SeriesEwmMean => "series_ewm_mean",
+            Self::SeriesResampleSum => "series_resample_sum",
+            Self::SeriesResampleMean => "series_resample_mean",
+            Self::SeriesResampleCount => "series_resample_count",
+            Self::DataFrameRollingMean => "dataframe_rolling_mean",
+            Self::DataFrameResampleSum => "dataframe_resample_sum",
+            Self::DataFrameResampleMean => "dataframe_resample_mean",
         }
     }
 }
@@ -938,9 +1015,40 @@ pub struct PacketFixture {
     #[serde(default)]
     pub melt_value_name: Option<String>,
     #[serde(default)]
+    pub pivot_values: Option<Vec<String>>,
+    #[serde(default)]
+    pub pivot_index: Option<String>,
+    #[serde(default)]
+    pub pivot_columns: Option<String>,
+    #[serde(default)]
+    pub pivot_aggfunc: Option<String>,
+    #[serde(default)]
+    pub pivot_margins: Option<bool>,
+    #[serde(default)]
+    pub pivot_margins_name: Option<String>,
+    #[serde(default)]
+    pub dummy_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub crosstab_normalize: Option<String>,
+    #[serde(default)]
     pub replace_to_find: Option<Vec<Scalar>>,
     #[serde(default)]
     pub replace_to_value: Option<Vec<Scalar>>,
+    // Window operation parameters
+    #[serde(default)]
+    pub window_size: Option<usize>,
+    #[serde(default)]
+    pub min_periods: Option<usize>,
+    #[serde(default)]
+    pub window_center: Option<bool>,
+    #[serde(default)]
+    pub ewm_span: Option<f64>,
+    #[serde(default)]
+    pub ewm_alpha: Option<f64>,
+    #[serde(default)]
+    pub resample_freq: Option<String>,
+    #[serde(default)]
+    pub quantile_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1239,6 +1347,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
+        | FixtureOperation::SeriesUnstack
+        | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
@@ -1274,7 +1384,24 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
-        | FixtureOperation::DataFrameMelt => &["CC-004"],
+        | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivotTable
+        | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameCrosstab
+        | FixtureOperation::DataFrameCrosstabNormalize
+        | FixtureOperation::DataFrameGetDummies
+        | FixtureOperation::SeriesRollingMean
+        | FixtureOperation::SeriesRollingSum
+        | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesExpandingCount
+        | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesResampleSum
+        | FixtureOperation::SeriesResampleMean
+        | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::DataFrameRollingMean
+        | FixtureOperation::DataFrameResampleSum
+        | FixtureOperation::DataFrameResampleMean => &["CC-004"],
     }
 }
 
@@ -1903,6 +2030,36 @@ struct OracleRequest {
     melt_var_name: Option<String>,
     #[serde(default)]
     melt_value_name: Option<String>,
+    #[serde(default)]
+    pivot_values: Option<Vec<String>>,
+    #[serde(default)]
+    pivot_index: Option<String>,
+    #[serde(default)]
+    pivot_columns: Option<String>,
+    #[serde(default)]
+    pivot_aggfunc: Option<String>,
+    #[serde(default)]
+    pivot_margins: Option<bool>,
+    #[serde(default)]
+    pivot_margins_name: Option<String>,
+    #[serde(default)]
+    dummy_columns: Option<Vec<String>>,
+    #[serde(default)]
+    crosstab_normalize: Option<String>,
+    #[serde(default)]
+    window_size: Option<usize>,
+    #[serde(default)]
+    min_periods: Option<usize>,
+    #[serde(default)]
+    window_center: Option<bool>,
+    #[serde(default)]
+    ewm_span: Option<f64>,
+    #[serde(default)]
+    ewm_alpha: Option<f64>,
+    #[serde(default)]
+    resample_freq: Option<String>,
+    #[serde(default)]
+    quantile_value: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -7738,6 +7895,13 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivotTable
+        | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameCrosstab
+        | FixtureOperation::DataFrameCrosstabNormalize
+        | FixtureOperation::DataFrameGetDummies
+        | FixtureOperation::SeriesUnstack
+        | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -7786,6 +7950,36 @@ fn run_fixture_operation(
                 _ => return Err(format!("expected_series is required for {op_name}")),
             };
             compare_series_expected(&actual, &expected)
+        }
+        FixtureOperation::SeriesRollingMean
+        | FixtureOperation::SeriesRollingSum
+        | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesExpandingCount
+        | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesResampleSum
+        | FixtureOperation::SeriesResampleMean
+        | FixtureOperation::SeriesResampleCount => {
+            let actual = execute_series_window_fixture_operation(fixture, policy, ledger)?;
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual, &series),
+                _ => Err(format!(
+                    "expected_series is required for {:?}",
+                    fixture.operation
+                )),
+            }
+        }
+        FixtureOperation::DataFrameRollingMean
+        | FixtureOperation::DataFrameResampleSum
+        | FixtureOperation::DataFrameResampleMean => {
+            let actual = execute_dataframe_window_fixture_operation(fixture, policy, ledger)?;
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual, &frame),
+                _ => Err(format!(
+                    "expected_frame is required for {:?}",
+                    fixture.operation
+                )),
+            }
         }
     }
 }
@@ -8153,7 +8347,16 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::GroupByStd
         | FixtureOperation::GroupByVar
         | FixtureOperation::GroupByMedian
-        | FixtureOperation::SeriesCombineFirst => fixture
+        | FixtureOperation::SeriesCombineFirst
+        | FixtureOperation::SeriesRollingMean
+        | FixtureOperation::SeriesRollingSum
+        | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesExpandingCount
+        | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesResampleSum
+        | FixtureOperation::SeriesResampleMean
+        | FixtureOperation::SeriesResampleCount => fixture
             .expected_series
             .clone()
             .map(ResolvedExpected::Series)
@@ -8166,6 +8369,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::DataFrameLoc
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
+        | FixtureOperation::SeriesUnstack
+        | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
@@ -8219,10 +8424,18 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivotTable
+        | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameCrosstab
+        | FixtureOperation::DataFrameCrosstabNormalize
+        | FixtureOperation::DataFrameGetDummies
         | FixtureOperation::DataFrameCombineFirst
         | FixtureOperation::SeriesPartitionDf
         | FixtureOperation::SeriesRpartitionDf
-        | FixtureOperation::SeriesExtractDf => fixture
+        | FixtureOperation::SeriesExtractDf
+        | FixtureOperation::DataFrameRollingMean
+        | FixtureOperation::DataFrameResampleSum
+        | FixtureOperation::DataFrameResampleMean => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -8363,6 +8576,21 @@ fn capture_live_oracle_expected(
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),
         melt_value_name: fixture.melt_value_name.clone(),
+        pivot_values: fixture.pivot_values.clone(),
+        pivot_index: fixture.pivot_index.clone(),
+        pivot_columns: fixture.pivot_columns.clone(),
+        pivot_aggfunc: fixture.pivot_aggfunc.clone(),
+        pivot_margins: fixture.pivot_margins,
+        pivot_margins_name: fixture.pivot_margins_name.clone(),
+        dummy_columns: fixture.dummy_columns.clone(),
+        crosstab_normalize: fixture.crosstab_normalize.clone(),
+        window_size: fixture.window_size,
+        min_periods: fixture.min_periods,
+        window_center: fixture.window_center,
+        ewm_span: fixture.ewm_span,
+        ewm_alpha: fixture.ewm_alpha,
+        resample_freq: fixture.resample_freq.clone(),
+        quantile_value: fixture.quantile_value,
     };
     let input = serde_json::to_vec(&payload)?;
 
@@ -8536,7 +8764,16 @@ fn capture_live_oracle_expected(
         | FixtureOperation::GroupByStd
         | FixtureOperation::GroupByVar
         | FixtureOperation::GroupByMedian
-        | FixtureOperation::SeriesCombineFirst => response
+        | FixtureOperation::SeriesCombineFirst
+        | FixtureOperation::SeriesRollingMean
+        | FixtureOperation::SeriesRollingSum
+        | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesExpandingCount
+        | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesResampleSum
+        | FixtureOperation::SeriesResampleMean
+        | FixtureOperation::SeriesResampleCount => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -8549,6 +8786,8 @@ fn capture_live_oracle_expected(
         FixtureOperation::DataFrameLoc
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
+        | FixtureOperation::SeriesUnstack
+        | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
@@ -8602,10 +8841,18 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivotTable
+        | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameCrosstab
+        | FixtureOperation::DataFrameCrosstabNormalize
+        | FixtureOperation::DataFrameGetDummies
         | FixtureOperation::DataFrameCombineFirst
         | FixtureOperation::SeriesPartitionDf
         | FixtureOperation::SeriesRpartitionDf
-        | FixtureOperation::SeriesExtractDf => response
+        | FixtureOperation::SeriesExtractDf
+        | FixtureOperation::DataFrameRollingMean
+        | FixtureOperation::DataFrameResampleSum
+        | FixtureOperation::DataFrameResampleMean => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -9169,6 +9416,43 @@ fn resolve_optional_string_list(
         .map(|items| items.unwrap_or_default())
 }
 
+fn require_pivot_value_names(fixture: &PacketFixture) -> Result<Vec<String>, String> {
+    let values = resolve_optional_string_list(fixture.pivot_values.as_ref(), "pivot_values")?;
+    if values.is_empty() {
+        Err("pivot_values is required for dataframe_pivot_table".to_owned())
+    } else {
+        Ok(values)
+    }
+}
+
+fn require_pivot_index(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .pivot_index
+        .as_deref()
+        .ok_or_else(|| "pivot_index is required for dataframe_pivot_table".to_owned())
+}
+
+fn require_pivot_columns(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .pivot_columns
+        .as_deref()
+        .ok_or_else(|| "pivot_columns is required for dataframe_pivot_table".to_owned())
+}
+
+fn require_pivot_aggfunc(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .pivot_aggfunc
+        .as_deref()
+        .ok_or_else(|| "pivot_aggfunc is required for dataframe_pivot_table".to_owned())
+}
+
+fn require_crosstab_normalize(fixture: &PacketFixture) -> Result<&str, String> {
+    fixture
+        .crosstab_normalize
+        .as_deref()
+        .ok_or_else(|| "crosstab_normalize is required for dataframe_crosstab_normalize".to_owned())
+}
+
 fn resolve_duplicate_keep(fixture: &PacketFixture) -> Result<DuplicateKeep, String> {
     let Some(keep) = fixture.keep.as_deref() else {
         return Ok(DuplicateKeep::First);
@@ -9653,6 +9937,140 @@ fn execute_dataframe_query_fixture_operation(
     query_str_with_locals(expr, &frame, &locals, policy, ledger).map_err(|err| err.to_string())
 }
 
+fn execute_series_window_fixture_operation(
+    fixture: &PacketFixture,
+    _policy: &RuntimePolicy,
+    _ledger: &mut EvidenceLedger,
+) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+    let window_size = fixture.window_size.unwrap_or(3);
+    let min_periods = fixture.min_periods;
+    let center = fixture.window_center.unwrap_or(false);
+
+    match fixture.operation {
+        FixtureOperation::SeriesRollingMean => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .mean()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .mean()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingSum => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .sum()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .sum()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesRollingStd => {
+            if center {
+                series
+                    .rolling_with_center(window_size, min_periods, true)
+                    .std()
+                    .map_err(|err| err.to_string())
+            } else {
+                series
+                    .rolling(window_size, min_periods)
+                    .std()
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::SeriesExpandingCount => series
+            .expanding(min_periods)
+            .count()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingQuantile => {
+            let q = fixture.quantile_value.unwrap_or(0.5);
+            series
+                .expanding(min_periods)
+                .quantile(q)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesEwmMean => {
+            let span = fixture.ewm_span;
+            let alpha = fixture.ewm_alpha;
+            series
+                .ewm(span, alpha)
+                .mean()
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleSum => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_sum")?;
+            series.resample(freq).sum().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleMean => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_mean")?;
+            series.resample(freq).mean().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleCount => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_count")?;
+            series.resample(freq).count().map_err(|err| err.to_string())
+        }
+        _ => Err(format!(
+            "unsupported window operation: {:?}",
+            fixture.operation
+        )),
+    }
+}
+
+fn execute_dataframe_window_fixture_operation(
+    fixture: &PacketFixture,
+    _policy: &RuntimePolicy,
+    _ledger: &mut EvidenceLedger,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let window_size = fixture.window_size.unwrap_or(3);
+    let min_periods = fixture.min_periods;
+
+    match fixture.operation {
+        FixtureOperation::DataFrameRollingMean => frame
+            .rolling(window_size, min_periods)
+            .mean()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameResampleSum => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for dataframe_resample_sum")?;
+            frame.resample(freq).sum().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameResampleMean => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for dataframe_resample_mean")?;
+            frame.resample(freq).mean().map_err(|err| err.to_string())
+        }
+        _ => Err(format!(
+            "unsupported dataframe window operation: {:?}",
+            fixture.operation
+        )),
+    }
+}
+
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
         FixtureOperation::SeriesPartitionDf => {
@@ -9695,6 +10113,17 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let left = require_left_series(fixture)?;
             let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
             series.to_frame(None).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesUnstack => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series.unstack().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrGetDummies => {
+            let left = require_left_series(fixture)?;
+            let sep = require_string_sep(fixture, "series_str_get_dummies")?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series.str().get_dummies(sep).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameMerge => {
             execute_dataframe_merge_fixture_operation(fixture, false)
@@ -9799,6 +10228,77 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     fixture.melt_value_name.as_deref(),
                 )
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFramePivotTable => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let values = require_pivot_value_names(fixture)?;
+            let index = require_pivot_index(fixture)?;
+            let columns = require_pivot_columns(fixture)?;
+            let aggfunc = require_pivot_aggfunc(fixture)?;
+            let value_refs = values.iter().map(String::as_str).collect::<Vec<_>>();
+
+            if value_refs.len() > 1 {
+                frame
+                    .pivot_table_multi_values(&value_refs, index, columns, aggfunc)
+                    .map_err(|err| err.to_string())
+            } else if fixture.pivot_margins.unwrap_or(false) {
+                if let Some(margins_name) = fixture.pivot_margins_name.as_deref() {
+                    frame
+                        .pivot_table_with_margins_name(
+                            value_refs[0],
+                            index,
+                            columns,
+                            aggfunc,
+                            true,
+                            margins_name,
+                        )
+                        .map_err(|err| err.to_string())
+                } else {
+                    frame
+                        .pivot_table_with_margins(value_refs[0], index, columns, aggfunc, true)
+                        .map_err(|err| err.to_string())
+                }
+            } else if let Some(fill_value) = fixture.fill_value.as_ref() {
+                let fill = fill_value
+                    .to_f64()
+                    .map_err(|err| format!("pivot fill_value must be numeric: {err:?}"))?;
+                frame
+                    .pivot_table_fill(value_refs[0], index, columns, aggfunc, fill)
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .pivot_table(value_refs[0], index, columns, aggfunc)
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::DataFrameStack => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.stack().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCrosstab => {
+            let left = build_series(require_left_series(fixture)?)
+                .map_err(|err| format!("left series build failed: {err}"))?;
+            let right = build_series(require_right_series(fixture)?)
+                .map_err(|err| format!("right series build failed: {err}"))?;
+            DataFrame::crosstab(&left, &right).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameCrosstabNormalize => {
+            let left = build_series(require_left_series(fixture)?)
+                .map_err(|err| format!("left series build failed: {err}"))?;
+            let right = build_series(require_right_series(fixture)?)
+                .map_err(|err| format!("right series build failed: {err}"))?;
+            DataFrame::crosstab_normalize(&left, &right, require_crosstab_normalize(fixture)?)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameGetDummies => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let columns =
+                resolve_optional_string_list(fixture.dummy_columns.as_ref(), "dummy_columns")?;
+            let refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+            frame.get_dummies(&refs).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameIsNa => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -14069,6 +14569,13 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameCummax
         | FixtureOperation::DataFrameCummin
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivotTable
+        | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameCrosstab
+        | FixtureOperation::DataFrameCrosstabNormalize
+        | FixtureOperation::DataFrameGetDummies
+        | FixtureOperation::SeriesUnstack
+        | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -14129,6 +14636,42 @@ fn execute_and_compare_differential(
                 _ => return Err(format!("expected_series required for {op_name}")),
             };
             Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::SeriesRollingMean
+        | FixtureOperation::SeriesRollingSum
+        | FixtureOperation::SeriesRollingStd
+        | FixtureOperation::SeriesExpandingCount
+        | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesResampleSum
+        | FixtureOperation::SeriesResampleMean
+        | FixtureOperation::SeriesResampleCount => {
+            let actual = execute_series_window_fixture_operation(fixture, policy, ledger)?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => {
+                    return Err(format!(
+                        "expected_series required for {:?}",
+                        fixture.operation
+                    ));
+                }
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::DataFrameRollingMean
+        | FixtureOperation::DataFrameResampleSum
+        | FixtureOperation::DataFrameResampleMean => {
+            let actual = execute_dataframe_window_fixture_operation(fixture, policy, ledger)?;
+            let expected = match expected {
+                ResolvedExpected::Frame(f) => f,
+                _ => {
+                    return Err(format!(
+                        "expected_frame required for {:?}",
+                        fixture.operation
+                    ));
+                }
+            };
+            Ok(diff_dataframe(&actual, &expected))
         }
     }
 }
@@ -17969,6 +18512,32 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-126 dataframe eval/query fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_window_resample_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-127", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-127"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-127 window/resample fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_reshape_dummy_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-127", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-127"));
+        assert!(
+            report.fixture_count >= 10,
+            "expected FP-P2D-127 reshape/dummy fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

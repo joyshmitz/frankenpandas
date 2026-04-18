@@ -12,10 +12,10 @@
       { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "datetime64", "value": "2024-01-01T00:00:00" },
-      { "kind": "datetime64", "value": "2023-01-01T00:00:00" },
-      { "kind": "datetime64", "value": "2000-01-01T00:00:00" },
-      { "kind": "datetime64", "value": "1900-01-01T00:00:00" }
+      { "kind": "utf8", "value": "2024-01-01T00:00:00" },
+      { "kind": "utf8", "value": "2023-01-01T00:00:00" },
+      { "kind": "utf8", "value": "2000-01-01T00:00:00" },
+      { "kind": "utf8", "value": "1900-01-01T00:00:00" }
     ]
   },
   "expected_series": {

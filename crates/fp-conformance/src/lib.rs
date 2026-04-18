@@ -560,6 +560,14 @@ pub enum FixtureOperation {
     SeriesDtIsQuarterStart,
     #[serde(rename = "series_dt_is_quarter_end", alias = "series_dt_is_quarter_end_default")]
     SeriesDtIsQuarterEnd,
+    #[serde(rename = "series_dt_strftime", alias = "series_dt_strftime_default")]
+    SeriesDtStrftime,
+    #[serde(rename = "series_dt_floor", alias = "series_dt_floor_default")]
+    SeriesDtFloor,
+    #[serde(rename = "series_dt_ceil", alias = "series_dt_ceil_default")]
+    SeriesDtCeil,
+    #[serde(rename = "series_dt_round", alias = "series_dt_round_default")]
+    SeriesDtRound,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -1007,6 +1015,10 @@ impl FixtureOperation {
             Self::SeriesDtIsLeapYear => "series_dt_is_leap_year",
             Self::SeriesDtIsQuarterStart => "series_dt_is_quarter_start",
             Self::SeriesDtIsQuarterEnd => "series_dt_is_quarter_end",
+            Self::SeriesDtStrftime => "series_dt_strftime",
+            Self::SeriesDtFloor => "series_dt_floor",
+            Self::SeriesDtCeil => "series_dt_ceil",
+            Self::SeriesDtRound => "series_dt_round",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1505,6 +1517,10 @@ pub struct PacketFixture {
     pub resample_freq: Option<String>,
     #[serde(default)]
     pub quantile_value: Option<f64>,
+    #[serde(default)]
+    pub dt_freq: Option<String>,
+    #[serde(default)]
+    pub dt_strftime_format: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1837,6 +1853,15 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtIsMonthEnd
         | FixtureOperation::SeriesDtIsYearStart
         | FixtureOperation::SeriesDtIsYearEnd
+        | FixtureOperation::SeriesDtDate
+        | FixtureOperation::SeriesDtDaysInMonth
+        | FixtureOperation::SeriesDtIsLeapYear
+        | FixtureOperation::SeriesDtIsQuarterStart
+        | FixtureOperation::SeriesDtIsQuarterEnd
+        | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtFloor
+        | FixtureOperation::SeriesDtCeil
+        | FixtureOperation::SeriesDtRound
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -7633,7 +7658,16 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtIsMonthStart
         | FixtureOperation::SeriesDtIsMonthEnd
         | FixtureOperation::SeriesDtIsYearStart
-        | FixtureOperation::SeriesDtIsYearEnd => {
+        | FixtureOperation::SeriesDtIsYearEnd
+        | FixtureOperation::SeriesDtDate
+        | FixtureOperation::SeriesDtDaysInMonth
+        | FixtureOperation::SeriesDtIsLeapYear
+        | FixtureOperation::SeriesDtIsQuarterStart
+        | FixtureOperation::SeriesDtIsQuarterEnd
+        | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtFloor
+        | FixtureOperation::SeriesDtCeil
+        | FixtureOperation::SeriesDtRound => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -9214,6 +9248,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtIsLeapYear
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
+        | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtFloor
+        | FixtureOperation::SeriesDtCeil
+        | FixtureOperation::SeriesDtRound
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9768,6 +9806,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtIsLeapYear
         | FixtureOperation::SeriesDtIsQuarterStart
         | FixtureOperation::SeriesDtIsQuarterEnd
+        | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtFloor
+        | FixtureOperation::SeriesDtCeil
+        | FixtureOperation::SeriesDtRound
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -12518,6 +12560,34 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtIsQuarterEnd => {
             series.dt().is_quarter_end().map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesDtStrftime => {
+            let format = fixture
+                .dt_strftime_format
+                .as_deref()
+                .unwrap_or("%Y-%m-%d %H:%M:%S");
+            series.dt().strftime(format).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtFloor => {
+            let freq = fixture
+                .dt_freq
+                .as_deref()
+                .ok_or_else(|| "series_dt_floor requires dt_freq".to_string())?;
+            series.dt().floor(freq).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtCeil => {
+            let freq = fixture
+                .dt_freq
+                .as_deref()
+                .ok_or_else(|| "series_dt_ceil requires dt_freq".to_string())?;
+            series.dt().ceil(freq).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtRound => {
+            let freq = fixture
+                .dt_freq
+                .as_deref()
+                .ok_or_else(|| "series_dt_round requires dt_freq".to_string())?;
+            series.dt().round(freq).map_err(|err| err.to_string())
+        }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
@@ -15220,7 +15290,16 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtIsMonthStart
         | FixtureOperation::SeriesDtIsMonthEnd
         | FixtureOperation::SeriesDtIsYearStart
-        | FixtureOperation::SeriesDtIsYearEnd => {
+        | FixtureOperation::SeriesDtIsYearEnd
+        | FixtureOperation::SeriesDtDate
+        | FixtureOperation::SeriesDtDaysInMonth
+        | FixtureOperation::SeriesDtIsLeapYear
+        | FixtureOperation::SeriesDtIsQuarterStart
+        | FixtureOperation::SeriesDtIsQuarterEnd
+        | FixtureOperation::SeriesDtStrftime
+        | FixtureOperation::SeriesDtFloor
+        | FixtureOperation::SeriesDtCeil
+        | FixtureOperation::SeriesDtRound => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {

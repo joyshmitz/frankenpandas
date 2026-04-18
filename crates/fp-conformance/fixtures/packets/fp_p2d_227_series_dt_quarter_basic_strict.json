@@ -12,10 +12,10 @@
       { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "datetime64", "value": "2024-01-15T00:00:00" },
-      { "kind": "datetime64", "value": "2024-04-15T00:00:00" },
-      { "kind": "datetime64", "value": "2024-07-15T00:00:00" },
-      { "kind": "datetime64", "value": "2024-10-15T00:00:00" }
+      { "kind": "utf8", "value": "2024-01-15T00:00:00" },
+      { "kind": "utf8", "value": "2024-04-15T00:00:00" },
+      { "kind": "utf8", "value": "2024-07-15T00:00:00" },
+      { "kind": "utf8", "value": "2024-10-15T00:00:00" }
     ]
   },
   "expected_series": {

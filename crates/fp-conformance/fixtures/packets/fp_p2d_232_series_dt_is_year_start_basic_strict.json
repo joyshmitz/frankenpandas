@@ -11,9 +11,9 @@
       { "kind": "int64", "value": 2 }
     ],
     "values": [
-      { "kind": "datetime64", "value": "2024-01-01T00:00:00" },
-      { "kind": "datetime64", "value": "2024-06-15T00:00:00" },
-      { "kind": "datetime64", "value": "2025-01-01T00:00:00" }
+      { "kind": "utf8", "value": "2024-01-01T00:00:00" },
+      { "kind": "utf8", "value": "2024-06-15T00:00:00" },
+      { "kind": "utf8", "value": "2025-01-01T00:00:00" }
     ]
   },
   "expected_series": {

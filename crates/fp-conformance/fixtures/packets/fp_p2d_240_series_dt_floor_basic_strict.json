@@ -1,19 +1,20 @@
 {
-  "packet_id": "FP-P2D-234",
-  "case_id": "series_dt_date_basic_strict",
+  "packet_id": "FP-P2D-240",
+  "case_id": "series_dt_floor_basic_strict",
   "mode": "strict",
-  "operation": "series_dt_date",
+  "operation": "series_dt_floor",
+  "dt_freq": "D",
   "left": {
-    "name": "datetimes",
+    "name": "dates",
     "index": [
       { "kind": "int64", "value": 0 },
       { "kind": "int64", "value": 1 },
       { "kind": "int64", "value": 2 }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15T10:30:00" },
-      { "kind": "utf8", "value": "2024-06-20T15:45:00" },
-      { "kind": "utf8", "value": "2024-12-31T23:59:59" }
+      { "kind": "utf8", "value": "2024-01-15T10:30:45" },
+      { "kind": "utf8", "value": "2024-06-30T23:59:59" },
+      { "kind": "utf8", "value": "2024-12-25T12:00:00" }
     ]
   },
   "expected_series": {
@@ -24,8 +25,8 @@
     ],
     "values": [
       { "kind": "utf8", "value": "2024-01-15T00:00:00" },
-      { "kind": "utf8", "value": "2024-06-20T00:00:00" },
-      { "kind": "utf8", "value": "2024-12-31T00:00:00" }
+      { "kind": "utf8", "value": "2024-06-30T00:00:00" },
+      { "kind": "utf8", "value": "2024-12-25T00:00:00" }
     ]
   }
 }

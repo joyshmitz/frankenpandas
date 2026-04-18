@@ -329,6 +329,10 @@ pub enum FixtureOperation {
     DataFrameStd,
     #[serde(rename = "dataframe_var", alias = "dataframe_var_default")]
     DataFrameVar,
+    #[serde(rename = "dataframe_min", alias = "dataframe_min_default")]
+    DataFrameMin,
+    #[serde(rename = "dataframe_max", alias = "dataframe_max_default")]
+    DataFrameMax,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -730,6 +734,8 @@ impl FixtureOperation {
             Self::DataFrameMean => "dataframe_mean",
             Self::DataFrameStd => "dataframe_std",
             Self::DataFrameVar => "dataframe_var",
+            Self::DataFrameMin => "dataframe_min",
+            Self::DataFrameMax => "dataframe_max",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1466,6 +1472,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
         | FixtureOperation::DataFrameVar
+        | FixtureOperation::DataFrameMin
+        | FixtureOperation::DataFrameMax
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6856,7 +6864,9 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
-        | FixtureOperation::DataFrameVar => {
+        | FixtureOperation::DataFrameVar
+        | FixtureOperation::DataFrameMin
+        | FixtureOperation::DataFrameMax => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6873,6 +6883,8 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -8707,6 +8719,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
         | FixtureOperation::DataFrameVar
+        | FixtureOperation::DataFrameMin
+        | FixtureOperation::DataFrameMax
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9179,6 +9193,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
         | FixtureOperation::DataFrameVar
+        | FixtureOperation::DataFrameMin
+        | FixtureOperation::DataFrameMax
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13785,7 +13801,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
-        | FixtureOperation::DataFrameVar => {
+        | FixtureOperation::DataFrameVar
+        | FixtureOperation::DataFrameMin
+        | FixtureOperation::DataFrameMax => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -13802,6 +13820,8 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {

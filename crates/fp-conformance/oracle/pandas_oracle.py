@@ -2044,6 +2044,38 @@ def op_dataframe_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_min requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("min_axis", 0)
+    skipna = payload.get("min_skipna", True)
+
+    try:
+        out = frame.min(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_min failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_max requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("max_axis", 0)
+    skipna = payload.get("max_skipna", True)
+
+    try:
+        out = frame.max(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_max failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -4025,6 +4057,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_std(pd, payload)
     if op in {"dataframe_var", "data_frame_var"}:
         return op_dataframe_var(pd, payload)
+    if op in {"dataframe_min", "data_frame_min"}:
+        return op_dataframe_min(pd, payload)
+    if op in {"dataframe_max", "data_frame_max"}:
+        return op_dataframe_max(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

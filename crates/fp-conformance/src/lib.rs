@@ -460,6 +460,20 @@ pub enum FixtureOperation {
     SeriesStrLstrip,
     #[serde(rename = "series_str_rstrip", alias = "series_str_rstrip_default")]
     SeriesStrRstrip,
+    #[serde(rename = "series_str_title", alias = "series_str_title_default")]
+    SeriesStrTitle,
+    #[serde(rename = "series_str_swapcase", alias = "series_str_swapcase_default")]
+    SeriesStrSwapcase,
+    #[serde(rename = "series_str_zfill", alias = "series_str_zfill_default")]
+    SeriesStrZfill,
+    #[serde(rename = "series_str_center", alias = "series_str_center_default")]
+    SeriesStrCenter,
+    #[serde(rename = "series_str_ljust", alias = "series_str_ljust_default")]
+    SeriesStrLjust,
+    #[serde(rename = "series_str_rjust", alias = "series_str_rjust_default")]
+    SeriesStrRjust,
+    #[serde(rename = "series_str_pad", alias = "series_str_pad_default")]
+    SeriesStrPad,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -871,6 +885,13 @@ impl FixtureOperation {
             Self::SeriesStrReplace => "series_str_replace",
             Self::SeriesStrLstrip => "series_str_lstrip",
             Self::SeriesStrRstrip => "series_str_rstrip",
+            Self::SeriesStrTitle => "series_str_title",
+            Self::SeriesStrSwapcase => "series_str_swapcase",
+            Self::SeriesStrZfill => "series_str_zfill",
+            Self::SeriesStrCenter => "series_str_center",
+            Self::SeriesStrLjust => "series_str_ljust",
+            Self::SeriesStrRjust => "series_str_rjust",
+            Self::SeriesStrPad => "series_str_pad",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1302,6 +1323,12 @@ pub struct PacketFixture {
     #[serde(default)]
     pub replace_value: Option<String>,
     #[serde(default)]
+    pub str_width: Option<usize>,
+    #[serde(default)]
+    pub str_fillchar: Option<char>,
+    #[serde(default)]
+    pub str_pad_side: Option<String>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1631,6 +1658,13 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrReplace
         | FixtureOperation::SeriesStrLstrip
         | FixtureOperation::SeriesStrRstrip
+        | FixtureOperation::SeriesStrTitle
+        | FixtureOperation::SeriesStrSwapcase
+        | FixtureOperation::SeriesStrZfill
+        | FixtureOperation::SeriesStrCenter
+        | FixtureOperation::SeriesStrLjust
+        | FixtureOperation::SeriesStrRjust
+        | FixtureOperation::SeriesStrPad
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7390,6 +7424,13 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrReplace
         | FixtureOperation::SeriesStrLstrip
         | FixtureOperation::SeriesStrRstrip
+        | FixtureOperation::SeriesStrTitle
+        | FixtureOperation::SeriesStrSwapcase
+        | FixtureOperation::SeriesStrZfill
+        | FixtureOperation::SeriesStrCenter
+        | FixtureOperation::SeriesStrLjust
+        | FixtureOperation::SeriesStrRjust
+        | FixtureOperation::SeriesStrPad
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -8927,6 +8968,13 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrReplace
         | FixtureOperation::SeriesStrLstrip
         | FixtureOperation::SeriesStrRstrip
+        | FixtureOperation::SeriesStrTitle
+        | FixtureOperation::SeriesStrSwapcase
+        | FixtureOperation::SeriesStrZfill
+        | FixtureOperation::SeriesStrCenter
+        | FixtureOperation::SeriesStrLjust
+        | FixtureOperation::SeriesStrRjust
+        | FixtureOperation::SeriesStrPad
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9438,6 +9486,13 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrReplace
         | FixtureOperation::SeriesStrLstrip
         | FixtureOperation::SeriesStrRstrip
+        | FixtureOperation::SeriesStrTitle
+        | FixtureOperation::SeriesStrSwapcase
+        | FixtureOperation::SeriesStrZfill
+        | FixtureOperation::SeriesStrCenter
+        | FixtureOperation::SeriesStrLjust
+        | FixtureOperation::SeriesStrRjust
+        | FixtureOperation::SeriesStrPad
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -11952,6 +12007,60 @@ fn execute_series_module_utility_fixture_operation(
         }
         FixtureOperation::SeriesStrLstrip => series.str().lstrip().map_err(|err| err.to_string()),
         FixtureOperation::SeriesStrRstrip => series.str().rstrip().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrTitle => series.str().title().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrSwapcase => {
+            series.str().swapcase().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrZfill => {
+            let width = fixture
+                .str_width
+                .ok_or_else(|| "str_width required for series_str_zfill".to_owned())?;
+            series.str().zfill(width).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrCenter => {
+            let width = fixture
+                .str_width
+                .ok_or_else(|| "str_width required for series_str_center".to_owned())?;
+            let fillchar = fixture.str_fillchar.unwrap_or(' ');
+            series
+                .str()
+                .center(width, fillchar)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrLjust => {
+            let width = fixture
+                .str_width
+                .ok_or_else(|| "str_width required for series_str_ljust".to_owned())?;
+            let fillchar = fixture.str_fillchar.unwrap_or(' ');
+            series
+                .str()
+                .ljust(width, fillchar)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrRjust => {
+            let width = fixture
+                .str_width
+                .ok_or_else(|| "str_width required for series_str_rjust".to_owned())?;
+            let fillchar = fixture.str_fillchar.unwrap_or(' ');
+            series
+                .str()
+                .rjust(width, fillchar)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrPad => {
+            let width = fixture
+                .str_width
+                .ok_or_else(|| "str_width required for series_str_pad".to_owned())?;
+            let side = fixture
+                .str_pad_side
+                .as_deref()
+                .ok_or_else(|| "str_pad_side required for series_str_pad".to_owned())?;
+            let fillchar = fixture.str_fillchar.unwrap_or(' ');
+            series
+                .str()
+                .pad(width, side, fillchar)
+                .map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtDay => series.dt().day().map_err(|err| err.to_string()),
@@ -14619,6 +14728,13 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrReplace
         | FixtureOperation::SeriesStrLstrip
         | FixtureOperation::SeriesStrRstrip
+        | FixtureOperation::SeriesStrTitle
+        | FixtureOperation::SeriesStrSwapcase
+        | FixtureOperation::SeriesStrZfill
+        | FixtureOperation::SeriesStrCenter
+        | FixtureOperation::SeriesStrLjust
+        | FixtureOperation::SeriesStrRjust
+        | FixtureOperation::SeriesStrPad
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay

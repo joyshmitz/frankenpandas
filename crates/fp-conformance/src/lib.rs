@@ -556,6 +556,10 @@ pub enum FixtureOperation {
     SeriesDtDaysInMonth,
     #[serde(rename = "series_dt_is_leap_year", alias = "series_dt_is_leap_year_default")]
     SeriesDtIsLeapYear,
+    #[serde(rename = "series_dt_is_quarter_start", alias = "series_dt_is_quarter_start_default")]
+    SeriesDtIsQuarterStart,
+    #[serde(rename = "series_dt_is_quarter_end", alias = "series_dt_is_quarter_end_default")]
+    SeriesDtIsQuarterEnd,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -1001,6 +1005,8 @@ impl FixtureOperation {
             Self::SeriesDtDate => "series_dt_date",
             Self::SeriesDtDaysInMonth => "series_dt_days_in_month",
             Self::SeriesDtIsLeapYear => "series_dt_is_leap_year",
+            Self::SeriesDtIsQuarterStart => "series_dt_is_quarter_start",
+            Self::SeriesDtIsQuarterEnd => "series_dt_is_quarter_end",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -9206,6 +9212,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtDate
         | FixtureOperation::SeriesDtDaysInMonth
         | FixtureOperation::SeriesDtIsLeapYear
+        | FixtureOperation::SeriesDtIsQuarterStart
+        | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9758,6 +9766,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtDate
         | FixtureOperation::SeriesDtDaysInMonth
         | FixtureOperation::SeriesDtIsLeapYear
+        | FixtureOperation::SeriesDtIsQuarterStart
+        | FixtureOperation::SeriesDtIsQuarterEnd
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -12501,6 +12511,12 @@ fn execute_series_module_utility_fixture_operation(
         }
         FixtureOperation::SeriesDtIsLeapYear => {
             series.dt().is_leap_year().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsQuarterStart => {
+            series.dt().is_quarter_start().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsQuarterEnd => {
+            series.dt().is_quarter_end().map_err(|err| err.to_string())
         }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"

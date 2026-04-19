@@ -14,7 +14,7 @@
     ],
     "values": [
       { "kind": "utf8", "value": "a\t\tb" },
-      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "na_n" },
       { "kind": "utf8", "value": "" },
       { "kind": "utf8", "value": "no tabs here" }
     ]
@@ -28,7 +28,7 @@
     ],
     "values": [
       { "kind": "utf8", "value": "a               b" },
-      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "na_n" },
       { "kind": "utf8", "value": "" },
       { "kind": "utf8", "value": "no tabs here" }
     ]

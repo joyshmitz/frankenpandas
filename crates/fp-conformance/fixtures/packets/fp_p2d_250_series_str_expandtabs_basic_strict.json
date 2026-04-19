@@ -24,8 +24,8 @@
       { "kind": "int64", "value": 2 }
     ],
     "values": [
-      { "kind": "utf8", "value": "a    b" },
-      { "kind": "utf8", "value": "hello    world" },
+      { "kind": "utf8", "value": "a   b" },
+      { "kind": "utf8", "value": "hello   world" },
       { "kind": "utf8", "value": "no tabs" }
     ]
   }

@@ -8387,21 +8387,21 @@ impl StringAccessor<'_> {
         self.apply_str(
             |s| {
                 let mut result = String::with_capacity(s.len());
-                let mut capitalize_next = true;
+                let mut previous_was_cased = false;
                 for c in s.chars() {
-                    if c.is_whitespace() || c == '_' || c == '-' {
+                    let is_cased = c.is_lowercase() || c.is_uppercase();
+                    if !is_cased {
                         result.push(c);
-                        capitalize_next = true;
-                    } else if capitalize_next {
-                        for uc in c.to_uppercase() {
-                            result.push(uc);
-                        }
-                        capitalize_next = false;
-                    } else {
+                    } else if previous_was_cased {
                         for lc in c.to_lowercase() {
                             result.push(lc);
                         }
+                    } else {
+                        for uc in c.to_uppercase() {
+                            result.push(uc);
+                        }
                     }
+                    previous_was_cased = is_cased;
                 }
                 Scalar::Utf8(result)
             },
@@ -9205,9 +9205,33 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.expandtabs(tabsize)`.
     pub fn expandtabs(&self, tabsize: usize) -> Result<Series, FrameError> {
-        let spaces = " ".repeat(tabsize);
         self.apply_str(
-            |s| Scalar::Utf8(s.replace('\t', &spaces)),
+            |s| {
+                let mut out = String::new();
+                let mut column = 0usize;
+                for ch in s.chars() {
+                    match ch {
+                        '\t' => {
+                            let pad = if tabsize == 0 {
+                                0
+                            } else {
+                                tabsize - (column % tabsize)
+                            };
+                            out.extend(std::iter::repeat_n(' ', pad));
+                            column += pad;
+                        }
+                        '\n' | '\r' => {
+                            out.push(ch);
+                            column = 0;
+                        }
+                        _ => {
+                            out.push(ch);
+                            column += 1;
+                        }
+                    }
+                }
+                Scalar::Utf8(out)
+            },
             self.series.name(),
         )
     }
@@ -37912,6 +37936,25 @@ mod tests {
     }
 
     #[test]
+    fn str_title_resets_after_punctuation_and_digits() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("rock'n'roll".to_owned()),
+                Scalar::Utf8("a.b".to_owned()),
+                Scalar::Utf8("9lives".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let result = s.str().title().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("Rock'N'Roll".to_owned()));
+        assert_eq!(result.values()[1], Scalar::Utf8("A.B".to_owned()));
+        assert_eq!(result.values()[2], Scalar::Utf8("9Lives".to_owned()));
+    }
+
+    #[test]
     fn str_cat_concatenation() {
         let s = Series::from_values(
             "x",
@@ -43823,10 +43866,23 @@ mod tests {
 
     #[test]
     fn str_expandtabs() {
-        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a\tb".into())])
-            .unwrap();
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a\tb".into()),
+                Scalar::Utf8("a\tb\tc".into()),
+                Scalar::Utf8("ab\tcd\nxy\tz".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().expandtabs(4).unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Utf8("a    b".into()));
+        assert_eq!(result.column().values()[0], Scalar::Utf8("a   b".into()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("a   b   c".into()));
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("ab  cd\nxy  z".into())
+        );
     }
 
     #[test]

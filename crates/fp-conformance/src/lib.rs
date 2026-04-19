@@ -626,6 +626,11 @@ pub enum FixtureOperation {
         alias = "series_dt_microsecond_default"
     )]
     SeriesDtMicrosecond,
+    #[serde(
+        rename = "series_dt_nanosecond",
+        alias = "series_dt_nanosecond_default"
+    )]
+    SeriesDtNanosecond,
     #[serde(rename = "series_dt_dayofweek", alias = "series_dt_dayofweek_default")]
     SeriesDtDayofweek,
     #[serde(rename = "series_dt_quarter", alias = "series_dt_quarter_default")]
@@ -1175,6 +1180,7 @@ impl FixtureOperation {
             Self::SeriesDtMinute => "series_dt_minute",
             Self::SeriesDtSecond => "series_dt_second",
             Self::SeriesDtMicrosecond => "series_dt_microsecond",
+            Self::SeriesDtNanosecond => "series_dt_nanosecond",
             Self::SeriesDtDayofweek => "series_dt_dayofweek",
             Self::SeriesDtQuarter => "series_dt_quarter",
             Self::SeriesDtDayofyear => "series_dt_dayofyear",
@@ -2048,6 +2054,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtMicrosecond
+        | FixtureOperation::SeriesDtNanosecond
         | FixtureOperation::SeriesDtDayofweek
         | FixtureOperation::SeriesDtQuarter
         | FixtureOperation::SeriesDtDayofyear
@@ -7875,6 +7882,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtMicrosecond
+        | FixtureOperation::SeriesDtNanosecond
         | FixtureOperation::SeriesDtDayofweek
         | FixtureOperation::SeriesDtQuarter
         | FixtureOperation::SeriesDtDayofyear
@@ -9479,6 +9487,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtMicrosecond
+        | FixtureOperation::SeriesDtNanosecond
         | FixtureOperation::SeriesDtDayofweek
         | FixtureOperation::SeriesDtQuarter
         | FixtureOperation::SeriesDtDayofyear
@@ -10057,6 +10066,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtMicrosecond
+        | FixtureOperation::SeriesDtNanosecond
         | FixtureOperation::SeriesDtDayofweek
         | FixtureOperation::SeriesDtQuarter
         | FixtureOperation::SeriesDtDayofyear
@@ -12882,6 +12892,9 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtMicrosecond => {
             series.dt().microsecond().map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesDtNanosecond => {
+            series.dt().nanosecond().map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesDtDayofweek => {
             series.dt().dayofweek().map_err(|err| err.to_string())
         }
@@ -15667,6 +15680,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtMinute
         | FixtureOperation::SeriesDtSecond
         | FixtureOperation::SeriesDtMicrosecond
+        | FixtureOperation::SeriesDtNanosecond
         | FixtureOperation::SeriesDtDayofweek
         | FixtureOperation::SeriesDtQuarter
         | FixtureOperation::SeriesDtDayofyear

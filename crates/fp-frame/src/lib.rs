@@ -9662,6 +9662,13 @@ impl DatetimeAccessor<'_> {
         self.extract_component(Self::parse_datetime_microsecond, self.series.name())
     }
 
+    /// Extract nanosecond component (0-999).
+    ///
+    /// Matches `pd.Series.dt.nanosecond`.
+    pub fn nanosecond(&self) -> Result<Series, FrameError> {
+        self.extract_component(Self::parse_datetime_nanosecond, self.series.name())
+    }
+
     /// Extract day of week (Monday=0, Sunday=6).
     ///
     /// Matches `pd.Series.dt.dayofweek` / `pd.Series.dt.weekday`.
@@ -9783,6 +9790,27 @@ impl DatetimeAccessor<'_> {
 
         match parse_naive_datetime_value(trimmed) {
             Ok(value) => Scalar::Int64(i64::from(value.and_utc().timestamp_subsec_micros())),
+            Err(_) => Scalar::Null(NullKind::NaN),
+        }
+    }
+
+    fn parse_datetime_nanosecond(s: &str) -> Scalar {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Scalar::Null(NullKind::NaN);
+        }
+
+        if has_tz_suffix(trimmed) {
+            return match parse_tz_aware_datetime(trimmed) {
+                Ok(parsed) => {
+                    Scalar::Int64(i64::from(parsed.fixed.timestamp_subsec_nanos() % 1_000))
+                }
+                Err(_) => Scalar::Null(NullKind::NaN),
+            };
+        }
+
+        match parse_naive_datetime_value(trimmed) {
+            Ok(value) => Scalar::Int64(i64::from(value.and_utc().timestamp_subsec_nanos() % 1_000)),
             Err(_) => Scalar::Null(NullKind::NaN),
         }
     }
@@ -48539,6 +48567,26 @@ mod tests {
         let result = s.dt().microsecond().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Int64(123_456));
         assert_eq!(result.column().values()[1], Scalar::Int64(987_654));
+        assert_eq!(result.column().values()[2], Scalar::Int64(0));
+        assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn test_dt_nanosecond() {
+        let s = Series::from_values(
+            "datetimes",
+            vec![0_i64.into(), 1_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-06-15 12:34:56.123456789".to_string()),
+                Scalar::Utf8("2024-06-15T12:34:56.987654321".to_string()),
+                Scalar::Utf8("2024-06-15".to_string()),
+                Scalar::Utf8("not-a-date".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().nanosecond().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(789));
+        assert_eq!(result.column().values()[1], Scalar::Int64(321));
         assert_eq!(result.column().values()[2], Scalar::Int64(0));
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::NaN));
     }

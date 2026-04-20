@@ -8288,6 +8288,40 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Check whether each string contains `pat` with case/na/regex options.
+    ///
+    /// Matches `pd.Series.str.contains(pat, case=True, na=None, regex=True)`:
+    /// - `regex=true` treats `pat` as a regular expression; `regex=false`
+    ///   treats it as a literal substring search.
+    /// - `case=false` makes the match case-insensitive.
+    /// - `na=None` propagates nulls as NaN; `na=Some(bool)` replaces null
+    ///   entries with that boolean, matching pandas' fill-on-NaN behavior.
+    pub fn contains_with_options(
+        &self,
+        pat: &str,
+        case: bool,
+        na: Option<bool>,
+        regex: bool,
+    ) -> Result<Series, FrameError> {
+        if regex {
+            let anchored = if case {
+                pat.to_owned()
+            } else {
+                format!("(?i){pat}")
+            };
+            let re = Regex::new(&anchored).map_err(|e| {
+                FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+            })?;
+            self.str_boolean_with_na(na, move |s| re.is_match(s))
+        } else if case {
+            let needle = pat.to_owned();
+            self.str_boolean_with_na(na, move |s| s.contains(&needle))
+        } else {
+            let lowered = pat.to_lowercase();
+            self.str_boolean_with_na(na, move |s| s.to_lowercase().contains(&lowered))
+        }
+    }
+
     /// Replace occurrences of a pattern with a replacement string.
     pub fn replace(&self, pat: &str, repl: &str) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Utf8(s.replace(pat, repl)), self.series.name())
@@ -34659,6 +34693,101 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Bool(true));
         assert_eq!(result.values()[1], Scalar::Bool(false));
         assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_contains_with_options_case_insensitive_literal() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("Hello World".into()),
+                Scalar::Utf8("goodbye".into()),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .contains_with_options("hello", false, None, false)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn str_contains_with_options_case_insensitive_regex() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("HELLO123".into()),
+                Scalar::Utf8("world".into()),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .contains_with_options(r"hello\d+", false, None, true)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn str_contains_with_options_na_fills_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("beta".into()),
+            ],
+        )
+        .unwrap();
+        // na=Some(false): null becomes false
+        let r_false = s
+            .str()
+            .contains_with_options("al", true, Some(false), false)
+            .unwrap();
+        assert_eq!(r_false.values()[0], Scalar::Bool(true));
+        assert_eq!(r_false.values()[1], Scalar::Bool(false));
+        assert_eq!(r_false.values()[2], Scalar::Bool(false));
+        // na=None: null propagates
+        let r_none = s
+            .str()
+            .contains_with_options("al", true, None, false)
+            .unwrap();
+        assert!(r_none.values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_contains_with_options_invalid_regex_errors() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
+        let err = s
+            .str()
+            .contains_with_options("(unclosed", true, None, true)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn str_contains_with_options_regex_false_treats_parens_as_literal() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("foo (bar)".into()),
+                Scalar::Utf8("foo bar".into()),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .contains_with_options("(bar)", true, None, false)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false));
     }
 
     #[test]

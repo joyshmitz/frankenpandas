@@ -2748,6 +2748,16 @@ impl Series {
         non_null.len() == total_non_null && null_count <= 1
     }
 
+    /// Return whether the Series contains any duplicated values.
+    ///
+    /// Matches `pd.Series.has_duplicates`. Semantically the complement of
+    /// `is_unique`: multiple null entries count as duplicates, consistent
+    /// with `is_unique`'s `null_count <= 1` rule.
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        !self.is_unique()
+    }
+
     /// Check if values are monotonically increasing (non-decreasing).
     ///
     /// Matches `pd.Series.is_monotonic_increasing`.
@@ -38151,6 +38161,52 @@ mod tests {
         .unwrap();
 
         assert!(!s.is_unique());
+    }
+
+    #[test]
+    fn series_has_duplicates_false_when_all_unique() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        assert!(!s.has_duplicates());
+    }
+
+    #[test]
+    fn series_has_duplicates_true_on_repeat_value() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        assert!(s.has_duplicates());
+    }
+
+    #[test]
+    fn series_has_duplicates_true_on_multiple_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+
+        assert!(s.has_duplicates());
+    }
+
+    #[test]
+    fn series_has_duplicates_empty_series_false() {
+        let s = Series::from_values("x", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        assert!(!s.has_duplicates());
     }
 
     #[test]

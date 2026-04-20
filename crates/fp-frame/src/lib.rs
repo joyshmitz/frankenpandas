@@ -8502,13 +8502,27 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.split(pat, expand=True)`.
     pub fn split_df(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        self.split_df_n(pat, None)
+    }
+
+    /// Split each string with a maximum number of splits, returning a DataFrame.
+    ///
+    /// Matches `pd.Series.str.split(pat, n=..., expand=True)`. `n=None`
+    /// means split on every occurrence (default behavior); `n=Some(k)`
+    /// caps the result at `k + 1` parts by doing at most `k` splits.
+    pub fn split_df_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
         let mut row_parts = Vec::new();
         let mut max_parts = 0;
         for val in self.series.column().values() {
             match val {
                 Scalar::Utf8(s) => {
-                    let parts: Vec<Scalar> =
-                        s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect();
+                    let parts: Vec<Scalar> = if let Some(limit) = n {
+                        s.splitn(limit + 1, pat)
+                            .map(|p| Scalar::Utf8(p.to_string()))
+                            .collect()
+                    } else {
+                        s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect()
+                    };
                     max_parts = max_parts.max(parts.len());
                     row_parts.push(parts);
                 }
@@ -34999,6 +35013,65 @@ mod tests {
         assert_eq!(
             result.column("2").unwrap().values(),
             &[Scalar::Utf8("c".into()), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn str_split_df_n_caps_splits() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("a-b-c-d".into()),
+                Scalar::Utf8("x-y".into()),
+            ],
+        )
+        .unwrap();
+        // n=1 means at most 1 split → 2 parts max.
+        let result = s.str().split_df_n("-", Some(1)).unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("x".into())]
+        );
+        // Row 0's remainder stays joined.
+        assert_eq!(
+            result.column("1").unwrap().values(),
+            &[Scalar::Utf8("b-c-d".into()), Scalar::Utf8("y".into())]
+        );
+    }
+
+    #[test]
+    fn str_split_df_n_none_matches_unlimited_split() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into())],
+        )
+        .unwrap();
+        let unlimited = s.str().split_df("-").unwrap();
+        let none_arg = s.str().split_df_n("-", None).unwrap();
+        assert_eq!(unlimited.column_names(), none_arg.column_names());
+        assert_eq!(
+            unlimited.column("0").unwrap().values(),
+            none_arg.column("0").unwrap().values()
+        );
+    }
+
+    #[test]
+    fn str_split_df_n_zero_yields_single_column() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into())],
+        )
+        .unwrap();
+        // n=0 means zero splits → entire string in column 0.
+        let result = s.str().split_df_n("-", Some(0)).unwrap();
+        assert_eq!(result.column_names(), vec!["0"]);
+        assert_eq!(
+            result.column("0").unwrap().values(),
+            &[Scalar::Utf8("a-b-c".into())]
         );
     }
 

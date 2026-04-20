@@ -9230,6 +9230,12 @@ impl StringAccessor<'_> {
     /// Returns a DataFrame where each column is a split part.
     /// Shorter splits are padded with NaN.
     pub fn split_expand(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        if pat.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "empty separator".to_string(),
+            ));
+        }
+
         let mut all_parts: Vec<Vec<String>> = Vec::new();
         let mut max_parts = 0;
 
@@ -48221,6 +48227,19 @@ mod tests {
             Scalar::Utf8("f".to_string())
         );
         assert!(result.columns["1"].values()[2].is_missing());
+    }
+
+    #[test]
+    fn str_split_expand_empty_separator_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("abc".into()), Scalar::Utf8("def".into())],
+        )
+        .unwrap();
+
+        let err = s.str().split_expand("").unwrap_err();
+        assert!(err.to_string().contains("empty separator"));
     }
 
     // ── Rolling.corr / Rolling.cov ──

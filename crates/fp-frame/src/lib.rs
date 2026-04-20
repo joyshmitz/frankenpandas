@@ -97,21 +97,41 @@ fn dtype_memory_width(dtype: DType) -> usize {
 }
 
 fn column_memory_usage_bytes(column: &Column) -> usize {
-    column.len() * dtype_memory_width(column.dtype())
+    column_memory_usage_bytes_with_deep(column, false)
 }
 
-fn index_label_memory_usage_bytes(label: &IndexLabel) -> usize {
+fn column_memory_usage_bytes_with_deep(column: &Column, deep: bool) -> usize {
+    if deep && column.dtype() == DType::Utf8 {
+        column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Utf8(text) => text.len(),
+                _ => 0,
+            })
+            .sum()
+    } else {
+        column.len() * dtype_memory_width(column.dtype())
+    }
+}
+
+fn index_label_memory_usage_bytes_with_deep(label: &IndexLabel, deep: bool) -> usize {
     match label {
         IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+        IndexLabel::Utf8(text) if deep => text.len(),
         IndexLabel::Utf8(_) => std::mem::size_of::<usize>(),
     }
 }
 
 fn index_memory_usage_bytes(index: &Index) -> usize {
+    index_memory_usage_bytes_with_deep(index, false)
+}
+
+fn index_memory_usage_bytes_with_deep(index: &Index, deep: bool) -> usize {
     index
         .labels()
         .iter()
-        .map(index_label_memory_usage_bytes)
+        .map(|label| index_label_memory_usage_bytes_with_deep(label, deep))
         .sum()
 }
 
@@ -19888,13 +19908,23 @@ impl DataFrame {
     /// Matches `pd.DataFrame.memory_usage()`. Returns a Series with column
     /// names as index and byte estimates as values. Includes the index.
     pub fn memory_usage(&self) -> Result<Series, FrameError> {
-        let index_bytes = index_memory_usage_bytes(&self.index);
-        let mut labels = vec![IndexLabel::from("Index")];
-        let mut values = vec![Scalar::Int64(index_bytes as i64)];
+        self.memory_usage_with_options(true, false)
+    }
+
+    /// Matches `pd.DataFrame.memory_usage(index=..., deep=...)`.
+    pub fn memory_usage_with_options(&self, index: bool, deep: bool) -> Result<Series, FrameError> {
+        let mut labels = Vec::with_capacity(self.column_order.len() + usize::from(index));
+        let mut values = Vec::with_capacity(self.column_order.len() + usize::from(index));
+
+        if index {
+            let index_bytes = index_memory_usage_bytes_with_deep(&self.index, deep);
+            labels.push(IndexLabel::from("Index"));
+            values.push(Scalar::Int64(index_bytes as i64));
+        }
 
         for col_name in &self.column_order {
             let col = &self.columns[col_name];
-            let bytes = column_memory_usage_bytes(col);
+            let bytes = column_memory_usage_bytes_with_deep(col, deep);
             labels.push(IndexLabel::from(col_name.as_str()));
             values.push(Scalar::Int64(bytes as i64));
         }
@@ -40081,6 +40111,57 @@ mod tests {
         assert_eq!(expect_int64(&mem.values()[0]), 16);
         assert_eq!(expect_int64(&mem.values()[1]), 16);
         assert_eq!(expect_int64(&mem.values()[2]), 16);
+    }
+
+    #[test]
+    fn df_memory_usage_index_false_excludes_index() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let mem = df.memory_usage_with_options(false, true).unwrap();
+        assert_eq!(
+            mem.index().labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("b")]
+        );
+        assert_eq!(mem.values(), &[Scalar::Int64(24), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn df_memory_usage_deep_utf8_counts_string_bytes() {
+        let df = DataFrame::from_dict(
+            &["text"],
+            vec![(
+                "text",
+                vec![
+                    Scalar::Utf8("aa".to_owned()),
+                    Scalar::Utf8("b".to_owned()),
+                    Scalar::Utf8(String::new()),
+                    Scalar::Utf8("cccc".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let shallow = df.memory_usage_with_options(false, false).unwrap();
+        let deep = df.memory_usage_with_options(false, true).unwrap();
+        assert_eq!(shallow.values(), &[Scalar::Int64(32)]);
+        assert_eq!(deep.values(), &[Scalar::Int64(7)]);
     }
 
     // ── DatetimeAccessor extensions ──

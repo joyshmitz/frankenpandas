@@ -1557,6 +1557,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub value_counts_normalize: Option<bool>,
     #[serde(default)]
+    pub memory_usage_index: Option<bool>,
+    #[serde(default)]
+    pub memory_usage_deep: Option<bool>,
+    #[serde(default)]
     pub concat_axis: Option<i64>,
     #[serde(default)]
     pub concat_join: Option<String>,
@@ -2849,6 +2853,10 @@ struct OracleRequest {
     sort_ascending: Option<bool>,
     #[serde(default)]
     value_counts_normalize: Option<bool>,
+    #[serde(default)]
+    memory_usage_index: Option<bool>,
+    #[serde(default)]
+    memory_usage_deep: Option<bool>,
     #[serde(default)]
     concat_axis: Option<i64>,
     #[serde(default)]
@@ -7611,9 +7619,12 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameValueCounts => {
                     frame.value_counts().map_err(|err| err.to_string())
                 }
-                FixtureOperation::DataFrameMemoryUsage => {
-                    frame.memory_usage().map_err(|err| err.to_string())
-                }
+                FixtureOperation::DataFrameMemoryUsage => frame
+                    .memory_usage_with_options(
+                        resolve_memory_usage_index(fixture),
+                        resolve_memory_usage_deep(fixture),
+                    )
+                    .map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -9932,6 +9943,8 @@ fn capture_live_oracle_expected(
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         value_counts_normalize: fixture.value_counts_normalize,
+        memory_usage_index: fixture.memory_usage_index,
+        memory_usage_deep: fixture.memory_usage_deep,
         concat_axis: fixture.concat_axis,
         concat_join: fixture.concat_join.clone(),
         set_index_column: fixture.set_index_column.clone(),
@@ -11060,6 +11073,14 @@ fn resolve_value_counts_ascending(fixture: &PacketFixture) -> bool {
 
 fn resolve_value_counts_normalize(fixture: &PacketFixture) -> bool {
     fixture.value_counts_normalize.unwrap_or(false)
+}
+
+fn resolve_memory_usage_index(fixture: &PacketFixture) -> bool {
+    fixture.memory_usage_index.unwrap_or(true)
+}
+
+fn resolve_memory_usage_deep(fixture: &PacketFixture) -> bool {
+    fixture.memory_usage_deep.unwrap_or(false)
 }
 
 fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
@@ -15666,9 +15687,12 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameValueCounts => {
                     frame.value_counts().map_err(|err| err.to_string())
                 }
-                FixtureOperation::DataFrameMemoryUsage => {
-                    frame.memory_usage().map_err(|err| err.to_string())
-                }
+                FixtureOperation::DataFrameMemoryUsage => frame
+                    .memory_usage_with_options(
+                        resolve_memory_usage_index(fixture),
+                        resolve_memory_usage_deep(fixture),
+                    )
+                    .map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {

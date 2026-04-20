@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
 use fp_expr::{eval_str_with_locals, query_str_with_locals};
 use fp_frame::{
@@ -220,6 +221,8 @@ pub enum FixtureOperation {
         alias = "series_combine_first_default"
     )]
     SeriesCombineFirst,
+    #[serde(rename = "series_asof", alias = "series_asof_default")]
+    SeriesAsof,
     // FP-P2C-007: Missingness + nanops
     NanSum,
     NanMean,
@@ -1021,6 +1024,7 @@ impl FixtureOperation {
             Self::IndexFirstPositions => "index_first_positions",
             Self::SeriesConcat => "series_concat",
             Self::SeriesCombineFirst => "series_combine_first",
+            Self::SeriesAsof => "series_asof",
             Self::NanSum => "nan_sum",
             Self::NanMean => "nan_mean",
             Self::NanMin => "nan_min",
@@ -2223,6 +2227,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesExpandingStd
         | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
+        | FixtureOperation::SeriesAsof
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
         | FixtureOperation::SeriesResampleCount
@@ -6573,6 +6578,14 @@ fn run_fixture_operation(
             };
             compare_series_expected(&actual?, &expected)
         }
+        FixtureOperation::SeriesAsof => {
+            let actual = execute_series_asof_fixture_operation(fixture)?;
+            let expected = match expected {
+                ResolvedExpected::Scalar(scalar) => scalar,
+                _ => return Err("expected_scalar is required for series_asof".to_owned()),
+            };
+            compare_scalar(&actual, &expected, "series_asof")
+        }
         FixtureOperation::NanSum
         | FixtureOperation::NanMean
         | FixtureOperation::NanMin
@@ -9763,6 +9776,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::NanStd
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
+        | FixtureOperation::SeriesAsof
         | FixtureOperation::SeriesCount => fixture
             .expected_scalar
             .clone()
@@ -10339,6 +10353,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::NanStd
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
+        | FixtureOperation::SeriesAsof
         | FixtureOperation::SeriesCount => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -10790,10 +10805,12 @@ fn require_group_name<'a>(
 }
 
 fn require_asof_label(fixture: &PacketFixture) -> Result<&IndexLabel, String> {
-    fixture
-        .asof_label
-        .as_ref()
-        .ok_or_else(|| "asof_label is required for dataframe_asof".to_owned())
+    fixture.asof_label.as_ref().ok_or_else(|| {
+        format!(
+            "asof_label is required for {}",
+            fixture.operation.operation_name()
+        )
+    })
 }
 
 fn require_time_value(fixture: &PacketFixture) -> Result<&str, String> {
@@ -12579,6 +12596,53 @@ fn execute_series_combine_first_fixture_operation(
     let left = build_series(left).map_err(|err| format!("left series build failed: {err}"))?;
     let right = build_series(right).map_err(|err| format!("right series build failed: {err}"))?;
     left.combine_first(&right).map_err(|err| err.to_string())
+}
+
+fn execute_series_asof_fixture_operation(fixture: &PacketFixture) -> Result<Scalar, String> {
+    let left = build_series(require_left_series(fixture)?)
+        .map_err(|err| format!("series build failed: {err}"))?;
+    let label = require_asof_label(fixture)?;
+    Ok(left
+        .asof(label)
+        .cloned()
+        .unwrap_or_else(|| series_asof_missing_scalar(&left)))
+}
+
+fn series_asof_missing_scalar(series: &Series) -> Scalar {
+    match series.dtype() {
+        DType::Utf8 if series_asof_looks_datetime_like(series) => Scalar::Null(NullKind::NaT),
+        dtype => Scalar::missing_for_dtype(dtype),
+    }
+}
+
+fn series_asof_looks_datetime_like(series: &Series) -> bool {
+    let mut saw_non_missing = false;
+    for value in series.column().values() {
+        match value {
+            Scalar::Utf8(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("nat") {
+                    continue;
+                }
+                saw_non_missing = true;
+                if !utf8_value_looks_datetime_like(trimmed) {
+                    return false;
+                }
+            }
+            _ if value.is_missing() => {}
+            _ => return false,
+        }
+    }
+    saw_non_missing
+}
+
+fn utf8_value_looks_datetime_like(value: &str) -> bool {
+    DateTime::parse_from_rfc3339(value).is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
+        || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 
 fn execute_series_module_utility_fixture_operation(
@@ -15772,6 +15836,15 @@ fn execute_and_compare_differential(
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
                 _ => Err("expected_series required for series_combine_first".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesAsof => {
+            let actual = execute_series_asof_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Scalar(scalar) => {
+                    Ok(diff_scalar(&actual?, &scalar, "series_asof"))
+                }
+                _ => Err("expected_scalar required for series_asof".to_owned()),
             }
         }
         FixtureOperation::SeriesToNumeric
@@ -20502,6 +20575,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-090 combine_first fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_asof_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-419", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-419"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-419 series asof fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

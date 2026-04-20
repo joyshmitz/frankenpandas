@@ -621,6 +621,23 @@ def op_series_combine_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_series_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_asof requires left payload")
+    asof_label = payload.get("asof_label")
+    if asof_label is None:
+        raise OracleError("series_asof requires asof_label payload")
+
+    series = fixture_series_from_payload(pd, left, "series_asof")
+    label = label_from_json(asof_label)
+    try:
+        out = series.asof(label)
+    except Exception as exc:
+        raise OracleError(f"series_asof failed: {exc}") from exc
+    return {"expected_scalar": scalar_to_json(out)}
+
+
 def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     series = fixture_series_from_payload(pd, left, "series_to_datetime")
@@ -4015,6 +4032,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_constructor(pd, payload)
     if op == "series_combine_first":
         return op_series_combine_first(pd, payload)
+    if op == "series_asof":
+        return op_series_asof(pd, payload)
     if op in {"series_to_datetime", "to_datetime"}:
         return op_series_to_datetime(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:

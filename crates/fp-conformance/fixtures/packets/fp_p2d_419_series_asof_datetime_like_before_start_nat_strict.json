@@ -1,0 +1,21 @@
+{
+  "packet_id": "FP-P2D-419",
+  "case_id": "series_asof_datetime_like_before_start_nat_strict",
+  "mode": "strict",
+  "operation": "series_asof",
+  "asof_label": { "kind": "int64", "value": 0 },
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-02-29" },
+      { "kind": "utf8", "value": "2024-03-01" },
+      { "kind": "utf8", "value": "2024-03-02T12:34:56" }
+    ]
+  },
+  "expected_scalar": { "kind": "null", "value": "na_t" }
+}

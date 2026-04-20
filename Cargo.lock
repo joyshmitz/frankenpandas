@@ -656,6 +656,7 @@ dependencies = [
 name = "fp-conformance"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fp-columnar",
  "fp-expr",
  "fp-frame",

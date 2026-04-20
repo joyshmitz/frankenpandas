@@ -1,0 +1,21 @@
+{
+  "packet_id": "FP-P2D-419",
+  "case_id": "series_asof_utf8_before_start_null_strict",
+  "mode": "strict",
+  "operation": "series_asof",
+  "asof_label": { "kind": "int64", "value": 0 },
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "alpha" },
+      { "kind": "utf8", "value": "beta" },
+      { "kind": "utf8", "value": "gamma" }
+    ]
+  },
+  "expected_scalar": { "kind": "null", "value": "null" }
+}

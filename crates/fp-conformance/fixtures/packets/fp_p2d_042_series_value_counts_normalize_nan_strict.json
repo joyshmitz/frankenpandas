@@ -1,0 +1,42 @@
+{
+  "packet_id": "FP-P2D-042",
+  "case_id": "series_value_counts_normalize_nan_strict",
+  "mode": "strict",
+  "operation": "series_value_counts",
+  "value_counts_normalize": true,
+  "left": {
+    "name": "vals",
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" },
+      { "kind": "utf8", "value": "r3" },
+      { "kind": "utf8", "value": "r4" },
+      { "kind": "utf8", "value": "r5" },
+      { "kind": "utf8", "value": "r6" },
+      { "kind": "utf8", "value": "r7" },
+      { "kind": "utf8", "value": "r8" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "null", "value": "na_n" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 0.5 },
+      { "kind": "float64", "value": 0.3333333333333333 },
+      { "kind": "float64", "value": 0.16666666666666666 }
+    ]
+  }
+}

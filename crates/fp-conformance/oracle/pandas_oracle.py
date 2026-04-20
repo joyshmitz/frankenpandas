@@ -1541,10 +1541,12 @@ def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if left is None:
         raise OracleError("series_value_counts requires left payload")
 
+    normalize = payload.get("value_counts_normalize", False)
+    ascending = payload.get("sort_ascending", False)
     index = [label_from_json(item) for item in left["index"]]
     values = [scalar_from_json(item) for item in left["values"]]
     series = pd.Series(values, index=index, name=left.get("name", "series"))
-    out = series.value_counts(dropna=True)
+    out = series.value_counts(normalize=normalize, sort=True, ascending=ascending, dropna=True)
 
     return {
         "expected_series": {

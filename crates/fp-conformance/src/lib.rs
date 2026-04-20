@@ -1555,6 +1555,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub sort_ascending: Option<bool>,
     #[serde(default)]
+    pub value_counts_normalize: Option<bool>,
+    #[serde(default)]
     pub concat_axis: Option<i64>,
     #[serde(default)]
     pub concat_join: Option<String>,
@@ -2845,6 +2847,8 @@ struct OracleRequest {
     pub sort_column: Option<String>,
     #[serde(default)]
     sort_ascending: Option<bool>,
+    #[serde(default)]
+    value_counts_normalize: Option<bool>,
     #[serde(default)]
     concat_axis: Option<i64>,
     #[serde(default)]
@@ -6815,7 +6819,14 @@ fn run_fixture_operation(
         FixtureOperation::SeriesValueCounts => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = series.value_counts().map_err(|err| err.to_string());
+            let actual = series
+                .value_counts_with_options(
+                    resolve_value_counts_normalize(fixture),
+                    true,
+                    resolve_value_counts_ascending(fixture),
+                    true,
+                )
+                .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -9920,6 +9931,7 @@ fn capture_live_oracle_expected(
         corr_numeric_only: fixture.corr_numeric_only,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
+        value_counts_normalize: fixture.value_counts_normalize,
         concat_axis: fixture.concat_axis,
         concat_join: fixture.concat_join.clone(),
         set_index_column: fixture.set_index_column.clone(),
@@ -11040,6 +11052,14 @@ fn resolve_drop_duplicates_ignore_index(fixture: &PacketFixture) -> bool {
 
 fn resolve_sort_ascending(fixture: &PacketFixture) -> bool {
     fixture.sort_ascending.unwrap_or(true)
+}
+
+fn resolve_value_counts_ascending(fixture: &PacketFixture) -> bool {
+    fixture.sort_ascending.unwrap_or(false)
+}
+
+fn resolve_value_counts_normalize(fixture: &PacketFixture) -> bool {
+    fixture.value_counts_normalize.unwrap_or(false)
 }
 
 fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
@@ -14649,7 +14669,14 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesValueCounts => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = series.value_counts().map_err(|err| err.to_string());
+            let actual = series
+                .value_counts_with_options(
+                    resolve_value_counts_normalize(fixture),
+                    true,
+                    resolve_value_counts_ascending(fixture),
+                    true,
+                )
+                .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {

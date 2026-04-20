@@ -2655,7 +2655,11 @@ impl Series {
             }
         }
 
-        let total = if normalize { self.len() as f64 } else { 1.0 };
+        let total = if normalize {
+            counts.iter().map(|(_, count)| *count).sum::<usize>() as f64
+        } else {
+            1.0
+        };
 
         let mut labels = Vec::with_capacity(counts.len());
         let mut values = Vec::with_capacity(counts.len());
@@ -37812,6 +37816,40 @@ mod tests {
         // Both values have 0.5
         let v = expect_float64(&vc.values()[0]);
         assert!((v - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_value_counts_with_options_normalize_excludes_missing_from_denominator() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let vc = s
+            .value_counts_with_options(true, true, false, true)
+            .unwrap();
+
+        assert_eq!(
+            vc.index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(vc.len(), 2);
+        assert_eq!(vc.values()[0], Scalar::Float64(2.0 / 3.0));
+        assert_eq!(vc.values()[1], Scalar::Float64(1.0 / 3.0));
     }
 
     #[test]

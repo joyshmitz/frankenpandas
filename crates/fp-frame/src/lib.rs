@@ -10456,6 +10456,45 @@ impl DatetimeAccessor<'_> {
         })
     }
 
+    fn normalize_to_pydatetime(s: &str, _warn: bool) -> Result<Scalar, FrameError> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Ok(Scalar::Null(NullKind::NaN));
+        }
+
+        if has_tz_suffix(trimmed) {
+            return Ok(match parse_tz_aware_datetime(trimmed) {
+                Ok(parsed) => {
+                    let micros = parsed.fixed.timestamp_subsec_micros();
+                    let Some(truncated) = parsed
+                        .fixed
+                        .offset()
+                        .timestamp_opt(parsed.fixed.timestamp(), micros * 1_000)
+                        .single()
+                    else {
+                        return Ok(Scalar::Null(NullKind::NaN));
+                    };
+                    Scalar::Utf8(format_pydatetime_aware(truncated))
+                }
+                Err(_) => Scalar::Null(NullKind::NaN),
+            });
+        }
+
+        Ok(match parse_naive_datetime_value(trimmed) {
+            Ok(value) => {
+                let micros = value.and_utc().timestamp_subsec_micros();
+                let Some(truncated) = Utc
+                    .timestamp_opt(value.and_utc().timestamp(), micros * 1_000)
+                    .single()
+                else {
+                    return Ok(Scalar::Null(NullKind::NaN));
+                };
+                Scalar::Utf8(format_pydatetime_naive(truncated.naive_utc()))
+            }
+            Err(_) => Scalar::Null(NullKind::NaN),
+        })
+    }
+
     /// Convert period-like strings to full timestamp strings.
     ///
     /// Matches `pd.Series.dt.to_timestamp()`. For date-only strings ("YYYY-MM-DD"),
@@ -10472,6 +10511,24 @@ impl DatetimeAccessor<'_> {
         let how = how.to_owned();
         self.try_extract_component(
             |s| Self::normalize_period_like_timestamp_with_how(s, &how),
+            self.series.name(),
+        )
+    }
+
+    /// Convert datetime-like strings to Python-datetime-compatible strings.
+    ///
+    /// Matches `pd.Series.dt.to_pydatetime(warn=...)` in observable value output.
+    /// Nanoseconds beyond microsecond precision are truncated to match Python's
+    /// `datetime` precision.
+    pub fn to_pydatetime(&self) -> Result<Series, FrameError> {
+        self.to_pydatetime_with_warn(true)
+    }
+
+    /// Convert datetime-like strings to Python-datetime-compatible strings,
+    /// optionally suppressing pandas' nanosecond-loss warning.
+    pub fn to_pydatetime_with_warn(&self, warn: bool) -> Result<Series, FrameError> {
+        self.try_extract_component(
+            |s| Self::normalize_to_pydatetime(s, warn),
             self.series.name(),
         )
     }
@@ -11038,6 +11095,16 @@ fn format_naive_datetime(value: NaiveDateTime) -> String {
     rendered
 }
 
+fn format_pydatetime_naive(value: NaiveDateTime) -> String {
+    let rendered = value.format("%Y-%m-%d %H:%M:%S").to_string();
+    let micros = value.and_utc().timestamp_subsec_micros();
+    if micros == 0 {
+        rendered
+    } else {
+        format!("{rendered}.{micros:06}")
+    }
+}
+
 fn format_utc_datetime(value: NaiveDateTime) -> String {
     format!("{}+00:00", format_naive_datetime(value))
 }
@@ -11054,6 +11121,14 @@ fn format_aware_datetime(value: DateTime<FixedOffset>, zone_name: Option<&str>) 
         rendered.push(']');
     }
     rendered
+}
+
+fn format_pydatetime_aware(value: DateTime<FixedOffset>) -> String {
+    format!(
+        "{}{}",
+        format_pydatetime_naive(value.naive_local()),
+        value.format("%:z")
+    )
 }
 
 fn localize_scalar_to_timezone(
@@ -49497,6 +49572,46 @@ mod tests {
             result.column().values()[4],
             Scalar::Utf8("2024-02-29T12:30:00".to_string())
         );
+    }
+
+    #[test]
+    fn test_dt_to_pydatetime_warn_false_truncates_to_microseconds() {
+        let s = Series::from_values(
+            "datetimes",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00.123456789".to_string()),
+                Scalar::Utf8("2024-01-15T10:30:00.987654321+05:30".to_string()),
+                Scalar::Utf8("2024-01-16".to_string()),
+                Scalar::Utf8("2024-01-15 10:30:00.500000000".to_string()),
+                Scalar::Utf8("not-a-date".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().to_pydatetime_with_warn(false).unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00.123456".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2024-01-15 10:30:00.987654+05:30".to_string())
+        );
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("2024-01-16 00:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[3],
+            Scalar::Utf8("2024-01-15 10:30:00.500000".to_string())
+        );
+        assert_eq!(result.column().values()[4], Scalar::Null(NullKind::NaN));
     }
 
     #[test]

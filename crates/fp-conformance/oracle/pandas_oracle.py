@@ -724,6 +724,35 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_dt_to_pydatetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_to_pydatetime requires left payload")
+    warn = payload.get("dt_warn")
+    if warn is not None and not isinstance(warn, bool):
+        raise OracleError("series_dt_to_pydatetime dt_warn must be a boolean")
+
+    series = fixture_series_from_payload(pd, left, "series_dt_to_pydatetime")
+    try:
+        out = pd.to_datetime(series, errors="coerce").dt.to_pydatetime(
+            warn=True if warn is None else warn
+        )
+    except Exception as exc:
+        raise OracleError(f"series_dt_to_pydatetime failed: {exc}") from exc
+
+    def pydatetime_scalar_to_json(value: Any) -> dict[str, Any]:
+        if pd.isna(value):
+            return {"kind": "null", "value": "null"}
+        return {"kind": "utf8", "value": str(value)}
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in series.index.tolist()],
+            "values": [pydatetime_scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_dataframe_from_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
     payloads = collect_constructor_series_payloads(payload, "dataframe_from_series")
     series_list = [
@@ -4128,6 +4157,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_clip(pd, payload)
     if op in {"series_to_datetime", "to_datetime"}:
         return op_series_to_datetime(pd, payload)
+    if op == "series_dt_to_pydatetime":
+        return op_series_dt_to_pydatetime(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
         return op_dataframe_from_series(pd, payload)
     if op in {"dataframe_from_dict", "data_frame_from_dict"}:

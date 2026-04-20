@@ -717,6 +717,11 @@ pub enum FixtureOperation {
         alias = "series_dt_to_timestamp_default"
     )]
     SeriesDtToTimestamp,
+    #[serde(
+        rename = "series_dt_to_pydatetime",
+        alias = "series_dt_to_pydatetime_default"
+    )]
+    SeriesDtToPydatetime,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -1216,6 +1221,7 @@ impl FixtureOperation {
             Self::SeriesDtDayName => "series_dt_day_name",
             Self::SeriesDtTotalSeconds => "series_dt_total_seconds",
             Self::SeriesDtToTimestamp => "series_dt_to_timestamp",
+            Self::SeriesDtToPydatetime => "series_dt_to_pydatetime",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1758,6 +1764,8 @@ pub struct PacketFixture {
     pub dt_strftime_format: Option<String>,
     #[serde(default)]
     pub dt_how: Option<String>,
+    #[serde(default)]
+    pub dt_warn: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2120,6 +2128,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -2971,6 +2980,14 @@ struct OracleRequest {
     resample_freq: Option<String>,
     #[serde(default)]
     quantile_value: Option<f64>,
+    #[serde(default)]
+    dt_freq: Option<String>,
+    #[serde(default)]
+    dt_strftime_format: Option<String>,
+    #[serde(default)]
+    dt_how: Option<String>,
+    #[serde(default)]
+    dt_warn: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -8020,7 +8037,8 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
-        | FixtureOperation::SeriesDtToTimestamp => {
+        | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -9653,6 +9671,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -10002,6 +10021,10 @@ fn capture_live_oracle_expected(
         ewm_alpha: fixture.ewm_alpha,
         resample_freq: fixture.resample_freq.clone(),
         quantile_value: fixture.quantile_value,
+        dt_freq: fixture.dt_freq.clone(),
+        dt_strftime_format: fixture.dt_strftime_format.clone(),
+        dt_how: fixture.dt_how.clone(),
+        dt_warn: fixture.dt_warn,
     };
     let input = serde_json::to_vec(&payload)?;
 
@@ -10245,6 +10268,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
         | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPydatetime
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -13272,6 +13296,13 @@ fn execute_series_module_utility_fixture_operation(
                 .to_timestamp_with_how(how)
                 .map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesDtToPydatetime => {
+            let warn = fixture.dt_warn.unwrap_or(true);
+            series
+                .dt()
+                .to_pydatetime_with_warn(warn)
+                .map_err(|err| err.to_string())
+        }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
@@ -16096,7 +16127,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtMonthName
         | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesDtTotalSeconds
-        | FixtureOperation::SeriesDtToTimestamp => {
+        | FixtureOperation::SeriesDtToTimestamp
+        | FixtureOperation::SeriesDtToPydatetime => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {

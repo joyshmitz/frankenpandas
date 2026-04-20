@@ -8900,6 +8900,8 @@ impl StringAccessor<'_> {
     /// Analogous to `pandas.Series.str.extractall(pat)`. Returns a DataFrame
     /// where each row is a match, with a composite index "original_idx, match_n".
     /// If the pattern contains capture groups, returns one column per group.
+    /// Named capture groups (`(?P<name>...)` / `(?<name>...)`) produce columns
+    /// with that name; unnamed groups use positional names `0, 1, ...`.
     pub fn extractall(&self, pat: &str) -> Result<DataFrame, FrameError> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
@@ -8940,9 +8942,31 @@ impl StringAccessor<'_> {
         let index = Index::new(index_labels);
         let mut columns = BTreeMap::new();
         let mut column_order = Vec::new();
+        let group_names: Vec<Option<String>> = if num_groups == 0 {
+            vec![None]
+        } else {
+            re.capture_names()
+                .skip(1)
+                .map(|n| n.map(str::to_owned))
+                .collect()
+        };
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (i, vals) in col_vecs.into_iter().enumerate() {
-            let name = format!("{i}");
-            columns.insert(name.clone(), Column::from_values(vals)?);
+            let default = format!("{i}");
+            let proposed = group_names
+                .get(i)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| default.clone());
+            let mut name = proposed.clone();
+            let mut suffix = 1usize;
+            while used.contains(&name) {
+                name = format!("{proposed}_{suffix}");
+                suffix += 1;
+            }
+            used.insert(name.clone());
+            let col = Column::from_values(vals)?;
+            columns.insert(name.clone(), col);
             column_order.push(name);
         }
 
@@ -47629,6 +47653,53 @@ mod tests {
         .unwrap();
         let result = s.str().extractall(r"(\d+)").unwrap();
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn str_extractall_uses_named_group_as_column_name() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a1 b2".to_string())],
+        )
+        .unwrap();
+        let result = s.str().extractall(r"(?P<digit>\d)").unwrap();
+        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        assert_eq!(names, vec!["digit"]);
+        assert_eq!(
+            result.column("digit").unwrap().values()[0],
+            Scalar::Utf8("1".into())
+        );
+        assert_eq!(
+            result.column("digit").unwrap().values()[1],
+            Scalar::Utf8("2".into())
+        );
+    }
+
+    #[test]
+    fn str_extractall_mixes_named_and_positional_groups() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a1".to_string())],
+        )
+        .unwrap();
+        let result = s.str().extractall(r"(?P<letter>[a-z])(\d)").unwrap();
+        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        assert_eq!(names, vec!["letter", "1"]);
+    }
+
+    #[test]
+    fn str_extractall_positional_only_unchanged() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a1b2".to_string())],
+        )
+        .unwrap();
+        let result = s.str().extractall(r"([a-z])(\d)").unwrap();
+        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        assert_eq!(names, vec!["0", "1"]);
     }
 
     // ── str.split_expand() ──

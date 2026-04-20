@@ -5847,6 +5847,20 @@ impl Series {
         categories: Vec<Scalar>,
         ordered: bool,
     ) -> Result<Self, FrameError> {
+        for code in &codes {
+            if *code < -1 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "categorical code {code} is invalid; expected -1 or a category position"
+                )));
+            }
+            if *code >= 0 && (*code as usize) >= categories.len() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "categorical code {code} is out of bounds for {} categories",
+                    categories.len()
+                )));
+            }
+        }
+
         let index_labels: Vec<IndexLabel> =
             (0..codes.len() as i64).map(IndexLabel::Int64).collect();
 
@@ -50055,6 +50069,30 @@ mod tests {
         let cat = s.cat().unwrap();
         assert_eq!(cat.categories().len(), 3);
         assert!(cat.ordered());
+    }
+
+    #[test]
+    fn categorical_from_codes_allows_missing_code() {
+        let categories = vec![Scalar::Utf8("low".into()), Scalar::Utf8("high".into())];
+        let s =
+            Series::from_categorical_codes("rating", vec![0, -1, 1], categories, false).unwrap();
+
+        let values = s.cat().unwrap().to_values().unwrap();
+        assert_eq!(values.values()[0], Scalar::Utf8("low".into()));
+        assert_eq!(values.values()[1], Scalar::Null(NullKind::Null));
+        assert_eq!(values.values()[2], Scalar::Utf8("high".into()));
+    }
+
+    #[test]
+    fn categorical_from_codes_rejects_out_of_bounds_code() {
+        let categories = vec![Scalar::Utf8("low".into()), Scalar::Utf8("high".into())];
+        let err =
+            Series::from_categorical_codes("rating", vec![0, 2], categories, false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

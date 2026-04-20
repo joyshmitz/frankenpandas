@@ -1,0 +1,23 @@
+{
+  "packet_id": "FP-P2D-417",
+  "case_id": "series_categorical_from_codes_out_of_bounds_strict",
+  "mode": "strict",
+  "operation": "series_categorical_from_codes",
+  "left": {
+    "name": "rating",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 2 }
+    ]
+  },
+  "categorical_categories": [
+    { "kind": "utf8", "value": "low" },
+    { "kind": "utf8", "value": "high" }
+  ],
+  "categorical_ordered": true,
+  "expected_error_contains": "out of bounds"
+}

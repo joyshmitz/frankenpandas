@@ -402,6 +402,11 @@ pub enum FixtureOperation {
     SeriesUpdate,
     #[serde(rename = "series_map", alias = "series_map_default")]
     SeriesMap,
+    #[serde(
+        rename = "series_categorical_from_codes",
+        alias = "categorical_from_codes"
+    )]
+    SeriesCategoricalFromCodes,
     #[serde(rename = "series_to_frame", alias = "series_to_frame_default")]
     SeriesToFrame,
     #[serde(rename = "series_unstack", alias = "series_unstack_default")]
@@ -1103,6 +1108,7 @@ impl FixtureOperation {
             Self::SeriesReplace => "series_replace",
             Self::SeriesUpdate => "series_update",
             Self::SeriesMap => "series_map",
+            Self::SeriesCategoricalFromCodes => "series_categorical_from_codes",
             Self::SeriesToFrame => "series_to_frame",
             Self::SeriesUnstack => "series_unstack",
             Self::SeriesXs => "series_xs",
@@ -1697,6 +1703,10 @@ pub struct PacketFixture {
     pub replace_to_value: Option<Vec<Scalar>>,
     #[serde(default)]
     pub na_action_ignore: Option<bool>,
+    #[serde(default)]
+    pub categorical_categories: Option<Vec<Scalar>>,
+    #[serde(default)]
+    pub categorical_ordered: Option<bool>,
     // Window operation parameters
     #[serde(default)]
     pub window_size: Option<usize>,
@@ -2121,6 +2131,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
         | FixtureOperation::SeriesMap
+        | FixtureOperation::SeriesCategoricalFromCodes
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
@@ -7260,6 +7271,33 @@ fn run_fixture_operation(
                 _ => Err("expected_series or expected_error is required for series_map".to_owned()),
             }
         }
+        FixtureOperation::SeriesCategoricalFromCodes => {
+            let actual = run_series_categorical_from_codes(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_categorical_from_codes error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_categorical_from_codes to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_categorical_from_codes to fail but operation succeeded"
+                            .to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_categorical_from_codes"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesIsNa => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -9407,6 +9445,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
         | FixtureOperation::SeriesMap
+        | FixtureOperation::SeriesCategoricalFromCodes
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -9987,6 +10026,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesReplace
         | FixtureOperation::SeriesUpdate
         | FixtureOperation::SeriesMap
+        | FixtureOperation::SeriesCategoricalFromCodes
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -13279,6 +13319,35 @@ fn build_series(series: &FixtureSeries) -> Result<Series, String> {
     .map_err(|err| err.to_string())
 }
 
+fn run_series_categorical_from_codes(fixture: &PacketFixture) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    let categories = fixture.categorical_categories.as_ref().ok_or_else(|| {
+        "categorical_categories required for series_categorical_from_codes".to_owned()
+    })?;
+    let ordered = fixture.categorical_ordered.unwrap_or(false);
+    let codes = left
+        .values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| match value {
+            Scalar::Int64(code) => Ok(*code),
+            other => Err(format!(
+                "series_categorical_from_codes requires int64 codes at idx={idx}, got {other:?}"
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let categorical =
+        Series::from_categorical_codes(left.name.clone(), codes, categories.clone(), ordered)
+            .map_err(|err| err.to_string())?;
+
+    categorical
+        .cat()
+        .ok_or_else(|| "series_categorical_from_codes produced non-categorical series".to_owned())?
+        .to_values()
+        .map_err(|err| err.to_string())
+}
+
 fn resolve_datetime_origin_option(
     origin: Option<&serde_json::Value>,
 ) -> Result<Option<fp_frame::ToDatetimeOrigin<'_>>, String> {
@@ -15004,6 +15073,44 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_series or expected_error required for series_map".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesCategoricalFromCodes => {
+            let actual = run_series_categorical_from_codes(fixture);
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_categorical_from_codes.error",
+                        format!(
+                            "expected series_categorical_from_codes error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_categorical_from_codes.error",
+                        "expected series_categorical_from_codes to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_categorical_from_codes.error",
+                        "expected series_categorical_from_codes to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_categorical_from_codes"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::SeriesIsNa => {

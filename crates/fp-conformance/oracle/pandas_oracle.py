@@ -2865,8 +2865,9 @@ def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]
         columns.append(entry.strip())
 
     frame = dataframe_from_json(pd, frame_payload)
+    ascending = _resolve_sort_ascending(payload, "dataframe_groupby_cumcount")
     try:
-        out = frame.groupby(columns).cumcount()
+        out = frame.groupby(columns).cumcount(ascending=ascending)
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_cumcount failed: {exc}") from exc
 

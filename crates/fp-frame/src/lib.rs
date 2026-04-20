@@ -24236,13 +24236,26 @@ impl DataFrameGroupBy<'_> {
     /// Matches `groupby.cumcount()`. Returns a Series of Int64 with a
     /// monotonically increasing counter within each group.
     pub fn cumcount(&self) -> Result<Series, FrameError> {
+        self.cumcount_with_ascending(true)
+    }
+
+    /// Assign within-group cumulative count (0-based) with explicit direction.
+    ///
+    /// Matches `groupby.cumcount(ascending=...)`.
+    pub fn cumcount_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
         let (_group_order, groups) = self.build_groups();
         let n = self.df.len();
         let mut out = vec![Scalar::Int64(0); n];
 
         for row_indices in groups.values() {
+            let group_len = row_indices.len() as i64;
             for (count, &idx) in row_indices.iter().enumerate() {
-                out[idx] = Scalar::Int64(count as i64);
+                let count = if ascending {
+                    count as i64
+                } else {
+                    group_len - count as i64 - 1
+                };
+                out[idx] = Scalar::Int64(count);
             }
         }
 
@@ -41753,6 +41766,41 @@ mod tests {
         assert_eq!(cc.values()[1], Scalar::Int64(0));
         assert_eq!(cc.values()[2], Scalar::Int64(1));
         assert_eq!(cc.values()[3], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn groupby_cumcount_descending() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["g"]).unwrap();
+        let cc = gb.cumcount_with_ascending(false).unwrap();
+        // a: 1, b: 1, a: 0, b: 0
+        assert_eq!(cc.values()[0], Scalar::Int64(1));
+        assert_eq!(cc.values()[1], Scalar::Int64(1));
+        assert_eq!(cc.values()[2], Scalar::Int64(0));
+        assert_eq!(cc.values()[3], Scalar::Int64(0));
     }
 
     #[test]

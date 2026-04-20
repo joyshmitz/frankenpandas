@@ -12440,7 +12440,9 @@ fn execute_dataframe_groupby_series_fixture_operation(
     if use_ngroup {
         groupby.ngroup().map_err(|err| err.to_string())
     } else {
-        groupby.cumcount().map_err(|err| err.to_string())
+        groupby
+            .cumcount_with_ascending(resolve_sort_ascending(fixture))
+            .map_err(|err| err.to_string())
     }
 }
 

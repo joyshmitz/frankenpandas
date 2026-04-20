@@ -14174,6 +14174,17 @@ impl DataFrame {
     ///
     /// Matches `df.set_index(column, drop=...)` for a single column selector.
     pub fn set_index(&self, column: &str, drop: bool) -> Result<Self, FrameError> {
+        self.set_index_with_verify_integrity(column, drop, false)
+    }
+
+    /// Set the DataFrame index from an existing column while optionally
+    /// rejecting duplicate labels.
+    pub fn set_index_with_verify_integrity(
+        &self,
+        column: &str,
+        drop: bool,
+        verify_integrity: bool,
+    ) -> Result<Self, FrameError> {
         let source = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column '{column}' not found"))
         })?;
@@ -14184,6 +14195,12 @@ impl DataFrame {
             .map(scalar_to_index_label)
             .collect::<Result<Vec<_>, _>>()?;
         let index = Index::new(labels);
+
+        if verify_integrity && index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "Index has duplicate keys".to_owned(),
+            ));
+        }
 
         if !drop {
             return Self::new_with_column_order(
@@ -30441,6 +30458,43 @@ mod tests {
         let err = df_null.set_index("id", true).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("missing label values"))
+        );
+    }
+
+    #[test]
+    fn dataframe_set_index_verify_integrity_rejects_duplicate_labels() {
+        let df = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
+                (
+                    "v",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .set_index_with_verify_integrity("id", true, true)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("Index has duplicate keys"))
+        );
+
+        let out = df
+            .set_index_with_verify_integrity("id", true, false)
+            .unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+            ]
         );
     }
 

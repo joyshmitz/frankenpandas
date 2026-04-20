@@ -1570,6 +1570,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub set_index_drop: Option<bool>,
     #[serde(default)]
+    pub set_index_verify_integrity: Option<bool>,
+    #[serde(default)]
     pub reset_index_drop: Option<bool>,
     #[serde(default)]
     pub insert_loc: Option<usize>,
@@ -2837,6 +2839,8 @@ struct OracleRequest {
     set_index_column: Option<String>,
     #[serde(default)]
     set_index_drop: Option<bool>,
+    #[serde(default)]
+    set_index_verify_integrity: Option<bool>,
     #[serde(default)]
     reset_index_drop: Option<bool>,
     #[serde(default)]
@@ -9903,6 +9907,7 @@ fn capture_live_oracle_expected(
         concat_join: fixture.concat_join.clone(),
         set_index_column: fixture.set_index_column.clone(),
         set_index_drop: fixture.set_index_drop,
+        set_index_verify_integrity: fixture.set_index_verify_integrity,
         reset_index_drop: fixture.reset_index_drop,
         insert_loc: fixture.insert_loc,
         insert_column: fixture.insert_column.clone(),
@@ -10903,6 +10908,10 @@ fn require_set_index_drop(fixture: &PacketFixture) -> Result<bool, String> {
     fixture
         .set_index_drop
         .ok_or_else(|| "set_index_drop is required for dataframe_set_index".to_owned())
+}
+
+fn resolve_set_index_verify_integrity(fixture: &PacketFixture) -> bool {
+    fixture.set_index_verify_integrity.unwrap_or(false)
 }
 
 fn require_reset_index_drop(fixture: &PacketFixture) -> Result<bool, String> {
@@ -12280,9 +12289,10 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame
-                .set_index(
+                .set_index_with_verify_integrity(
                     require_set_index_column(fixture)?,
                     require_set_index_drop(fixture)?,
+                    resolve_set_index_verify_integrity(fixture),
                 )
                 .map_err(|err| err.to_string())
         }
@@ -20495,7 +20505,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-053", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-053"));
         assert!(
-            report.fixture_count >= 6,
+            report.fixture_count >= 7,
             "expected FP-P2D-053 dataframe set/reset index fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

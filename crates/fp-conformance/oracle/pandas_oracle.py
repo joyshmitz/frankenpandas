@@ -3308,12 +3308,22 @@ def op_dataframe_set_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(set_index_drop, bool):
         raise OracleError("dataframe_set_index requires set_index_drop boolean payload")
 
+    set_index_verify_integrity = payload.get("set_index_verify_integrity", False)
+    if not isinstance(set_index_verify_integrity, bool):
+        raise OracleError(
+            "dataframe_set_index requires set_index_verify_integrity boolean payload"
+        )
+
     frame = dataframe_from_json(pd, frame_payload)
     column_name = set_index_column.strip()
     if column_name not in frame.columns:
         raise OracleError(f"dataframe_set_index column '{column_name}' not found")
     try:
-        out = frame.set_index(column_name, drop=set_index_drop)
+        out = frame.set_index(
+            column_name,
+            drop=set_index_drop,
+            verify_integrity=set_index_verify_integrity,
+        )
     except Exception as exc:
         raise OracleError(f"dataframe_set_index failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}

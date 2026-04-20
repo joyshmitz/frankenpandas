@@ -1,0 +1,29 @@
+{
+  "packet_id": "FP-P2D-216",
+  "case_id": "series_str_wrap_drop_whitespace_false_strict",
+  "mode": "strict",
+  "operation": "series_str_wrap",
+  "str_wrap_width": 6,
+  "str_wrap_drop_whitespace": false,
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" }
+    ],
+    "values": [
+      { "kind": "str", "value": "  alpha   beta  gamma  " },
+      { "kind": "str", "value": "a  bb   ccc" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" }
+    ],
+    "values": [
+      { "kind": "str", "value": "  \nalpha\n   \nbeta  \ngamma\n  " },
+      { "kind": "str", "value": "a  bb\n   ccc" }
+    ]
+  }
+}

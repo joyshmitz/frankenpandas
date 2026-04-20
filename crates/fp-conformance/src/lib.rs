@@ -1664,6 +1664,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_wrap_width: Option<usize>,
     #[serde(default)]
+    pub str_wrap_drop_whitespace: Option<bool>,
+    #[serde(default)]
     pub str_normalize_form: Option<String>,
     #[serde(default)]
     pub str_prefix: Option<String>,
@@ -12902,7 +12904,10 @@ fn execute_series_module_utility_fixture_operation(
             let width = fixture
                 .str_wrap_width
                 .ok_or_else(|| "str_wrap_width required for series_str_wrap".to_owned())?;
-            series.str().wrap(width).map_err(|err| err.to_string())
+            series
+                .str()
+                .wrap_with_drop_whitespace(width, fixture.str_wrap_drop_whitespace.unwrap_or(true))
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrNormalize => {
             let form = fixture

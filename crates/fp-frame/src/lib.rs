@@ -8998,27 +8998,20 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.wrap(width)`. Inserts newlines to wrap text.
     pub fn wrap(&self, width: usize) -> Result<Series, FrameError> {
+        self.wrap_with_drop_whitespace(width, true)
+    }
+
+    /// Wrap long lines while controlling whether boundary whitespace is dropped.
+    ///
+    /// Matches `pd.Series.str.wrap(width, drop_whitespace=...)` for the
+    /// supported strict-mode behavior covered by the conformance fixtures.
+    pub fn wrap_with_drop_whitespace(
+        &self,
+        width: usize,
+        drop_whitespace: bool,
+    ) -> Result<Series, FrameError> {
         self.apply_str(
-            |s| {
-                if width == 0 {
-                    return Scalar::Utf8(s.to_string());
-                }
-                let mut result = String::new();
-                let mut line_len = 0;
-                for word in s.split_whitespace() {
-                    let word_len = word.chars().count();
-                    if line_len > 0 && line_len + 1 + word_len > width {
-                        result.push('\n');
-                        line_len = 0;
-                    } else if line_len > 0 {
-                        result.push(' ');
-                        line_len += 1;
-                    }
-                    result.push_str(word);
-                    line_len += word_len;
-                }
-                Scalar::Utf8(result)
-            },
+            |s| Scalar::Utf8(wrap_text(s, width, drop_whitespace)),
             self.series.name(),
         )
     }
@@ -9530,6 +9523,87 @@ impl StringAccessor<'_> {
             self.series.name(),
         )
     }
+}
+
+fn wrap_text(s: &str, width: usize, drop_whitespace: bool) -> String {
+    if width == 0 || s.is_empty() {
+        return s.to_string();
+    }
+
+    if drop_whitespace {
+        let mut result = String::new();
+        let mut line_len = 0;
+        for word in s.split_whitespace() {
+            let word_len = word.chars().count();
+            if line_len > 0 && line_len + 1 + word_len > width {
+                result.push('\n');
+                line_len = 0;
+            } else if line_len > 0 {
+                result.push(' ');
+                line_len += 1;
+            }
+            result.push_str(word);
+            line_len += word_len;
+        }
+        return result;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+
+    for chunk in split_whitespace_chunks(s) {
+        let chunk_len = chunk.chars().count();
+        if current.is_empty() {
+            current.push_str(chunk);
+            current_len = chunk_len;
+            continue;
+        }
+
+        if current_len + chunk_len <= width {
+            current.push_str(chunk);
+            current_len += chunk_len;
+            continue;
+        }
+
+        lines.push(current);
+        current = chunk.to_string();
+        current_len = chunk_len;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines.join("\n")
+}
+
+fn split_whitespace_chunks(s: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut current_is_whitespace: Option<bool> = None;
+
+    for (idx, ch) in s.char_indices() {
+        let is_whitespace = ch.is_whitespace();
+        match current_is_whitespace {
+            None => {
+                start = idx;
+                current_is_whitespace = Some(is_whitespace);
+            }
+            Some(prev) if prev == is_whitespace => {}
+            Some(_) => {
+                chunks.push(&s[start..idx]);
+                start = idx;
+                current_is_whitespace = Some(is_whitespace);
+            }
+        }
+    }
+
+    if current_is_whitespace.is_some() {
+        chunks.push(&s[start..]);
+    }
+
+    chunks
 }
 
 /// Datetime accessor for Series, analogous to `pd.Series.dt`.
@@ -51601,6 +51675,45 @@ mod tests {
         assert_eq!(s.str().isalnum().unwrap().values()[2], Scalar::Bool(false));
         assert_eq!(s.str().isdigit().unwrap().values()[1], Scalar::Bool(true));
         assert_eq!(s.str().isdigit().unwrap().values()[0], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_str_wrap_drop_whitespace_false_preserves_runs() {
+        let s = Series::from_values(
+            "text",
+            vec![IndexLabel::from("dup"), IndexLabel::from("dup")],
+            vec![
+                Scalar::Utf8("  alpha   beta  gamma  ".to_owned()),
+                Scalar::Utf8("a  bb   ccc".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let wrapped = s.str().wrap_with_drop_whitespace(6, false).unwrap();
+        assert_eq!(
+            wrapped.values(),
+            &[
+                Scalar::Utf8("  \nalpha\n   \nbeta  \ngamma\n  ".to_owned()),
+                Scalar::Utf8("a  bb\n   ccc".to_owned()),
+            ]
+        );
+        assert_eq!(wrapped.index().labels(), s.index().labels());
+    }
+
+    #[test]
+    fn series_str_wrap_drop_whitespace_true_still_collapses_runs() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("  alpha   beta  gamma  ".to_owned())],
+        )
+        .unwrap();
+
+        let wrapped = s.str().wrap_with_drop_whitespace(6, true).unwrap();
+        assert_eq!(
+            wrapped.values(),
+            &[Scalar::Utf8("alpha\nbeta\ngamma".to_owned())]
+        );
     }
 
     #[test]

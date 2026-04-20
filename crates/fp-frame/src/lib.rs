@@ -44011,6 +44011,29 @@ mod tests {
     }
 
     #[test]
+    fn str_removeprefix_unicode_exactness() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("éclair".into()),
+                Scalar::Utf8("e\u{301}clair".into()),
+                Scalar::Utf8("ééclair".into()),
+                Scalar::Utf8("beta".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().removeprefix("é").unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("clair".into()));
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("e\u{301}clair".into())
+        );
+        assert_eq!(result.column().values()[2], Scalar::Utf8("éclair".into()));
+        assert_eq!(result.column().values()[3], Scalar::Utf8("beta".into()));
+    }
+
+    #[test]
     fn str_removesuffix() {
         let s = Series::from_values(
             "x",

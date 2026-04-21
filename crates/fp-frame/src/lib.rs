@@ -54323,6 +54323,35 @@ mod tests {
     }
 
     #[test]
+    fn to_datetime_with_options_timestamp_like_origin_preserves_fractional_seconds() {
+        let s = Series::from_values(
+            "epoch_s",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Float64(1.5), Scalar::Int64(-60)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("s"),
+                origin: Some(super::ToDatetimeOrigin::Str(
+                    "1960-01-01 12:34:56.123456789",
+                )),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("1960-01-01 12:34:56.123456789".into()),
+                Scalar::Utf8("1960-01-01 12:34:57.623456789".into()),
+                Scalar::Utf8("1960-01-01 12:33:56.123456789".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn to_datetime_with_options_origin_requires_explicit_unit() {
         let s = Series::from_values("epoch", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
         let err = super::to_datetime_with_options(

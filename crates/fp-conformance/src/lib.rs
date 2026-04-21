@@ -21764,7 +21764,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-091", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-091"));
         assert!(
-            report.fixture_count >= 3,
+            report.fixture_count >= 4,
             "expected FP-P2D-091 series_to_datetime fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
@@ -26179,6 +26179,65 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping to_datetime origin oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = fp_frame::to_datetime_with_options(
+            &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+            fp_frame::ToDatetimeOptions {
+                unit: fixture.datetime_unit.as_deref(),
+                origin: super::resolve_datetime_origin_option(fixture.datetime_origin.as_ref())
+                    .expect("datetime origin"),
+                ..fp_frame::ToDatetimeOptions::default()
+            },
+        )
+        .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_to_datetime_timestamp_origin_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-091",
+            "case_id": "series_to_datetime_timestamp_origin_live",
+            "mode": "strict",
+            "operation": "series_to_datetime",
+            "oracle_source": "live_legacy_pandas",
+            "datetime_unit": "s",
+            "datetime_origin": "1960-01-01 12:34:56.123456789",
+            "left": {
+                "name": "epoch_s",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "int64", "value": -60 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping to_datetime timestamp-origin oracle test: {message}"
             );
             return;
         }

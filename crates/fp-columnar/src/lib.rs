@@ -2,7 +2,7 @@
 
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    infer_dtype,
+    infer_dtype, nancummax, nancummin, nancumprod, nancumsum,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -577,6 +577,36 @@ pub enum ColumnError {
     Type(#[from] TypeError),
 }
 
+fn saturating_i64_to_usize(value: i64) -> usize {
+    if value <= 0 {
+        0
+    } else {
+        usize::try_from(value).unwrap_or(usize::MAX)
+    }
+}
+
+fn saturating_i64_abs_to_usize(value: i64) -> usize {
+    usize::try_from(value.unsigned_abs()).unwrap_or(usize::MAX)
+}
+
+fn normalize_head_take(n: i64, len: usize) -> usize {
+    if n >= 0 {
+        saturating_i64_to_usize(n).min(len)
+    } else {
+        len.saturating_sub(saturating_i64_abs_to_usize(n))
+    }
+}
+
+fn normalize_tail_window(n: i64, len: usize) -> (usize, usize) {
+    if n >= 0 {
+        let take = saturating_i64_to_usize(n).min(len);
+        (len - take, take)
+    } else {
+        let skip = saturating_i64_abs_to_usize(n).min(len);
+        (skip, len - skip)
+    }
+}
+
 impl Column {
     fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
         match value {
@@ -1033,6 +1063,24 @@ impl Column {
         Self::new(self.dtype, values)
     }
 
+    /// Return the first `n` values.
+    ///
+    /// Matches pandas `head(n)` semantics on a 1-D array-like surface.
+    /// Negative `n` returns all values except the last `-n`.
+    pub fn head(&self, n: i64) -> Result<Self, ColumnError> {
+        let take = normalize_head_take(n, self.len());
+        self.slice(0, take)
+    }
+
+    /// Return the last `n` values.
+    ///
+    /// Matches pandas `tail(n)` semantics on a 1-D array-like surface.
+    /// Negative `n` returns all values except the first `-n`.
+    pub fn tail(&self, n: i64) -> Result<Self, ColumnError> {
+        let (start, len) = normalize_tail_window(n, self.len());
+        self.slice(start, len)
+    }
+
     /// Concatenate `other` onto `self`, preserving dtype.
     ///
     /// Returns `ColumnError::DTypeMismatch` when `other.dtype()` differs
@@ -1064,6 +1112,117 @@ impl Column {
         let mut out = Vec::with_capacity(self.values.len() * repeats);
         for v in &self.values {
             for _ in 0..repeats {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Reverse the row order of the column.
+    ///
+    /// Matches `pd.Series[::-1]` / `iloc[::-1]`. Dtype is preserved.
+    pub fn reverse(&self) -> Result<Self, ColumnError> {
+        let mut values = self.values.clone();
+        values.reverse();
+        Self::new(self.dtype, values)
+    }
+
+    /// Return the first `n` rows (positive) or all-but-last `|n|` rows
+    /// (negative).
+    ///
+    /// Matches `pd.Series.head(n)`. Out-of-range `|n|` clamps to a full
+    /// clone / empty column without erroring.
+    pub fn head(&self, n: i64) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        let take = if n >= 0 {
+            (n as usize).min(len)
+        } else {
+            let drop = (-n) as usize;
+            len.saturating_sub(drop)
+        };
+        let values = self.values[..take].to_vec();
+        Self::new(self.dtype, values)
+    }
+
+    /// Return the last `n` rows (positive) or all-but-first `|n|` rows
+    /// (negative).
+    ///
+    /// Matches `pd.Series.tail(n)`.
+    pub fn tail(&self, n: i64) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        let (start, end) = if n >= 0 {
+            let take = (n as usize).min(len);
+            (len - take, len)
+        } else {
+            let drop = (-n) as usize;
+            (drop.min(len), len)
+        };
+        let values = self.values[start..end].to_vec();
+        Self::new(self.dtype, values)
+    }
+
+    /// Cumulative sum, null-propagating per fp-types::nancumsum.
+    ///
+    /// Matches `pd.Series.cumsum()`. The resulting column is always
+    /// Float64 (matching the numeric accumulator type used in
+    /// nancumsum).
+    pub fn cumsum(&self) -> Result<Self, ColumnError> {
+        let out = nancumsum(&self.values);
+        Self::new(DType::Float64, out)
+    }
+
+    /// Cumulative product, null-propagating per fp-types::nancumprod.
+    pub fn cumprod(&self) -> Result<Self, ColumnError> {
+        let out = nancumprod(&self.values);
+        Self::new(DType::Float64, out)
+    }
+
+    /// Cumulative maximum, null-propagating per fp-types::nancummax.
+    pub fn cummax(&self) -> Result<Self, ColumnError> {
+        let out = nancummax(&self.values);
+        Self::new(DType::Float64, out)
+    }
+
+    /// Cumulative minimum, null-propagating per fp-types::nancummin.
+    pub fn cummin(&self) -> Result<Self, ColumnError> {
+        let out = nancummin(&self.values);
+        Self::new(DType::Float64, out)
+    }
+
+    /// Unique values in first-seen order, missing values dropped.
+    ///
+    /// Matches `pd.Series.unique()` (pandas returns values in order of
+    /// appearance and drops NaN/NA). Float NaN is deduplicated on bit
+    /// pattern; +0.0 / -0.0 fold to the same key.
+    pub fn unique(&self) -> Result<Self, ColumnError> {
+        use std::collections::HashSet;
+        #[derive(Hash, PartialEq, Eq)]
+        enum Key<'a> {
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+
+        let mut seen: HashSet<Key<'_>> = HashSet::new();
+        let mut out = Vec::new();
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            let key = match v {
+                Scalar::Bool(b) => Key::Bool(*b),
+                Scalar::Int64(i) => Key::Int64(*i),
+                Scalar::Float64(f) => {
+                    let norm = if *f == 0.0 { 0.0 } else { *f };
+                    Key::FloatBits(norm.to_bits())
+                }
+                Scalar::Utf8(s) => Key::Utf8(s.as_str()),
+                Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Null(_) => continue,
+            };
+            if seen.insert(key) {
                 out.push(v.clone());
             }
         }
@@ -2399,6 +2558,164 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
             let out = col.repeat(1).expect("repeat");
             assert_eq!(out.values(), col.values());
+        }
+    }
+
+    mod reverse_head_tail_cumulatives_unique {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn reverse_swaps_order_and_preserves_dtype() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let r = col.reverse().expect("reverse");
+            assert_eq!(r.values()[0], Scalar::Int64(3));
+            assert_eq!(r.values()[2], Scalar::Int64(1));
+            assert_eq!(r.dtype(), DType::Int64);
+        }
+
+        #[test]
+        fn head_positive_takes_first_n() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let h = col.head(2).expect("head");
+            assert_eq!(h.len(), 2);
+            assert_eq!(h.values()[0], Scalar::Int64(1));
+            assert_eq!(h.values()[1], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn head_negative_drops_last_n() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let h = col.head(-1).expect("head");
+            assert_eq!(h.len(), 2);
+            assert_eq!(h.values()[1], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn tail_positive_takes_last_n() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let t = col.tail(2).expect("tail");
+            assert_eq!(t.len(), 2);
+            assert_eq!(t.values()[0], Scalar::Int64(3));
+            assert_eq!(t.values()[1], Scalar::Int64(4));
+        }
+
+        #[test]
+        fn tail_negative_drops_first_n() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let t = col.tail(-1).expect("tail");
+            assert_eq!(t.len(), 2);
+            assert_eq!(t.values()[0], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn head_tail_out_of_range_clamps() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            assert_eq!(col.head(10).expect("head").len(), 1);
+            assert_eq!(col.tail(10).expect("tail").len(), 1);
+            assert_eq!(col.head(-10).expect("head").len(), 0);
+            assert_eq!(col.tail(-10).expect("tail").len(), 0);
+        }
+
+        #[test]
+        fn cumsum_produces_float64_running_sum() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            let c = col.cumsum().expect("cumsum");
+            assert_eq!(c.dtype(), DType::Float64);
+            assert_eq!(c.values()[0], Scalar::Float64(1.0));
+            assert!(c.values()[1].is_missing());
+            assert_eq!(c.values()[2], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn cumprod_running_product() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+            let c = col.cumprod().expect("cumprod");
+            assert_eq!(c.values()[2], Scalar::Float64(24.0));
+        }
+
+        #[test]
+        fn cummax_cummin_running_extrema() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let mx = col.cummax().expect("cummax");
+            assert_eq!(mx.values()[4], Scalar::Float64(5.0));
+            let mn = col.cummin().expect("cummin");
+            assert_eq!(mn.values()[4], Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn unique_preserves_first_seen_order() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+            ])
+            .expect("col");
+            let u = col.unique().expect("unique");
+            assert_eq!(u.len(), 3);
+            assert_eq!(u.values()[0], Scalar::Int64(3));
+            assert_eq!(u.values()[1], Scalar::Int64(1));
+            assert_eq!(u.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn unique_drops_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let u = col.unique().expect("unique");
+            assert_eq!(u.len(), 1);
+            assert_eq!(u.values()[0], Scalar::Int64(1));
         }
     }
 }

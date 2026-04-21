@@ -8438,6 +8438,11 @@ impl DataFrameResample<'_> {
         self.apply_resample(|s, freq| s.resample(freq).max())
     }
 
+    /// Resample product across all numeric columns.
+    pub fn prod(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).prod())
+    }
+
     /// Aggregate with multiple functions, producing prefixed column names.
     ///
     /// Matches `df.resample(freq).agg(['sum', 'mean'])`. Each numeric column
@@ -48771,6 +48776,52 @@ mod tests {
         assert_eq!(result.len(), 2);
         let val = result.column_as_series("val").unwrap();
         assert_eq!(val.values()[0], Scalar::Float64(15.0)); // Jan: (10+20)/2
+    }
+
+    #[test]
+    fn df_resample_prod() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "sales",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "cost",
+                    vec![Scalar::Int64(4), Scalar::Int64(6), Scalar::Int64(7)],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df.resample("M").prod().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.column_names(), vec!["sales", "cost"]);
+
+        let sales = result.column_as_series("sales").unwrap();
+        assert_eq!(sales.values()[0], Scalar::Float64(6.0)); // Jan: 2 * 3
+        assert_eq!(sales.values()[1], Scalar::Float64(5.0)); // Feb: 5
+
+        let cost = result.column_as_series("cost").unwrap();
+        assert_eq!(cost.values()[0], Scalar::Float64(24.0)); // Jan: 4 * 6
+        assert_eq!(cost.values()[1], Scalar::Float64(7.0)); // Feb: 7
     }
 
     // ── DataFrame between_time / at_time tests ──

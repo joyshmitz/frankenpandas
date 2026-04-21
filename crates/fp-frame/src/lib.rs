@@ -13478,6 +13478,7 @@ pub struct DataFrameDictTight {
 pub enum DataFrameDictResult {
     Mapping(BTreeMap<String, Vec<(String, Scalar)>>),
     List(BTreeMap<String, Vec<Scalar>>),
+    Records(Vec<Vec<(String, Scalar)>>),
     Series(BTreeMap<String, Series>),
     Split(DataFrameDictSplit),
     Tight(DataFrameDictTight),
@@ -13494,6 +13495,13 @@ impl DataFrameDictResult {
     pub fn as_list(&self) -> Option<&BTreeMap<String, Vec<Scalar>>> {
         match self {
             Self::List(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    pub fn as_records(&self) -> Option<&Vec<Vec<(String, Scalar)>>> {
+        match self {
+            Self::Records(records) => Some(records),
             _ => None,
         }
     }
@@ -19572,8 +19580,8 @@ impl DataFrame {
                 Ok(DataFrameDictResult::List(result))
             }
             "records" => {
-                let mut result = BTreeMap::new();
-                for (row_idx, _label) in self.index.labels().iter().enumerate() {
+                let mut result = Vec::with_capacity(self.len());
+                for row_idx in 0..self.len() {
                     let entries: Vec<(String, Scalar)> = self
                         .column_order
                         .iter()
@@ -19582,11 +19590,19 @@ impl DataFrame {
                             (col_name.clone(), val)
                         })
                         .collect();
-                    result.insert(row_idx.to_string(), entries);
+                    result.push(entries);
                 }
-                Ok(DataFrameDictResult::Mapping(result))
+                Ok(DataFrameDictResult::Records(result))
             }
             "index" => {
+                // pandas raises ValueError when the index has duplicates
+                // because the resulting dict cannot round-trip without
+                // losing rows; match that behavior with an explicit reject.
+                if self.index.has_duplicates() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "to_dict orient 'index' does not support duplicate index labels".to_owned(),
+                    ));
+                }
                 let mut result = BTreeMap::new();
                 for (row_idx, label) in self.index.labels().iter().enumerate() {
                     let entries: Vec<(String, Scalar)> = self
@@ -38712,20 +38728,34 @@ mod tests {
 
     #[test]
     fn dataframe_to_dict_records() {
-        let df = DataFrame::from_series(vec![
-            Series::from_values(
-                "a",
-                vec![0_i64.into(), 1_i64.into()],
-                vec![Scalar::Int64(10), Scalar::Int64(20)],
-            )
-            .unwrap(),
-        ])
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
+                ("a", vec![Scalar::Int64(10), Scalar::Null(NullKind::NaN)]),
+            ],
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+        )
         .unwrap();
         let result = df.to_dict("records").unwrap();
         let result = result
-            .as_mapping()
-            .expect("records orient should return mapping");
-        assert_eq!(result.len(), 2); // 2 rows
+            .as_records()
+            .expect("records orient should return row-ordered records");
+        assert_eq!(
+            result,
+            &vec![
+                vec![
+                    ("b".to_owned(), Scalar::Utf8("x".into())),
+                    ("a".to_owned(), Scalar::Int64(10)),
+                ],
+                vec![
+                    ("b".to_owned(), Scalar::Utf8("y".into())),
+                    ("a".to_owned(), Scalar::Null(NullKind::NaN)),
+                ],
+            ]
+        );
     }
 
     #[test]
@@ -38790,6 +38820,44 @@ mod tests {
         ])
         .unwrap();
         assert!(df.to_dict("invalid").is_err());
+    }
+
+    #[test]
+    fn dataframe_to_dict_index_rejects_duplicate_index() {
+        let index = Index::from_i64(vec![1, 2, 1]);
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
+        let err = df.to_dict("index").unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        let FrameError::CompatibilityRejected(msg) = err else {
+            unreachable!();
+        };
+        assert!(msg.contains("duplicate index labels"));
+    }
+
+    #[test]
+    fn dataframe_to_dict_index_unique_index_still_works() {
+        let index = Index::from_i64(vec![10, 20, 30]);
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
+        let result = df.to_dict("index").unwrap();
+        let mapping = result.as_mapping().expect("index orient returns mapping");
+        // Three unique row buckets.
+        assert_eq!(mapping.len(), 3);
     }
 
     #[test]

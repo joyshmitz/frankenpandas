@@ -746,6 +746,8 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
     LengthMismatch { left: usize, right: usize },
+    #[error("invalid sorter permutation for column of length {len}: {reason}")]
+    InvalidSorter { len: usize, reason: String },
     #[error("mask must be Bool dtype; found {dtype:?}")]
     InvalidMaskType { dtype: DType },
     #[error("column dtype mismatch: left={left:?}, right={right:?}")]
@@ -2794,7 +2796,20 @@ impl Column {
     /// the end (consistent with `sort_values(true)`). Missing
     /// `needle` is rejected with a type error.
     pub fn searchsorted(&self, needle: &Scalar, side: &str) -> Result<usize, ColumnError> {
-        self.searchsorted_position(needle, side)
+        self.searchsorted_position(needle, side, None)
+    }
+
+    /// Position where `needle` would be inserted using an explicit sorter.
+    ///
+    /// Matches `pd.Series.searchsorted(value, side, sorter=...)` where
+    /// `sorter` is a permutation that sorts the column ascending.
+    pub fn searchsorted_with_sorter(
+        &self,
+        needle: &Scalar,
+        side: &str,
+        sorter: &[usize],
+    ) -> Result<usize, ColumnError> {
+        self.searchsorted_position(needle, side, Some(sorter))
     }
 
     /// Positions where `needles` would be inserted to preserve sort order.
@@ -2805,13 +2820,36 @@ impl Column {
     pub fn searchsorted_values(&self, needles: &[Scalar], side: &str) -> Result<Self, ColumnError> {
         let positions: Vec<Scalar> = needles
             .iter()
-            .map(|needle| self.searchsorted_position(needle, side))
+            .map(|needle| self.searchsorted_position(needle, side, None))
             .map(|result| result.map(|position| Scalar::Int64(position as i64)))
             .collect::<Result<Vec<_>, _>>()?;
         Self::new(DType::Int64, positions)
     }
 
-    fn searchsorted_position(&self, needle: &Scalar, side: &str) -> Result<usize, ColumnError> {
+    /// Positions where `needles` would be inserted using an explicit sorter.
+    ///
+    /// Matches `pd.Series.searchsorted(values, side, sorter=...)` for
+    /// array-like inputs. Returns an `Int64` column of insertion positions.
+    pub fn searchsorted_values_with_sorter(
+        &self,
+        needles: &[Scalar],
+        side: &str,
+        sorter: &[usize],
+    ) -> Result<Self, ColumnError> {
+        let positions: Vec<Scalar> = needles
+            .iter()
+            .map(|needle| self.searchsorted_position(needle, side, Some(sorter)))
+            .map(|result| result.map(|position| Scalar::Int64(position as i64)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(DType::Int64, positions)
+    }
+
+    fn searchsorted_position(
+        &self,
+        needle: &Scalar,
+        side: &str,
+        sorter: Option<&[usize]>,
+    ) -> Result<usize, ColumnError> {
         if side != "left" && side != "right" {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: side.to_string(),
@@ -2824,11 +2862,14 @@ impl Column {
             }));
         }
 
+        let sorter = self.validate_searchsorted_sorter(sorter)?;
+        let len = sorter.map_or(self.values.len(), <[usize]>::len);
         let mut lo = 0usize;
-        let mut hi = self.values.len();
+        let mut hi = len;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_val = &self.values[mid];
+            let mid_idx = sorter.map_or(mid, |indices| indices[mid]);
+            let mid_val = &self.values[mid_idx];
             // Values that are "missing" sort to the end; treat needle as
             // less than any missing slot.
             let ord = if mid_val.is_missing() {
@@ -2851,6 +2892,38 @@ impl Column {
             }
         }
         Ok(lo)
+    }
+
+    fn validate_searchsorted_sorter<'a>(
+        &self,
+        sorter: Option<&'a [usize]>,
+    ) -> Result<Option<&'a [usize]>, ColumnError> {
+        let Some(sorter) = sorter else {
+            return Ok(None);
+        };
+        let len = self.values.len();
+        if sorter.len() != len {
+            return Err(ColumnError::LengthMismatch {
+                left: len,
+                right: sorter.len(),
+            });
+        }
+        let mut seen = vec![false; len];
+        for &idx in sorter {
+            if idx >= len {
+                return Err(ColumnError::InvalidSorter {
+                    len,
+                    reason: format!("index {idx} out of bounds"),
+                });
+            }
+            if std::mem::replace(&mut seen[idx], true) {
+                return Err(ColumnError::InvalidSorter {
+                    len,
+                    reason: format!("index {idx} appears more than once"),
+                });
+            }
+        }
+        Ok(Some(sorter))
     }
 
     /// Cast the column to a target dtype.
@@ -4794,12 +4867,9 @@ mod tests {
 
         #[test]
         fn iter_values_preserves_order() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let collected: Vec<_> = col.iter_values().cloned().collect();
             assert_eq!(collected, col.values());
         }
@@ -4819,11 +4889,9 @@ mod tests {
                 Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
             assert!(!populated.has_any_missing());
 
-            let with_null = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("col");
+            let with_null =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                    .expect("col");
             assert!(with_null.has_any_missing());
         }
 
@@ -4839,11 +4907,8 @@ mod tests {
             .expect("col");
             assert!(all_null.all_missing());
 
-            let mixed = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("col");
+            let mixed = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                .expect("col");
             assert!(!mixed.all_missing());
         }
 
@@ -4857,11 +4922,7 @@ mod tests {
             ])
             .expect("col");
             let even = col
-                .apply_bool(|v| {
-                    v.to_f64()
-                        .map(|f| f as i64 % 2 == 0)
-                        .unwrap_or(false)
-                })
+                .apply_bool(|v| v.to_f64().map(|f| f as i64 % 2 == 0).unwrap_or(false))
                 .expect("apply_bool");
             assert_eq!(even.dtype(), DType::Bool);
             assert_eq!(even.values()[0], Scalar::Bool(false));
@@ -4896,22 +4957,15 @@ mod tests {
                 Scalar::Int64(6),
             ])
             .expect("col");
-            let evens = col.count_matching(|v| {
-                v.to_f64()
-                    .map(|f| f as i64 % 2 == 0)
-                    .unwrap_or(false)
-            });
+            let evens =
+                col.count_matching(|v| v.to_f64().map(|f| f as i64 % 2 == 0).unwrap_or(false));
             assert_eq!(evens, 3); // 2, 4, 6 — missing not counted.
         }
 
         #[test]
         fn zip_with_elementwise_combine() {
-            let a = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("a");
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .expect("a");
             let b = Column::from_values(vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -4938,25 +4992,18 @@ mod tests {
 
         #[test]
         fn iter_enumerate_yields_positions() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-            ])
-            .expect("col");
-            let collected: Vec<_> = col
-                .iter_enumerate()
-                .map(|(i, v)| (i, v.clone()))
-                .collect();
-            assert_eq!(collected, vec![(0, Scalar::Int64(10)), (1, Scalar::Int64(20))]);
+            let col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).expect("col");
+            let collected: Vec<_> = col.iter_enumerate().map(|(i, v)| (i, v.clone())).collect();
+            assert_eq!(
+                collected,
+                vec![(0, Scalar::Int64(10)), (1, Scalar::Int64(20))]
+            );
         }
 
         #[test]
         fn apply_bool_missing_maps_to_false() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("col");
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                .expect("col");
             let result = col.apply_bool(|_| true).expect("apply_bool");
             assert_eq!(result.values()[0], Scalar::Bool(true));
             // Missing input → false (per doc contract).
@@ -7668,6 +7715,88 @@ mod tests {
                 .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "left")
                 .unwrap_err();
             assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        #[test]
+        fn searchsorted_with_sorter_uses_argsort_permutation() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let sorter = col.argsort();
+            assert_eq!(
+                col.searchsorted_with_sorter(&Scalar::Int64(2), "left", &sorter)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                col.searchsorted_with_sorter(&Scalar::Int64(2), "right", &sorter)
+                    .unwrap(),
+                3
+            );
+            assert_eq!(
+                col.searchsorted_with_sorter(&Scalar::Int64(6), "left", &sorter)
+                    .unwrap(),
+                4
+            );
+        }
+
+        #[test]
+        fn searchsorted_values_with_sorter_returns_positions_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let sorter = col.argsort();
+            let positions = col
+                .searchsorted_values_with_sorter(
+                    &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(6)],
+                    "left",
+                    &sorter,
+                )
+                .expect("searchsorted");
+            assert_eq!(
+                positions.values(),
+                &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(4)]
+            );
+        }
+
+        #[test]
+        fn searchsorted_with_sorter_rejects_length_mismatch() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let err = col
+                .searchsorted_with_sorter(&Scalar::Int64(1), "left", &[0])
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                crate::ColumnError::LengthMismatch { left: 2, right: 1 }
+            ));
+        }
+
+        #[test]
+        fn searchsorted_with_sorter_rejects_duplicate_or_oob_indices() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let duplicate = col
+                .searchsorted_with_sorter(&Scalar::Int64(1), "left", &[0, 0])
+                .unwrap_err();
+            assert!(matches!(
+                duplicate,
+                crate::ColumnError::InvalidSorter { .. }
+            ));
+
+            let out_of_bounds = col
+                .searchsorted_with_sorter(&Scalar::Int64(1), "left", &[0, 2])
+                .unwrap_err();
+            assert!(matches!(
+                out_of_bounds,
+                crate::ColumnError::InvalidSorter { .. }
+            ));
         }
     }
 

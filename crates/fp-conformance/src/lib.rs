@@ -24,10 +24,11 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
-    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
-    write_csv_string, write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes,
-    write_json_string, write_jsonl_string, write_parquet_bytes,
+    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
+    read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
+    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes, write_csv_string,
+    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
+    write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -235,6 +236,8 @@ pub enum FixtureOperation {
     DropNa,
     // FP-P2C-008: IO round-trip
     CsvRoundTrip,
+    #[serde(rename = "csv_read_frame", alias = "csv_read_frame_default")]
+    CsvReadFrame,
     #[serde(rename = "json_round_trip", alias = "json_round_trip_default")]
     JsonRoundTrip,
     #[serde(rename = "jsonl_round_trip", alias = "jsonl_round_trip_default")]
@@ -1046,6 +1049,7 @@ impl FixtureOperation {
             Self::FillNa => "fill_na",
             Self::DropNa => "drop_na",
             Self::CsvRoundTrip => "csv_round_trip",
+            Self::CsvReadFrame => "csv_read_frame",
             Self::JsonRoundTrip => "json_round_trip",
             Self::JsonlRoundTrip => "jsonl_round_trip",
             Self::ParquetRoundTrip => "parquet_round_trip",
@@ -1635,6 +1639,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
+    pub csv_on_bad_lines: Option<String>,
+    #[serde(default)]
     pub json_input: Option<String>,
     #[serde(default)]
     pub json_orient: Option<String>,
@@ -2160,6 +2166,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns => &["CC-002", "CC-005"],
         FixtureOperation::CsvRoundTrip
+        | FixtureOperation::CsvReadFrame
         | FixtureOperation::JsonRoundTrip
         | FixtureOperation::JsonlRoundTrip
         | FixtureOperation::ParquetRoundTrip
@@ -6747,6 +6754,28 @@ fn run_fixture_operation(
                 }
             }
         }
+        FixtureOperation::CsvReadFrame => {
+            let actual = execute_csv_read_frame_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected csv_read_frame error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected csv_read_frame to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected csv_read_frame to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for csv_read_frame".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::JsonRoundTrip => {
             let actual = execute_json_round_trip_fixture_operation(fixture);
             run_bool_round_trip_match(actual, expected, "json_round_trip")
@@ -9905,6 +9934,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesRpartitionDf
         | FixtureOperation::SeriesSplitDf
         | FixtureOperation::SeriesExtractDf
+        | FixtureOperation::CsvReadFrame
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean => fixture
@@ -10505,6 +10535,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesRpartitionDf
         | FixtureOperation::SeriesSplitDf
         | FixtureOperation::SeriesExtractDf
+        | FixtureOperation::CsvReadFrame
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean => response
@@ -11607,6 +11638,29 @@ fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<b
     let output = write_csv_string(&df).map_err(|err| format!("csv write failed: {err}"))?;
     let reparsed = read_csv_str(&output).map_err(|err| format!("csv reparse failed: {err}"))?;
     Ok(dataframes_semantically_equal(&df, &reparsed))
+}
+
+fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
+    let csv_input = fixture
+        .csv_input
+        .as_ref()
+        .ok_or_else(|| "csv_input is required for csv_read_frame".to_owned())?;
+    let on_bad_lines = match fixture.csv_on_bad_lines.as_deref().unwrap_or("error") {
+        "error" => CsvOnBadLines::Error,
+        "warn" => CsvOnBadLines::Warn,
+        "skip" => CsvOnBadLines::Skip,
+        other => {
+            return Err(format!(
+                "csv_on_bad_lines must be one of error|warn|skip, got '{other}'"
+            ));
+        }
+    };
+
+    let options = CsvReadOptions {
+        on_bad_lines,
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options(csv_input, &options).map_err(|err| format!("csv read failed: {err}"))
 }
 
 fn dataframes_semantically_equal(left: &DataFrame, right: &DataFrame) -> bool {
@@ -14785,6 +14839,39 @@ fn execute_and_compare_differential(
         FixtureOperation::CsvRoundTrip => {
             let actual = execute_csv_round_trip_fixture_operation(fixture);
             diff_bool_round_trip_result(actual, expected, "csv_round_trip")
+        }
+        FixtureOperation::CsvReadFrame => {
+            let actual = execute_csv_read_frame_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "csv_read_frame.error",
+                        format!(
+                            "expected csv_read_frame error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "csv_read_frame.error",
+                        "expected csv_read_frame to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "csv_read_frame.error",
+                        "expected csv_read_frame to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_frame or expected_error required for csv_read_frame".to_owned()),
+            }
         }
         FixtureOperation::JsonRoundTrip => {
             let actual = execute_json_round_trip_fixture_operation(fixture);

@@ -10,7 +10,7 @@ use arrow::array::{
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
-use csv::{ReaderBuilder, WriterBuilder};
+use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series};
 use fp_index::{Index, IndexLabel};
@@ -62,6 +62,13 @@ pub enum JsonOrient {
     Values,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsvOnBadLines {
+    Error,
+    Warn,
+    Skip,
+}
+
 #[derive(Debug, Clone)]
 pub struct CsvReadOptions {
     pub delimiter: u8,
@@ -95,6 +102,10 @@ pub struct CsvReadOptions {
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
     pub comment: Option<u8>,
+    /// How to handle rows with more fields than the header width.
+    /// Matches pandas `on_bad_lines` parameter for the supported
+    /// `error`/`warn`/`skip` modes.
+    pub on_bad_lines: CsvOnBadLines,
 }
 
 impl Default for CsvReadOptions {
@@ -111,6 +122,7 @@ impl Default for CsvReadOptions {
             skiprows: 0,
             dtype: None,
             comment: None,
+            on_bad_lines: CsvOnBadLines::Error,
         }
     }
 }
@@ -307,11 +319,48 @@ fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoErro
     }
 }
 
+fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options: &CsvReadOptions) {
+    for (idx, col) in columns.iter_mut().enumerate() {
+        let field = record.get(idx).unwrap_or_default();
+        col.push(parse_scalar_with_options(
+            field,
+            options.na_filter,
+            options.keep_default_na,
+            &options.na_values,
+        ));
+    }
+}
+
+fn should_skip_bad_csv_record(
+    record: &StringRecord,
+    expected_fields: usize,
+    on_bad_lines: CsvOnBadLines,
+) -> bool {
+    if record.len() <= expected_fields {
+        return false;
+    }
+
+    match on_bad_lines {
+        CsvOnBadLines::Error => false,
+        CsvOnBadLines::Warn => {
+            eprintln!(
+                "Skipping bad CSV line: expected {expected_fields} fields, found {}",
+                record.len()
+            );
+            true
+        }
+        CsvOnBadLines::Skip => true,
+    }
+}
+
 // ── CSV with options ───────────────────────────────────────────────────
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
     let mut builder = ReaderBuilder::new();
     builder.has_headers(false).delimiter(options.delimiter);
+    if options.on_bad_lines != CsvOnBadLines::Error {
+        builder.flexible(true);
+    }
     if let Some(c) = options.comment {
         builder.comment(Some(c));
     }
@@ -360,15 +409,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .collect();
 
         if (row_count as usize) < max_rows {
-            for (idx, col) in columns.iter_mut().enumerate() {
-                let field = first_record.get(idx).unwrap_or_default();
-                col.push(parse_scalar_with_options(
-                    field,
-                    options.na_filter,
-                    options.keep_default_na,
-                    &options.na_values,
-                ));
-            }
+            append_csv_record(&mut columns, &first_record, options);
             row_count += 1;
         }
 
@@ -385,15 +426,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             break;
         }
         let record = row?;
-        for (idx, col) in columns.iter_mut().enumerate() {
-            let field = record.get(idx).unwrap_or_default();
-            col.push(parse_scalar_with_options(
-                field,
-                options.na_filter,
-                options.keep_default_na,
-                &options.na_values,
-            ));
+        if should_skip_bad_csv_record(&record, columns.len(), options.on_bad_lines) {
+            continue;
         }
+        append_csv_record(&mut columns, &record, options);
         row_count += 1;
     }
     reject_duplicate_headers(&headers)?;
@@ -2752,7 +2788,8 @@ mod tests {
     // === bd-2gi.19: IO Complete Contract Tests ===
 
     use super::{
-        CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str, write_json_string,
+        CsvOnBadLines, CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str,
+        write_json_string,
     };
 
     #[test]
@@ -2929,6 +2966,53 @@ mod tests {
         assert!(
             matches!(&err, IoError::Csv(_)),
             "expected CSV parser error for ragged row, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn csv_on_bad_lines_skip_skips_extra_field_rows() {
+        let input = "a,b\n1,2\n3,4,5\n6,7\n";
+        let opts = CsvReadOptions {
+            on_bad_lines: CsvOnBadLines::Skip,
+            ..Default::default()
+        };
+
+        let frame = read_csv_with_options(input, &opts).expect("parse with skipped bad line");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("b").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(6));
+        assert_eq!(frame.column("b").unwrap().values()[1], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn csv_on_bad_lines_warn_skips_extra_field_rows() {
+        let input = "a,b\n1,2\n3,4,5\n6,7\n";
+        let opts = CsvReadOptions {
+            on_bad_lines: CsvOnBadLines::Warn,
+            ..Default::default()
+        };
+
+        let frame = read_csv_with_options(input, &opts).expect("parse with warned bad line");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("b").unwrap().values()[1], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn csv_on_bad_lines_skip_preserves_short_rows_as_missing() {
+        let input = "a,b\n1,2\n3\n6,7\n";
+        let opts = CsvReadOptions {
+            on_bad_lines: CsvOnBadLines::Skip,
+            ..Default::default()
+        };
+
+        let frame = read_csv_with_options(input, &opts).expect("parse short row");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(
+            frame.column("b").unwrap().values()[1],
+            Scalar::Null(NullKind::Null)
         );
     }
 

@@ -530,7 +530,10 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
 }
 
 fn multiindex_tuple_to_string(labels: &[&IndexLabel]) -> String {
-    let parts = labels.iter().map(|label| label.to_string()).collect::<Vec<_>>();
+    let parts = labels
+        .iter()
+        .map(|label| label.to_string())
+        .collect::<Vec<_>>();
     format!("({})", parts.join(", "))
 }
 
@@ -7361,8 +7364,16 @@ impl Ewm<'_> {
         let mut nobs = 0_usize;
 
         for (a, b) in a_vals.iter().zip(b_vals.iter()) {
-            let x = if a.is_missing() { None } else { a.to_f64().ok() };
-            let y = if b.is_missing() { None } else { b.to_f64().ok() };
+            let x = if a.is_missing() {
+                None
+            } else {
+                a.to_f64().ok()
+            };
+            let y = if b.is_missing() {
+                None
+            } else {
+                b.to_f64().ok()
+            };
             match (x, y) {
                 (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan() => {
                     nobs += 1;
@@ -7383,6 +7394,90 @@ impl Ewm<'_> {
                         let bias = 1.0 - (1.0 - alpha).powi(nobs as i32);
                         let adjusted = if bias == 0.0 { cov_xy } else { cov_xy / bias };
                         out.push(Scalar::Float64(adjusted));
+                    }
+                }
+                _ => out.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// EWM Pearson correlation with another Series.
+    ///
+    /// Matches `series.ewm(span=...).corr(other)`. Uses the same
+    /// exponentially weighted covariance path as `cov(other)` and
+    /// normalizes by the two exponentially weighted standard deviations.
+    pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        let a_vals = self.series.column().values();
+        let b_vals = other.column().values();
+        let mut out = Vec::with_capacity(a_vals.len());
+
+        let alpha = self.alpha;
+        let one_minus_alpha = 1.0 - alpha;
+        let mut mean_x = 0.0_f64;
+        let mut mean_y = 0.0_f64;
+        let mut var_x = 0.0_f64;
+        let mut var_y = 0.0_f64;
+        let mut cov_xy = 0.0_f64;
+        let mut nobs = 0_usize;
+
+        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
+            let x = if a.is_missing() {
+                None
+            } else {
+                a.to_f64().ok()
+            };
+            let y = if b.is_missing() {
+                None
+            } else {
+                b.to_f64().ok()
+            };
+            match (x, y) {
+                (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan() => {
+                    nobs += 1;
+                    if nobs == 1 {
+                        mean_x = xv;
+                        mean_y = yv;
+                        var_x = 0.0;
+                        var_y = 0.0;
+                        cov_xy = 0.0;
+                        out.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+
+                    let delta_x = xv - mean_x;
+                    let delta_y = yv - mean_y;
+                    mean_x += alpha * delta_x;
+                    mean_y += alpha * delta_y;
+                    var_x = one_minus_alpha * (var_x + alpha * delta_x * delta_x);
+                    var_y = one_minus_alpha * (var_y + alpha * delta_y * delta_y);
+                    cov_xy = one_minus_alpha * (cov_xy + alpha * delta_x * delta_y);
+
+                    let bias = 1.0 - one_minus_alpha.powi(nobs as i32);
+                    if bias <= f64::EPSILON {
+                        out.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+
+                    let adj_var_x = var_x / bias;
+                    let adj_var_y = var_y / bias;
+                    let adj_cov = cov_xy / bias;
+                    if adj_var_x <= f64::EPSILON || adj_var_y <= f64::EPSILON {
+                        out.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        let corr = adj_cov / (adj_var_x.sqrt() * adj_var_y.sqrt());
+                        out.push(Scalar::Float64(corr.clamp(-1.0, 1.0)));
                     }
                 }
                 _ => out.push(Scalar::Null(NullKind::NaN)),
@@ -13957,15 +14052,11 @@ impl DataFrame {
                 })?;
                 Ok(multiindex_tuple_to_string(&tuple))
             }
-            None => self
-                .column_order
-                .get(position)
-                .cloned()
-                .ok_or_else(|| {
-                    FrameError::CompatibilityRejected(format!(
-                        "column position {position} out of bounds"
-                    ))
-                }),
+            None => self.column_order.get(position).cloned().ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "column position {position} out of bounds"
+                ))
+            }),
         }
     }
 
@@ -18813,9 +18904,7 @@ impl DataFrame {
             ))
         })?;
         let col = self.columns.get(column).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!(
-                "DataFrame.at: column {column:?} not found"
-            ))
+            FrameError::CompatibilityRejected(format!("DataFrame.at: column {column:?} not found"))
         })?;
         Ok(col.values()[row].clone())
     }
@@ -39476,12 +39565,8 @@ mod tests {
         let mut cols = BTreeMap::new();
         cols.insert(
             "a".to_string(),
-            Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .unwrap(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
         );
         cols.insert(
             "b".to_string(),
@@ -39492,12 +39577,9 @@ mod tests {
             ])
             .unwrap(),
         );
-        let df = DataFrame::new_with_column_order(
-            index,
-            cols,
-            vec!["a".to_string(), "b".to_string()],
-        )
-        .unwrap();
+        let df =
+            DataFrame::new_with_column_order(index, cols, vec!["a".to_string(), "b".to_string()])
+                .unwrap();
         assert_eq!(
             df.at(&IndexLabel::Int64(20), "a").unwrap(),
             Scalar::Int64(2)
@@ -39510,11 +39592,7 @@ mod tests {
 
     #[test]
     fn dataframe_at_missing_label_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
         assert!(df.at(&IndexLabel::Int64(999), "a").is_err());
         assert!(df.at(&IndexLabel::Int64(0), "missing").is_err());
     }
@@ -44696,6 +44774,64 @@ mod tests {
         assert!(matches!(err, FrameError::LengthMismatch { .. }));
     }
 
+    #[test]
+    fn ewm_corr_identical_series_is_one() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = a.ewm(None, Some(0.5)).corr(&a).unwrap();
+        assert!(result.values()[0].is_missing());
+        let v = expect_float64(&result.values()[3]);
+        assert!((v - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ewm_corr_constant_series_is_nan() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = a.ewm(None, Some(0.5)).corr(&b).unwrap();
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn ewm_corr_length_mismatch_errors() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let b = Series::from_values("b", vec![0_i64.into()], vec![Scalar::Float64(3.0)]).unwrap();
+        let err = a.ewm(None, Some(0.5)).corr(&b).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
     // ── autocorr tests ──
 
     #[test]
@@ -45826,16 +45962,10 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "label"],
             vec![
-                (
-                    "a",
-                    vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
-                ),
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 (
                     "label",
-                    vec![
-                        Scalar::Utf8("x".into()),
-                        Scalar::Utf8("y".into()),
-                    ],
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
                 ),
             ],
         )
@@ -48637,8 +48767,7 @@ mod tests {
 
     #[test]
     fn df_quantile_axis1_rejects_out_of_range() {
-        let df =
-            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(1.0)])]).unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(1.0)])]).unwrap();
         assert!(df.quantile_axis1(1.5).is_err());
         assert!(df.quantile_axis1(-0.1).is_err());
     }
@@ -48649,14 +48778,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                (
-                    "a",
-                    vec![Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)],
-                ),
-                (
-                    "b",
-                    vec![Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)],
-                ),
+                ("a", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)]),
             ],
         )
         .unwrap();
@@ -50424,7 +50547,10 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+                ),
                 (
                     "b",
                     vec![
@@ -51509,11 +51635,11 @@ mod tests {
         assert_eq!(skew_df.column_names(), vec!["x", "y"]);
         // Symmetric column x should produce skew ≈ 0 at position 4.
         let x_last = &skew_df.columns["x"].values()[4];
-        if let Scalar::Float64(v) = x_last {
-            assert!(v.abs() < 1e-9, "symmetric x should skew to 0, got {v}");
-        } else {
-            panic!("expected Float64 last value for x");
-        }
+        assert!(matches!(x_last, Scalar::Float64(_)));
+        let Scalar::Float64(v) = x_last else {
+            return;
+        };
+        assert!(v.abs() < 1e-9, "symmetric x should skew to 0, got {v}");
     }
 
     #[test]
@@ -51535,11 +51661,11 @@ mod tests {
         let kurt_df = df.expanding(Some(4)).kurt().unwrap();
         // pandas expanding kurt of [1..=5] at position 4 is -1.2.
         let last = &kurt_df.columns["x"].values()[4];
-        if let Scalar::Float64(v) = last {
-            assert!((v + 1.2).abs() < 1e-9, "expected -1.2, got {v}");
-        } else {
-            panic!("expected Float64 last value");
-        }
+        assert!(matches!(last, Scalar::Float64(_)));
+        let Scalar::Float64(v) = last else {
+            return;
+        };
+        assert!((v + 1.2).abs() < 1e-9, "expected -1.2, got {v}");
     }
 
     #[test]

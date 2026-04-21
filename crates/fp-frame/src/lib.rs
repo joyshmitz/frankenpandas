@@ -249,6 +249,7 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
         "min" => vals.iter().copied().fold(f64::INFINITY, f64::min),
         "max" => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         "first" => vals.first().copied().unwrap_or(f64::NAN),
+        "prod" => vals.iter().product(),
         "median" => {
             if vals.is_empty() {
                 return Ok(f64::NAN);
@@ -17338,6 +17339,8 @@ impl DataFrame {
                     "var" => s.var()?,
                     "median" => s.median()?,
                     "count" => Scalar::Int64(s.count() as i64),
+                    "skew" => Scalar::Float64(s.skew()?),
+                    "kurt" | "kurtosis" => Scalar::Float64(s.kurt()?),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
@@ -37340,6 +37343,75 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_pivot_table_prod() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(7.0),
+                    Scalar::Float64(11.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pt = df.pivot_table("val", "row", "col", "prod").unwrap();
+
+        assert_eq!(pt.column_names(), vec!["c1", "c2"]);
+        assert_eq!(pt.columns["c1"].values()[0], Scalar::Float64(6.0));
+        assert_eq!(pt.columns["c2"].values()[0], Scalar::Float64(5.0));
+        assert_eq!(pt.columns["c1"].values()[1], Scalar::Float64(7.0));
+        assert_eq!(pt.columns["c2"].values()[1], Scalar::Float64(11.0));
+    }
+
+    #[test]
     fn dataframe_pivot_table_margins_false_matches_base() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -51388,6 +51460,106 @@ mod tests {
         assert!(skew_v.abs() < 1e-10);
         let kurt_v = expect_float64(&kurt.column().values()[0]);
         assert!((kurt_v + 1.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn df_apply_axis0_skew_matches_series_skew() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.apply("skew", 0).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("x".to_string()),
+                IndexLabel::Utf8("y".to_string()),
+            ]
+        );
+        let x_skew = expect_float64(&result.column().values()[0]);
+        assert!(x_skew.abs() < 1e-10, "x_skew was {x_skew}");
+
+        let y_series = Series::from_values(
+            "y",
+            (0..5).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let expected_y = y_series.skew().unwrap();
+        let got_y = expect_float64(&result.column().values()[1]);
+        assert!(
+            (got_y - expected_y).abs() < 1e-10,
+            "expected {expected_y}, got {got_y}"
+        );
+    }
+
+    #[test]
+    fn df_apply_axis0_kurt_and_kurtosis_aliases() {
+        let df = DataFrame::from_dict(
+            &["v"],
+            vec![(
+                "v",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let kurt = df.apply("kurt", 0).unwrap();
+        let kurtosis = df.apply("kurtosis", 0).unwrap();
+
+        let got_kurt = expect_float64(&kurt.column().values()[0]);
+        let got_kurtosis = expect_float64(&kurtosis.column().values()[0]);
+        assert!((got_kurt - got_kurtosis).abs() < 1e-12);
+
+        let v_series = Series::from_values(
+            "v",
+            (0..5).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let expected = v_series.kurt().unwrap();
+        assert!((got_kurt - expected).abs() < 1e-10);
     }
 
     #[test]

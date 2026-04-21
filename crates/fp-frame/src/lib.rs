@@ -21165,13 +21165,33 @@ impl DataFrame {
             out
         }
 
-        fn render_grid_border(widths: &[usize], ch: char) -> String {
+        fn render_grid_border(
+            widths: &[usize],
+            left: char,
+            join: char,
+            right: char,
+            ch: char,
+        ) -> String {
             let mut out = String::new();
-            out.push('+');
+            out.push(left);
             for width in widths {
                 out.push_str(&ch.to_string().repeat(*width + 2));
-                out.push('+');
+                out.push(join);
             }
+            out.pop();
+            out.push(right);
+            out
+        }
+
+        fn render_box_row(cells: &[String], widths: &[usize], edge: char, divider: char) -> String {
+            let mut out = String::new();
+            out.push(edge);
+            for (cell, width) in cells.iter().zip(widths) {
+                out.push_str(&format!(" {:width$} ", cell, width = *width));
+                out.push(divider);
+            }
+            out.pop();
+            out.push(edge);
             out
         }
 
@@ -21236,8 +21256,8 @@ impl DataFrame {
             }
             "grid" => {
                 let mut lines = Vec::with_capacity(nrows * 2 + 3);
-                let border = render_grid_border(&widths, '-');
-                let header_border = render_grid_border(&widths, '=');
+                let border = render_grid_border(&widths, '+', '+', '+', '-');
+                let header_border = render_grid_border(&widths, '+', '+', '+', '=');
                 lines.push(border.clone());
                 lines.push(render_markdown_row(&headers, &widths));
                 lines.push(header_border);
@@ -21266,7 +21286,7 @@ impl DataFrame {
             }
             "psql" => {
                 let mut lines = Vec::with_capacity(nrows + 4);
-                let border = render_grid_border(&widths, '-');
+                let border = render_grid_border(&widths, '+', '+', '+', '-');
                 lines.push(border.clone());
                 lines.push(render_psql_row(&headers, &widths));
                 lines.push(render_psql_header_rule(&widths));
@@ -21274,6 +21294,23 @@ impl DataFrame {
                     lines.push(render_psql_row(&row, &widths));
                 }
                 lines.push(border);
+                Ok(lines.join("\n"))
+            }
+            "rounded_grid" => {
+                let mut lines = Vec::with_capacity(nrows * 2 + 3);
+                let top_border = render_grid_border(&widths, '╭', '┬', '╮', '─');
+                let row_border = render_grid_border(&widths, '├', '┼', '┤', '─');
+                let bottom_border = render_grid_border(&widths, '╰', '┴', '╯', '─');
+                lines.push(top_border);
+                lines.push(render_box_row(&headers, &widths, '│', '│'));
+                lines.push(row_border.clone());
+                for (idx, row) in rows.into_iter().enumerate() {
+                    lines.push(render_box_row(&row, &widths, '│', '│'));
+                    if idx + 1 != nrows {
+                        lines.push(row_border.clone());
+                    }
+                }
+                lines.push(bottom_border);
                 Ok(lines.join("\n"))
             }
             "rst" => {
@@ -46944,18 +46981,39 @@ mod tests {
     }
 
     #[test]
-    fn df_to_markdown_rejects_unknown_tablefmt() {
+    fn df_to_markdown_rounded_grid_without_index() {
+        let df = DataFrame::from_dict(
+            &["animal", "legs"],
+            vec![
+                (
+                    "animal",
+                    vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+                ),
+                ("legs", vec![Scalar::Int64(4), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("rounded_grid")).unwrap();
+        assert_eq!(
+            result,
+            "╭────────┬──────╮\n│ animal │ legs │\n├────────┼──────┤\n│ elk    │ 4    │\n├────────┼──────┤\n│ pig    │ 4    │\n╰────────┴──────╯"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_rounded_grid_with_index() {
         let df = DataFrame::from_dict(
             &["val"],
             vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
         )
         .unwrap();
 
-        let err = df.to_markdown(true, Some("rounded_grid")).unwrap_err();
-        assert!(matches!(
-            err,
-            FrameError::CompatibilityRejected(msg) if msg.contains("unsupported to_markdown tablefmt")
-        ));
+        let result = df.to_markdown(true, Some("rounded_grid")).unwrap();
+        assert_eq!(
+            result,
+            "╭─────┬─────╮\n│     │ val │\n├─────┼─────┤\n│ 0   │ 10  │\n├─────┼─────┤\n│ 1   │ 20  │\n╰─────┴─────╯"
+        );
     }
 
     #[test]

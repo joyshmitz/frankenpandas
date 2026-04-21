@@ -25742,22 +25742,13 @@ impl DataFrameGroupBy<'_> {
 
     /// Open-High-Low-Close per group.
     ///
-    /// Matches `groupby.ohlc()`. Returns columns: open, high, low, close.
+    /// Matches the current FrankenPandas `groupby.ohlc()` data contract.
+    /// The returned `DataFrame` still uses flat storage column names.
+    /// Use `ohlc_with_column_multiindex()` for the parallel pandas-style
+    /// MultiIndex column labels.
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
-        let value_cols: Vec<String> = self
-            .df
-            .column_names()
-            .iter()
-            .filter(|c| {
-                if self.by.contains(c) {
-                    return false;
-                }
-                let dt = self.df.columns[c.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
-            })
-            .map(|s| s.to_string())
-            .collect();
+        let value_cols = self.ohlc_value_columns();
 
         let mut out_labels = Vec::new();
         let mut result_cols = BTreeMap::new();
@@ -25826,6 +25817,50 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
         })
+    }
+
+    fn ohlc_value_columns(&self) -> Vec<String> {
+        self.df
+            .column_names()
+            .iter()
+            .filter(|c| {
+                if self.by.contains(c) {
+                    return false;
+                }
+                let dt = self.df.columns[c.as_str()].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// pandas-style column MultiIndex for `groupby.ohlc()`.
+    ///
+    /// The first level is the source value column and the second level is one
+    /// of `open`, `high`, `low`, or `close`.
+    pub fn ohlc_column_multiindex(&self) -> Result<fp_index::MultiIndex, FrameError> {
+        let value_cols = self.ohlc_value_columns();
+        let stats = ["open", "high", "low", "close"];
+        let mut top = Vec::with_capacity(value_cols.len() * stats.len());
+        let mut bottom = Vec::with_capacity(value_cols.len() * stats.len());
+
+        for col_name in &value_cols {
+            for stat in stats {
+                top.push(IndexLabel::Utf8(col_name.clone()));
+                bottom.push(IndexLabel::Utf8(stat.to_owned()));
+            }
+        }
+
+        Ok(fp_index::MultiIndex::from_arrays(vec![top, bottom])?)
+    }
+
+    /// Return the current flat OHLC frame plus pandas-style MultiIndex columns.
+    pub fn ohlc_with_column_multiindex(
+        &self,
+    ) -> Result<(DataFrame, fp_index::MultiIndex), FrameError> {
+        let frame = self.ohlc()?;
+        let columns = self.ohlc_column_multiindex()?;
+        Ok((frame, columns))
     }
 
     /// Forward-fill missing values within each group.
@@ -45165,6 +45200,125 @@ mod tests {
         assert_eq!(
             result.columns()["qty_low"].values()[1],
             Scalar::Float64(4.0)
+        );
+    }
+
+    #[test]
+    fn groupby_ohlc_single_value_column_exposes_column_multiindex() {
+        let df = DataFrame::from_dict(
+            &["g", "price"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "price",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(12.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["g"]).unwrap();
+        let (_frame, columns) = gb.ohlc_with_column_multiindex().unwrap();
+
+        let top = columns.get_level_values(0).unwrap();
+        let bottom = columns.get_level_values(1).unwrap();
+        assert_eq!(
+            top.labels(),
+            &[
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+            ]
+        );
+        assert_eq!(
+            bottom.labels(),
+            &[
+                IndexLabel::Utf8("open".into()),
+                IndexLabel::Utf8("high".into()),
+                IndexLabel::Utf8("low".into()),
+                IndexLabel::Utf8("close".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_ohlc_multiple_value_columns_expose_column_multiindex() {
+        let df = DataFrame::from_dict(
+            &["g", "price", "qty"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "price",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(11.0),
+                        Scalar::Float64(12.0),
+                    ],
+                ),
+                (
+                    "qty",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["g"]).unwrap();
+        let (_frame, columns) = gb.ohlc_with_column_multiindex().unwrap();
+
+        let top = columns.get_level_values(0).unwrap();
+        let bottom = columns.get_level_values(1).unwrap();
+        assert_eq!(
+            top.labels(),
+            &[
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("qty".into()),
+                IndexLabel::Utf8("qty".into()),
+                IndexLabel::Utf8("qty".into()),
+                IndexLabel::Utf8("qty".into()),
+            ]
+        );
+        assert_eq!(
+            bottom.labels(),
+            &[
+                IndexLabel::Utf8("open".into()),
+                IndexLabel::Utf8("high".into()),
+                IndexLabel::Utf8("low".into()),
+                IndexLabel::Utf8("close".into()),
+                IndexLabel::Utf8("open".into()),
+                IndexLabel::Utf8("high".into()),
+                IndexLabel::Utf8("low".into()),
+                IndexLabel::Utf8("close".into()),
+            ]
         );
     }
 

@@ -1788,6 +1788,35 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Percentage change with optional null fill before computation.
+    ///
+    /// Matches `pd.Series.pct_change(periods, fill_method=..., limit=...)`.
+    /// `fill_method=None` preserves pandas 2.2 default behavior (no fill).
+    /// `"ffill"` / `"pad"` forward-fill missing values first, while
+    /// `"bfill"` / `"backfill"` backward-fill first. `limit` caps
+    /// consecutive fills and is ignored when `fill_method` is `None`.
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Self, ColumnError> {
+        let filled = match fill_method {
+            None => self.clone(),
+            Some(method) => match method {
+                "ffill" | "pad" => self.ffill(limit)?,
+                "bfill" | "backfill" => self.bfill(limit)?,
+                other => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: other.to_string(),
+                        dtype: self.dtype,
+                    }));
+                }
+            },
+        };
+        filled.pct_change(periods)
+    }
+
     /// Summary descriptive statistics.
     ///
     /// Matches `pd.Series.describe()` for numeric columns: returns the
@@ -5922,6 +5951,89 @@ mod tests {
                 Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(5.0)]).expect("col");
             let r = col.pct_change(1).expect("pct_change");
             assert!(r.values()[1].is_missing());
+        }
+
+        #[test]
+        fn pct_change_with_fill_ffill_uses_filled_previous_value() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(12.0),
+            ])
+            .expect("col");
+            let r = col
+                .pct_change_with_fill(1, Some("ffill"), None)
+                .expect("pct_change_with_fill");
+            assert!(r.values()[0].is_missing());
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if v.abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[1]
+            );
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if (*v - 0.2).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[2]
+            );
+        }
+
+        #[test]
+        fn pct_change_with_fill_limit_caps_forward_fill_runs() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+            ])
+            .expect("col");
+            let r = col
+                .pct_change_with_fill(1, Some("ffill"), Some(1))
+                .expect("pct_change_with_fill");
+            assert!(r.values()[0].is_missing());
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if v.abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[1]
+            );
+            assert!(r.values()[2].is_missing());
+            assert!(r.values()[3].is_missing());
+        }
+
+        #[test]
+        fn pct_change_with_fill_bfill_aliases_backward_fill() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+            ])
+            .expect("col");
+            let r = col
+                .pct_change_with_fill(1, Some("backfill"), None)
+                .expect("pct_change_with_fill");
+            assert!(r.values()[0].is_missing());
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if (*v - 1.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[1]
+            );
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if v.abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[2]
+            );
+        }
+
+        #[test]
+        fn pct_change_with_fill_rejects_invalid_method() {
+            let col =
+                Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).expect("col");
+            let err = col
+                .pct_change_with_fill(1, Some("nearest"), None)
+                .expect_err("invalid fill_method should error");
+            assert!(matches!(
+                err,
+                crate::ColumnError::Type(fp_types::TypeError::NonNumericValue { .. })
+            ));
         }
 
         #[test]

@@ -3014,11 +3014,22 @@ impl Series {
     /// Return unique non-null values in first-seen order.
     ///
     /// Matches `pd.Series.unique()`.
+    ///
+    /// Values are returned in first-seen order (pandas preserves
+    /// appearance order, not sort order). A single missing marker is
+    /// retained: pandas' `Series([1, NaN, 2, NaN, 1]).unique()`
+    /// returns `[1, NaN, 2]`, not `[1, 2]` — NaN counts as one
+    /// distinct category.
     #[must_use]
     pub fn unique(&self) -> Vec<Scalar> {
         let mut seen = Vec::<Scalar>::new();
+        let mut missing_seen = false;
         for value in self.column.values() {
             if value.is_missing() {
+                if !missing_seen {
+                    seen.push(value.clone());
+                    missing_seen = true;
+                }
                 continue;
             }
             if !seen.iter().any(|existing| existing.semantic_eq(value)) {
@@ -29651,7 +29662,10 @@ mod tests {
     }
 
     #[test]
-    fn series_unique_returns_first_seen_order_skipping_nulls() {
+    fn series_unique_returns_first_seen_order_retaining_one_null() {
+        // pandas Series([3, 1, NaN, 3, NaN, 2]).unique() → [3, 1, NaN, 2].
+        // NaN counts as a single distinct value preserved in first-seen
+        // position; subsequent NaN occurrences are deduped.
         let s = Series::from_values(
             "vals",
             vec![
@@ -29660,22 +29674,44 @@ mod tests {
                 IndexLabel::from("c"),
                 IndexLabel::from("d"),
                 IndexLabel::from("e"),
+                IndexLabel::from("f"),
             ],
             vec![
                 Scalar::Int64(3),
                 Scalar::Int64(1),
                 Scalar::Null(NullKind::Null),
                 Scalar::Int64(3),
+                Scalar::Null(NullKind::Null),
                 Scalar::Int64(2),
             ],
         )
         .unwrap();
 
         let uniq = s.unique();
-        assert_eq!(
-            uniq,
-            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]
-        );
+        assert_eq!(uniq.len(), 4);
+        assert_eq!(uniq[0], Scalar::Int64(3));
+        assert_eq!(uniq[1], Scalar::Int64(1));
+        assert!(uniq[2].is_missing());
+        assert_eq!(uniq[3], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_unique_retains_one_null_when_only_nulls() {
+        let s = Series::from_values(
+            "nulls",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let uniq = s.unique();
+        // pandas emits a single NaN marker; semantic_eq treats different
+        // missing kinds as equal, so the NaN variant dedupes against Null.
+        assert_eq!(uniq.len(), 1);
+        assert!(uniq[0].is_missing());
     }
 
     #[test]

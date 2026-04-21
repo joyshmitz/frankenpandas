@@ -26117,6 +26117,81 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Transform each group using a user-supplied closure.
+    ///
+    /// Matches `df.groupby(col).transform(lambda s: ...)` — the closure
+    /// receives a per-group Series (one call per value column × per group)
+    /// and must return a Series of the same length. Values are scattered
+    /// back to their original row positions, so the output DataFrame has the
+    /// same shape and index as the input. Group-by key columns are excluded
+    /// from the transform (matching pandas). The closure returning a Series
+    /// whose length differs from its input is rejected.
+    pub fn transform_fn<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let n = self.df.len();
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut out_vals = vec![Scalar::Null(NullKind::NaN); n];
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_labels: Vec<IndexLabel> = row_indices
+                    .iter()
+                    .map(|&i| self.df.index.labels()[i].clone())
+                    .collect();
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+
+                let group_series = Series::from_values(
+                    col_name.clone(),
+                    group_labels,
+                    group_vals,
+                )?;
+
+                let transformed = func(&group_series)?;
+                if transformed.len() != row_indices.len() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "transform_fn: closure returned Series of length {} for group of size {} (column '{col_name}')",
+                        transformed.len(),
+                        row_indices.len()
+                    )));
+                }
+
+                let transformed_vals = transformed.column().values();
+                for (out_pos, &row_idx) in row_indices.iter().enumerate() {
+                    out_vals[row_idx] = transformed_vals[out_pos].clone();
+                }
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(out_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+        })
+    }
+
     /// GroupBy size (number of rows per group).
     pub fn size(&self) -> Result<Series, FrameError> {
         let (group_order, groups) = self.build_groups();
@@ -39145,6 +39220,204 @@ mod tests {
             result.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_fn_zscore_per_group() {
+        // (s - s.mean()) / s.std(ddof=0): per-group z-score
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .transform_fn(|s| {
+                let vals: Vec<f64> = s
+                    .column()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(f) => *f,
+                        Scalar::Int64(i) => *i as f64,
+                        _ => f64::NAN,
+                    })
+                    .collect();
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+                let std = var.sqrt();
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| Scalar::Float64((v - mean) / std))
+                    .collect();
+                Series::from_values(s.name().to_string(), s.index().labels().to_vec(), out)
+            })
+            .unwrap();
+
+        // Group "a" (1, 3): mean=2, std=1 → z-scores: -1, +1
+        assert_eq!(result.columns["v"].values()[0], Scalar::Float64(-1.0));
+        assert_eq!(result.columns["v"].values()[1], Scalar::Float64(1.0));
+        // Group "b" (10, 20): mean=15, std=5 → z-scores: -1, +1
+        assert_eq!(result.columns["v"].values()[2], Scalar::Float64(-1.0));
+        assert_eq!(result.columns["v"].values()[3], Scalar::Float64(1.0));
+        // Index preserved
+        assert_eq!(result.len(), 4);
+        // Group key column not in output
+        assert!(!result.column_order.contains(&"grp".to_string()));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_fn_identity_preserves_row_order() {
+        // Closure returning input unchanged: scatter back to original positions
+        // even when groups are interleaved.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "g",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["g"])
+            .unwrap()
+            .transform_fn(|s| Ok(s.clone()))
+            .unwrap();
+
+        // Identity transform: every value lands at its original position
+        // despite the per-group iteration order.
+        assert_eq!(result.columns["v"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(result.columns["v"].values()[1], Scalar::Float64(20.0));
+        assert_eq!(result.columns["v"].values()[2], Scalar::Float64(30.0));
+        assert_eq!(result.columns["v"].values()[3], Scalar::Float64(40.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_fn_rejects_length_mismatch() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "g",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Closure returns a single-row Series instead of length-2.
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .transform_fn(|_s| {
+                Series::from_values(
+                    "v".to_string(),
+                    vec![0_i64.into()],
+                    vec![Scalar::Float64(0.0)],
+                )
+            })
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_fn_propagates_closure_errors() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "g",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(1.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .transform_fn(|_s| {
+                Err(FrameError::CompatibilityRejected("user error".to_owned()))
+            })
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg == "user error"));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_fn_skips_group_key_columns() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "g",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["g"])
+            .unwrap()
+            .transform_fn(|s| Ok(s.clone()))
+            .unwrap();
+        assert_eq!(result.column_order, vec!["v".to_string()]);
+        assert!(!result.column_order.contains(&"g".to_string()));
     }
 
     // ── str accessor regex tests ──

@@ -102,6 +102,12 @@ pub struct CsvReadOptions {
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
     pub comment: Option<u8>,
+    /// Additional string values to coerce to `true` during CSV parsing.
+    /// Matches pandas `true_values` parameter.
+    pub true_values: Vec<String>,
+    /// Additional string values to coerce to `false` during CSV parsing.
+    /// Matches pandas `false_values` parameter.
+    pub false_values: Vec<String>,
     /// Character to recognize as the decimal separator when parsing floats.
     /// Matches pandas `decimal` parameter. Default: `.`.
     pub decimal: u8,
@@ -125,6 +131,8 @@ impl Default for CsvReadOptions {
             skiprows: 0,
             dtype: None,
             comment: None,
+            true_values: Vec::new(),
+            false_values: Vec::new(),
             decimal: b'.',
             on_bad_lines: CsvOnBadLines::Error,
         }
@@ -271,6 +279,8 @@ fn parse_scalar_with_options(
     na_filter: bool,
     keep_default_na: bool,
     na_values: &[String],
+    true_values: &[String],
+    false_values: &[String],
     decimal: u8,
 ) -> Scalar {
     let trimmed = field.trim();
@@ -284,9 +294,17 @@ fn parse_scalar_with_options(
         }
     }
 
+    if true_values.iter().any(|value| value == trimmed) {
+        return Scalar::Bool(true);
+    }
+    if false_values.iter().any(|value| value == trimmed) {
+        return Scalar::Bool(false);
+    }
+
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
+
     let float_candidate = if decimal == b'.' {
         trimmed.to_owned()
     } else {
@@ -337,6 +355,8 @@ fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options
             options.na_filter,
             options.keep_default_na,
             &options.na_values,
+            &options.true_values,
+            &options.false_values,
             options.decimal,
         ));
     }
@@ -4454,6 +4474,31 @@ mod tests {
         assert_eq!(
             frame.column("price").unwrap().values(),
             &[Scalar::Utf8("1,50".to_owned())]
+        );
+    }
+
+    #[test]
+    fn csv_true_false_values_override_numeric_inference() {
+        let input = "flag\n1\n0\n";
+        let opts = CsvReadOptions {
+            true_values: vec!["1".to_owned()],
+            false_values: vec!["0".to_owned()],
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("flag").unwrap().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn csv_default_parsing_keeps_numeric_boolean_tokens_as_ints() {
+        let input = "flag\n1\n0\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("flag").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
         );
     }
 

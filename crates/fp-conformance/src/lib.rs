@@ -1643,6 +1643,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_on_bad_lines: Option<String>,
     #[serde(default)]
+    pub csv_true_values: Option<Vec<String>>,
+    #[serde(default)]
+    pub csv_false_values: Option<Vec<String>>,
+    #[serde(default)]
     pub json_input: Option<String>,
     #[serde(default)]
     pub json_orient: Option<String>,
@@ -11670,6 +11674,8 @@ fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<D
     let options = CsvReadOptions {
         decimal,
         on_bad_lines,
+        true_values: fixture.csv_true_values.clone().unwrap_or_default(),
+        false_values: fixture.csv_false_values.clone().unwrap_or_default(),
         ..CsvReadOptions::default()
     };
     read_csv_with_options(csv_input, &options).map_err(|err| format!("csv read failed: {err}"))

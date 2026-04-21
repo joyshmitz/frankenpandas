@@ -1,0 +1,22 @@
+{
+  "packet_id": "FP-P2D-426",
+  "case_id": "csv_read_frame_true_false_values_strict",
+  "mode": "strict",
+  "operation": "csv_read_frame",
+  "csv_true_values": ["1"],
+  "csv_false_values": ["0"],
+  "csv_input": "flag\n1\n0\n",
+  "expected_frame": {
+    "columns": {
+      "flag": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ]
+    },
+    "column_order": ["flag"],
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ]
+  }
+}

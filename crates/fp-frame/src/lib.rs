@@ -4919,17 +4919,29 @@ impl Series {
     /// - `drop=false`: widen to a two-column DataFrame with the
     ///   materialized index first and the value column second.
     pub fn reset_index(&self, drop: bool) -> Result<SeriesResetIndexResult, FrameError> {
+        self.reset_index_with_name(drop, None)
+    }
+
+    /// Matches `pd.Series.reset_index(drop=..., name=...)` for the
+    /// single-index Series model.
+    pub fn reset_index_with_name(
+        &self,
+        drop: bool,
+        name: Option<&str>,
+    ) -> Result<SeriesResetIndexResult, FrameError> {
         if drop {
             let index = range_index(self.column.len())?;
             let series = Self::new(self.name.clone(), index, self.column.clone())?;
             return Ok(SeriesResetIndexResult::Series(series));
         }
 
-        let value_column_name = if self.name.is_empty() {
-            "0".to_owned()
-        } else {
-            self.name.clone()
-        };
+        let value_column_name = name.map(str::to_owned).unwrap_or_else(|| {
+            if self.name.is_empty() {
+                "0".to_owned()
+            } else {
+                self.name.clone()
+            }
+        });
         let index_column_name = match self.index.name() {
             Some(name) => {
                 if name == value_column_name {
@@ -48628,6 +48640,58 @@ mod tests {
     }
 
     #[test]
+    fn series_reset_index_with_name_overrides_named_series_value_column() {
+        let s = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s
+            .reset_index_with_name(false, Some("value"))
+            .unwrap()
+            .into_dataframe()
+            .unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["index".to_owned(), "value".to_owned()]);
+        assert_eq!(
+            reset.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn series_reset_index_with_name_overrides_unnamed_series_value_column() {
+        let s = Series::from_values(
+            "",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s
+            .reset_index_with_name(false, Some("value"))
+            .unwrap()
+            .into_dataframe()
+            .unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["index".to_owned(), "value".to_owned()]);
+        assert_eq!(
+            reset.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
     fn series_reset_index_drop_false_uses_level_0_when_series_named_index() {
         let s = Series::from_values(
             "index",
@@ -48689,6 +48753,52 @@ mod tests {
         let err = s.reset_index(false).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("cannot insert x"))
+        );
+    }
+
+    #[test]
+    fn series_reset_index_with_name_rejects_index_name_collision() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+        ])
+        .set_name("row");
+        let s = Series::new(
+            "x".to_owned(),
+            index,
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        )
+        .unwrap();
+
+        let err = s.reset_index_with_name(false, Some("row")).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("cannot insert row"))
+        );
+    }
+
+    #[test]
+    fn series_reset_index_with_name_uses_level_0_when_value_name_is_index() {
+        let s = Series::from_values(
+            "",
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s
+            .reset_index_with_name(false, Some("index"))
+            .unwrap()
+            .into_dataframe()
+            .unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["level_0".to_owned(), "index".to_owned()]);
+        assert_eq!(
+            reset.column("level_0").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
         );
     }
 

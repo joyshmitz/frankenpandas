@@ -22203,6 +22203,114 @@ impl DataFrame {
     /// Median across columns per row.
     ///
     /// Matches `pd.DataFrame.median(axis=1)`.
+    /// Per-row quantile across numeric columns (axis=1).
+    ///
+    /// Matches `pd.DataFrame.quantile(q, axis=1)`. For each row the
+    /// numeric column values are collected (skipping non-numeric and
+    /// missing entries) and their linear-interpolation quantile is
+    /// returned. `q` must lie in `[0.0, 1.0]`. Rows with no numeric
+    /// entries emit `Null(NaN)`.
+    pub fn quantile_axis1(&self, q: f64) -> Result<Series, FrameError> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "quantile must be between 0 and 1, got {q}"
+            )));
+        }
+        let len = self.index.labels().len();
+        let mut out = Vec::with_capacity(len);
+        for row_idx in 0..len {
+            let mut nums: Vec<f64> = Vec::new();
+            for name in &self.column_order {
+                let col = &self.columns[name];
+                if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                    continue;
+                }
+                let v = &col.values()[row_idx];
+                if v.is_missing() {
+                    continue;
+                }
+                if let Ok(f) = v.to_f64()
+                    && !f.is_nan()
+                {
+                    nums.push(f);
+                }
+            }
+            if nums.is_empty() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = nums.len();
+            if n == 1 {
+                out.push(Scalar::Float64(nums[0]));
+                continue;
+            }
+            let pos = q * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            let value = if lo == hi {
+                nums[lo]
+            } else {
+                let weight = pos - lo as f64;
+                nums[lo] + (nums[hi] - nums[lo]) * weight
+            };
+            out.push(Scalar::Float64(value));
+        }
+        Series::from_values("quantile", self.index.labels().to_vec(), out)
+    }
+
+    /// Per-row index label of the first smallest numeric value.
+    ///
+    /// Matches `pd.DataFrame.idxmin(axis=1)` combined with positional
+    /// column lookup. Returns the column-name Series entry for each
+    /// row's argmin; rows with no numeric entries emit Null(NaN).
+    pub fn argmin_axis1(&self) -> Result<Series, FrameError> {
+        self.arg_extrema_axis1(false)
+    }
+
+    /// Per-row index label of the first largest numeric value.
+    ///
+    /// Matches `pd.DataFrame.idxmax(axis=1)`.
+    pub fn argmax_axis1(&self) -> Result<Series, FrameError> {
+        self.arg_extrema_axis1(true)
+    }
+
+    fn arg_extrema_axis1(&self, largest: bool) -> Result<Series, FrameError> {
+        let len = self.index.labels().len();
+        let mut out = Vec::with_capacity(len);
+        for row_idx in 0..len {
+            let mut best: Option<(&str, f64)> = None;
+            for name in &self.column_order {
+                let col = &self.columns[name];
+                if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                    continue;
+                }
+                let v = &col.values()[row_idx];
+                if v.is_missing() {
+                    continue;
+                }
+                if let Ok(f) = v.to_f64()
+                    && !f.is_nan()
+                {
+                    let take = match best {
+                        None => true,
+                        Some((_, cur)) if largest => f > cur,
+                        Some((_, cur)) => f < cur,
+                    };
+                    if take {
+                        best = Some((name.as_str(), f));
+                    }
+                }
+            }
+            match best {
+                Some((name, _)) => out.push(Scalar::Utf8(name.to_owned())),
+                None => out.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+        let label = if largest { "idxmax" } else { "idxmin" };
+        Series::from_values(label, self.index.labels().to_vec(), out)
+    }
+
     pub fn median_axis1(&self) -> Result<Series, FrameError> {
         self.reduce_rows(
             |vals| {
@@ -48357,6 +48465,98 @@ mod tests {
         .unwrap();
         let result = df.median_axis1().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn df_quantile_axis1_matches_median_at_q_half() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(10.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(5.0), Scalar::Float64(30.0)]),
+            ],
+        )
+        .unwrap();
+        let q = df.quantile_axis1(0.5).unwrap();
+        assert_eq!(q.column().values()[0], Scalar::Float64(3.0));
+        assert_eq!(q.column().values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn df_quantile_axis1_rejects_out_of_range() {
+        let df =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(1.0)])]).unwrap();
+        assert!(df.quantile_axis1(1.5).is_err());
+        assert!(df.quantile_axis1(-0.1).is_err());
+    }
+
+    #[test]
+    fn df_quantile_axis1_empty_row_is_null() {
+        // A row whose every numeric column is null → NaN output.
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)],
+                ),
+            ],
+        )
+        .unwrap();
+        let q = df.quantile_axis1(0.5).unwrap();
+        assert!(q.column().values()[0].is_missing());
+        assert_eq!(q.column().values()[1], Scalar::Float64(1.5));
+    }
+
+    #[test]
+    fn df_argmin_axis1_returns_column_name() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+        let idx = df.argmin_axis1().unwrap();
+        assert_eq!(idx.column().values()[0], Scalar::Utf8("b".to_owned()));
+        assert_eq!(idx.column().values()[1], Scalar::Utf8("a".to_owned()));
+    }
+
+    #[test]
+    fn df_argmax_axis1_returns_column_name() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+        let idx = df.argmax_axis1().unwrap();
+        assert_eq!(idx.column().values()[0], Scalar::Utf8("a".to_owned()));
+        assert_eq!(idx.column().values()[1], Scalar::Utf8("b".to_owned()));
+    }
+
+    #[test]
+    fn df_argmin_axis1_all_missing_row_is_null() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Null(NullKind::NaN)]),
+            ],
+        )
+        .unwrap();
+        let idx = df.argmin_axis1().unwrap();
+        assert!(idx.column().values()[0].is_missing());
     }
 
     #[test]

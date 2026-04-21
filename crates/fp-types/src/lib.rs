@@ -788,6 +788,89 @@ pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
     }
 }
 
+/// Standard error of the mean over non-missing values.
+///
+/// Matches `pd.Series.sem(ddof=1)` / `scipy.stats.sem`. Computed as
+/// `std(values, ddof) / sqrt(n)` where `n` is the non-missing count.
+/// Returns `Null(NaN)` when `n <= ddof`.
+pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
+    let nums = collect_finite(values);
+    if nums.len() <= ddof {
+        return Scalar::Null(NullKind::NaN);
+    }
+    match nanstd(values, ddof) {
+        Scalar::Float64(s) => Scalar::Float64(s / (nums.len() as f64).sqrt()),
+        other => other,
+    }
+}
+
+/// Peak-to-peak range of non-missing values (max − min).
+///
+/// Matches `np.ptp` behavior on nan-safe inputs. Returns `Null(NaN)`
+/// for empty or all-missing inputs.
+pub fn nanptp(values: &[Scalar]) -> Scalar {
+    let nums = collect_finite(values);
+    if nums.is_empty() {
+        return Scalar::Null(NullKind::NaN);
+    }
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for x in &nums {
+        if *x < lo {
+            lo = *x;
+        }
+        if *x > hi {
+            hi = *x;
+        }
+    }
+    Scalar::Float64(hi - lo)
+}
+
+/// Sample skewness (bias-corrected, Fisher-Pearson) over non-missing values.
+///
+/// Matches `pd.Series.skew()`. Requires at least 3 non-missing values;
+/// returns `Null(NaN)` otherwise, and when the sample standard deviation
+/// is zero.
+pub fn nanskew(values: &[Scalar]) -> Scalar {
+    let nums = collect_finite(values);
+    let n = nums.len() as f64;
+    if n < 3.0 {
+        return Scalar::Null(NullKind::NaN);
+    }
+    let mean = nums.iter().sum::<f64>() / n;
+    let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+    let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
+    let s2 = m2 / (n - 1.0);
+    if s2 == 0.0 {
+        return Scalar::Float64(0.0);
+    }
+    let s3 = s2.powf(1.5);
+    Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3))
+}
+
+/// Excess sample kurtosis (Fisher's definition, bias-corrected) over
+/// non-missing values.
+///
+/// Matches `pd.Series.kurt()`. Requires at least 4 non-missing values;
+/// returns `Null(NaN)` otherwise, and when the sample standard deviation
+/// is zero.
+pub fn nankurt(values: &[Scalar]) -> Scalar {
+    let nums = collect_finite(values);
+    let n = nums.len() as f64;
+    if n < 4.0 {
+        return Scalar::Null(NullKind::NaN);
+    }
+    let mean = nums.iter().sum::<f64>() / n;
+    let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+    let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+    let s2 = m2 / (n - 1.0);
+    if s2 == 0.0 {
+        return Scalar::Float64(0.0);
+    }
+    let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+    let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+    Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
+}
+
 /// Product of non-missing values. Returns 1.0 for empty input (matching pandas).
 pub fn nanprod(values: &[Scalar]) -> Scalar {
     let nums = collect_finite(values);
@@ -1580,12 +1663,8 @@ mod tests {
     #[test]
     fn nanquantile_empty_and_out_of_range_yield_null() {
         assert!(super::nanquantile(&[], 0.5).is_missing());
-        assert!(
-            super::nanquantile(&[Scalar::Float64(1.0)], 1.5).is_missing()
-        );
-        assert!(
-            super::nanquantile(&[Scalar::Float64(1.0)], -0.1).is_missing()
-        );
+        assert!(super::nanquantile(&[Scalar::Float64(1.0)], 1.5).is_missing());
+        assert!(super::nanquantile(&[Scalar::Float64(1.0)], -0.1).is_missing());
     }
 
     #[test]
@@ -1613,11 +1692,119 @@ mod tests {
 
     #[test]
     fn nanargmax_all_missing_returns_none() {
-        let values = vec![
-            Scalar::Null(NullKind::NaN),
-            Scalar::Null(NullKind::Null),
-        ];
+        let values = vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::Null)];
         assert_eq!(super::nanargmax(&values), None);
         assert_eq!(super::nanargmin(&values), None);
+    }
+
+    #[test]
+    fn nansem_matches_std_over_sqrt_n() {
+        let values = vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(7.0),
+            Scalar::Float64(9.0),
+        ];
+        // numpy/scipy: std(ddof=1) = 2.138089935299395; sem = std/sqrt(8) = 0.7559
+        let sem = super::nansem(&values, 1);
+        assert!(matches!(sem, Scalar::Float64(_)));
+        let Scalar::Float64(v) = sem else {
+            return;
+        };
+        assert!((v - 0.7559289460184544).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nansem_empty_returns_null() {
+        assert!(super::nansem(&[], 1).is_missing());
+        assert!(super::nansem(&[Scalar::Float64(1.0)], 1).is_missing());
+    }
+
+    #[test]
+    fn nanptp_returns_max_minus_min() {
+        let values = vec![
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(7.0),
+            Scalar::Float64(1.0),
+        ];
+        assert_eq!(super::nanptp(&values), Scalar::Float64(6.0));
+    }
+
+    #[test]
+    fn nanptp_empty_returns_null() {
+        assert!(super::nanptp(&[]).is_missing());
+        assert!(super::nanptp(&[Scalar::Null(NullKind::NaN)]).is_missing());
+    }
+
+    #[test]
+    fn nanskew_symmetric_distribution_near_zero() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+        ];
+        // Perfectly symmetric -> skew = 0
+        let skew = super::nanskew(&values);
+        assert!(matches!(skew, Scalar::Float64(_)));
+        let Scalar::Float64(v) = skew else {
+            return;
+        };
+        assert!(v.abs() < 1e-9);
+    }
+
+    #[test]
+    fn nanskew_too_few_values_returns_null() {
+        assert!(super::nanskew(&[]).is_missing());
+        assert!(super::nanskew(&[Scalar::Float64(1.0), Scalar::Float64(2.0)]).is_missing());
+    }
+
+    #[test]
+    fn nankurt_symmetric_uniform_distribution() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+        ];
+        // pandas kurt([1,2,3,4,5]) = -1.2
+        let kurt = super::nankurt(&values);
+        assert!(matches!(kurt, Scalar::Float64(_)));
+        let Scalar::Float64(v) = kurt else {
+            return;
+        };
+        assert!((v + 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nankurt_too_few_values_returns_null() {
+        let vals: Vec<Scalar> = (0..3).map(|i| Scalar::Float64(i as f64)).collect();
+        assert!(super::nankurt(&vals).is_missing());
+    }
+
+    #[test]
+    fn nanskew_constant_series_returns_zero() {
+        let values = vec![
+            Scalar::Float64(5.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(5.0),
+        ];
+        assert_eq!(super::nanskew(&values), Scalar::Float64(0.0));
+        assert_eq!(
+            super::nankurt(&[
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ]),
+            Scalar::Float64(0.0)
+        );
     }
 }

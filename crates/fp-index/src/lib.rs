@@ -3944,7 +3944,10 @@ mod tests {
         assert_eq!(idx.asof(&IndexLabel::Int64(4)), Some(IndexLabel::Int64(3)));
         assert_eq!(idx.asof(&IndexLabel::Int64(5)), Some(IndexLabel::Int64(5)));
         assert_eq!(idx.asof(&IndexLabel::Int64(7)), Some(IndexLabel::Int64(7)));
-        assert_eq!(idx.asof(&IndexLabel::Int64(100)), Some(IndexLabel::Int64(7)));
+        assert_eq!(
+            idx.asof(&IndexLabel::Int64(100)),
+            Some(IndexLabel::Int64(7))
+        );
     }
 
     #[test]
@@ -3956,30 +3959,16 @@ mod tests {
     #[test]
     fn index_searchsorted_left_right() {
         let idx = Index::from_i64(vec![1, 2, 2, 5]);
-        assert_eq!(
-            idx.searchsorted(&IndexLabel::Int64(2), "left").unwrap(),
-            1
-        );
-        assert_eq!(
-            idx.searchsorted(&IndexLabel::Int64(2), "right").unwrap(),
-            3
-        );
-        assert_eq!(
-            idx.searchsorted(&IndexLabel::Int64(0), "left").unwrap(),
-            0
-        );
-        assert_eq!(
-            idx.searchsorted(&IndexLabel::Int64(6), "left").unwrap(),
-            4
-        );
+        assert_eq!(idx.searchsorted(&IndexLabel::Int64(2), "left").unwrap(), 1);
+        assert_eq!(idx.searchsorted(&IndexLabel::Int64(2), "right").unwrap(), 3);
+        assert_eq!(idx.searchsorted(&IndexLabel::Int64(0), "left").unwrap(), 0);
+        assert_eq!(idx.searchsorted(&IndexLabel::Int64(6), "left").unwrap(), 4);
     }
 
     #[test]
     fn index_searchsorted_rejects_invalid_side() {
         let idx = Index::from_i64(vec![1]);
-        assert!(
-            idx.searchsorted(&IndexLabel::Int64(0), "middle").is_err()
-        );
+        assert!(idx.searchsorted(&IndexLabel::Int64(0), "middle").is_err());
     }
 
     #[test]

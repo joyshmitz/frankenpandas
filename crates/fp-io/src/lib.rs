@@ -1962,6 +1962,9 @@ pub struct ExcelReadOptions {
     pub sheet_name: Option<String>,
     /// Whether the first row contains column headers.
     pub has_headers: bool,
+    /// Read only these columns (by name). `None` means read all.
+    /// Matches pandas `usecols` parameter for label-based selection.
+    pub usecols: Option<Vec<String>>,
     /// Explicit column names to use instead of worksheet headers or
     /// auto-generated `column_N` names. Matches pandas `names=...`.
     pub names: Option<Vec<String>>,
@@ -1976,6 +1979,7 @@ impl Default for ExcelReadOptions {
         Self {
             sheet_name: None,
             has_headers: true,
+            usecols: None,
             names: None,
             index_col: None,
             skip_rows: 0,
@@ -2085,6 +2089,10 @@ fn parse_excel_rows(
     };
     reject_duplicate_headers(&headers)?;
 
+    if let Some(ref usecols) = options.usecols {
+        validate_usecols(&headers, usecols)?;
+    }
+
     let ncols = headers.len();
 
     // Accumulate columns.
@@ -2098,6 +2106,26 @@ fn parse_excel_rows(
             col_vec.push(excel_cell_to_scalar(cell));
         }
     }
+
+    let (headers, header_generated, columns) = if let Some(ref usecols) = options.usecols {
+        let mut filtered_headers = Vec::new();
+        let mut filtered_generated = Vec::new();
+        let mut filtered_columns = Vec::new();
+        for ((name, generated), values) in headers
+            .into_iter()
+            .zip(header_generated.into_iter())
+            .zip(columns.into_iter())
+        {
+            if usecols.contains(&name) {
+                filtered_headers.push(name);
+                filtered_generated.push(generated);
+                filtered_columns.push(values);
+            }
+        }
+        (filtered_headers, filtered_generated, filtered_columns)
+    } else {
+        (headers, header_generated, columns)
+    };
 
     // Handle index_col if specified.
     let index_col_idx = if let Some(ref idx_name) = options.index_col {
@@ -2223,6 +2251,99 @@ pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataF
 /// `skip_rows`) are applied uniformly to each selected sheet. The
 /// per-sheet `sheet_name` option on `options` is ignored here
 /// because the explicit `sheet_names` argument drives selection.
+/// Read multiple sheets preserving workbook iteration order.
+///
+/// Matches `pd.read_excel(sheet_name=None)` exactly — pandas returns
+/// a `dict` and, since Python 3.7, dict iteration order matches
+/// insertion order, which in turn matches workbook sheet position.
+/// `BTreeMap` (used by `read_excel_sheets`) would alphabetize, so
+/// this sibling returns `Vec<(String, DataFrame)>` to preserve order.
+pub fn read_excel_sheets_ordered(
+    path: &Path,
+    sheet_names: Option<&[String]>,
+    options: &ExcelReadOptions,
+) -> Result<Vec<(String, DataFrame)>, IoError> {
+    use calamine::{Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
+    let available: Vec<String> = workbook.sheet_names();
+    let selected: Vec<String> = match sheet_names {
+        Some(names) => {
+            for name in names {
+                if !available.iter().any(|s| s == name) {
+                    return Err(IoError::Excel(format!(
+                        "workbook does not contain sheet {name:?}"
+                    )));
+                }
+            }
+            names.to_vec()
+        }
+        None => available.clone(),
+    };
+    if selected.is_empty() {
+        return Err(IoError::Excel("no sheets selected".to_owned()));
+    }
+    let mut out = Vec::with_capacity(selected.len());
+    for sheet in &selected {
+        let range = workbook
+            .worksheet_range(sheet)
+            .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
+        let rows: Vec<Vec<calamine::Data>> = range
+            .rows()
+            .skip(options.skip_rows)
+            .map(|r| r.to_vec())
+            .collect();
+        let frame = parse_excel_rows(rows, options)?;
+        out.push((sheet.clone(), frame));
+    }
+    Ok(out)
+}
+
+/// Byte-based counterpart to `read_excel_sheets_ordered`.
+pub fn read_excel_sheets_ordered_bytes(
+    data: &[u8],
+    sheet_names: Option<&[String]>,
+    options: &ExcelReadOptions,
+) -> Result<Vec<(String, DataFrame)>, IoError> {
+    use calamine::{Reader, open_workbook_auto_from_rs};
+
+    let cursor = std::io::Cursor::new(data);
+    let mut workbook = open_workbook_auto_from_rs(cursor)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
+    let available: Vec<String> = workbook.sheet_names();
+    let selected: Vec<String> = match sheet_names {
+        Some(names) => {
+            for name in names {
+                if !available.iter().any(|s| s == name) {
+                    return Err(IoError::Excel(format!(
+                        "workbook does not contain sheet {name:?}"
+                    )));
+                }
+            }
+            names.to_vec()
+        }
+        None => available.clone(),
+    };
+    if selected.is_empty() {
+        return Err(IoError::Excel("no sheets selected".to_owned()));
+    }
+    let mut out = Vec::with_capacity(selected.len());
+    for sheet in &selected {
+        let range = workbook
+            .worksheet_range(sheet)
+            .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
+        let rows: Vec<Vec<calamine::Data>> = range
+            .rows()
+            .skip(options.skip_rows)
+            .map(|r| r.to_vec())
+            .collect();
+        let frame = parse_excel_rows(rows, options)?;
+        out.push((sheet.clone(), frame));
+    }
+    Ok(out)
+}
+
 pub fn read_excel_sheets(
     path: &Path,
     sheet_names: Option<&[String]>,
@@ -4416,6 +4537,91 @@ mod tests {
     }
 
     #[test]
+    fn read_excel_sheets_ordered_bytes_preserves_workbook_order() {
+        // Workbook sheet order: Alpha, Bravo, Charlie. A sorted map
+        // would still give Alpha/Bravo/Charlie alphabetically — but
+        // pandas guarantees workbook order regardless of alphabetic
+        // relationship, so this test uses a fixture where the ordered
+        // result differs from sorted order.
+        use rust_xlsxwriter::Workbook;
+        let mut workbook = Workbook::new();
+        let s1 = workbook.add_worksheet();
+        s1.set_name("Zulu").expect("name");
+        s1.write_string(0, 0, "v").expect("header");
+        s1.write_number(1, 0, 1.0).expect("data");
+        let s2 = workbook.add_worksheet();
+        s2.set_name("Alpha").expect("name");
+        s2.write_string(0, 0, "v").expect("header");
+        s2.write_number(1, 0, 2.0).expect("data");
+        let s3 = workbook.add_worksheet();
+        s3.set_name("Mike").expect("name");
+        s3.write_string(0, 0, "v").expect("header");
+        s3.write_number(1, 0, 3.0).expect("data");
+        let bytes = workbook.save_to_buffer().expect("save");
+
+        let ordered = super::read_excel_sheets_ordered_bytes(
+            &bytes,
+            None,
+            &super::ExcelReadOptions::default(),
+        )
+        .expect("read ordered");
+        assert_eq!(
+            ordered.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["Zulu", "Alpha", "Mike"],
+            "ordered form preserves workbook order"
+        );
+
+        // Sorted form alphabetizes (existing contract for BTreeMap).
+        let sorted =
+            super::read_excel_sheets_bytes(&bytes, None, &super::ExcelReadOptions::default())
+                .expect("read sorted");
+        assert_eq!(
+            sorted.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["Alpha", "Mike", "Zulu"],
+            "BTreeMap form alphabetizes"
+        );
+    }
+
+    #[test]
+    fn read_excel_sheets_ordered_bytes_selected_subset_keeps_caller_order() {
+        let bytes = build_two_sheet_workbook_bytes();
+        // Caller-specified order: Charlie, Alpha — deliberately reversed
+        // from workbook order. Pandas docs say sheet_name=[list] returns
+        // a dict whose iteration reflects the argument order; we match.
+        let req = vec!["Charlie".to_string(), "Alpha".to_string()];
+        let ordered = super::read_excel_sheets_ordered_bytes(
+            &bytes,
+            Some(&req),
+            &super::ExcelReadOptions::default(),
+        )
+        .expect("ordered subset");
+        assert_eq!(
+            ordered.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["Charlie", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn read_excel_sheets_ordered_path_matches_bytes() {
+        let bytes = build_two_sheet_workbook_bytes();
+        let temp = std::env::temp_dir().join("fp_io_wrt3_ordered.xlsx");
+        std::fs::write(&temp, &bytes).expect("write temp");
+        let via_path =
+            super::read_excel_sheets_ordered(&temp, None, &super::ExcelReadOptions::default())
+                .expect("read path");
+        let via_bytes = super::read_excel_sheets_ordered_bytes(
+            &bytes,
+            None,
+            &super::ExcelReadOptions::default(),
+        )
+        .expect("read bytes");
+        assert_eq!(
+            via_path.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            via_bytes.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn read_excel_sheets_bytes_all_sheets_returns_map() {
         let bytes = build_two_sheet_workbook_bytes();
         let sheets =
@@ -4472,13 +4678,15 @@ mod tests {
         let bytes = build_two_sheet_workbook_bytes();
         let temp = std::env::temp_dir().join("fp_io_9my2_multisheet.xlsx");
         std::fs::write(&temp, &bytes).expect("write temp");
-        let via_path =
-            super::read_excel_sheets(&temp, None, &super::ExcelReadOptions::default())
-                .expect("read path");
+        let via_path = super::read_excel_sheets(&temp, None, &super::ExcelReadOptions::default())
+            .expect("read path");
         let via_bytes =
             super::read_excel_sheets_bytes(&bytes, None, &super::ExcelReadOptions::default())
                 .expect("read bytes");
-        assert_eq!(via_path.keys().collect::<Vec<_>>(), via_bytes.keys().collect::<Vec<_>>());
+        assert_eq!(
+            via_path.keys().collect::<Vec<_>>(),
+            via_bytes.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -4761,6 +4969,92 @@ mod tests {
 
         assert!(
             matches!(err, IoError::Excel(message) if message.contains("expected 2 column names, got 1"))
+        );
+    }
+
+    #[test]
+    fn excel_usecols_selects_subset_in_sheet_order() {
+        let rows = vec![
+            vec![
+                calamine::Data::String("a".to_owned()),
+                calamine::Data::String("b".to_owned()),
+                calamine::Data::String("c".to_owned()),
+            ],
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::Int(2),
+                calamine::Data::Int(3),
+            ],
+        ];
+
+        let frame = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                usecols: Some(vec!["c".to_owned(), "a".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect("parse excel rows with usecols");
+
+        assert_eq!(frame.column_names(), vec!["a", "c"]);
+        assert_eq!(frame.column("a").unwrap().values(), &[Scalar::Int64(1)]);
+        assert_eq!(frame.column("c").unwrap().values(), &[Scalar::Int64(3)]);
+        assert!(frame.column("b").is_none());
+    }
+
+    #[test]
+    fn excel_usecols_with_explicit_names_filters_renamed_columns() {
+        let rows = vec![
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::String("alpha".to_owned()),
+            ],
+            vec![
+                calamine::Data::Int(2),
+                calamine::Data::String("beta".to_owned()),
+            ],
+        ];
+
+        let frame = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                has_headers: false,
+                names: Some(vec!["id".to_owned(), "label".to_owned()]),
+                usecols: Some(vec!["label".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect("parse headerless excel rows with names and usecols");
+
+        assert_eq!(frame.column_names(), vec!["label"]);
+        assert_eq!(
+            frame.column("label").unwrap().values(),
+            &[Scalar::Utf8("alpha".into()), Scalar::Utf8("beta".into())]
+        );
+        assert!(frame.column("id").is_none());
+    }
+
+    #[test]
+    fn excel_usecols_missing_column_errors() {
+        let rows = vec![
+            vec![
+                calamine::Data::String("a".to_owned()),
+                calamine::Data::String("b".to_owned()),
+            ],
+            vec![calamine::Data::Int(1), calamine::Data::Int(2)],
+        ];
+
+        let err = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                usecols: Some(vec!["missing".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect_err("missing excel usecols should error");
+
+        assert!(
+            matches!(err, IoError::MissingUsecols(missing) if missing == vec!["missing".to_owned()])
         );
     }
 

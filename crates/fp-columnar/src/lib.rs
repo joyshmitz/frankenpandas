@@ -571,6 +571,8 @@ pub enum ColumnError {
     LengthMismatch { left: usize, right: usize },
     #[error("mask must be Bool dtype; found {dtype:?}")]
     InvalidMaskType { dtype: DType },
+    #[error("column dtype mismatch: left={left:?}, right={right:?}")]
+    DTypeMismatch { left: DType, right: DType },
     #[error(transparent)]
     Type(#[from] TypeError),
 }
@@ -993,6 +995,79 @@ impl Column {
             .collect();
 
         Self::new(self.dtype, values)
+    }
+
+    /// Gather rows by integer position.
+    ///
+    /// Matches `pd.Series.take(indices)`. Each index must fall within
+    /// `0..len()`; out-of-range positions return
+    /// `ColumnError::LengthMismatch` (left=length, right=offending
+    /// index).
+    pub fn take(&self, indices: &[usize]) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(indices.len());
+        for &i in indices {
+            match self.values.get(i) {
+                Some(v) => out.push(v.clone()),
+                None => {
+                    return Err(ColumnError::LengthMismatch {
+                        left: self.values.len(),
+                        right: i,
+                    });
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Contiguous slice by positional range `start..start+len`.
+    ///
+    /// Out-of-range requests are clamped to the available tail so a
+    /// start past `len()` yields an empty column with the same dtype,
+    /// matching pandas' permissive slice semantics.
+    pub fn slice(&self, start: usize, len: usize) -> Result<Self, ColumnError> {
+        if start >= self.values.len() {
+            return Self::new(self.dtype, Vec::new());
+        }
+        let end = (start + len).min(self.values.len());
+        let values = self.values[start..end].to_vec();
+        Self::new(self.dtype, values)
+    }
+
+    /// Concatenate `other` onto `self`, preserving dtype.
+    ///
+    /// Returns `ColumnError::DTypeMismatch` when `other.dtype()` differs
+    /// from `self.dtype()`.
+    pub fn concat(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.dtype != other.dtype {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: other.dtype,
+            });
+        }
+        let mut values = Vec::with_capacity(self.values.len() + other.values.len());
+        values.extend_from_slice(&self.values);
+        values.extend_from_slice(&other.values);
+        Self::new(self.dtype, values)
+    }
+
+    /// Repeat each value `repeats` times contiguously.
+    ///
+    /// Matches `pd.Series.repeat(n)`. `repeats=0` yields an empty
+    /// column; `repeats=1` is a clone.
+    pub fn repeat(&self, repeats: usize) -> Result<Self, ColumnError> {
+        if repeats == 0 {
+            return Self::new(self.dtype, Vec::new());
+        }
+        if repeats == 1 {
+            return Ok(self.clone());
+        }
+        let mut out = Vec::with_capacity(self.values.len() * repeats);
+        for v in &self.values {
+            for _ in 0..repeats {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
     }
 
     #[must_use]
@@ -2220,6 +2295,110 @@ mod tests {
                 .expect("gt");
             assert_eq!(gt.values()[0], Scalar::Bool(true));
             assert_eq!(gt.values()[1], Scalar::Bool(false));
+        }
+    }
+
+    mod take_slice_concat_repeat {
+        use super::*;
+
+        #[test]
+        fn take_reorders_rows() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("col");
+            let picked = col.take(&[2, 0, 1]).expect("take");
+            assert_eq!(picked.values()[0], Scalar::Int64(30));
+            assert_eq!(picked.values()[1], Scalar::Int64(10));
+            assert_eq!(picked.values()[2], Scalar::Int64(20));
+        }
+
+        #[test]
+        fn take_out_of_bounds_errors() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col.take(&[5]).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn slice_returns_contiguous_range() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let middle = col.slice(1, 2).expect("slice");
+            assert_eq!(middle.len(), 2);
+            assert_eq!(middle.values()[0], Scalar::Int64(2));
+            assert_eq!(middle.values()[1], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn slice_past_end_yields_empty() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let empty = col.slice(10, 5).expect("slice");
+            assert!(empty.is_empty());
+            assert_eq!(empty.dtype(), DType::Int64);
+        }
+
+        #[test]
+        fn slice_len_clamps_to_tail() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            let tail = col.slice(2, 100).expect("slice");
+            assert_eq!(tail.len(), 1);
+            assert_eq!(tail.values()[0], Scalar::Float64(3.0));
+        }
+
+        #[test]
+        fn concat_appends_same_dtype() {
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(3)]).expect("b");
+            let combined = a.concat(&b).expect("concat");
+            assert_eq!(combined.len(), 3);
+            assert_eq!(combined.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn concat_different_dtypes_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("b");
+            let err = a.concat(&b).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::DTypeMismatch { .. }));
+        }
+
+        #[test]
+        fn repeat_duplicates_contiguously() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let out = col.repeat(3).expect("repeat");
+            assert_eq!(out.len(), 6);
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(1));
+            assert_eq!(out.values()[2], Scalar::Int64(1));
+            assert_eq!(out.values()[3], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn repeat_zero_is_empty_same_dtype() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let out = col.repeat(0).expect("repeat");
+            assert!(out.is_empty());
+            assert_eq!(out.dtype(), DType::Int64);
+        }
+
+        #[test]
+        fn repeat_one_is_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let out = col.repeat(1).expect("repeat");
+            assert_eq!(out.values(), col.values());
         }
     }
 }

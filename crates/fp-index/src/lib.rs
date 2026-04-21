@@ -4,7 +4,7 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::fmt;
 
-use fp_types::Timedelta;
+use fp_types::{Scalar, Timedelta};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -857,15 +857,20 @@ impl Index {
         self.labels == other.labels && self.name == other.name
     }
 
-    /// Count occurrences of each distinct label.
-    ///
-    /// Matches `pd.Index.value_counts()`. Returns a `Vec<(IndexLabel, usize)>`
-    /// sorted by descending count (first-seen wins on ties).
-    #[must_use]
-    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+    fn value_counts_raw(
+        &self,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> (Vec<(IndexLabel, usize)>, usize) {
         let mut seen_order: Vec<IndexLabel> = Vec::new();
         let mut counts: HashMap<IndexLabel, usize> = HashMap::new();
+        let mut total = 0usize;
         for label in &self.labels {
+            if dropna && label.is_missing() {
+                continue;
+            }
+            total += 1;
             if !counts.contains_key(label) {
                 seen_order.push(label.clone());
             }
@@ -878,8 +883,51 @@ impl Index {
                 (label, count)
             })
             .collect();
-        pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
+        if sort {
+            if ascending {
+                pairs.sort_by_key(|entry| entry.1);
+            } else {
+                pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+            }
+        }
+        (pairs, total)
+    }
+
+    /// Count occurrences of each distinct label.
+    ///
+    /// Matches `pd.Index.value_counts()` default behavior. Missing labels are
+    /// dropped, counts are sorted descending, and first-seen order breaks ties.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        self.value_counts_raw(true, false, true).0
+    }
+
+    /// Count occurrences of each distinct label with pandas-style options.
+    ///
+    /// Matches `pd.Index.value_counts(normalize, sort, ascending, dropna)`.
+    /// Returns `Scalar::Int64` counts unless `normalize=true`, in which case
+    /// the values are `Scalar::Float64` fractions.
+    #[must_use]
+    pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Vec<(IndexLabel, Scalar)> {
+        let (pairs, total) = self.value_counts_raw(sort, ascending, dropna);
+        if normalize {
+            let denom = total as f64;
+            return pairs
+                .into_iter()
+                .map(|(label, count)| (label, Scalar::Float64(count as f64 / denom)))
+                .collect();
+        }
+
         pairs
+            .into_iter()
+            .map(|(label, count)| (label, Scalar::Int64(count as i64)))
+            .collect()
     }
 
     /// Shift the labels by `periods` positions, filling vacated slots
@@ -2185,7 +2233,7 @@ pub enum MultiIndexOrIndex {
 #[cfg(test)]
 mod tests {
     use super::{Index, IndexLabel, MultiIndex, align_union, validate_alignment_plan};
-    use fp_types::Timedelta;
+    use fp_types::{Scalar, Timedelta};
 
     #[test]
     fn union_alignment_preserves_left_then_right_unseen_order() {
@@ -3541,6 +3589,67 @@ mod tests {
     fn index_value_counts_empty() {
         let idx = Index::new(Vec::<IndexLabel>::new());
         assert!(idx.value_counts().is_empty());
+    }
+
+    #[test]
+    fn index_value_counts_drops_missing_by_default() {
+        let idx = Index::new(vec![
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Datetime64(i64::MIN),
+        ]);
+
+        let counts = idx.value_counts();
+        assert_eq!(counts, vec![(IndexLabel::Utf8("a".into()), 2)]);
+    }
+
+    #[test]
+    fn index_value_counts_with_options_preserves_first_seen_order_when_unsorted() {
+        let idx = Index::new(vec![
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+        ]);
+
+        let counts = idx.value_counts_with_options(false, false, false, false);
+        assert_eq!(
+            counts,
+            vec![
+                (IndexLabel::Datetime64(i64::MIN), Scalar::Int64(1)),
+                (IndexLabel::Utf8("b".into()), Scalar::Int64(2)),
+                (IndexLabel::Utf8("a".into()), Scalar::Int64(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_value_counts_with_options_normalize_excludes_missing_from_denominator() {
+        let idx = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Datetime64(i64::MIN),
+        ]);
+
+        let counts = idx.value_counts_with_options(true, true, false, true);
+        assert!(matches!(
+            counts.as_slice(),
+            [
+                (IndexLabel::Int64(1), Scalar::Float64(_)),
+                (IndexLabel::Int64(2), Scalar::Float64(_))
+            ]
+        ));
+        let [
+            (IndexLabel::Int64(1), Scalar::Float64(first)),
+            (IndexLabel::Int64(2), Scalar::Float64(second)),
+        ] = counts.as_slice()
+        else {
+            return;
+        };
+        assert!((first - (2.0 / 3.0)).abs() < 1e-12);
+        assert!((second - (1.0 / 3.0)).abs() < 1e-12);
     }
 
     #[test]

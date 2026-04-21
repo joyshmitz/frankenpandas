@@ -13457,13 +13457,20 @@ pub struct DataFrameDictSplit {
     pub data: Vec<Vec<Scalar>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataFrameDictAxisLabels {
+    Flat(Vec<Scalar>),
+    Multi(Vec<Vec<Scalar>>),
+}
+
 /// Pandas 2.2 `to_dict(orient='tight')` payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFrameDictTight {
     /// Row index labels, in row order.
     pub index: Vec<Scalar>,
-    /// Column names, in column order.
-    pub columns: Vec<Scalar>,
+    /// Column labels, in column order. Flat columns stay flat; MultiIndex
+    /// columns are emitted as tuples of level labels.
+    pub columns: DataFrameDictAxisLabels,
     /// Row-major nested data: `data[row][col]`.
     pub data: Vec<Vec<Scalar>>,
     /// Names of each index level (pandas emits `[None]` for an
@@ -13583,6 +13590,34 @@ impl DataFrame {
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+        }
+    }
+
+    fn tight_column_labels(&self) -> Result<DataFrameDictAxisLabels, FrameError> {
+        match &self.column_multiindex {
+            Some(multiindex) => {
+                let mut tuples = Vec::with_capacity(multiindex.len());
+                for position in 0..multiindex.len() {
+                    let tuple = multiindex.get_tuple(position).ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!(
+                            "column MultiIndex position {position} out of bounds"
+                        ))
+                    })?;
+                    tuples.push(
+                        tuple
+                            .into_iter()
+                            .map(Self::index_label_to_scalar)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                Ok(DataFrameDictAxisLabels::Multi(tuples))
+            }
+            None => Ok(DataFrameDictAxisLabels::Flat(
+                self.column_order
+                    .iter()
+                    .map(|name| Scalar::Utf8(name.clone()))
+                    .collect(),
+            )),
         }
     }
 
@@ -14589,6 +14624,18 @@ impl DataFrame {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+
+    /// Pandas-style `.empty` property: true iff the DataFrame contains
+    /// zero rows OR zero columns.
+    ///
+    /// Matches `pd.DataFrame.empty`. This is a stricter predicate than
+    /// `is_empty()` — a frame with rows but no columns is still empty
+    /// under pandas' definition because there are no values to
+    /// operate on.
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.index.is_empty() || self.column_order.is_empty()
     }
 
     /// Return the number of columns.
@@ -19557,6 +19604,15 @@ impl DataFrame {
     pub fn to_dict(&self, orient: &str) -> Result<DataFrameDictResult, FrameError> {
         match orient {
             "dict" => {
+                // pandas rejects duplicate index for orient='dict' — the
+                // inner {index -> value} mapping would collide and drop
+                // rows.
+                if self.index.has_duplicates() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "to_dict orient 'dict' does not support duplicate index labels"
+                            .to_owned(),
+                    ));
+                }
                 let mut result = BTreeMap::new();
                 for col_name in &self.column_order {
                     let col = &self.columns[col_name];
@@ -19643,11 +19699,7 @@ impl DataFrame {
             "tight" => {
                 // Tight orient: pandas 2.2 payload = {index, columns,
                 // data (row-major nested list), index_names, column_names}.
-                let columns: Vec<Scalar> = self
-                    .column_order
-                    .iter()
-                    .map(|name| Scalar::Utf8(name.clone()))
-                    .collect();
+                let columns = self.tight_column_labels()?;
                 let index: Vec<Scalar> = self
                     .index
                     .labels()
@@ -19668,8 +19720,10 @@ impl DataFrame {
                     })
                     .collect();
                 let index_names = vec![self.index.name().map(str::to_owned)];
-                // Column-level names are None until MultiIndex columns land.
-                let column_names = vec![None];
+                let column_names = self
+                    .column_multiindex
+                    .as_ref()
+                    .map_or_else(|| vec![None], |multiindex| multiindex.names().to_vec());
                 Ok(DataFrameDictResult::Tight(DataFrameDictTight {
                     index,
                     columns,
@@ -38823,6 +38877,54 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_dict_dict_rejects_duplicate_index() {
+        let index = Index::from_i64(vec![1, 1]);
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        let df =
+            DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
+        let err = df.to_dict("dict").unwrap_err();
+        let FrameError::CompatibilityRejected(msg) = err else {
+            panic!("expected CompatibilityRejected");
+        };
+        assert!(msg.contains("duplicate index labels"));
+    }
+
+    #[test]
+    fn dataframe_empty_true_when_zero_rows() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", Vec::<Scalar>::new())],
+        )
+        .unwrap();
+        assert!(df.empty());
+        assert!(df.is_empty()); // consistency with the row-only check
+    }
+
+    #[test]
+    fn dataframe_empty_true_when_zero_columns() {
+        // A DataFrame with rows but no columns is pandas-empty.
+        let index = Index::from_i64(vec![0, 1, 2]);
+        let df = DataFrame::new_with_column_order(index, BTreeMap::new(), Vec::new()).unwrap();
+        assert!(df.empty());
+        // is_empty (row-only) is false — rows exist.
+        assert!(!df.is_empty());
+    }
+
+    #[test]
+    fn dataframe_empty_false_when_non_trivial() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        assert!(!df.empty());
+    }
+
+    #[test]
     fn dataframe_to_dict_index_rejects_duplicate_index() {
         let index = Index::from_i64(vec![1, 2, 1]);
         let mut cols = BTreeMap::new();
@@ -38880,7 +38982,9 @@ mod tests {
             .expect("tight orient should return structured tight payload");
         assert_eq!(
             tight.columns,
-            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+            DataFrameDictAxisLabels::Flat(
+                vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()),]
+            )
         );
         assert_eq!(tight.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
         // Row-major data: row 0 = [1, "a"], row 1 = [2, "b"]
@@ -38909,6 +39013,60 @@ mod tests {
         let result = df.to_dict("tight").unwrap();
         let tight = result.as_tight().expect("tight");
         assert_eq!(tight.index_names, vec![Some("row_id".to_owned())]);
+    }
+
+    #[test]
+    fn dataframe_to_dict_tight_uses_column_multiindex_metadata() {
+        let index = Index::from_i64(vec![0, 1]);
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "price_open".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(12)]).unwrap(),
+        );
+        columns.insert(
+            "price_close".to_string(),
+            Column::from_values(vec![Scalar::Int64(11), Scalar::Int64(13)]).unwrap(),
+        );
+        let column_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+            ],
+            vec![
+                IndexLabel::Utf8("open".into()),
+                IndexLabel::Utf8("close".into()),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("field".into()), Some("stat".into())]);
+        let df = DataFrame::new_with_column_order_and_multiindex(
+            index,
+            columns,
+            vec!["price_open".to_string(), "price_close".to_string()],
+            Some(column_multiindex),
+        )
+        .unwrap();
+
+        let result = df.to_dict("tight").unwrap();
+        let tight = result.as_tight().expect("tight");
+        assert_eq!(
+            tight.columns,
+            DataFrameDictAxisLabels::Multi(vec![
+                vec![Scalar::Utf8("price".into()), Scalar::Utf8("open".into())],
+                vec![Scalar::Utf8("price".into()), Scalar::Utf8("close".into())],
+            ])
+        );
+        assert_eq!(
+            tight.column_names,
+            vec![Some("field".to_owned()), Some("stat".to_owned())]
+        );
+        assert_eq!(
+            tight.data,
+            vec![
+                vec![Scalar::Int64(10), Scalar::Int64(11)],
+                vec![Scalar::Int64(12), Scalar::Int64(13)],
+            ]
+        );
     }
 
     #[test]

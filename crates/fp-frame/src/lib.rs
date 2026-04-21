@@ -51576,7 +51576,10 @@ mod tests {
         assert!((got_x - expected_x).abs() < 1e-10);
 
         let got_y = expect_float64(&result.column().values()[1]);
-        assert!(got_y.is_nan(), "expected singleton sem to be NaN, got {got_y}");
+        assert!(
+            got_y.is_nan(),
+            "expected singleton sem to be NaN, got {got_y}"
+        );
     }
 
     #[test]

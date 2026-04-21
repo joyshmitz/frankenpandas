@@ -18779,6 +18779,25 @@ impl DataFrame {
         })
     }
 
+    /// Per-column value counts as a map of Series.
+    ///
+    /// Returns `{column_name → Series}` where each Series is the
+    /// `value_counts()` result for that column. This is distinct from
+    /// both `value_counts()` (counts unique full-row tuples) and
+    /// `value_counts_per_column()` (returns a nunique summary
+    /// DataFrame). Callers who want the pandas idiom
+    /// `{col: df[col].value_counts() for col in df.columns}` get it
+    /// in one pass here.
+    pub fn value_counts_map(&self) -> Result<BTreeMap<String, Series>, FrameError> {
+        let mut out = BTreeMap::new();
+        for name in &self.column_order {
+            let series = self.column_as_series(name)?;
+            let counts = series.value_counts()?;
+            out.insert(name.clone(), counts);
+        }
+        Ok(out)
+    }
+
     /// Count unique rows in the DataFrame.
     ///
     /// Matches `pd.DataFrame.value_counts()`. Returns a Series indexed by
@@ -50265,6 +50284,51 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.column().values()[0], Scalar::Int64(2)); // most frequent first
         assert_eq!(result.column().values()[1], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn df_value_counts_map_one_series_per_column() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)]),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.value_counts_map().unwrap();
+        assert_eq!(result.len(), 2);
+        let a = result.get("a").expect("a column");
+        assert_eq!(a.len(), 2); // [1 counted twice, 2 counted once]
+        let b = result.get("b").expect("b column");
+        assert_eq!(b.len(), 2); // [x counted twice, y counted once]
+    }
+
+    #[test]
+    fn df_value_counts_map_differs_from_row_value_counts() {
+        // Row value_counts treats full-row tuples; per-column decomposes.
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+        // Row level: (1,2) and (1,3) are distinct rows → 2 buckets.
+        let row_counts = df.value_counts().unwrap();
+        assert_eq!(row_counts.len(), 2);
+        // Per-column: a has one unique value (1), b has two (2, 3).
+        let per_col = df.value_counts_map().unwrap();
+        assert_eq!(per_col.get("a").unwrap().len(), 1);
+        assert_eq!(per_col.get("b").unwrap().len(), 2);
     }
 
     #[test]

@@ -1268,6 +1268,172 @@ impl Column {
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
+    /// Summary descriptive statistics.
+    ///
+    /// Matches `pd.Series.describe()` for numeric columns: returns the
+    /// seven-value tuple (count, mean, std, min, q25, q50, q75, max)
+    /// as a `Vec<(&'static str, Scalar)>` in pandas order. Non-numeric
+    /// columns return TypeError. Empty or fully-missing columns
+    /// produce Null(NaN) for the moment-based stats and Int64(0) for
+    /// count.
+    pub fn describe(&self) -> Result<Vec<(&'static str, Scalar)>, ColumnError> {
+        if !matches!(
+            self.dtype,
+            DType::Int64 | DType::Float64 | DType::Timedelta64
+        ) {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: format!("{:?}", self.dtype),
+                dtype: self.dtype,
+            }));
+        }
+        let count = Scalar::Int64(self.count() as i64);
+        let mean = self.mean();
+        let std = {
+            let nums: Vec<f64> = self
+                .values
+                .iter()
+                .filter(|v| !v.is_missing())
+                .filter_map(|v| v.to_f64().ok())
+                .collect();
+            if nums.len() < 2 {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                let mu = nums.iter().sum::<f64>() / nums.len() as f64;
+                let ss: f64 = nums.iter().map(|x| (x - mu).powi(2)).sum();
+                Scalar::Float64((ss / (nums.len() as f64 - 1.0)).sqrt())
+            }
+        };
+        let q25 = self.quantile(0.25);
+        let q50 = self.quantile(0.5);
+        let q75 = self.quantile(0.75);
+        let min = self.min();
+        let max = self.max();
+        Ok(vec![
+            ("count", count),
+            ("mean", mean),
+            ("std", std),
+            ("min", min),
+            ("25%", q25),
+            ("50%", q50),
+            ("75%", q75),
+            ("max", max),
+        ])
+    }
+
+    /// Combine two columns element-wise via `func`, using `fill` where
+    /// either input is missing.
+    ///
+    /// Matches `pd.Series.combine(other, func, fill_value=...)`. Result
+    /// length is the min of the two inputs (pandas aligns by position
+    /// when inputs are the same length; longer inputs are truncated).
+    /// Length mismatch returns `LengthMismatch`.
+    pub fn combine<F>(
+        &self,
+        other: &Self,
+        mut func: F,
+        fill: Scalar,
+    ) -> Result<Self, ColumnError>
+    where
+        F: FnMut(&Scalar, &Scalar) -> Scalar,
+    {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| {
+                let left = if a.is_missing() { &fill } else { a };
+                let right = if b.is_missing() { &fill } else { b };
+                func(left, right)
+            })
+            .collect();
+        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        Self::new(inferred, out)
+    }
+
+    /// Numeric-only `map` that converts each non-missing value to f64,
+    /// applies `func`, and collects the result.
+    ///
+    /// Matches the common pattern `pd.Series.apply(lambda x: f(x))`
+    /// for numeric-only transforms. Missing values pass through as
+    /// Null(NaN) without invoking `func`. Non-numeric inputs return a
+    /// type error on the first failing element. Result dtype is
+    /// Float64.
+    pub fn apply_float<F>(&self, mut func: F) -> Result<Self, ColumnError>
+    where
+        F: FnMut(f64) -> f64,
+    {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            match v.to_f64() {
+                Ok(x) => {
+                    let y = func(x);
+                    if y.is_nan() {
+                        out.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        out.push(Scalar::Float64(y));
+                    }
+                }
+                Err(err) => return Err(ColumnError::Type(err)),
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Bin non-missing values into `bins` equal-width buckets covering
+    /// `[min, max]` and return the count per bin.
+    ///
+    /// Matches the `bins=n` histogram path behind `pd.Series.hist` (or
+    /// `numpy.histogram(bins=n)[0]`). Bucket boundaries are inclusive on
+    /// the low side except for the final bucket, which is inclusive on
+    /// both sides. Empty columns / bins=0 yield an empty Vec.
+    #[must_use]
+    pub fn hist_counts(&self, bins: usize) -> Vec<usize> {
+        if bins == 0 {
+            return Vec::new();
+        }
+        let nums: Vec<f64> = self
+            .values
+            .iter()
+            .filter(|v| !v.is_missing())
+            .filter_map(|v| v.to_f64().ok())
+            .filter(|f| !f.is_nan())
+            .collect();
+        if nums.is_empty() {
+            return vec![0; bins];
+        }
+        let (min, max) = nums
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| {
+                (lo.min(x), hi.max(x))
+            });
+        if (max - min).abs() < f64::EPSILON {
+            // All values collapse into the first bin.
+            let mut counts = vec![0; bins];
+            counts[0] = nums.len();
+            return counts;
+        }
+        let width = (max - min) / bins as f64;
+        let mut counts = vec![0usize; bins];
+        for x in &nums {
+            let mut idx = ((x - min) / width) as usize;
+            if idx >= bins {
+                idx = bins - 1;
+            }
+            counts[idx] += 1;
+        }
+        counts
+    }
+
     /// Position of the smallest non-missing value, or None when every
     /// value is missing.
     ///
@@ -4593,6 +4759,135 @@ mod tests {
             assert_eq!(c.values()[0], Scalar::Float64(-2.0));
             assert_eq!(c.values()[1], Scalar::Float64(0.0));
             assert_eq!(c.values()[2], Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn describe_returns_pandas_order() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let stats = col.describe().expect("describe");
+            let names: Vec<&str> = stats.iter().map(|(k, _)| *k).collect();
+            assert_eq!(names, vec!["count", "mean", "std", "min", "25%", "50%", "75%", "max"]);
+            assert_eq!(stats[0].1, Scalar::Int64(5));
+            match &stats[1].1 {
+                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+            assert_eq!(stats[3].1, Scalar::Float64(1.0));
+            assert_eq!(stats[7].1, Scalar::Float64(5.0));
+        }
+
+        #[test]
+        fn describe_rejects_utf8_column() {
+            let col = Column::from_values(vec![Scalar::Utf8("a".into())]).expect("col");
+            assert!(col.describe().is_err());
+        }
+
+        #[test]
+        fn combine_uses_fill_for_missing() {
+            let a = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("b");
+            let out = a
+                .combine(
+                    &b,
+                    |l, r| {
+                        if let (Ok(lf), Ok(rf)) = (l.to_f64(), r.to_f64()) {
+                            Scalar::Float64(lf + rf)
+                        } else {
+                            Scalar::Null(NullKind::NaN)
+                        }
+                    },
+                    Scalar::Int64(0),
+                )
+                .expect("combine");
+            assert_eq!(out.values()[0], Scalar::Float64(11.0));
+            assert_eq!(out.values()[1], Scalar::Float64(20.0));
+            assert_eq!(out.values()[2], Scalar::Float64(3.0));
+        }
+
+        #[test]
+        fn combine_length_mismatch_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("b");
+            let err = a
+                .combine(&b, |l, _| l.clone(), Scalar::Int64(0))
+                .unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn apply_float_applies_numeric_fn() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+            let out = col.apply_float(|x| x.sqrt()).expect("apply_float");
+            assert_eq!(out.values()[0], Scalar::Float64(1.0));
+            assert!(out.values()[1].is_missing());
+            assert_eq!(out.values()[2], Scalar::Float64(2.0));
+            assert_eq!(out.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn apply_float_rejects_non_numeric() {
+            let col = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("col");
+            assert!(col.apply_float(|x| x + 1.0).is_err());
+        }
+
+        #[test]
+        fn hist_counts_equal_width_bins() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(9.0),
+            ])
+            .expect("col");
+            let counts = col.hist_counts(3);
+            // Bin width = 3, buckets [0,3), [3,6), [6,9]
+            assert_eq!(counts.len(), 3);
+            assert_eq!(counts[0], 3); // 0,1,2
+            assert_eq!(counts[1], 1); // 3
+            assert_eq!(counts[2], 1); // 9 clamps into last bin
+        }
+
+        #[test]
+        fn hist_counts_zero_bins_is_empty() {
+            let col = Column::from_values(vec![Scalar::Float64(1.0)]).expect("col");
+            assert!(col.hist_counts(0).is_empty());
+        }
+
+        #[test]
+        fn hist_counts_constant_column_puts_all_in_first_bin() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let counts = col.hist_counts(3);
+            assert_eq!(counts[0], 3);
+            assert_eq!(counts[1], 0);
+            assert_eq!(counts[2], 0);
         }
 
         #[test]

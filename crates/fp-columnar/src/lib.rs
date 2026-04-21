@@ -2,8 +2,8 @@
 
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    infer_dtype, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nanmax,
-    nanmean, nanmedian, nanmin, nanprod, nanquantile, nansum,
+    infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum,
+    nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanquantile, nansum,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1268,6 +1268,122 @@ impl Column {
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
+    /// Count of distinct non-missing values.
+    ///
+    /// Matches `pd.Series.nunique(dropna=True)`.
+    #[must_use]
+    pub fn nunique(&self) -> Scalar {
+        nannunique(&self.values)
+    }
+
+    /// Truthiness reduction: whether any non-missing value is truthy.
+    ///
+    /// Matches `pd.Series.any()` in skipna=True mode. Empty column
+    /// returns false (pandas convention).
+    #[must_use]
+    pub fn any(&self) -> Scalar {
+        nanany(&self.values)
+    }
+
+    /// Truthiness reduction: whether all non-missing values are truthy.
+    ///
+    /// Matches `pd.Series.all()` in skipna=True mode. Empty column
+    /// returns true.
+    #[must_use]
+    pub fn all(&self) -> Scalar {
+        nanall(&self.values)
+    }
+
+    /// Whether every non-missing value is distinct.
+    ///
+    /// Matches `pd.Series.is_unique`.
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        !self.has_duplicates()
+    }
+
+    /// Whether any non-missing value repeats.
+    ///
+    /// Matches `pd.Series.has_duplicates`.
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        use std::collections::HashSet;
+        #[derive(Hash, PartialEq, Eq)]
+        enum Key<'a> {
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+        let mut seen: HashSet<Key<'_>> = HashSet::new();
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            let key = match v {
+                Scalar::Bool(b) => Key::Bool(*b),
+                Scalar::Int64(i) => Key::Int64(*i),
+                Scalar::Float64(f) => {
+                    let norm = if *f == 0.0 { 0.0 } else { *f };
+                    Key::FloatBits(norm.to_bits())
+                }
+                Scalar::Utf8(s) => Key::Utf8(s.as_str()),
+                Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Null(_) => continue,
+            };
+            if !seen.insert(key) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Percent change between consecutive non-missing values.
+    ///
+    /// Matches `pd.Series.pct_change(periods=1)` (fill_method defaults
+    /// to None on pandas 2.2+, so nulls propagate without forward fill).
+    /// Result dtype Float64. Non-numeric inputs return TypeError. The
+    /// leading `|periods|` positions are Null(NaN).
+    pub fn pct_change(&self, periods: i64) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        if len == 0 || periods == 0 {
+            return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
+        }
+        let abs = periods.unsigned_abs() as usize;
+        let mut out: Vec<Scalar> = Vec::with_capacity(len);
+        for i in 0..len {
+            let prev_idx = if periods > 0 {
+                i.checked_sub(abs)
+            } else if i + abs < len {
+                Some(i + abs)
+            } else {
+                None
+            };
+            let Some(pi) = prev_idx else {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            };
+            let cur = &self.values[i];
+            let prev = &self.values[pi];
+            if cur.is_missing() || prev.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            match (cur.to_f64(), prev.to_f64()) {
+                (Ok(c), Ok(p)) => {
+                    if p == 0.0 || p.is_nan() || c.is_nan() {
+                        out.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        out.push(Scalar::Float64((c - p) / p));
+                    }
+                }
+                _ => out.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Summary descriptive statistics.
     ///
     /// Matches `pd.Series.describe()` for numeric columns: returns the
@@ -1327,12 +1443,7 @@ impl Column {
     /// length is the min of the two inputs (pandas aligns by position
     /// when inputs are the same length; longer inputs are truncated).
     /// Length mismatch returns `LengthMismatch`.
-    pub fn combine<F>(
-        &self,
-        other: &Self,
-        mut func: F,
-        fill: Scalar,
-    ) -> Result<Self, ColumnError>
+    pub fn combine<F>(&self, other: &Self, mut func: F, fill: Scalar) -> Result<Self, ColumnError>
     where
         F: FnMut(&Scalar, &Scalar) -> Scalar,
     {
@@ -4676,12 +4787,9 @@ mod tests {
 
         #[test]
         fn is_monotonic_decreasing_detects_descending() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(5),
-                Scalar::Int64(3),
-                Scalar::Int64(1),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(3), Scalar::Int64(1)])
+                    .expect("col");
             assert!(col.is_monotonic_decreasing());
             assert!(!col.is_monotonic_increasing());
         }
@@ -4773,12 +4881,16 @@ mod tests {
             .expect("col");
             let stats = col.describe().expect("describe");
             let names: Vec<&str> = stats.iter().map(|(k, _)| *k).collect();
-            assert_eq!(names, vec!["count", "mean", "std", "min", "25%", "50%", "75%", "max"]);
+            assert_eq!(
+                names,
+                vec!["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+            );
             assert_eq!(stats[0].1, Scalar::Int64(5));
-            match &stats[1].1 {
-                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
-            }
+            assert!(
+                matches!(&stats[1].1, Scalar::Float64(v) if (*v - 3.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                stats[1].1
+            );
             assert_eq!(stats[3].1, Scalar::Float64(1.0));
             assert_eq!(stats[7].1, Scalar::Float64(5.0));
         }
@@ -4888,6 +5000,104 @@ mod tests {
             assert_eq!(counts[0], 3);
             assert_eq!(counts[1], 0);
             assert_eq!(counts[2], 0);
+        }
+
+        #[test]
+        fn nunique_drops_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert_eq!(col.nunique(), Scalar::Int64(2));
+        }
+
+        #[test]
+        fn any_all_reductions() {
+            let col = Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(0)]).expect("col");
+            assert_eq!(col.any(), Scalar::Bool(false));
+            assert_eq!(col.all(), Scalar::Bool(false));
+
+            let mixed = Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(1)]).expect("col");
+            assert_eq!(mixed.any(), Scalar::Bool(true));
+            assert_eq!(mixed.all(), Scalar::Bool(false));
+
+            let all_true =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            assert_eq!(all_true.all(), Scalar::Bool(true));
+        }
+
+        #[test]
+        fn is_unique_true_when_no_repeats() {
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
+            assert!(col.is_unique());
+            assert!(!col.has_duplicates());
+        }
+
+        #[test]
+        fn has_duplicates_true_when_repeats_present() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(1)]).expect("col");
+            assert!(col.has_duplicates());
+            assert!(!col.is_unique());
+        }
+
+        #[test]
+        fn is_unique_ignores_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert!(col.is_unique());
+        }
+
+        #[test]
+        fn pct_change_periods_one() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(12.0),
+                Scalar::Float64(9.0),
+            ])
+            .expect("col");
+            let r = col.pct_change(1).expect("pct_change");
+            assert!(r.values()[0].is_missing());
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if (*v - 0.2).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[1]
+            );
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if (*v + 0.25).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[2]
+            );
+        }
+
+        #[test]
+        fn pct_change_zero_prev_yields_null() {
+            let col =
+                Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(5.0)]).expect("col");
+            let r = col.pct_change(1).expect("pct_change");
+            assert!(r.values()[1].is_missing());
+        }
+
+        #[test]
+        fn pct_change_negative_periods() {
+            let col = Column::from_values(vec![Scalar::Float64(10.0), Scalar::Float64(15.0)])
+                .expect("col");
+            let r = col.pct_change(-1).expect("pct_change");
+            // (10 - 15) / 15 = -1/3
+            assert!(
+                matches!(&r.values()[0], Scalar::Float64(v) if (*v + 1.0 / 3.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[0]
+            );
+            assert!(r.values()[1].is_missing());
         }
 
         #[test]

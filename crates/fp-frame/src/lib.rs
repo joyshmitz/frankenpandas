@@ -7938,6 +7938,23 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(move |s, mp| s.expanding(Some(mp)).quantile(q))
     }
 
+    /// Expanding sample skewness (Fisher-Pearson) across all numeric
+    /// columns.
+    ///
+    /// Matches `pd.DataFrame.expanding().skew()`. Delegates to
+    /// `Series::expanding().skew()` per column; non-numeric columns
+    /// are skipped.
+    pub fn skew(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).skew())
+    }
+
+    /// Expanding excess kurtosis across all numeric columns.
+    ///
+    /// Matches `pd.DataFrame.expanding().kurt()`.
+    pub fn kurt(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).kurt())
+    }
+
     /// Apply a custom function over the expanding window for each numeric column.
     ///
     /// Matches `df.expanding().apply(func)`.
@@ -51061,6 +51078,101 @@ mod tests {
         assert_eq!(result.columns["x"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["x"].values()[1], Scalar::Float64(2.0));
         assert_eq!(result.columns["x"].values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn df_expanding_skew_matches_series_skew_per_column() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let skew_df = df.expanding(Some(3)).skew().unwrap();
+        assert_eq!(skew_df.column_names(), vec!["x", "y"]);
+        // Symmetric column x should produce skew ≈ 0 at position 4.
+        let x_last = &skew_df.columns["x"].values()[4];
+        if let Scalar::Float64(v) = x_last {
+            assert!(v.abs() < 1e-9, "symmetric x should skew to 0, got {v}");
+        } else {
+            panic!("expected Float64 last value for x");
+        }
+    }
+
+    #[test]
+    fn df_expanding_kurt_matches_series_kurt_per_column() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let kurt_df = df.expanding(Some(4)).kurt().unwrap();
+        // pandas expanding kurt of [1..=5] at position 4 is -1.2.
+        let last = &kurt_df.columns["x"].values()[4];
+        if let Scalar::Float64(v) = last {
+            assert!((v + 1.2).abs() < 1e-9, "expected -1.2, got {v}");
+        } else {
+            panic!("expected Float64 last value");
+        }
+    }
+
+    #[test]
+    fn df_expanding_skew_kurt_skip_non_numeric() {
+        let df = DataFrame::from_dict(
+            &["a", "label"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let skew_df = df.expanding(Some(3)).skew().unwrap();
+        assert_eq!(skew_df.column_names(), vec!["a"]);
+        let kurt_df = df.expanding(Some(4)).kurt().unwrap();
+        assert_eq!(kurt_df.column_names(), vec!["a"]);
     }
 
     #[test]

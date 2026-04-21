@@ -2111,11 +2111,7 @@ fn parse_excel_rows(
         let mut filtered_headers = Vec::new();
         let mut filtered_generated = Vec::new();
         let mut filtered_columns = Vec::new();
-        for ((name, generated), values) in headers
-            .into_iter()
-            .zip(header_generated.into_iter())
-            .zip(columns.into_iter())
-        {
+        for ((name, generated), values) in headers.into_iter().zip(header_generated).zip(columns) {
             if usecols.contains(&name) {
                 filtered_headers.push(name);
                 filtered_generated.push(generated);

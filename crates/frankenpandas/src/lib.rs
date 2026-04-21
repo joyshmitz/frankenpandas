@@ -60,6 +60,7 @@ pub use fp_io::{
     JsonOrient,
     // SQL
     SqlIfExists,
+    SqlReadOptions,
     read_csv,
     read_csv_str,
     read_csv_with_options,
@@ -80,6 +81,7 @@ pub use fp_io::{
     read_parquet_bytes,
     read_sql,
     read_sql_table,
+    read_sql_with_options,
     write_csv,
     write_csv_string,
     write_excel,

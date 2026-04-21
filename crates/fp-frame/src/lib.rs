@@ -222,6 +222,72 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
     }
 }
 
+fn pivot_label_to_column_name(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+    }
+}
+
+fn scalar_to_pivot_column_name(value: &Scalar) -> String {
+    pivot_label_to_column_name(&scalar_to_value_counts_index_label(value))
+}
+
+fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
+    Ok(match aggfunc {
+        "sum" => vals.iter().sum(),
+        "mean" => {
+            if vals.is_empty() {
+                f64::NAN
+            } else {
+                vals.iter().sum::<f64>() / vals.len() as f64
+            }
+        }
+        "count" => vals.len() as f64,
+        "min" => vals.iter().copied().fold(f64::INFINITY, f64::min),
+        "max" => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "first" => vals.first().copied().unwrap_or(f64::NAN),
+        "median" => {
+            if vals.is_empty() {
+                return Ok(f64::NAN);
+            }
+            let mut sorted = vals.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = sorted.len() / 2;
+            if sorted.len().is_multiple_of(2) {
+                (sorted[mid - 1] + sorted[mid]) / 2.0
+            } else {
+                sorted[mid]
+            }
+        }
+        "var" => {
+            if vals.len() < 2 {
+                f64::NAN
+            } else {
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                sum_sq / (vals.len() as f64 - 1.0)
+            }
+        }
+        "std" => {
+            if vals.len() < 2 {
+                f64::NAN
+            } else {
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                (sum_sq / (vals.len() as f64 - 1.0)).sqrt()
+            }
+        }
+        _ => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "pivot_table aggfunc '{aggfunc}' not supported"
+            )));
+        }
+    })
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 enum ScalarKey<'a> {
     Null(NullKind),
@@ -18038,55 +18104,6 @@ impl DataFrame {
         }
 
         // Aggregate
-        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
-            "sum" => |vals: &[f64]| vals.iter().sum(),
-            "mean" => |vals: &[f64]| {
-                if vals.is_empty() {
-                    f64::NAN
-                } else {
-                    vals.iter().sum::<f64>() / vals.len() as f64
-                }
-            },
-            "count" => |vals: &[f64]| vals.len() as f64,
-            "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
-            "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
-            "median" => |vals: &[f64]| {
-                if vals.is_empty() {
-                    return f64::NAN;
-                }
-                let mut sorted = vals.to_vec();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mid = sorted.len() / 2;
-                if sorted.len().is_multiple_of(2) {
-                    (sorted[mid - 1] + sorted[mid]) / 2.0
-                } else {
-                    sorted[mid]
-                }
-            },
-            "var" => |vals: &[f64]| {
-                if vals.len() < 2 {
-                    return f64::NAN;
-                }
-                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-                sum_sq / (vals.len() as f64 - 1.0)
-            },
-            "std" => |vals: &[f64]| {
-                if vals.len() < 2 {
-                    return f64::NAN;
-                }
-                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-                (sum_sq / (vals.len() as f64 - 1.0)).sqrt()
-            },
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "pivot_table aggfunc '{aggfunc}' not supported"
-                )));
-            }
-        };
-
         // Build result columns
         let mut result_cols = BTreeMap::new();
         let mut result_col_order = Vec::new();
@@ -18096,7 +18113,7 @@ impl DataFrame {
             let mut col_vals = Vec::with_capacity(idx_order_keys.len());
             for ik in &idx_order_keys {
                 if let Some(vals) = groups.get(&(*ik, *ck)) {
-                    col_vals.push(Scalar::Float64(agg_fn(vals)));
+                    col_vals.push(Scalar::Float64(pivot_table_agg_value(aggfunc, vals)?));
                 } else {
                     col_vals.push(Scalar::Null(NullKind::NaN));
                 }
@@ -18244,117 +18261,49 @@ impl DataFrame {
         })
     }
 
-    /// Create a pivot table with optional margin totals.
-    ///
-    /// Matches `df.pivot_table(values, index, columns, aggfunc, margins=True)`.
-    /// When `margins` is `true`, appends an "All" row and "All" column with
-    /// totals computed using the same aggregation function.
-    pub fn pivot_table_with_margins(
+    fn pivot_table_margin_source_values(
         &self,
         values: &str,
         index_col: &str,
         columns_col: &str,
-        aggfunc: &str,
-        margins: bool,
-    ) -> Result<Self, FrameError> {
-        let base = self.pivot_table(values, index_col, columns_col, aggfunc)?;
-        if !margins {
-            return Ok(base);
-        }
+        row_label: Option<&IndexLabel>,
+        column_name: Option<&str>,
+    ) -> Vec<f64> {
+        let val_col = &self.columns[values];
+        let idx_col = &self.columns[index_col];
+        let cols_col = &self.columns[columns_col];
+        let mut out = Vec::new();
 
-        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
-            "sum" => |vals: &[f64]| vals.iter().sum(),
-            "mean" => |vals: &[f64]| {
-                if vals.is_empty() {
-                    f64::NAN
-                } else {
-                    vals.iter().sum::<f64>() / vals.len() as f64
-                }
-            },
-            "count" => |vals: &[f64]| vals.len() as f64,
-            "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
-            "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "pivot_table aggfunc '{aggfunc}' not supported for margins"
-                )));
+        for row_idx in 0..self.len() {
+            let idx_value = &idx_col.values()[row_idx];
+            let cols_value = &cols_col.values()[row_idx];
+            if scalar_key_skip_missing(idx_value).is_none()
+                || scalar_key_skip_missing(cols_value).is_none()
+            {
+                continue;
             }
-        };
 
-        let n_rows = base.len();
-        let col_names = base.column_order.clone();
-
-        // Add "All" column: row-wise aggregation across all pivot columns
-        let mut all_col_vals = Vec::with_capacity(n_rows);
-        for row in 0..n_rows {
-            let mut row_vals = Vec::new();
-            for name in &col_names {
-                if let Some(col) = base.columns.get(name)
-                    && let Ok(v) = col.values()[row].to_f64()
-                {
-                    row_vals.push(v);
-                }
+            if let Some(expected_row) = row_label
+                && scalar_to_value_counts_index_label(idx_value) != *expected_row
+            {
+                continue;
             }
-            if row_vals.is_empty() {
-                all_col_vals.push(Scalar::Null(NullKind::NaN));
-            } else {
-                all_col_vals.push(Scalar::Float64(agg_fn(&row_vals)));
+
+            if let Some(expected_column) = column_name
+                && scalar_to_pivot_column_name(cols_value) != expected_column
+            {
+                continue;
+            }
+
+            if let Ok(value) = val_col.values()[row_idx].to_f64() {
+                out.push(value);
             }
         }
 
-        // Add "All" row: column-wise aggregation across all index rows
-        let mut new_cols = BTreeMap::new();
-        let mut new_col_order = col_names.clone();
-        let mut all_row_vals_for_all_col = Vec::new();
-
-        for name in &col_names {
-            let col = &base.columns[name];
-            let mut col_vals: Vec<Scalar> = col.values().to_vec();
-            // Compute margin for this column
-            let nums: Vec<f64> = col
-                .values()
-                .iter()
-                .filter_map(|v| v.to_f64().ok())
-                .collect();
-            let margin = if nums.is_empty() {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                Scalar::Float64(agg_fn(&nums))
-            };
-            if let Ok(v) = margin.to_f64() {
-                all_row_vals_for_all_col.push(v);
-            }
-            col_vals.push(margin);
-            new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
-        }
-
-        // "All" column data including margin-of-margins
-        all_col_vals.push(if all_row_vals_for_all_col.is_empty() {
-            Scalar::Null(NullKind::NaN)
-        } else {
-            Scalar::Float64(agg_fn(&all_row_vals_for_all_col))
-        });
-        new_cols.insert("All".to_owned(), Column::new(DType::Float64, all_col_vals)?);
-        new_col_order.push("All".to_owned());
-
-        // Build new index with "All" label appended
-        let mut new_labels = base.index.labels().to_vec();
-        new_labels.push(IndexLabel::Utf8("All".to_owned()));
-
-        Ok(Self {
-            columns: new_cols,
-            column_order: new_col_order,
-            index: Index::new(new_labels),
-            column_multiindex: None,
-        })
+        out
     }
 
-    /// Pivot table with margins and a customizable margin label.
-    ///
-    /// Like `pivot_table_with_margins` but allows specifying the label used
-    /// for the margin row/column (default is "All" in pandas).
-    pub fn pivot_table_with_margins_name(
+    fn pivot_table_with_margins_impl(
         &self,
         values: &str,
         index_col: &str,
@@ -18368,76 +18317,51 @@ impl DataFrame {
             return Ok(base);
         }
 
-        let agg_fn: fn(&[f64]) -> f64 = match aggfunc {
-            "sum" => |vals: &[f64]| vals.iter().sum(),
-            "mean" => |vals: &[f64]| {
-                if vals.is_empty() {
-                    f64::NAN
-                } else {
-                    vals.iter().sum::<f64>() / vals.len() as f64
-                }
-            },
-            "count" => |vals: &[f64]| vals.len() as f64,
-            "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
-            "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "pivot_table aggfunc '{aggfunc}' not supported for margins"
-                )));
-            }
-        };
-
         let n_rows = base.len();
         let col_names = base.column_order.clone();
 
-        // margin-label column: row-wise aggregation
-        let mut all_col_vals = Vec::with_capacity(n_rows);
-        for row in 0..n_rows {
-            let mut row_vals = Vec::new();
-            for name in &col_names {
-                if let Some(col) = base.columns.get(name)
-                    && let Ok(v) = col.values()[row].to_f64()
-                {
-                    row_vals.push(v);
-                }
-            }
-            if row_vals.is_empty() {
-                all_col_vals.push(Scalar::Null(NullKind::NaN));
+        let mut all_col_vals = Vec::with_capacity(n_rows + 1);
+        for row_label in base.index.labels() {
+            let source_vals = self.pivot_table_margin_source_values(
+                values,
+                index_col,
+                columns_col,
+                Some(row_label),
+                None,
+            );
+            all_col_vals.push(if source_vals.is_empty() {
+                Scalar::Null(NullKind::NaN)
             } else {
-                all_col_vals.push(Scalar::Float64(agg_fn(&row_vals)));
-            }
+                Scalar::Float64(pivot_table_agg_value(aggfunc, &source_vals)?)
+            });
         }
 
-        // margin-label row: column-wise aggregation
         let mut new_cols = BTreeMap::new();
         let mut new_col_order = col_names.clone();
-        let mut all_row_vals_for_all_col = Vec::new();
-
         for name in &col_names {
             let col = &base.columns[name];
             let mut col_vals: Vec<Scalar> = col.values().to_vec();
-            let nums: Vec<f64> = col
-                .values()
-                .iter()
-                .filter_map(|v| v.to_f64().ok())
-                .collect();
-            let margin = if nums.is_empty() {
+            let source_vals = self.pivot_table_margin_source_values(
+                values,
+                index_col,
+                columns_col,
+                None,
+                Some(name),
+            );
+            col_vals.push(if source_vals.is_empty() {
                 Scalar::Null(NullKind::NaN)
             } else {
-                Scalar::Float64(agg_fn(&nums))
-            };
-            if let Ok(v) = margin.to_f64() {
-                all_row_vals_for_all_col.push(v);
-            }
-            col_vals.push(margin);
+                Scalar::Float64(pivot_table_agg_value(aggfunc, &source_vals)?)
+            });
             new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
         }
 
-        all_col_vals.push(if all_row_vals_for_all_col.is_empty() {
+        let overall_vals =
+            self.pivot_table_margin_source_values(values, index_col, columns_col, None, None);
+        all_col_vals.push(if overall_vals.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
-            Scalar::Float64(agg_fn(&all_row_vals_for_all_col))
+            Scalar::Float64(pivot_table_agg_value(aggfunc, &overall_vals)?)
         });
         new_cols.insert(
             margins_name.to_owned(),
@@ -18454,6 +18378,45 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: None,
         })
+    }
+
+    /// Create a pivot table with optional margin totals.
+    ///
+    /// Matches `df.pivot_table(values, index, columns, aggfunc, margins=True)`.
+    /// When `margins` is `true`, appends an "All" row and "All" column with
+    /// totals computed using the same aggregation function.
+    pub fn pivot_table_with_margins(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        margins: bool,
+    ) -> Result<Self, FrameError> {
+        self.pivot_table_with_margins_impl(values, index_col, columns_col, aggfunc, margins, "All")
+    }
+
+    /// Pivot table with margins and a customizable margin label.
+    ///
+    /// Like `pivot_table_with_margins` but allows specifying the label used
+    /// for the margin row/column (default is "All" in pandas).
+    pub fn pivot_table_with_margins_name(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        margins: bool,
+        margins_name: &str,
+    ) -> Result<Self, FrameError> {
+        self.pivot_table_with_margins_impl(
+            values,
+            index_col,
+            columns_col,
+            aggfunc,
+            margins,
+            margins_name,
+        )
     }
 
     /// Aggregate using one or more operations over the specified axis.
@@ -37162,6 +37125,101 @@ mod tests {
         assert_eq!(base.column_names(), no_margins.column_names());
     }
 
+    #[test]
+    fn dataframe_pivot_table_with_margins_std_uses_raw_source_values() {
+        fn sample_std(values: &[f64]) -> f64 {
+            if values.len() < 2 {
+                return f64::NAN;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let sum_sq = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            (sum_sq / (values.len() as f64 - 1.0)).sqrt()
+        }
+
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pt = df
+            .pivot_table_with_margins("val", "row", "col", "std", true)
+            .unwrap();
+
+        let r1_all = pt.columns["All"].values()[0].to_f64().unwrap();
+        let r2_all = pt.columns["All"].values()[1].to_f64().unwrap();
+        let all_c1 = pt.columns["c1"].values()[2].to_f64().unwrap();
+        let all_c2 = pt.columns["c2"].values()[2].to_f64().unwrap();
+        let all_all = pt.columns["All"].values()[2].to_f64().unwrap();
+
+        assert!((r1_all - sample_std(&[10.0, 20.0])).abs() < 1e-10);
+        assert!((r2_all - sample_std(&[4.0, 8.0, 1.0, 3.0])).abs() < 1e-10);
+        assert!((all_c1 - sample_std(&[10.0, 20.0, 4.0, 8.0])).abs() < 1e-10);
+        assert!((all_c2 - sample_std(&[1.0, 3.0])).abs() < 1e-10);
+        assert!((all_all - sample_std(&[10.0, 20.0, 4.0, 8.0, 1.0, 3.0])).abs() < 1e-10);
+    }
+
     // ── agg tests ──
 
     #[test]
@@ -54862,6 +54920,80 @@ mod tests {
         let labels = result.index().labels();
         let last = &labels[labels.len() - 1];
         assert_eq!(*last, IndexLabel::Utf8("Total".into()));
+    }
+
+    #[test]
+    fn test_pivot_table_with_margins_name_var_uses_ddof1_and_singleton_nan() {
+        fn sample_var(values: &[f64]) -> f64 {
+            if values.len() < 2 {
+                return f64::NAN;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let sum_sq = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            sum_sq / (values.len() as f64 - 1.0)
+        }
+
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("East".into()),
+                        Scalar::Utf8("West".into()),
+                        Scalar::Utf8("West".into()),
+                        Scalar::Utf8("West".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .pivot_table_with_margins_name("sales", "region", "product", "var", true, "Total")
+            .unwrap();
+
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"Total".to_string()));
+        assert_eq!(
+            result.index().labels().last(),
+            Some(&IndexLabel::Utf8("Total".into()))
+        );
+
+        assert!(result.columns["Total"].values()[0].is_missing());
+        assert!(result.columns["B"].values()[2].is_missing());
+        assert!(
+            (result.columns["A"].values()[2].to_f64().unwrap() - sample_var(&[10.0, 4.0, 8.0]))
+                .abs()
+                < 1e-10
+        );
+        assert!(
+            (result.columns["Total"].values()[2].to_f64().unwrap()
+                - sample_var(&[10.0, 4.0, 8.0, 1.0]))
+            .abs()
+                < 1e-10
+        );
     }
 
     #[test]

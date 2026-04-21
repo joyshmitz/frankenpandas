@@ -2233,6 +2233,146 @@ impl Column {
         base + deep_extra + validity_bytes
     }
 
+    /// Element-wise equality into a Bool column.
+    ///
+    /// Matches `pd.Series.eq(other)`. Both inputs must have the same
+    /// length. Missing-on-either-side positions produce `false`
+    /// (pandas semantics: NaN != anything, including NaN).
+    pub fn equals(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| {
+                if a.is_missing() || b.is_missing() {
+                    Scalar::Bool(false)
+                } else {
+                    Scalar::Bool(a.semantic_eq(b))
+                }
+            })
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Scalar dot product against another column.
+    ///
+    /// Matches `pd.Series.dot(other)` for numeric columns. Missing
+    /// entries on either side contribute zero (consistent with
+    /// fp-types nan-aware sums). Length mismatch returns
+    /// `LengthMismatch`; non-numeric inputs return a type error on
+    /// the first offending value.
+    pub fn dot(&self, other: &Self) -> Result<f64, ColumnError> {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let mut sum = 0.0_f64;
+        for (a, b) in self.values.iter().zip(other.values.iter()) {
+            if a.is_missing() || b.is_missing() {
+                continue;
+            }
+            let av = a.to_f64().map_err(ColumnError::Type)?;
+            let bv = b.to_f64().map_err(ColumnError::Type)?;
+            if av.is_nan() || bv.is_nan() {
+                continue;
+            }
+            sum += av * bv;
+        }
+        Ok(sum)
+    }
+
+    /// Fill missing values in `self` with aligned values from `other`.
+    ///
+    /// Matches `pd.Series.fillna(other)` when `other` is a Series. Only
+    /// positions missing in `self` are replaced. Length mismatch
+    /// returns `LengthMismatch`. Values from `other` are cast into
+    /// `self.dtype`.
+    pub fn fillna_with_column(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(v, o)| {
+                if v.is_missing() {
+                    cast_scalar(o, self.dtype)
+                } else {
+                    Ok(v.clone())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ColumnError::Type)?;
+        Self::new(self.dtype, out)
+    }
+
+    /// Element-wise quotient and remainder against `divisor`.
+    ///
+    /// Matches `pd.Series.divmod(other)`: returns
+    /// `(self // other, self % other)`. Division by zero, missing
+    /// inputs, or non-numeric values yield `Null(NaN)` in both
+    /// outputs at that position. Length mismatch returns
+    /// `LengthMismatch`. Both result columns are Float64.
+    pub fn divmod(&self, divisor: &Self) -> Result<(Self, Self), ColumnError> {
+        if self.values.len() != divisor.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: divisor.values.len(),
+            });
+        }
+        let mut quotient = Vec::with_capacity(self.values.len());
+        let mut remainder = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(divisor.values.iter()) {
+            if a.is_missing() || b.is_missing() {
+                quotient.push(Scalar::Null(NullKind::NaN));
+                remainder.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let num = match a.to_f64() {
+                Ok(x) if !x.is_nan() => x,
+                _ => {
+                    quotient.push(Scalar::Null(NullKind::NaN));
+                    remainder.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+            };
+            let den = match b.to_f64() {
+                Ok(x) if !x.is_nan() => x,
+                _ => {
+                    quotient.push(Scalar::Null(NullKind::NaN));
+                    remainder.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+            };
+            if den == 0.0 {
+                quotient.push(Scalar::Null(NullKind::NaN));
+                remainder.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            // Floor-division and Python-style modulo.
+            let q = (num / den).floor();
+            let r = num - q * den;
+            quotient.push(Scalar::Float64(q));
+            remainder.push(Scalar::Float64(r));
+        }
+        Ok((
+            Self::new(DType::Float64, quotient)?,
+            Self::new(DType::Float64, remainder)?,
+        ))
+    }
+
     /// Keep values where `cond` is true; replace false positions with
     /// values from an `other` Column (element-wise).
     ///
@@ -6276,6 +6416,131 @@ mod tests {
             let cond = Column::from_values(vec![Scalar::Int64(1)]).expect("cond");
             let err = col.where_cond(&cond, &Scalar::Int64(0)).unwrap_err();
             assert!(matches!(err, crate::ColumnError::InvalidMaskType { .. }));
+        }
+
+        #[test]
+        fn equals_elementwise_matches_semantic_eq() {
+            let a = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("b");
+            let r = a.equals(&b).expect("equals");
+            assert_eq!(r.dtype(), DType::Bool);
+            assert_eq!(r.values()[0], Scalar::Bool(true));
+            assert_eq!(r.values()[1], Scalar::Bool(false));
+            // NaN vs NaN → false (pandas semantics)
+            assert_eq!(r.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn equals_length_mismatch_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("b");
+            assert!(a.equals(&b).is_err());
+        }
+
+        #[test]
+        fn dot_ignores_missing() {
+            let a = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("b");
+            let r = a.dot(&b).expect("dot");
+            // 1*2 + skip + 3*5 = 17
+            assert!((r - 17.0).abs() < 1e-9);
+        }
+
+        #[test]
+        fn dot_non_numeric_errors() {
+            let a = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("a");
+            let b = Column::from_values(vec![Scalar::Float64(1.0)]).expect("b");
+            assert!(a.dot(&b).is_err());
+        }
+
+        #[test]
+        fn fillna_with_column_fills_missing_positions() {
+            let a = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("b");
+            let r = a.fillna_with_column(&b).expect("fillna_with_column");
+            assert_eq!(r.values()[0], Scalar::Int64(1));
+            assert_eq!(r.values()[1], Scalar::Int64(20));
+            assert_eq!(r.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn divmod_returns_quotient_and_remainder() {
+            let a = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(-5.0),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("b");
+            let (q, r) = a.divmod(&b).expect("divmod");
+            // Python-style: floor(10/3)=3, 10 - 3*3 = 1
+            match (&q.values()[0], &r.values()[0]) {
+                (Scalar::Float64(qv), Scalar::Float64(rv)) => {
+                    assert!((qv - 3.0).abs() < 1e-9);
+                    assert!((rv - 1.0).abs() < 1e-9);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            // 7 / 2 → q=3, r=1
+            match (&q.values()[1], &r.values()[1]) {
+                (Scalar::Float64(qv), Scalar::Float64(rv)) => {
+                    assert!((qv - 3.0).abs() < 1e-9);
+                    assert!((rv - 1.0).abs() < 1e-9);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            // -5 / 3 → q=-2 (floor), r = -5 - (-2*3) = 1
+            match (&q.values()[2], &r.values()[2]) {
+                (Scalar::Float64(qv), Scalar::Float64(rv)) => {
+                    assert!((qv + 2.0).abs() < 1e-9);
+                    assert!((rv - 1.0).abs() < 1e-9);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+
+        #[test]
+        fn divmod_zero_divisor_yields_null() {
+            let a = Column::from_values(vec![Scalar::Float64(10.0)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Float64(0.0)]).expect("b");
+            let (q, r) = a.divmod(&b).expect("divmod");
+            assert!(q.values()[0].is_missing());
+            assert!(r.values()[0].is_missing());
         }
 
         #[test]

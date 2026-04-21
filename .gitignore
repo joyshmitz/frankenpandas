@@ -128,8 +128,8 @@ verify_*.sh
 newfile.txt
 repro_*.rs
 
-# Claude local settings
-.claude/settings.local.json
+# Claude local settings (entire dir — scheduled_tasks.lock etc. are machine-local state)
+.claude/
 
 # FastEmbed model caches
 .fastembed_cache/

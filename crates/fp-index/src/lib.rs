@@ -963,6 +963,47 @@ impl Index {
         self.propagate_name(Self::new(out))
     }
 
+    /// Materialize labels into an owned `Vec<IndexLabel>`.
+    ///
+    /// Matches `pd.Index.to_list()`. Convenience helper for callers
+    /// that need ownership without manually cloning via `labels()`.
+    #[must_use]
+    pub fn to_list(&self) -> Vec<IndexLabel> {
+        self.labels.clone()
+    }
+
+    /// Stringify each label using its `Display` impl.
+    ///
+    /// Matches `pd.Index.format()` / `pd.Index.astype(str).tolist()`.
+    /// Result is a `Vec<String>` in index order.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.labels.iter().map(IndexLabel::to_string).collect()
+    }
+
+    /// Replace labels at positions where `cond` is true with `value`.
+    ///
+    /// Matches `pd.Index.putmask(cond, value)`. A shorter `cond`
+    /// leaves trailing labels unchanged (pandas-style lenient
+    /// alignment); a longer `cond` is silently truncated. The name
+    /// is preserved.
+    #[must_use]
+    pub fn putmask(&self, cond: &[bool], value: &IndexLabel) -> Self {
+        let new_labels: Vec<IndexLabel> = self
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                if cond.get(i).copied().unwrap_or(false) {
+                    value.clone()
+                } else {
+                    label.clone()
+                }
+            })
+            .collect();
+        self.propagate_name(Self::new(new_labels))
+    }
+
     /// Whether any label coerces to true.
     ///
     /// Matches `pd.Index.any()`. Non-zero integers, non-empty strings,
@@ -3731,6 +3772,71 @@ mod tests {
         let idx = Index::new(vec!["".into(), "".into(), "x".into()]);
         assert!(idx.any());
         assert!(!idx.all());
+    }
+
+    #[test]
+    fn index_to_list_returns_owned_labels() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        assert_eq!(
+            idx.to_list(),
+            vec![
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_format_stringifies_labels() {
+        let idx = Index::new(vec![
+            IndexLabel::Int64(10),
+            IndexLabel::Utf8("abc".into()),
+            IndexLabel::Int64(-5),
+        ]);
+        assert_eq!(idx.format(), vec!["10", "abc", "-5"]);
+    }
+
+    #[test]
+    fn index_putmask_replaces_true_positions() {
+        let idx = Index::from_i64(vec![1, 2, 3, 4]).set_name("k");
+        let cond = vec![false, true, false, true];
+        let replaced = idx.putmask(&cond, &IndexLabel::Int64(0));
+        assert_eq!(
+            replaced.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(0),
+            ]
+        );
+        assert_eq!(replaced.name(), Some("k"));
+    }
+
+    #[test]
+    fn index_putmask_short_cond_leaves_tail_unchanged() {
+        let idx = Index::from_i64(vec![1, 2, 3, 4]);
+        // cond shorter than index — trailing positions keep original
+        // labels (matches pandas lenient alignment).
+        let cond = vec![true];
+        let replaced = idx.putmask(&cond, &IndexLabel::Int64(-1));
+        assert_eq!(
+            replaced.labels(),
+            &[
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_putmask_empty_cond_is_noop() {
+        let idx = Index::from_i64(vec![1, 2]);
+        let replaced = idx.putmask(&[], &IndexLabel::Int64(0));
+        assert_eq!(replaced.labels(), idx.labels());
     }
 
     #[test]

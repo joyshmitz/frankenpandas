@@ -21633,6 +21633,16 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_series_rolling_min_min_periods_zero_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-428", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-428"));
+        assert_eq!(report.fixture_count, 1);
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_series_timedelta_total_seconds_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =

@@ -6191,9 +6191,44 @@ impl Rolling<'_> {
 
     /// Rolling minimum.
     pub fn min(&self) -> Result<Series, FrameError> {
-        self.apply_rolling(
-            |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        if self.center {
+            let half = self.window / 2;
+            for i in 0..len {
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                let nums = Self::window_values(&vals[start..end]);
+
+                if nums.len() < self.min_periods || nums.is_empty() {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(
+                        nums.iter().copied().fold(f64::INFINITY, f64::min),
+                    ));
+                }
+            }
+        } else {
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(self.window);
+                let nums = Self::window_values(&vals[start..=i]);
+
+                if nums.len() < self.min_periods || nums.is_empty() {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(
+                        nums.iter().copied().fold(f64::INFINITY, f64::min),
+                    ));
+                }
+            }
+        }
+
+        Series::from_values(
             self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
         )
     }
 
@@ -33769,6 +33804,64 @@ mod tests {
         assert_eq!(maxs.values()[1], Scalar::Float64(3.0)); // max(3,1)
         assert_eq!(maxs.values()[2], Scalar::Float64(4.0)); // max(1,4)
         assert_eq!(maxs.values()[3], Scalar::Float64(4.0)); // max(4,2)
+    }
+
+    #[test]
+    fn rolling_min_min_periods_zero_allows_partial_windows() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let mins = s.rolling(3, Some(0)).min().unwrap();
+        assert_eq!(mins.values()[0], Scalar::Float64(5.0));
+        assert_eq!(mins.values()[1], Scalar::Float64(2.0));
+        assert_eq!(mins.values()[2], Scalar::Float64(2.0));
+        assert_eq!(mins.values()[3], Scalar::Float64(1.0));
+        assert_eq!(mins.values()[4], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn rolling_min_min_periods_one_allows_partial_windows_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let mins = s.rolling(3, Some(1)).min().unwrap();
+        assert_eq!(mins.values()[0], Scalar::Float64(5.0));
+        assert_eq!(mins.values()[1], Scalar::Float64(5.0));
+        assert_eq!(mins.values()[2], Scalar::Float64(3.0));
+        assert_eq!(mins.values()[3], Scalar::Float64(1.0));
+        assert_eq!(mins.values()[4], Scalar::Float64(1.0));
     }
 
     #[test]

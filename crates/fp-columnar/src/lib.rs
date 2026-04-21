@@ -137,6 +137,93 @@ impl ValidityMask {
     pub fn bits(&self) -> impl Iterator<Item = bool> + '_ {
         (0..self.len).map(|idx| self.get(idx))
     }
+
+    /// Number of invalid (cleared) positions.
+    #[must_use]
+    pub fn count_invalid(&self) -> usize {
+        self.len.saturating_sub(self.count_valid())
+    }
+
+    /// Whether any bit is set.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.count_valid() > 0
+    }
+
+    /// Whether all bits are set.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.count_valid() == self.len
+    }
+
+    /// Bitwise XOR (symmetric difference) with another mask.
+    ///
+    /// Produced length is `min(self.len, other.len)`.
+    #[must_use]
+    pub fn xor_mask(&self, other: &Self) -> Self {
+        let len = self.len.min(other.len);
+        let word_count = len.div_ceil(64);
+        let mut words: Vec<u64> = self.words[..word_count]
+            .iter()
+            .zip(&other.words[..word_count])
+            .map(|(a, b)| a ^ b)
+            .collect();
+        let remainder = len % 64;
+        if remainder > 0 && !words.is_empty() {
+            let last = words.len() - 1;
+            words[last] &= (1_u64 << remainder) - 1;
+        }
+        Self { words, len }
+    }
+
+    /// Extract a contiguous sub-range as a new mask.
+    ///
+    /// `start..start+len` is clamped to the available tail — callers
+    /// don't need to pre-validate against `self.len`.
+    #[must_use]
+    pub fn slice(&self, start: usize, len: usize) -> Self {
+        if start >= self.len {
+            return Self::all_invalid(0);
+        }
+        let effective_len = len.min(self.len - start);
+        let mut out = Self::all_invalid(effective_len);
+        for i in 0..effective_len {
+            if self.get(start + i) {
+                out.set(i, true);
+            }
+        }
+        out
+    }
+
+    /// Append another mask's bits to the end of this one.
+    #[must_use]
+    pub fn concat(&self, other: &Self) -> Self {
+        let total = self.len + other.len;
+        let mut out = Self::all_invalid(total);
+        for i in 0..self.len {
+            if self.get(i) {
+                out.set(i, true);
+            }
+        }
+        for i in 0..other.len {
+            if other.get(i) {
+                out.set(self.len + i, true);
+            }
+        }
+        out
+    }
+
+    /// Position of the first valid bit.
+    #[must_use]
+    pub fn first_valid(&self) -> Option<usize> {
+        (0..self.len).find(|&i| self.get(i))
+    }
+
+    /// Position of the last valid bit.
+    #[must_use]
+    pub fn last_valid(&self) -> Option<usize> {
+        (0..self.len).rev().find(|&i| self.get(i))
+    }
 }
 
 impl PartialEq for ValidityMask {
@@ -3340,6 +3427,130 @@ mod tests {
         assert_eq!(mask.len(), 0);
         assert_eq!(mask.count_valid(), 0);
         assert_eq!(mask.bits().count(), 0);
+    }
+
+    #[test]
+    fn validity_mask_count_invalid_matches_complement() {
+        let mask = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(2),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(3),
+        ]);
+        assert_eq!(mask.count_valid(), 3);
+        assert_eq!(mask.count_invalid(), 2);
+        assert_eq!(mask.count_valid() + mask.count_invalid(), mask.len());
+    }
+
+    #[test]
+    fn validity_mask_any_and_all() {
+        let all_set = ValidityMask::all_valid(4);
+        assert!(all_set.any());
+        assert!(all_set.all());
+
+        let none_set = ValidityMask::all_invalid(4);
+        assert!(!none_set.any());
+        assert!(!none_set.all());
+
+        let mixed = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::NaN),
+        ]);
+        assert!(mixed.any());
+        assert!(!mixed.all());
+
+        let empty = ValidityMask::all_invalid(0);
+        assert!(!empty.any());
+        assert!(empty.all()); // vacuously true
+    }
+
+    #[test]
+    fn validity_mask_xor_finds_differences() {
+        let a = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(4),
+        ]);
+        let b = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(4),
+        ]);
+        let diff = a.xor_mask(&b);
+        assert_eq!(diff.len(), 4);
+        // position 0: both valid → 0
+        // position 1: a valid, b invalid → 1
+        // position 2: both invalid → 0
+        // position 3: both valid → 0
+        assert!(!diff.get(0));
+        assert!(diff.get(1));
+        assert!(!diff.get(2));
+        assert!(!diff.get(3));
+    }
+
+    #[test]
+    fn validity_mask_slice_extracts_range() {
+        let mask = ValidityMask::from_values(&[
+            Scalar::Int64(1),          // valid
+            Scalar::Null(NullKind::NaN), // invalid
+            Scalar::Int64(3),          // valid
+            Scalar::Int64(4),          // valid
+            Scalar::Null(NullKind::NaN), // invalid
+        ]);
+        let sub = mask.slice(1, 3);
+        assert_eq!(sub.len(), 3);
+        assert!(!sub.get(0));
+        assert!(sub.get(1));
+        assert!(sub.get(2));
+    }
+
+    #[test]
+    fn validity_mask_slice_past_end_clamps() {
+        let mask = ValidityMask::all_valid(3);
+        let sub = mask.slice(2, 10);
+        assert_eq!(sub.len(), 1);
+        assert!(sub.get(0));
+
+        let empty = mask.slice(100, 5);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn validity_mask_concat_appends() {
+        let a = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::NaN),
+        ]);
+        let b = ValidityMask::from_values(&[
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+        ]);
+        let merged = a.concat(&b);
+        assert_eq!(merged.len(), 4);
+        assert!(merged.get(0));
+        assert!(!merged.get(1));
+        assert!(merged.get(2));
+        assert!(merged.get(3));
+    }
+
+    #[test]
+    fn validity_mask_first_last_valid() {
+        let mask = ValidityMask::from_values(&[
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Null(NullKind::NaN),
+        ]);
+        assert_eq!(mask.first_valid(), Some(2));
+        assert_eq!(mask.last_valid(), Some(3));
+
+        let none_set = ValidityMask::all_invalid(3);
+        assert_eq!(none_set.first_valid(), None);
+        assert_eq!(none_set.last_valid(), None);
     }
 
     #[test]

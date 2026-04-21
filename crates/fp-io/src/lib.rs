@@ -102,6 +102,9 @@ pub struct CsvReadOptions {
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
     pub comment: Option<u8>,
+    /// Character to recognize as the decimal separator when parsing floats.
+    /// Matches pandas `decimal` parameter. Default: `.`.
+    pub decimal: u8,
     /// How to handle rows with more fields than the header width.
     /// Matches pandas `on_bad_lines` parameter for the supported
     /// `error`/`warn`/`skip` modes.
@@ -122,6 +125,7 @@ impl Default for CsvReadOptions {
             skiprows: 0,
             dtype: None,
             comment: None,
+            decimal: b'.',
             on_bad_lines: CsvOnBadLines::Error,
         }
     }
@@ -267,6 +271,7 @@ fn parse_scalar_with_options(
     na_filter: bool,
     keep_default_na: bool,
     na_values: &[String],
+    decimal: u8,
 ) -> Scalar {
     let trimmed = field.trim();
 
@@ -282,7 +287,12 @@ fn parse_scalar_with_options(
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
-    if let Ok(value) = trimmed.parse::<f64>() {
+    let float_candidate = if decimal == b'.' {
+        trimmed.to_owned()
+    } else {
+        trimmed.replace(char::from(decimal), ".")
+    };
+    if let Ok(value) = float_candidate.parse::<f64>() {
         return Scalar::Float64(value);
     }
     if trimmed.eq_ignore_ascii_case("true") {
@@ -327,6 +337,7 @@ fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options
             options.na_filter,
             options.keep_default_na,
             &options.na_values,
+            options.decimal,
         ));
     }
 }
@@ -4420,6 +4431,30 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 0);
+    }
+
+    #[test]
+    fn csv_decimal_comma_parses_quoted_float_fields() {
+        let input = "price\n\"1,50\"\n\"3,75\"\n";
+        let opts = CsvReadOptions {
+            decimal: b',',
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("price").unwrap().values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(3.75)]
+        );
+    }
+
+    #[test]
+    fn csv_default_decimal_keeps_comma_decimal_strings_as_utf8() {
+        let input = "price\n\"1,50\"\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("price").unwrap().values(),
+            &[Scalar::Utf8("1,50".to_owned())]
+        );
     }
 
     // ── JSONL tests (frankenpandas-sue) ──────────────────────────────

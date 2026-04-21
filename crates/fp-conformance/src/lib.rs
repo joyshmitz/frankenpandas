@@ -1639,6 +1639,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
+    pub csv_decimal: Option<String>,
+    #[serde(default)]
     pub csv_on_bad_lines: Option<String>,
     #[serde(default)]
     pub json_input: Option<String>,
@@ -11655,8 +11657,18 @@ fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<D
             ));
         }
     };
+    let decimal = match fixture.csv_decimal.as_deref() {
+        None => b'.',
+        Some(value) if value.len() == 1 => value.as_bytes()[0],
+        Some(other) => {
+            return Err(format!(
+                "csv_decimal must be a single-byte separator, got '{other}'"
+            ));
+        }
+    };
 
     let options = CsvReadOptions {
+        decimal,
         on_bad_lines,
         ..CsvReadOptions::default()
     };

@@ -3,7 +3,7 @@
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
     infer_dtype, nancummax, nancummin, nancumprod, nancumsum, nanmax, nanmean, nanmedian, nanmin,
-    nanprod, nansum,
+    nanprod, nanquantile, nansum,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1240,6 +1240,101 @@ impl Column {
     #[must_use]
     pub fn count(&self) -> usize {
         self.values.iter().filter(|v| !v.is_missing()).count()
+    }
+
+    /// Linear-interpolation quantile at `q ∈ [0.0, 1.0]`.
+    ///
+    /// Matches `pd.Series.quantile(q, interpolation='linear')`.
+    /// Missing values are skipped (skipna=True). Returns
+    /// `Null(NaN)` for empty columns or `q` outside `[0.0, 1.0]`.
+    #[must_use]
+    pub fn quantile(&self, q: f64) -> Scalar {
+        nanquantile(&self.values, q)
+    }
+
+    /// Most frequent non-missing values, ascending-sorted.
+    ///
+    /// Matches `pd.Series.mode()`. Ties are all returned; missing
+    /// values are ignored. For empty or all-missing columns the
+    /// result is an empty same-dtype column.
+    pub fn mode(&self) -> Result<Self, ColumnError> {
+        use std::collections::HashMap;
+        #[derive(Hash, PartialEq, Eq)]
+        enum Key<'a> {
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+        fn key_of(v: &Scalar) -> Option<Key<'_>> {
+            if v.is_missing() {
+                return None;
+            }
+            Some(match v {
+                Scalar::Bool(b) => Key::Bool(*b),
+                Scalar::Int64(i) => Key::Int64(*i),
+                Scalar::Float64(f) => {
+                    let norm = if *f == 0.0 { 0.0 } else { *f };
+                    Key::FloatBits(norm.to_bits())
+                }
+                Scalar::Utf8(s) => Key::Utf8(s.as_str()),
+                Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Null(_) => return None,
+            })
+        }
+
+        let mut counts: HashMap<Key<'_>, (usize, &Scalar)> = HashMap::new();
+        for v in &self.values {
+            if let Some(k) = key_of(v) {
+                counts
+                    .entry(k)
+                    .and_modify(|entry| entry.0 += 1)
+                    .or_insert((1, v));
+            }
+        }
+        if counts.is_empty() {
+            return Self::new(self.dtype, Vec::new());
+        }
+        let max_count = counts.values().map(|(c, _)| *c).max().unwrap_or(0);
+        let mut winners: Vec<Scalar> = counts
+            .values()
+            .filter_map(|(c, v)| if *c == max_count { Some((*v).clone()) } else { None })
+            .collect();
+        winners.sort_by(|a, b| compare_scalars_na_last(a, b, true));
+        Self::new(self.dtype, winners)
+    }
+
+    /// Approximate memory footprint in bytes.
+    ///
+    /// Matches `pd.Series.memory_usage(deep=...)`. When `deep` is true
+    /// and the column contains Utf8 values, each string's byte length
+    /// is counted; otherwise a fixed per-element width is used
+    /// (8 bytes for numeric/timedelta, 1 for Bool, pointer-sized for
+    /// Utf8, 0 for Null). The ValidityMask is counted separately.
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        let element_bytes = match self.dtype {
+            DType::Bool => 1,
+            DType::Int64 | DType::Float64 | DType::Timedelta64 => 8,
+            DType::Utf8 => std::mem::size_of::<usize>(),
+            _ => 0,
+        };
+        let base = element_bytes * self.values.len();
+        let deep_extra = if deep && self.dtype == DType::Utf8 {
+            self.values
+                .iter()
+                .map(|v| match v {
+                    Scalar::Utf8(s) => s.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+        } else {
+            0
+        };
+        // One bit per element, rounded up to whole bytes.
+        let validity_bytes = self.values.len().div_ceil(8);
+        base + deep_extra + validity_bytes
     }
 
     /// Keep values where `cond` is true; replace false positions with
@@ -3912,6 +4007,96 @@ mod tests {
         fn prod_empty_is_one() {
             let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
             assert_eq!(col.prod(), Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn quantile_median_of_sorted_values() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            match col.quantile(0.5) {
+                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn quantile_empty_is_null() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(col.quantile(0.5).is_missing());
+        }
+
+        #[test]
+        fn quantile_out_of_range_is_null() {
+            let col = Column::from_values(vec![Scalar::Float64(1.0)]).expect("col");
+            assert!(col.quantile(1.5).is_missing());
+            assert!(col.quantile(-0.1).is_missing());
+        }
+
+        #[test]
+        fn mode_returns_tied_max_frequency() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let m = col.mode().expect("mode");
+            assert_eq!(m.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+        }
+
+        #[test]
+        fn mode_ignores_missing_values() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let m = col.mode().expect("mode");
+            assert_eq!(m.values(), &[Scalar::Int64(1)]);
+        }
+
+        #[test]
+        fn mode_empty_is_empty_same_dtype() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            let m = col.mode().expect("mode");
+            assert!(m.is_empty());
+        }
+
+        #[test]
+        fn memory_usage_fixed_width_for_numeric() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let usage = col.memory_usage(false);
+            // 3 * 8 + ceil(3/8) = 24 + 1
+            assert_eq!(usage, 25);
+        }
+
+        #[test]
+        fn memory_usage_deep_counts_utf8_bytes() {
+            let col = Column::from_values(vec![
+                Scalar::Utf8("hi".into()),
+                Scalar::Utf8("world".into()),
+            ])
+            .expect("col");
+            let shallow = col.memory_usage(false);
+            let deep = col.memory_usage(true);
+            assert!(deep > shallow);
+            // deep_extra = "hi".len() + "world".len() = 2 + 5 = 7
+            assert_eq!(deep - shallow, 7);
         }
 
         #[test]

@@ -910,6 +910,74 @@ impl Column {
         self.values.iter().all(Scalar::is_missing)
     }
 
+    /// First value in the column (index 0), or `None` when empty.
+    ///
+    /// Matches `pd.Series.iloc[0]` shorthand. Returns the raw Scalar
+    /// including missing markers; callers who want skipna semantics
+    /// can pair with `has_any_missing`.
+    #[must_use]
+    pub fn first(&self) -> Option<&Scalar> {
+        self.values.first()
+    }
+
+    /// Last value in the column, or `None` when empty.
+    #[must_use]
+    pub fn last(&self) -> Option<&Scalar> {
+        self.values.last()
+    }
+
+    /// Count values for which `predicate` returns true.
+    ///
+    /// Complement to `apply_bool` that yields only the count rather
+    /// than materializing a Bool column. Missing inputs are treated
+    /// as a non-match (consistent with `apply_bool`'s
+    /// missing→Bool(false) contract).
+    pub fn count_matching<F>(&self, mut predicate: F) -> usize
+    where
+        F: FnMut(&Scalar) -> bool,
+    {
+        self.values
+            .iter()
+            .filter(|v| !v.is_missing() && predicate(v))
+            .count()
+    }
+
+    /// Elementwise combine with another column via a user function.
+    ///
+    /// Matches `pd.Series.combine(other, func)` at the Column layer
+    /// without the pandas `fill_value=None` null-propagation policy
+    /// — `zip_with` always invokes `func`, passing through missing
+    /// values as-is so the caller decides whether to short-circuit
+    /// nulls. Length mismatch returns `LengthMismatch`.
+    pub fn zip_with<F>(&self, other: &Self, mut func: F) -> Result<Self, ColumnError>
+    where
+        F: FnMut(&Scalar, &Scalar) -> Scalar,
+    {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| func(a, b))
+            .collect();
+        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        Self::new(inferred, out)
+    }
+
+    /// `(position, scalar)` iterator.
+    ///
+    /// Shortcut for `iter_values().enumerate()`. Convenience for
+    /// callers that need both positions and values and don't want
+    /// to reach through the slice accessor.
+    pub fn iter_enumerate(&self) -> std::iter::Enumerate<std::slice::Iter<'_, Scalar>> {
+        self.values.iter().enumerate()
+    }
+
     /// Apply a predicate per value and collect the results into a
     /// Bool column.
     ///
@@ -4800,6 +4868,86 @@ mod tests {
             assert_eq!(even.values()[1], Scalar::Bool(true));
             assert_eq!(even.values()[2], Scalar::Bool(false));
             assert_eq!(even.values()[3], Scalar::Bool(true));
+        }
+
+        #[test]
+        fn first_and_last_return_endpoints() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("col");
+            assert_eq!(col.first(), Some(&Scalar::Int64(10)));
+            assert_eq!(col.last(), Some(&Scalar::Int64(30)));
+
+            let empty = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert_eq!(empty.first(), None);
+            assert_eq!(empty.last(), None);
+        }
+
+        #[test]
+        fn count_matching_ignores_missing_and_mismatches() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(4),
+                Scalar::Int64(6),
+            ])
+            .expect("col");
+            let evens = col.count_matching(|v| {
+                v.to_f64()
+                    .map(|f| f as i64 % 2 == 0)
+                    .unwrap_or(false)
+            });
+            assert_eq!(evens, 3); // 2, 4, 6 — missing not counted.
+        }
+
+        #[test]
+        fn zip_with_elementwise_combine() {
+            let a = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("b");
+            let sum = a
+                .zip_with(&b, |l, r| match (l.to_f64(), r.to_f64()) {
+                    (Ok(lf), Ok(rf)) => Scalar::Float64(lf + rf),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .expect("zip_with");
+            assert_eq!(sum.values()[0], Scalar::Float64(11.0));
+            assert_eq!(sum.values()[1], Scalar::Float64(22.0));
+            assert_eq!(sum.values()[2], Scalar::Float64(33.0));
+        }
+
+        #[test]
+        fn zip_with_length_mismatch_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("b");
+            assert!(a.zip_with(&b, |l, _| l.clone()).is_err());
+        }
+
+        #[test]
+        fn iter_enumerate_yields_positions() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+            ])
+            .expect("col");
+            let collected: Vec<_> = col
+                .iter_enumerate()
+                .map(|(i, v)| (i, v.clone()))
+                .collect();
+            assert_eq!(collected, vec![(0, Scalar::Int64(10)), (1, Scalar::Int64(20))]);
         }
 
         #[test]

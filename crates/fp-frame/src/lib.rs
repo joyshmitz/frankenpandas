@@ -825,6 +825,32 @@ fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
     }
 }
 
+/// Ordering helper that works across Scalar variants without requiring
+/// an `Ord` derive on `Scalar` itself.
+///
+/// Strategy:
+/// - Same-variant homogeneous scalars use the native ordering (Int64
+///   via `i64::cmp`, Float64 via `partial_cmp` with NaN treated as
+///   equal, Utf8 via `str::cmp`, Bool via `bool::cmp`, Timedelta64
+///   via `i64::cmp`).
+/// - Mixed variants fall back to numeric comparison via `to_f64`. If
+///   either side is non-numeric (Utf8 vs Int64, etc.), return Equal —
+///   callers are responsible for not mixing types in a sorted Series.
+fn compare_scalar_values(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (Scalar::Int64(a), Scalar::Int64(b)) => a.cmp(b),
+        (Scalar::Float64(a), Scalar::Float64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Scalar::Utf8(a), Scalar::Utf8(b)) => a.cmp(b),
+        (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
+        (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => a.cmp(b),
+        (a, b) => match (a.to_f64(), b.to_f64()) {
+            (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
+    }
+}
+
 fn range_index(len: usize) -> Result<Index, FrameError> {
     let len_i64 = i64::try_from(len).map_err(|_| {
         FrameError::CompatibilityRejected(format!(
@@ -4349,42 +4375,39 @@ impl Series {
     ///
     /// Matches `pd.Series.searchsorted(value, side='left'|'right')`.
     /// The Series must be sorted. Returns integer positions.
+    ///
+    /// Works for any ordered Scalar type — numeric (Int64/Float64/
+    /// Timedelta64), textual (Utf8), and Bool. Previously the
+    /// implementation coerced the needle to f64 unconditionally, which
+    /// rejected Utf8 needles with a non-numeric type error even though
+    /// pandas supports string searchsorted on string-sorted Series.
     pub fn searchsorted(&self, value: &Scalar, side: &str) -> Result<usize, FrameError> {
-        let vals = self.column.values();
-        let target = value
-            .to_f64()
-            .map_err(|e| FrameError::Column(ColumnError::from(e)))?;
-
-        match side {
-            "right" => {
-                // First position where val > target
-                let pos = vals
-                    .iter()
-                    .position(|v| {
-                        if v.is_missing() {
-                            true // NaN sorts last
-                        } else {
-                            v.to_f64().map_or(true, |f| f > target)
-                        }
-                    })
-                    .unwrap_or(vals.len());
-                Ok(pos)
-            }
-            _ => {
-                // "left" default: first position where val >= target
-                let pos = vals
-                    .iter()
-                    .position(|v| {
-                        if v.is_missing() {
-                            true
-                        } else {
-                            v.to_f64().map_or(true, |f| f >= target)
-                        }
-                    })
-                    .unwrap_or(vals.len());
-                Ok(pos)
-            }
+        if side != "left" && side != "right" {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "searchsorted: side must be 'left' or 'right', got {side:?}"
+            )));
         }
+        if value.is_missing() {
+            return Err(FrameError::CompatibilityRejected(
+                "searchsorted: needle cannot be missing".to_owned(),
+            ));
+        }
+        let vals = self.column.values();
+        let pos = vals
+            .iter()
+            .position(|v| {
+                if v.is_missing() {
+                    // Missing values sort last; any needle inserts before them.
+                    return true;
+                }
+                let ord = compare_scalar_values(v, value);
+                match side {
+                    "right" => matches!(ord, std::cmp::Ordering::Greater),
+                    _ => !matches!(ord, std::cmp::Ordering::Less),
+                }
+            })
+            .unwrap_or(vals.len());
+        Ok(pos)
     }
 
     /// Find insertion points for array-like values to maintain sorted order.
@@ -38973,10 +38996,9 @@ mod tests {
         );
         let df = DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
         let err = df.to_dict("dict").unwrap_err();
-        let FrameError::CompatibilityRejected(msg) = err else {
-            panic!("expected CompatibilityRejected");
-        };
-        assert!(msg.contains("duplicate index labels"));
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index labels"))
+        );
     }
 
     #[test]
@@ -42712,6 +42734,82 @@ mod tests {
     }
 
     #[test]
+    fn series_searchsorted_utf8_finds_position() {
+        // pandas: pd.Series(['apple','banana','cherry']).searchsorted('b') → 1
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("banana".into()),
+                Scalar::Utf8("cherry".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            s.searchsorted(&Scalar::Utf8("b".into()), "left").unwrap(),
+            1
+        );
+        assert_eq!(
+            s.searchsorted(&Scalar::Utf8("banana".into()), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.searchsorted(&Scalar::Utf8("banana".into()), "right")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            s.searchsorted(&Scalar::Utf8("zz".into()), "left").unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn series_searchsorted_bool_finds_position() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        // first position where v >= true → index 2
+        assert_eq!(
+            s.searchsorted(&Scalar::Bool(true), "left").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn series_searchsorted_rejects_invalid_side() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let err = s
+            .searchsorted(&Scalar::Utf8("a".into()), "middle")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn series_searchsorted_rejects_missing_needle() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let err = s
+            .searchsorted(&Scalar::Null(NullKind::NaN), "left")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
     fn series_factorize() {
         let s = Series::from_values(
             "x",
@@ -45396,10 +45494,7 @@ mod tests {
     fn series_reset_index_drop_false_is_rejected_with_hint() {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
         let err = s.reset_index(false).unwrap_err();
-        let FrameError::CompatibilityRejected(msg) = err else {
-            panic!("expected CompatibilityRejected");
-        };
-        assert!(msg.contains("to_frame"));
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("to_frame")));
     }
 
     #[test]

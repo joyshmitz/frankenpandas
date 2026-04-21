@@ -42730,7 +42730,10 @@ mod tests {
         let err = s
             .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "left")
             .unwrap_err();
-        assert!(matches!(err, FrameError::Column(_)));
+        // New error path uses CompatibilityRejected with a clearer message
+        // ("searchsorted: needle cannot be missing") instead of wrapping a
+        // numeric-coercion TypeError.
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     #[test]

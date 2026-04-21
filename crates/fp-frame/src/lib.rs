@@ -8469,6 +8469,7 @@ impl DataFrameResample<'_> {
                     "count" => resample.count()?,
                     "min" => resample.min()?,
                     "max" => resample.max()?,
+                    "prod" => resample.prod()?,
                     "std" => resample.std()?,
                     "var" => resample.var()?,
                     "median" => resample.median()?,
@@ -57264,7 +57265,7 @@ mod tests {
         .unwrap();
         let result = df
             .resample("M")
-            .agg(&["sum", "mean", "std", "var", "median"])
+            .agg(&["sum", "mean", "std", "var", "median", "prod"])
             .unwrap();
         let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
         assert!(col_names.contains(&"val_sum".to_string()));
@@ -57272,6 +57273,7 @@ mod tests {
         assert!(col_names.contains(&"val_std".to_string()));
         assert!(col_names.contains(&"val_var".to_string()));
         assert!(col_names.contains(&"val_median".to_string()));
+        assert!(col_names.contains(&"val_prod".to_string()));
         assert_eq!(
             result.columns["val_std"].values(),
             &[
@@ -57286,6 +57288,10 @@ mod tests {
         assert_eq!(
             result.columns["val_median"].values(),
             &[Scalar::Float64(1.5), Scalar::Float64(3.5)]
+        );
+        assert_eq!(
+            result.columns["val_prod"].values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(12.0)]
         );
     }
 

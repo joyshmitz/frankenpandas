@@ -6903,14 +6903,30 @@ impl Expanding<'_> {
     }
 
     /// Expanding sum.
+    ///
+    /// Matches `pd.Series.expanding(min_periods).sum()`. Empty
+    /// windows (no non-missing values observed yet) emit `Null(NaN)`
+    /// when `min_periods >= 1`; if the caller explicitly sets
+    /// `min_periods=0` an empty window still returns 0.0 (pandas
+    /// conventional empty-sum identity).
     pub fn sum(&self) -> Result<Series, FrameError> {
         self.apply_expanding(|nums| nums.iter().sum(), self.series.name())
     }
 
     /// Expanding mean.
+    ///
+    /// Matches `pd.Series.expanding(min_periods).mean()`. Empty
+    /// windows return `Null(NaN)` regardless of `min_periods` — mean
+    /// of an empty set is undefined (pandas emits NaN, not 0/0).
     pub fn mean(&self) -> Result<Series, FrameError> {
         self.apply_expanding(
-            |nums| nums.iter().sum::<f64>() / nums.len() as f64,
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().sum::<f64>() / nums.len() as f64
+                }
+            },
             self.series.name(),
         )
     }
@@ -6918,7 +6934,13 @@ impl Expanding<'_> {
     /// Expanding minimum.
     pub fn min(&self) -> Result<Series, FrameError> {
         self.apply_expanding(
-            |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().copied().fold(f64::INFINITY, f64::min)
+                }
+            },
             self.series.name(),
         )
     }
@@ -6926,7 +6948,13 @@ impl Expanding<'_> {
     /// Expanding maximum.
     pub fn max(&self) -> Result<Series, FrameError> {
         self.apply_expanding(
-            |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                }
+            },
             self.series.name(),
         )
     }
@@ -34875,6 +34903,66 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(2.0)); // 2/1
         assert_eq!(result.values()[1], Scalar::Float64(3.0)); // (2+4)/2
         assert_eq!(result.values()[2], Scalar::Float64(4.0)); // (2+4+6)/3
+    }
+
+    #[test]
+    fn expanding_mean_empty_window_is_nan_not_zero() {
+        // All leading values are missing → the agg window is empty; mean
+        // should emit NaN (pandas convention) rather than 0/0 producing
+        // an Inf or panic.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+        // min_periods=0 allows the aggregator to be called on an empty
+        // slice; earlier positions should therefore still emit NaN.
+        let result = s.expanding(Some(0)).mean().unwrap();
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing());
+        assert_eq!(result.values()[2], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn expanding_sum_empty_window_returns_zero_when_min_periods_zero() {
+        // pandas convention: empty-sum identity is 0.0 when
+        // min_periods=0; only when min_periods >= 1 do we emit NaN.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(Some(0)).sum().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(0.0));
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        assert_eq!(result.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn expanding_min_max_empty_window_is_nan() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+        )
+        .unwrap();
+        let min_result = s.expanding(Some(0)).min().unwrap();
+        let max_result = s.expanding(Some(0)).max().unwrap();
+        // First position: empty window → NaN, not Infinity.
+        assert!(min_result.values()[0].is_missing());
+        assert!(max_result.values()[0].is_missing());
+        assert_eq!(min_result.values()[1], Scalar::Float64(3.0));
+        assert_eq!(max_result.values()[1], Scalar::Float64(3.0));
     }
 
     #[test]

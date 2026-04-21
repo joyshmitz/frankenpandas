@@ -17964,6 +17964,35 @@ impl DataFrame {
             "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
             "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
+            "median" => |vals: &[f64]| {
+                if vals.is_empty() {
+                    return f64::NAN;
+                }
+                let mut sorted = vals.to_vec();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let mid = sorted.len() / 2;
+                if sorted.len().is_multiple_of(2) {
+                    (sorted[mid - 1] + sorted[mid]) / 2.0
+                } else {
+                    sorted[mid]
+                }
+            },
+            "var" => |vals: &[f64]| {
+                if vals.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                sum_sq / (vals.len() as f64 - 1.0)
+            },
+            "std" => |vals: &[f64]| {
+                if vals.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                (sum_sq / (vals.len() as f64 - 1.0)).sqrt()
+            },
             _ => {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "pivot_table aggfunc '{aggfunc}' not supported"
@@ -36280,6 +36309,228 @@ mod tests {
         // r1, c1 → mean(10, 20) = 15.0; r1, c2 → 30.0
         assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(15.0));
         assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_median() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(10.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "median").unwrap();
+        assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(15.0));
+        assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(30.0));
+        assert_eq!(pivoted.columns["c1"].values()[1], Scalar::Float64(5.0));
+        assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(9.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_var_uses_sample_variance() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "var").unwrap();
+        assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(50.0));
+        assert_eq!(pivoted.columns["c1"].values()[1], Scalar::Float64(8.0));
+        assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(2.0));
+        assert!(pivoted.columns["c2"].values()[0].is_missing());
+    }
+
+    #[test]
+    fn dataframe_pivot_table_std_uses_sample_std() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "std").unwrap();
+        let r1_c1 = pivoted.columns["c1"].values()[0].to_f64().unwrap();
+        let r2_c1 = pivoted.columns["c1"].values()[1].to_f64().unwrap();
+        let r2_c2 = pivoted.columns["c2"].values()[1].to_f64().unwrap();
+        assert!((r1_c1 - 50.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r2_c1 - 8.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r2_c2 - 2.0_f64.sqrt()).abs() < 1e-10);
+        assert!(pivoted.columns["c2"].values()[0].is_missing());
     }
 
     #[test]

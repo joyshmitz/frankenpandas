@@ -17410,6 +17410,7 @@ impl DataFrame {
                     ),
                     "count" => Scalar::Int64(row_vals.len() as i64),
                     "median" => Scalar::Float64(sample_median(&row_vals)),
+                    "product" => Scalar::Float64(row_vals.iter().product::<f64>()),
                     "var" => Scalar::Float64(Self::row_sample_var(&row_vals)),
                     "std" => Scalar::Float64(Self::row_sample_var(&row_vals).sqrt()),
                     "sem" => Scalar::Float64(Self::row_sem(&row_vals)),
@@ -51747,6 +51748,26 @@ mod tests {
         .unwrap();
         let prod = df.apply("prod", 0).unwrap();
         assert_eq!(prod.column().values(), &[Scalar::Float64(10.0)]);
+    }
+
+    #[test]
+    fn df_apply_axis1_product_alias_uses_rowwise_product() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("c", vec![Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.apply("product", 1).unwrap();
+        assert_eq!(result.index().labels(), df.index().labels());
+        let first = expect_float64(&result.column().values()[0]);
+        let second = expect_float64(&result.column().values()[1]);
+        assert!((first - 30.0).abs() < 1e-12);
+        assert!((second - 24.0).abs() < 1e-12);
     }
 
     #[test]

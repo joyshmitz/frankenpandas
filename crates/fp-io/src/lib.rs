@@ -218,23 +218,67 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
 }
 
 pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
-    let mut writer = WriterBuilder::new().from_writer(Vec::new());
+    write_csv_string_with_options(frame, &CsvWriteOptions::default())
+}
+
+/// Options controlling CSV serialization.
+///
+/// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
+/// not depend on file IO (that layer is handled by `write_csv`).
+#[derive(Debug, Clone)]
+pub struct CsvWriteOptions {
+    /// Field delimiter. Matches pandas `sep`. Default: `,`.
+    pub delimiter: u8,
+    /// String written for missing values. Matches pandas `na_rep`. Default: `""`.
+    pub na_rep: String,
+    /// If false, the header row is omitted. Matches pandas `header=False`.
+    pub header: bool,
+}
+
+impl Default for CsvWriteOptions {
+    fn default() -> Self {
+        Self {
+            delimiter: b',',
+            na_rep: String::new(),
+            header: true,
+        }
+    }
+}
+
+/// Serialize a DataFrame to CSV with explicit options.
+///
+/// Matches `pd.DataFrame.to_csv(sep, na_rep, header)` for the in-memory
+/// string form. Null and NaN-like values are substituted with
+/// `options.na_rep`; all other scalars use the same stringification as
+/// the default `write_csv_string`.
+pub fn write_csv_string_with_options(
+    frame: &DataFrame,
+    options: &CsvWriteOptions,
+) -> Result<String, IoError> {
+    let mut writer = WriterBuilder::new()
+        .delimiter(options.delimiter)
+        .from_writer(Vec::new());
 
     let headers = frame
         .column_names()
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    writer.write_record(&headers)?;
+    if options.header {
+        writer.write_record(&headers)?;
+    }
 
     for row_idx in 0..frame.index().len() {
         let row = headers
             .iter()
             .map(|name| {
-                frame
+                let value = frame
                     .column(name)
-                    .and_then(|column| column.value(row_idx))
-                    .map_or_else(String::new, scalar_to_csv)
+                    .and_then(|column| column.value(row_idx));
+                match value {
+                    Some(scalar) => scalar_to_csv_with_na(scalar, &options.na_rep),
+                    None => options.na_rep.clone(),
+                }
             })
             .collect::<Vec<_>>();
         writer.write_record(&row)?;
@@ -242,6 +286,15 @@ pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
 
     let bytes = writer.into_inner().map_err(|err| err.into_error())?;
     Ok(String::from_utf8(bytes)?)
+}
+
+fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
+    match scalar {
+        Scalar::Null(_) => na_rep.to_owned(),
+        Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        other => scalar_to_csv(other),
+    }
 }
 
 /// Default NA values recognized by pandas read_csv.
@@ -2694,7 +2747,7 @@ mod tests {
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
-    use super::{IoError, read_csv_str, write_csv_string};
+    use super::{CsvWriteOptions, IoError, read_csv_str, write_csv_string, write_csv_string_with_options};
 
     #[test]
     fn csv_round_trip_preserves_null_and_numeric_shape() {
@@ -3108,6 +3161,95 @@ mod tests {
             );
         }
         eprintln!("[TEST] test_csv_round_trip_unchanged | rows=3 cols=3 parse_ok=true | PASS");
+    }
+
+    #[test]
+    fn test_write_csv_options_custom_delimiter() {
+        let input = "a,b\n1,x\n2,y\n";
+        let frame = read_csv_str(input).expect("read");
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                delimiter: b';',
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+        assert!(output.starts_with("a;b\n"));
+        assert!(output.contains("1;x\n"));
+        assert!(output.contains("2;y\n"));
+    }
+
+    #[test]
+    fn test_write_csv_options_na_rep_replaces_nulls() {
+        let input = "id,name\n1,Alice\n2,\n";
+        let frame = read_csv_str(input).expect("read");
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                na_rep: "NA".to_string(),
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+        // Second data row's name should render as NA, not empty.
+        assert!(output.contains("2,NA\n"));
+        assert!(!output.contains("2,\n"));
+    }
+
+    #[test]
+    fn test_write_csv_options_header_false_omits_header_row() {
+        let input = "a,b\n1,2\n";
+        let frame = read_csv_str(input).expect("read");
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                header: false,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+        assert_eq!(output, "1,2\n");
+    }
+
+    #[test]
+    fn test_write_csv_options_default_matches_write_csv_string() {
+        let input = "a,b\n1,2\n3,4\n";
+        let frame = read_csv_str(input).expect("read");
+        let default_output = write_csv_string(&frame).expect("write");
+        let options_output =
+            write_csv_string_with_options(&frame, &CsvWriteOptions::default()).expect("write");
+        assert_eq!(default_output, options_output);
+    }
+
+    #[test]
+    fn test_write_csv_options_na_rep_with_float_nan() {
+        // Generate a frame with an explicit NaN float.
+        use fp_columnar::Column;
+        let mut cols = std::collections::BTreeMap::new();
+        cols.insert(
+            "score".to_string(),
+            Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(f64::NAN),
+            ])
+            .unwrap(),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            cols,
+            vec!["score".to_string()],
+        )
+        .unwrap();
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                na_rep: "NaN".to_string(),
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+        assert!(output.contains("NaN"));
     }
 
     #[test]

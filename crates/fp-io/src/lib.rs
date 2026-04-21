@@ -127,6 +127,9 @@ pub struct CsvReadOptions {
     /// Matches pandas `thousands` parameter. Must differ from `decimal`
     /// (otherwise the option is silently ignored, matching pandas).
     pub thousands: Option<u8>,
+    /// Number of trailing data rows to drop (after the header is
+    /// consumed). Matches pandas `skipfooter` parameter. Default: `0`.
+    pub skipfooter: usize,
     /// Character used to quote fields that contain the delimiter, a
     /// newline, or the quote character itself. Defaults to `"` (ASCII
     /// double-quote). Matches pandas `quotechar` parameter.
@@ -166,6 +169,7 @@ impl Default for CsvReadOptions {
             quotechar: b'"',
             escapechar: None,
             doublequote: true,
+            skipfooter: 0,
         }
     }
 }
@@ -715,6 +719,17 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
         append_csv_record(&mut columns, &record, options);
         row_count += 1;
+    }
+
+    // Drop the last `skipfooter` data rows. Matches pandas semantics:
+    // footer rows are dropped *after* header parsing and nrows limit.
+    if options.skipfooter > 0 && (row_count as usize) > 0 {
+        let drop = options.skipfooter.min(row_count as usize);
+        for col in columns.iter_mut() {
+            let new_len = col.len().saturating_sub(drop);
+            col.truncate(new_len);
+        }
+        row_count -= drop as i64;
     }
     reject_duplicate_headers(&headers)?;
     if let Some(ref usecols) = options.usecols {
@@ -3001,6 +3016,59 @@ mod tests {
             frame.column("text").unwrap().values()[0],
             Scalar::Utf8("hi\"there".to_string())
         );
+    }
+
+    #[test]
+    fn test_csv_skipfooter_drops_trailing_rows() {
+        let input = "a,b\n1,x\n2,y\n3,z\nTOTAL,summary\n";
+        let options = CsvReadOptions {
+            skipfooter: 1,
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(
+            frame.column("a").unwrap().values()[2],
+            Scalar::Int64(3)
+        );
+    }
+
+    #[test]
+    fn test_csv_skipfooter_zero_is_noop() {
+        let input = "a,b\n1,x\n2,y\n";
+        let frame_default = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        let options = CsvReadOptions {
+            skipfooter: 0,
+            ..CsvReadOptions::default()
+        };
+        let frame_zero = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame_default.index().len(), frame_zero.index().len());
+    }
+
+    #[test]
+    fn test_csv_skipfooter_larger_than_data_clears_rows() {
+        let input = "a,b\n1,x\n2,y\n";
+        let options = CsvReadOptions {
+            skipfooter: 10,
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 0);
+        // Columns and headers are still preserved.
+        assert_eq!(frame.column_names().len(), 2);
+    }
+
+    #[test]
+    fn test_csv_skipfooter_with_nrows() {
+        // nrows caps read to 4, then skipfooter drops last 1 → 3 rows.
+        let input = "a\n1\n2\n3\n4\n5\n";
+        let options = CsvReadOptions {
+            nrows: Some(4),
+            skipfooter: 1,
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 3);
     }
 
     #[test]

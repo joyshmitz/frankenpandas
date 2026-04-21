@@ -13,7 +13,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, to_datetime};
-use fp_index::{Index, IndexLabel};
+use fp_index::{Index, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -1615,7 +1615,7 @@ pub fn series_from_arrow_array(
 
 /// Build an Arrow RecordBatch from a DataFrame.
 fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
-    let col_names = frame.column_names();
+    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let mut fields = Vec::with_capacity(col_names.len());
     let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(col_names.len());
 
@@ -2570,7 +2570,7 @@ pub fn write_excel_bytes_with_options(
         .set_name(options.sheet_name.as_str())
         .map_err(|e| IoError::Excel(format!("set sheet name: {e}")))?;
 
-    let col_names = frame.column_names();
+    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let data_col_offset: u16 = if options.index { 1 } else { 0 };
 
     // Header row (optional).
@@ -2784,6 +2784,17 @@ pub struct SqlReadOptions {
     pub parse_dates: Option<Vec<String>>,
 }
 
+/// Options for writing a DataFrame to SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlWriteOptions {
+    /// Behavior when the target table already exists.
+    pub if_exists: SqlIfExists,
+    /// Whether to materialize the DataFrame index as the leading SQL column.
+    pub index: bool,
+    /// Optional override for the emitted index column name.
+    pub index_label: Option<String>,
+}
+
 /// Map an fp-types DType to an SQLite column type declaration.
 fn dtype_to_sql(dtype: DType) -> &'static str {
     match dtype {
@@ -2806,6 +2817,84 @@ fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
         rusqlite::types::Value::Text(s) => Scalar::Utf8(s.clone()),
         rusqlite::types::Value::Blob(b) => Scalar::Utf8(format!("<blob:{} bytes>", b.len())),
     }
+}
+
+fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
+    match scalar {
+        Scalar::Int64(v) => rusqlite::types::Value::Integer(*v),
+        Scalar::Float64(v) => {
+            if v.is_nan() {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Real(*v)
+            }
+        }
+        Scalar::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
+        Scalar::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
+        Scalar::Null(_) => rusqlite::types::Value::Null,
+        Scalar::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Integer(*v)
+            }
+        }
+    }
+}
+
+fn sql_value_from_index_label(label: &IndexLabel) -> rusqlite::types::Value {
+    match label {
+        IndexLabel::Int64(v) => rusqlite::types::Value::Integer(*v),
+        IndexLabel::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
+        IndexLabel::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Integer(*v)
+            }
+        }
+        IndexLabel::Datetime64(v) => {
+            if *v == i64::MIN {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Text(format_datetime_ns(*v))
+            }
+        }
+    }
+}
+
+fn sql_dtype_from_index(index: &Index) -> &'static str {
+    for label in index.labels() {
+        match label {
+            IndexLabel::Int64(_) => return "INTEGER",
+            IndexLabel::Utf8(_) => return "TEXT",
+            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "INTEGER",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TEXT",
+            _ => {}
+        }
+    }
+    "TEXT"
+}
+
+fn resolve_sql_index_label(
+    frame: &DataFrame,
+    options: &SqlWriteOptions,
+) -> Result<Option<String>, IoError> {
+    if !options.index {
+        return Ok(None);
+    }
+
+    let label = options
+        .index_label
+        .clone()
+        .or_else(|| frame.index().name().map(str::to_owned))
+        .unwrap_or_else(|| "index".to_owned());
+
+    if frame.column(&label).is_some() {
+        return Err(IoError::DuplicateColumnName(label));
+    }
+
+    Ok(Some(label))
 }
 
 fn escape_sql_ident(name: &str) -> Result<String, IoError> {
@@ -3018,6 +3107,28 @@ pub fn write_sql(
     table_name: &str,
     if_exists: SqlIfExists,
 ) -> Result<(), IoError> {
+    write_sql_with_options(
+        frame,
+        conn,
+        table_name,
+        &SqlWriteOptions {
+            if_exists,
+            index: false,
+            index_label: None,
+        },
+    )
+}
+
+/// Write a DataFrame to a SQLite table with pandas-style index options.
+///
+/// Matches the supported subset of
+/// `pd.DataFrame.to_sql(name, con, index=..., index_label=...)`.
+pub fn write_sql_with_options(
+    frame: &DataFrame,
+    conn: &rusqlite::Connection,
+    table_name: &str,
+    options: &SqlWriteOptions,
+) -> Result<(), IoError> {
     // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
     if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
@@ -3025,15 +3136,22 @@ pub fn write_sql(
         )));
     }
 
-    let col_names = frame.column_names();
+    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    let index_label = resolve_sql_index_label(frame, options)?;
     let escaped_table = escape_sql_ident(table_name)?;
-    let escaped_cols: Vec<String> = col_names
+    let mut sql_col_names =
+        Vec::with_capacity(col_names.len() + usize::from(index_label.is_some()));
+    if let Some(ref label) = index_label {
+        sql_col_names.push(label.clone());
+    }
+    sql_col_names.extend(col_names.iter().cloned());
+    let escaped_cols: Vec<String> = sql_col_names
         .iter()
         .map(|name| escape_sql_ident(name))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Handle if_exists policy.
-    match if_exists {
+    match options.if_exists {
         SqlIfExists::Fail => {
             // Check if table exists.
             let exists: bool = conn
@@ -3054,14 +3172,24 @@ pub fn write_sql(
     }
 
     // Build CREATE TABLE statement.
-    let col_defs: Vec<String> = col_names
-        .iter()
-        .zip(&escaped_cols)
-        .map(|(name, escaped)| {
-            let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-            format!("\"{}\" {}", escaped, dtype_to_sql(dt))
-        })
-        .collect();
+    let mut col_defs = Vec::with_capacity(sql_col_names.len());
+    if let Some(ref label) = index_label {
+        col_defs.push(format!(
+            "\"{}\" {}",
+            escape_sql_ident(label)?,
+            sql_dtype_from_index(frame.index())
+        ));
+    }
+    col_defs.extend(
+        col_names
+            .iter()
+            .map(|name| {
+                let escaped = escape_sql_ident(name)?;
+                let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
+                Ok(format!("\"{}\" {}", escaped, dtype_to_sql(dt)))
+            })
+            .collect::<Result<Vec<_>, IoError>>()?,
+    );
 
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
@@ -3072,7 +3200,7 @@ pub fn write_sql(
         .map_err(|e| IoError::Sql(format!("create table failed: {e}")))?;
 
     // Insert rows in a transaction for performance.
-    let placeholders: Vec<&str> = col_names.iter().map(|_| "?").collect();
+    let placeholders: Vec<&str> = sql_col_names.iter().map(|_| "?").collect();
     let insert_sql = format!(
         "INSERT INTO \"{}\" ({}) VALUES ({})",
         escaped_table,
@@ -3095,36 +3223,16 @@ pub fn write_sql(
 
         let nrows = frame.index().len();
         for row_idx in 0..nrows {
-            let params: Vec<rusqlite::types::Value> = col_names
-                .iter()
-                .map(|name| {
-                    frame
-                        .column(name)
-                        .and_then(|col| col.value(row_idx))
-                        .map_or(rusqlite::types::Value::Null, |scalar| match scalar {
-                            Scalar::Int64(v) => rusqlite::types::Value::Integer(*v),
-                            Scalar::Float64(v) => {
-                                if v.is_nan() {
-                                    rusqlite::types::Value::Null
-                                } else {
-                                    rusqlite::types::Value::Real(*v)
-                                }
-                            }
-                            Scalar::Bool(b) => {
-                                rusqlite::types::Value::Integer(if *b { 1 } else { 0 })
-                            }
-                            Scalar::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
-                            Scalar::Null(_) => rusqlite::types::Value::Null,
-                            Scalar::Timedelta64(v) => {
-                                if *v == Timedelta::NAT {
-                                    rusqlite::types::Value::Null
-                                } else {
-                                    rusqlite::types::Value::Integer(*v)
-                                }
-                            }
-                        })
-                })
-                .collect();
+            let mut params = Vec::with_capacity(sql_col_names.len());
+            if options.index {
+                params.push(sql_value_from_index_label(&frame.index().labels()[row_idx]));
+            }
+            params.extend(col_names.iter().map(|name| {
+                frame
+                    .column(name)
+                    .and_then(|col| col.value(row_idx))
+                    .map_or(rusqlite::types::Value::Null, sql_value_from_scalar)
+            }));
 
             stmt.execute(rusqlite::params_from_iter(params.iter()))
                 .map_err(|e| IoError::Sql(format!("insert row {row_idx} failed: {e}")))?;
@@ -3194,6 +3302,14 @@ pub trait DataFrameIoExt {
         table_name: &str,
         if_exists: SqlIfExists,
     ) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a SQLite table with pandas-style SQL write options.
+    fn to_sql_with_options(
+        &self,
+        conn: &rusqlite::Connection,
+        table_name: &str,
+        options: &SqlWriteOptions,
+    ) -> Result<(), IoError>;
 }
 
 impl DataFrameIoExt for DataFrame {
@@ -3240,6 +3356,15 @@ impl DataFrameIoExt for DataFrame {
         if_exists: SqlIfExists,
     ) -> Result<(), IoError> {
         write_sql(self, conn, table_name, if_exists)
+    }
+
+    fn to_sql_with_options(
+        &self,
+        conn: &rusqlite::Connection,
+        table_name: &str,
+        options: &SqlWriteOptions,
+    ) -> Result<(), IoError> {
+        write_sql_with_options(self, conn, table_name, options)
     }
 }
 
@@ -5433,8 +5558,9 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlReadOptions, read_sql, read_sql_table, read_sql_table_columns,
-        read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
+        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_table,
+        read_sql_table_columns, read_sql_table_with_index_col, read_sql_with_index_col,
+        read_sql_with_options, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -5596,6 +5722,148 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn sql_write_with_options_includes_named_index_column() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(101), IndexLabel::Int64(102)]).set_name("row_id"),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+        let conn = make_sql_test_conn();
+
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "indexed_write_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: true,
+                index_label: None,
+            },
+        )
+        .expect("write with named index");
+
+        let roundtrip = read_sql_table_with_index_col(&conn, "indexed_write_tbl", Some("row_id"))
+            .expect("read with promoted index");
+        assert_eq!(roundtrip.index().name(), Some("row_id"));
+        assert_eq!(roundtrip.index().labels(), frame.index().labels());
+        assert!(roundtrip.column("row_id").is_none());
+        assert_eq!(
+            roundtrip.column("vals").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn sql_write_with_options_unnamed_index_defaults_to_index_column_name() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "default_index_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: true,
+                index_label: None,
+            },
+        )
+        .expect("write with unnamed index");
+
+        let raw = read_sql_table(&conn, "default_index_tbl").expect("read raw table");
+        assert!(raw.column("index").is_some());
+        assert_eq!(raw.column("index").unwrap().values()[0], Scalar::Int64(0));
+        assert_eq!(raw.column("index").unwrap().values()[2], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn sql_write_with_options_index_label_overrides_name() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(7), Scalar::Int64(8)]).unwrap(),
+        );
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]).set_name("row_id"),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+        let conn = make_sql_test_conn();
+
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "override_index_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: true,
+                index_label: Some("custom_id".to_string()),
+            },
+        )
+        .expect("write with custom index label");
+
+        let raw = read_sql_table(&conn, "override_index_tbl").expect("read raw table");
+        assert!(raw.column("custom_id").is_some());
+        assert!(raw.column("row_id").is_none());
+        assert_eq!(
+            raw.column("custom_id").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            raw.column("custom_id").unwrap().values()[1],
+            Scalar::Int64(2)
+        );
+    }
+
+    #[test]
+    fn sql_write_with_options_index_false_omits_index_column() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(5), Scalar::Int64(6)]).unwrap(),
+        );
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(9), IndexLabel::Int64(10)]).set_name("row_id"),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+        let conn = make_sql_test_conn();
+
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "no_index_write_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: Some("custom_id".to_string()),
+            },
+        )
+        .expect("write without index");
+
+        let raw = read_sql_table(&conn, "no_index_write_tbl").expect("read raw table");
+        assert!(raw.column("row_id").is_none());
+        assert!(raw.column("custom_id").is_none());
+        let names: Vec<&str> = raw
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["vals"]);
     }
 
     #[test]

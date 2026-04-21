@@ -61,6 +61,7 @@ pub use fp_io::{
     // SQL
     SqlIfExists,
     SqlReadOptions,
+    SqlWriteOptions,
     read_csv,
     read_csv_str,
     read_csv_with_options,
@@ -96,6 +97,7 @@ pub use fp_io::{
     write_parquet,
     write_parquet_bytes,
     write_sql,
+    write_sql_with_options,
 };
 
 // ── Expression engine ───────────────────────────────────────────────────

@@ -2,7 +2,8 @@
 
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    infer_dtype, nancummax, nancummin, nancumprod, nancumsum,
+    infer_dtype, nancummax, nancummin, nancumprod, nancumsum, nanmax, nanmean, nanmedian, nanmin,
+    nanprod, nansum,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -565,11 +566,7 @@ pub enum ComparisonOp {
     Le,
 }
 
-fn compare_scalars_na_last(
-    left: &Scalar,
-    right: &Scalar,
-    ascending: bool,
-) -> std::cmp::Ordering {
+fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (left.is_missing(), right.is_missing()) {
         (true, true) => Ordering::Equal,
@@ -1185,6 +1182,66 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Sum of non-missing values.
+    ///
+    /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
+    /// Empty column returns 0.0 (matching pandas).
+    #[must_use]
+    pub fn sum(&self) -> Scalar {
+        nansum(&self.values)
+    }
+
+    /// Arithmetic mean of non-missing values.
+    ///
+    /// Matches `pd.Series.mean()` via fp-types::nanmean. Empty column
+    /// returns Null(NaN).
+    #[must_use]
+    pub fn mean(&self) -> Scalar {
+        nanmean(&self.values)
+    }
+
+    /// Minimum non-missing value.
+    ///
+    /// Matches `pd.Series.min()` via fp-types::nanmin. Preserves dtype
+    /// for homogeneous inputs.
+    #[must_use]
+    pub fn min(&self) -> Scalar {
+        nanmin(&self.values)
+    }
+
+    /// Maximum non-missing value.
+    ///
+    /// Matches `pd.Series.max()` via fp-types::nanmax.
+    #[must_use]
+    pub fn max(&self) -> Scalar {
+        nanmax(&self.values)
+    }
+
+    /// Median of non-missing values.
+    ///
+    /// Matches `pd.Series.median()` via fp-types::nanmedian.
+    #[must_use]
+    pub fn median(&self) -> Scalar {
+        nanmedian(&self.values)
+    }
+
+    /// Product of non-missing values.
+    ///
+    /// Matches `pd.Series.prod()` via fp-types::nanprod. Empty column
+    /// returns 1.0 (matching pandas).
+    #[must_use]
+    pub fn prod(&self) -> Scalar {
+        nanprod(&self.values)
+    }
+
+    /// Count of non-missing values.
+    ///
+    /// Matches `pd.Series.count()`.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.values.iter().filter(|v| !v.is_missing()).count()
+    }
+
     /// Sort values in ascending or descending order.
     ///
     /// Matches `pd.Series.sort_values(ascending=...)`. Missing values
@@ -1292,12 +1349,7 @@ impl Column {
     /// Matches `pd.Series.between(left, right, inclusive='both'|'neither')`.
     /// Missing values map to false. Non-numeric inputs return a type
     /// error.
-    pub fn between(
-        &self,
-        lower: f64,
-        upper: f64,
-        inclusive: bool,
-    ) -> Result<Self, ColumnError> {
+    pub fn between(&self, lower: f64, upper: f64, inclusive: bool) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -1317,6 +1369,33 @@ impl Column {
             }
         }
         Self::new(DType::Bool, out)
+    }
+
+    /// Encode the column as integer codes plus unique values.
+    ///
+    /// Matches `pd.Series.factorize()` default behavior: missing values
+    /// map to `-1`, and uniques preserve first-seen order.
+    pub fn factorize(&self) -> Result<(Self, Self), ColumnError> {
+        let mut uniques: Vec<Scalar> = Vec::new();
+        let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
+
+        for value in &self.values {
+            if value.is_missing() {
+                codes.push(Scalar::Int64(-1));
+                continue;
+            }
+
+            if let Some(position) = uniques.iter().position(|existing| existing == value) {
+                codes.push(Scalar::Int64(position as i64));
+            } else {
+                codes.push(Scalar::Int64(uniques.len() as i64));
+                uniques.push(value.clone());
+            }
+        }
+
+        let codes_col = Self::new(DType::Int64, codes)?;
+        let uniques_col = Self::new(self.dtype, uniques)?;
+        Ok((codes_col, uniques_col))
     }
 
     /// Element-wise absolute value.
@@ -3330,12 +3409,9 @@ mod tests {
 
         #[test]
         fn argsort_matches_take_sort_values() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(3),
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)])
+                    .expect("col");
             let positions = col.argsort();
             assert_eq!(positions, vec![1, 2, 0]);
             let via_take = col.take(&positions).expect("take");
@@ -3345,12 +3421,9 @@ mod tests {
 
         #[test]
         fn diff_periods_one_subtracts_prev() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(5),
-                Scalar::Int64(8),
-                Scalar::Int64(10),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(8), Scalar::Int64(10)])
+                    .expect("col");
             let d = col.diff(1).expect("diff");
             assert!(d.values()[0].is_missing());
             assert_eq!(d.values()[1], Scalar::Float64(3.0));
@@ -3360,12 +3433,9 @@ mod tests {
 
         #[test]
         fn diff_negative_period_looks_ahead() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(5),
-                Scalar::Int64(8),
-                Scalar::Int64(10),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(8), Scalar::Int64(10)])
+                    .expect("col");
             let d = col.diff(-1).expect("diff");
             assert_eq!(d.values()[0], Scalar::Float64(-3.0));
             assert_eq!(d.values()[1], Scalar::Float64(-2.0));
@@ -3436,14 +3506,195 @@ mod tests {
 
         #[test]
         fn between_missing_maps_to_false() {
-            let col = Column::from_values(vec![
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(3.0),
-            ])
-            .expect("col");
+            let col = Column::from_values(vec![Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)])
+                .expect("col");
             let b = col.between(1.0, 5.0, true).expect("between");
             assert_eq!(b.values()[0], Scalar::Bool(false));
             assert_eq!(b.values()[1], Scalar::Bool(true));
+        }
+    }
+
+    mod factorize {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn factorize_preserves_first_seen_order() {
+            let col = Column::from_values(vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+            ])
+            .expect("col");
+
+            let (codes, uniques) = col.factorize().expect("factorize");
+            assert_eq!(codes.dtype(), DType::Int64);
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                ]
+            );
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("c".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn factorize_missing_values_map_to_negative_one() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(1.5),
+            ])
+            .expect("col");
+
+            let (codes, uniques) = col.factorize().expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(0),
+                    Scalar::Int64(-1),
+                    Scalar::Int64(1),
+                    Scalar::Int64(-1),
+                    Scalar::Int64(0),
+                ]
+            );
+            assert_eq!(uniques.dtype(), DType::Float64);
+            assert_eq!(
+                uniques.values(),
+                &[Scalar::Float64(1.5), Scalar::Float64(2.5)]
+            );
+        }
+
+        #[test]
+        fn factorize_empty_column_returns_empty_outputs() {
+            let col = Column::new(DType::Int64, Vec::new()).expect("col");
+            let (codes, uniques) = col.factorize().expect("factorize");
+            assert!(codes.is_empty());
+            assert!(uniques.is_empty());
+            assert_eq!(codes.dtype(), DType::Int64);
+            assert_eq!(uniques.dtype(), DType::Int64);
+        }
+    }
+
+    mod aggregation_helpers {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn sum_skips_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            match col.sum() {
+                Scalar::Float64(v) => assert!((v - 6.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn sum_empty_is_zero() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert_eq!(col.sum(), Scalar::Float64(0.0));
+        }
+
+        #[test]
+        fn mean_matches_sum_over_count() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ])
+            .expect("col");
+            match col.mean() {
+                Scalar::Float64(v) => assert!((v - 4.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mean_empty_is_null() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(col.mean().is_missing());
+        }
+
+        #[test]
+        fn min_max_extrema_skip_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            assert_eq!(col.min(), Scalar::Int64(1));
+            assert_eq!(col.max(), Scalar::Int64(5));
+        }
+
+        #[test]
+        fn median_of_odd_count() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            match col.median() {
+                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn prod_multiplies_non_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+            match col.prod() {
+                Scalar::Float64(v) => assert!((v - 24.0).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn prod_empty_is_one() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert_eq!(col.prod(), Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn count_excludes_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+            assert_eq!(col.count(), 2);
         }
     }
 

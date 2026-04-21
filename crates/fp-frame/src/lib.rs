@@ -4849,25 +4849,76 @@ impl Series {
     ///
     /// Matches `pd.Series.reset_index(drop=...)`:
     /// - `drop=true`: keep only the values; replace the index with
-    ///   `0..len`. Return type is a Series (preserves the shape for
-    ///   method chaining).
-    /// - `drop=false`: pandas returns a two-column DataFrame
-    ///   (`index` + the series name). We don't widen the return type
-    ///   here — callers who need the frame form should call
-    ///   `to_frame()` + `reset_index()` on the result. When
-    ///   `drop=false` this method returns `CompatibilityRejected`
-    ///   with a clear hint so the distinction is explicit rather than
-    ///   silently dropping the old index.
-    pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
-        if !drop {
-            return Err(FrameError::CompatibilityRejected(
-                "Series.reset_index(drop=false) not supported in the Series return shape; \
-                call `to_frame()?.reset_index(false)` instead"
-                    .to_owned(),
-            ));
+    ///   `0..len` and return a Series.
+    /// - `drop=false`: widen to a two-column DataFrame with the
+    ///   materialized index first and the value column second.
+    pub fn reset_index(&self, drop: bool) -> Result<SeriesResetIndexResult, FrameError> {
+        if drop {
+            let index = range_index(self.column.len())?;
+            let series = Self::new(self.name.clone(), index, self.column.clone())?;
+            return Ok(SeriesResetIndexResult::Series(series));
         }
-        let index = range_index(self.column.len())?;
-        Self::new(self.name.clone(), index, self.column.clone())
+
+        let value_column_name = if self.name.is_empty() {
+            "0".to_owned()
+        } else {
+            self.name.clone()
+        };
+        let index_column_name = match self.index.name() {
+            Some(name) => {
+                if name == value_column_name {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "cannot insert {name}, already exists"
+                    )));
+                }
+                name.to_owned()
+            }
+            None => {
+                if value_column_name == "index" {
+                    "level_0".to_owned()
+                } else {
+                    "index".to_owned()
+                }
+            }
+        };
+
+        let has_int = self
+            .index
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(_)));
+        let has_utf8 = self
+            .index
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(_)));
+        let index_values = if has_int && has_utf8 {
+            self.index
+                .labels()
+                .iter()
+                .map(index_label_to_utf8_scalar)
+                .collect::<Vec<_>>()
+        } else {
+            self.index
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect::<Vec<_>>()
+        };
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            index_column_name.clone(),
+            Column::from_values(index_values)?,
+        );
+        columns.insert(value_column_name.clone(), self.column.clone());
+
+        let frame = DataFrame::new_with_column_order(
+            range_index(self.len())?,
+            columns,
+            vec![index_column_name, value_column_name],
+        )?;
+        Ok(SeriesResetIndexResult::DataFrame(frame))
     }
 
     /// Pass the Series through a function.
@@ -13961,6 +14012,42 @@ impl DataFrameDictResult {
     pub fn as_split(&self) -> Option<&DataFrameDictSplit> {
         match self {
             Self::Split(split) => Some(split),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SeriesResetIndexResult {
+    Series(Series),
+    DataFrame(DataFrame),
+}
+
+impl SeriesResetIndexResult {
+    pub fn as_series(&self) -> Option<&Series> {
+        match self {
+            Self::Series(series) => Some(series),
+            _ => None,
+        }
+    }
+
+    pub fn as_dataframe(&self) -> Option<&DataFrame> {
+        match self {
+            Self::DataFrame(frame) => Some(frame),
+            _ => None,
+        }
+    }
+
+    pub fn into_series(self) -> Option<Series> {
+        match self {
+            Self::Series(series) => Some(series),
+            _ => None,
+        }
+    }
+
+    pub fn into_dataframe(self) -> Option<DataFrame> {
+        match self {
+            Self::DataFrame(frame) => Some(frame),
             _ => None,
         }
     }
@@ -48210,7 +48297,7 @@ mod tests {
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
-        let reset = s.reset_index(true).unwrap();
+        let reset = s.reset_index(true).unwrap().into_series().unwrap();
         assert_eq!(
             reset.index().labels(),
             &[
@@ -48225,10 +48312,120 @@ mod tests {
     }
 
     #[test]
-    fn series_reset_index_drop_false_is_rejected_with_hint() {
-        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+    fn series_reset_index_drop_false_returns_dataframe() {
+        let s = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s.reset_index(false).unwrap().into_dataframe().unwrap();
+        assert_eq!(
+            reset.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["index".to_owned(), "x".to_owned()]);
+        assert_eq!(
+            reset.column("index").unwrap().values(),
+            &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
+        );
+        assert_eq!(
+            reset.column("x").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn series_reset_index_drop_false_unnamed_series_uses_zero_column_name() {
+        let s = Series::from_values(
+            "",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s.reset_index(false).unwrap().into_dataframe().unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["index".to_owned(), "0".to_owned()]);
+        assert_eq!(
+            reset.column("0").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn series_reset_index_drop_false_uses_level_0_when_series_named_index() {
+        let s = Series::from_values(
+            "index",
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let reset = s.reset_index(false).unwrap().into_dataframe().unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["level_0".to_owned(), "index".to_owned()]);
+        assert_eq!(
+            reset.column("level_0").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn series_reset_index_drop_false_uses_index_name_when_present() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+        ])
+        .set_name("row");
+        let s = Series::new(
+            "x".to_owned(),
+            index,
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        )
+        .unwrap();
+
+        let reset = s.reset_index(false).unwrap().into_dataframe().unwrap();
+        let names = reset
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["row".to_owned(), "x".to_owned()]);
+    }
+
+    #[test]
+    fn series_reset_index_drop_false_rejects_index_name_collision() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+        ])
+        .set_name("x");
+        let s = Series::new(
+            "x".to_owned(),
+            index,
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        )
+        .unwrap();
+
         let err = s.reset_index(false).unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("to_frame")));
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("cannot insert x"))
+        );
     }
 
     #[test]

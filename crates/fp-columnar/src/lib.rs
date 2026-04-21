@@ -567,6 +567,48 @@ pub enum ComparisonOp {
     Le,
 }
 
+fn nkeep_impl(
+    col: &Column,
+    n: usize,
+    keep: &str,
+    ascending: bool,
+) -> Result<Column, ColumnError> {
+    if !matches!(keep, "first" | "last" | "all") {
+        return Err(ColumnError::Type(TypeError::NonNumericValue {
+            value: keep.to_string(),
+            dtype: col.dtype(),
+        }));
+    }
+    // Annotate each value with its original position, then sort
+    // (position is the secondary key; Rust's sort_by is stable, so
+    // "first" falls out for free on equal primary keys).
+    let mut indexed: Vec<(usize, &Scalar)> = col.values().iter().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        let primary = compare_scalars_na_last(a.1, b.1, ascending);
+        match (primary, keep) {
+            // "last" policy: on ties, prefer later positions.
+            (std::cmp::Ordering::Equal, "last") => b.0.cmp(&a.0),
+            (std::cmp::Ordering::Equal, _) => a.0.cmp(&b.0),
+            _ => primary,
+        }
+    });
+    let take = n.min(indexed.len());
+    let mut end = take;
+    if keep == "all" && take > 0 && take < indexed.len() {
+        let boundary = indexed[take - 1].1;
+        while end < indexed.len() {
+            let same =
+                compare_scalars_na_last(indexed[end].1, boundary, ascending).is_eq();
+            if !same {
+                break;
+            }
+            end += 1;
+        }
+    }
+    let values: Vec<Scalar> = indexed[..end].iter().map(|(_, v)| (*v).clone()).collect();
+    Column::new(col.dtype(), values)
+}
+
 fn is_monotonic_in_direction(values: &[Scalar], increasing: bool) -> bool {
     let mut prev: Option<&Scalar> = None;
     for v in values {
@@ -2267,6 +2309,28 @@ impl Column {
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
         Self::new(target, out)
+    }
+
+    /// Return the `n` smallest values with explicit keep policy for
+    /// ties.
+    ///
+    /// Matches `pd.Series.nsmallest(n, keep=...)`:
+    /// - `"first"`: take the first `n` rows in ascending order, break
+    ///   ties by original position (stable).
+    /// - `"last"`: on ties, prefer later-appearing rows.
+    /// - `"all"`: include every row tied with the `n`-th smallest, so
+    ///   the returned column can exceed `n`.
+    pub fn nsmallest_keep(&self, n: usize, keep: &str) -> Result<Self, ColumnError> {
+        nkeep_impl(self, n, keep, true)
+    }
+
+    /// Return the `n` largest values with explicit keep policy for
+    /// ties.
+    ///
+    /// Matches `pd.Series.nlargest(n, keep=...)` — see `nsmallest_keep`
+    /// for the shared semantics.
+    pub fn nlargest_keep(&self, n: usize, keep: &str) -> Result<Self, ColumnError> {
+        nkeep_impl(self, n, keep, false)
     }
 
     /// Return the `n` largest values.
@@ -5679,6 +5743,87 @@ mod tests {
             .expect("col");
             assert_eq!(col.first_valid(), Some(2));
             assert_eq!(col.last_valid(), Some(3));
+        }
+
+        #[test]
+        fn nsmallest_keep_first_breaks_ties_by_earlier_position() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(2), // pos 0
+                Scalar::Int64(1), // pos 1
+                Scalar::Int64(1), // pos 2
+                Scalar::Int64(3), // pos 3
+                Scalar::Int64(1), // pos 4
+            ])
+            .expect("col");
+            let r = col.nsmallest_keep(2, "first").expect("nsmallest_keep");
+            // Two 1s: ties broken by earliest position → positions 1,2 → values [1, 1].
+            assert_eq!(r.len(), 2);
+            assert_eq!(r.values()[0], Scalar::Int64(1));
+            assert_eq!(r.values()[1], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nsmallest_keep_last_breaks_ties_by_later_position() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1), // pos 0
+                Scalar::Int64(2),
+                Scalar::Int64(1), // pos 2
+                Scalar::Int64(3),
+                Scalar::Int64(1), // pos 4
+            ])
+            .expect("col");
+            // Three tied 1s; keep=last picks positions 4, 2 (latest two).
+            let r = col.nsmallest_keep(2, "last").expect("nsmallest_keep");
+            assert_eq!(r.len(), 2);
+            assert_eq!(r.values()[0], Scalar::Int64(1));
+            assert_eq!(r.values()[1], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nsmallest_keep_all_expands_beyond_n_on_ties() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            // n=1 but three 1s tied for smallest; keep='all' returns them all.
+            let r = col.nsmallest_keep(1, "all").expect("nsmallest_keep");
+            assert_eq!(r.len(), 3);
+            assert_eq!(r.values()[0], Scalar::Int64(1));
+            assert_eq!(r.values()[1], Scalar::Int64(1));
+            assert_eq!(r.values()[2], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nlargest_keep_mirror_symmetry() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let r = col.nlargest_keep(1, "all").expect("nlargest_keep");
+            assert_eq!(r.len(), 2);
+            assert_eq!(r.values()[0], Scalar::Int64(3));
+            assert_eq!(r.values()[1], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn nkeep_invalid_keep_errors() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            assert!(col.nsmallest_keep(1, "middle").is_err());
+            assert!(col.nlargest_keep(1, "middle").is_err());
+        }
+
+        #[test]
+        fn nkeep_zero_is_empty_same_dtype() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let r = col.nsmallest_keep(0, "first").expect("nsmallest_keep");
+            assert!(r.is_empty());
+            assert_eq!(r.dtype(), DType::Int64);
         }
 
         #[test]

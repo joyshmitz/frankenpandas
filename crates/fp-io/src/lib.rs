@@ -2522,35 +2522,100 @@ fn write_excel_scalar(
 /// Matches pandas `DataFrame.to_excel()` default index behavior by emitting
 /// the index as the first worksheet column.
 pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    write_excel_bytes_with_options(frame, &ExcelWriteOptions::default())
+}
+
+/// Options for serializing a DataFrame to Excel.
+///
+/// Mirrors the subset of `pd.DataFrame.to_excel` parameters that
+/// don't depend on the workbook writer itself.
+#[derive(Debug, Clone)]
+pub struct ExcelWriteOptions {
+    /// Target sheet name. Default: `"Sheet1"` (rust_xlsxwriter default).
+    pub sheet_name: String,
+    /// Whether to write the row index as a leading column. Matches
+    /// pandas `index=True|False`. Default: true.
+    pub index: bool,
+    /// Header label for the index column when `index=true`. When
+    /// `None`, the frame's index name is used (falling back to an
+    /// empty string). Matches pandas `index_label=...`.
+    pub index_label: Option<String>,
+    /// Whether to emit the column-name header row. Matches pandas
+    /// `header=True|False`. Default: true.
+    pub header: bool,
+}
+
+impl Default for ExcelWriteOptions {
+    fn default() -> Self {
+        Self {
+            sheet_name: "Sheet1".to_string(),
+            index: true,
+            index_label: None,
+            header: true,
+        }
+    }
+}
+
+/// Serialize a DataFrame to Excel bytes with explicit options.
+///
+/// Matches `pd.DataFrame.to_excel(sheet_name, index, index_label,
+/// header)` for the in-memory byte form. The default `ExcelWriteOptions`
+/// reproduces the existing `write_excel_bytes` behavior (index=true,
+/// sheet_name="Sheet1").
+pub fn write_excel_bytes_with_options(
+    frame: &DataFrame,
+    options: &ExcelWriteOptions,
+) -> Result<Vec<u8>, IoError> {
     use rust_xlsxwriter::Workbook;
 
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
+    worksheet
+        .set_name(options.sheet_name.as_str())
+        .map_err(|e| IoError::Excel(format!("set sheet name: {e}")))?;
 
     let col_names = frame.column_names();
+    let data_col_offset: u16 = if options.index { 1 } else { 0 };
 
-    // Write headers.
-    worksheet
-        .write_string(0, 0, frame.index().name().unwrap_or(""))
-        .map_err(|e| IoError::Excel(format!("write index header: {e}")))?;
-    for (col_idx, name) in col_names.iter().enumerate() {
-        worksheet
-            .write_string(0, (col_idx + 1) as u16, name.as_str())
-            .map_err(|e| IoError::Excel(format!("write header: {e}")))?;
+    // Header row (optional).
+    if options.header {
+        if options.index {
+            let idx_header = options
+                .index_label
+                .as_deref()
+                .unwrap_or_else(|| frame.index().name().unwrap_or(""));
+            worksheet
+                .write_string(0, 0, idx_header)
+                .map_err(|e| IoError::Excel(format!("write index header: {e}")))?;
+        }
+        for (col_idx, name) in col_names.iter().enumerate() {
+            worksheet
+                .write_string(0, data_col_offset + col_idx as u16, name.as_str())
+                .map_err(|e| IoError::Excel(format!("write header: {e}")))?;
+        }
     }
 
-    // Write data rows.
+    // Data rows — when header=true the first data row lands at excel
+    // row 1; when header=false data starts at row 0.
+    let header_rows: u32 = if options.header { 1 } else { 0 };
     let nrows = frame.index().len();
     for row_idx in 0..nrows {
-        let excel_row = (row_idx + 1) as u32; // +1 for header row
-        if let Some(label) = frame.index().labels().get(row_idx) {
+        let excel_row = row_idx as u32 + header_rows;
+        if options.index
+            && let Some(label) = frame.index().labels().get(row_idx)
+        {
             write_excel_index_label(worksheet, excel_row, 0, label)?;
         }
         for (col_idx, name) in col_names.iter().enumerate() {
             if let Some(col) = frame.column(name)
                 && let Some(scalar) = col.value(row_idx)
             {
-                write_excel_scalar(worksheet, excel_row, (col_idx + 1) as u16, scalar)?;
+                write_excel_scalar(
+                    worksheet,
+                    excel_row,
+                    data_col_offset + col_idx as u16,
+                    scalar,
+                )?;
             }
         }
     }
@@ -2560,6 +2625,17 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
         .map_err(|e| IoError::Excel(format!("save workbook: {e}")))?;
 
     Ok(buf)
+}
+
+/// File-based counterpart to `write_excel_bytes_with_options`.
+pub fn write_excel_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &ExcelWriteOptions,
+) -> Result<(), IoError> {
+    let bytes = write_excel_bytes_with_options(frame, options)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 // ── Arrow IPC / Feather I/O ──────────────────────────────────────────────
@@ -4509,6 +4585,99 @@ mod tests {
     }
 
     // ── Excel I/O tests ──────────────────────────────────────────────
+
+    #[test]
+    fn write_excel_with_options_custom_sheet_name_survives_round_trip() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes_with_options(
+            &frame,
+            &super::ExcelWriteOptions {
+                sheet_name: "Results".to_string(),
+                ..super::ExcelWriteOptions::default()
+            },
+        )
+        .expect("write");
+        let sheets = super::read_excel_sheets_bytes(
+            &bytes,
+            None,
+            &super::ExcelReadOptions::default(),
+        )
+        .expect("read");
+        assert_eq!(sheets.len(), 1);
+        assert!(sheets.contains_key("Results"));
+    }
+
+    #[test]
+    fn write_excel_with_options_index_false_omits_index_column() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes_with_options(
+            &frame,
+            &super::ExcelWriteOptions {
+                index: false,
+                ..super::ExcelWriteOptions::default()
+            },
+        )
+        .expect("write");
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+        // With index=false the first column is "ints" directly (no
+        // anonymous leading index column).
+        let names = frame2.column_names();
+        assert_eq!(
+            names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["ints", "floats", "names"]
+        );
+    }
+
+    #[test]
+    fn write_excel_with_options_index_label_overrides_header() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes_with_options(
+            &frame,
+            &super::ExcelWriteOptions {
+                index_label: Some("row_id".to_string()),
+                ..super::ExcelWriteOptions::default()
+            },
+        )
+        .expect("write");
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+        // The index column now shows up as "row_id" before the data columns.
+        let names = frame2.column_names();
+        assert_eq!(names[0], "row_id");
+    }
+
+    #[test]
+    fn write_excel_with_options_header_false_omits_header_row() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_excel_bytes_with_options(
+            &frame,
+            &super::ExcelWriteOptions {
+                header: false,
+                index: false,
+                ..super::ExcelWriteOptions::default()
+            },
+        )
+        .expect("write");
+        // Without header, the reader treats row 0 as headers. We
+        // expect the first data row to become the column names
+        // instead of literal "ints"/"floats"/"names".
+        let frame2 =
+            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
+        let names = frame2.column_names();
+        let name_strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        assert!(!name_strs.contains(&"ints"));
+    }
+
+    #[test]
+    fn write_excel_with_options_default_matches_write_excel_bytes() {
+        let frame = make_test_dataframe();
+        let default_bytes = super::write_excel_bytes(&frame).expect("default");
+        let options_bytes =
+            super::write_excel_bytes_with_options(&frame, &super::ExcelWriteOptions::default())
+                .expect("options");
+        assert_eq!(default_bytes, options_bytes);
+    }
 
     fn build_two_sheet_workbook_bytes() -> Vec<u8> {
         use rust_xlsxwriter::Workbook;

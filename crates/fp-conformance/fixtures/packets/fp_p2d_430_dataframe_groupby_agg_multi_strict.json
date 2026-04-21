@@ -1,0 +1,60 @@
+{
+  "packet_id": "FP-P2D-430",
+  "case_id": "dataframe_groupby_agg_multi_per_column_strict",
+  "mode": "strict",
+  "operation": "dataframe_groupby_agg_multi",
+  "groupby_columns": ["grp"],
+  "groupby_agg_multi": {
+    "x": ["sum", "mean"],
+    "y": ["count"]
+  },
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["grp", "x", "y"],
+    "columns": {
+      "grp": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "b" },
+        { "kind": "utf8", "value": "b" }
+      ],
+      "x": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 20.0 }
+      ],
+      "y": [
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "float64", "value": 200.0 },
+        { "kind": "float64", "value": 300.0 },
+        { "kind": "float64", "value": 400.0 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "columns": {
+      "x_mean": [
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 15.0 }
+      ],
+      "x_sum": [
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": 30.0 }
+      ],
+      "y_count": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  }
+}

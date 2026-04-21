@@ -17843,6 +17843,22 @@ impl DataFrame {
         columns_col: &str,
         aggfunc: &str,
     ) -> Result<Self, FrameError> {
+        self.pivot_table_with_dropna(values, index_col, columns_col, aggfunc, true)
+    }
+
+    /// Pivot table with explicit control over whether missing index/column
+    /// keys are dropped before aggregation.
+    ///
+    /// Matches `df.pivot_table(..., dropna=...)` for the core single-value
+    /// case. The default `pivot_table()` wrapper uses `dropna=true`.
+    pub fn pivot_table_with_dropna(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        dropna: bool,
+    ) -> Result<Self, FrameError> {
         // Validate columns
         for col in [values, index_col, columns_col] {
             if !self.columns.contains_key(col) {
@@ -17863,7 +17879,13 @@ impl DataFrame {
         let mut idx_seen: HashSet<ScalarKey<'_>> = HashSet::new();
         for i in 0..n_rows {
             let val = &idx_col.values()[i];
-            let key = scalar_key_allow_missing(val);
+            let Some(key) = (if dropna {
+                scalar_key_skip_missing(val)
+            } else {
+                Some(scalar_key_allow_missing(val))
+            }) else {
+                continue;
+            };
             if idx_seen.insert(key) {
                 idx_order_keys.push(key);
                 idx_labels.push(scalar_to_value_counts_index_label(val));
@@ -17876,7 +17898,13 @@ impl DataFrame {
         let mut col_seen: HashSet<ScalarKey<'_>> = HashSet::new();
         for i in 0..n_rows {
             let val = &cols_col.values()[i];
-            let key = scalar_key_allow_missing(val);
+            let Some(key) = (if dropna {
+                scalar_key_skip_missing(val)
+            } else {
+                Some(scalar_key_allow_missing(val))
+            }) else {
+                continue;
+            };
             if col_seen.insert(key) {
                 col_order_keys.push(key);
                 let label = scalar_to_value_counts_index_label(val);
@@ -17893,8 +17921,20 @@ impl DataFrame {
         // Build groups: (idx_key, col_key) -> Vec<f64>
         let mut groups: HashMap<(ScalarKey<'_>, ScalarKey<'_>), Vec<f64>> = HashMap::new();
         for i in 0..n_rows {
-            let ik = scalar_key_allow_missing(&idx_col.values()[i]);
-            let ck = scalar_key_allow_missing(&cols_col.values()[i]);
+            let Some(ik) = (if dropna {
+                scalar_key_skip_missing(&idx_col.values()[i])
+            } else {
+                Some(scalar_key_allow_missing(&idx_col.values()[i]))
+            }) else {
+                continue;
+            };
+            let Some(ck) = (if dropna {
+                scalar_key_skip_missing(&cols_col.values()[i])
+            } else {
+                Some(scalar_key_allow_missing(&cols_col.values()[i]))
+            }) else {
+                continue;
+            };
             if let Ok(v) = val_col.values()[i].to_f64() {
                 groups.entry((ik, ck)).or_default().push(v);
             }
@@ -26159,11 +26199,7 @@ impl DataFrameGroupBy<'_> {
                     .map(|&i| col.values()[i].clone())
                     .collect();
 
-                let group_series = Series::from_values(
-                    col_name.clone(),
-                    group_labels,
-                    group_vals,
-                )?;
+                let group_series = Series::from_values(col_name.clone(), group_labels, group_vals)?;
 
                 let transformed = func(&group_series)?;
                 if transformed.len() != row_indices.len() {
@@ -36200,6 +36236,131 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_pivot_table_drops_missing_keys_by_default() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r1".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "sum").unwrap();
+
+        assert_eq!(
+            pivoted.index.labels(),
+            &[IndexLabel::Utf8("r1".into()), IndexLabel::Utf8("r2".into())]
+        );
+        assert_eq!(pivoted.column_order, vec!["c1".to_owned()]);
+        assert_eq!(
+            pivoted.columns["c1"].values(),
+            &[Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn dataframe_pivot_table_with_dropna_false_keeps_missing_key_buckets() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r1".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df
+            .pivot_table_with_dropna("val", "row", "col", "sum", false)
+            .unwrap();
+
+        assert_eq!(
+            pivoted.index.labels(),
+            &[
+                IndexLabel::Utf8("r1".into()),
+                IndexLabel::Utf8("<null>".into()),
+                IndexLabel::Utf8("r2".into()),
+            ]
+        );
+        assert_eq!(
+            pivoted.column_order,
+            vec!["c1".to_owned(), "<null>".to_owned()]
+        );
+        assert_eq!(
+            pivoted.columns["c1"].values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(
+            pivoted.columns["<null>"].values(),
+            &[
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ]
+        );
+    }
+
+    #[test]
     fn dataframe_pivot_table_aggfunc_dict_per_column_agg() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -36250,11 +36411,7 @@ mod tests {
         .unwrap();
 
         let pivoted = df
-            .pivot_table_aggfunc_dict(
-                &[("amount", "sum"), ("qty", "mean")],
-                "region",
-                "quarter",
-            )
+            .pivot_table_aggfunc_dict(&[("amount", "sum"), ("qty", "mean")], "region", "quarter")
             .unwrap();
 
         // Columns: amount_Q1, amount_Q2, qty_Q1, qty_Q2 (in call order).
@@ -36268,10 +36425,22 @@ mod tests {
             ]
         );
         // amount is summed
-        assert_eq!(pivoted.columns["amount_Q1"].values()[0], Scalar::Float64(10.0));
-        assert_eq!(pivoted.columns["amount_Q2"].values()[0], Scalar::Float64(20.0));
-        assert_eq!(pivoted.columns["amount_Q1"].values()[1], Scalar::Float64(30.0));
-        assert_eq!(pivoted.columns["amount_Q2"].values()[1], Scalar::Float64(40.0));
+        assert_eq!(
+            pivoted.columns["amount_Q1"].values()[0],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            pivoted.columns["amount_Q2"].values()[0],
+            Scalar::Float64(20.0)
+        );
+        assert_eq!(
+            pivoted.columns["amount_Q1"].values()[1],
+            Scalar::Float64(30.0)
+        );
+        assert_eq!(
+            pivoted.columns["amount_Q2"].values()[1],
+            Scalar::Float64(40.0)
+        );
         // qty is averaged
         assert_eq!(pivoted.columns["qty_Q1"].values()[0], Scalar::Float64(1.0));
         assert_eq!(pivoted.columns["qty_Q2"].values()[0], Scalar::Float64(3.0));
@@ -36282,10 +36451,8 @@ mod tests {
     #[test]
     fn dataframe_pivot_table_aggfunc_dict_rejects_empty() {
         let df = DataFrame::from_series(vec![
-            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
-                .unwrap(),
-            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
-                .unwrap(),
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())]).unwrap(),
             Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
@@ -36297,10 +36464,8 @@ mod tests {
     #[test]
     fn dataframe_pivot_table_aggfunc_dict_rejects_duplicate_value_column() {
         let df = DataFrame::from_series(vec![
-            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
-                .unwrap(),
-            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
-                .unwrap(),
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())]).unwrap(),
             Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
@@ -36335,9 +36500,14 @@ mod tests {
         ])
         .unwrap();
 
-        let pivoted = df.pivot_table_aggfunc_dict(&[("v", "sum")], "r", "c").unwrap();
+        let pivoted = df
+            .pivot_table_aggfunc_dict(&[("v", "sum")], "r", "c")
+            .unwrap();
         // With a single value column, columns are prefixed "v_{pivot}".
-        assert_eq!(pivoted.column_order, vec!["v_x".to_string(), "v_y".to_string()]);
+        assert_eq!(
+            pivoted.column_order,
+            vec!["v_x".to_string(), "v_y".to_string()]
+        );
         assert_eq!(pivoted.columns["v_x"].values()[0], Scalar::Float64(2.0));
         assert_eq!(pivoted.columns["v_y"].values()[0], Scalar::Float64(4.0));
     }
@@ -36345,10 +36515,8 @@ mod tests {
     #[test]
     fn dataframe_pivot_table_aggfunc_dict_propagates_unknown_aggfunc() {
         let df = DataFrame::from_series(vec![
-            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
-                .unwrap(),
-            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
-                .unwrap(),
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())]).unwrap(),
             Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
@@ -38548,10 +38716,7 @@ mod tests {
 
         let mut func_map: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        func_map.insert(
-            "x".to_string(),
-            vec!["sum".to_string(), "mean".to_string()],
-        );
+        func_map.insert("x".to_string(), vec!["sum".to_string(), "mean".to_string()]);
         func_map.insert("y".to_string(), vec!["min".to_string(), "max".to_string()]);
 
         let result = df
@@ -38618,18 +38783,8 @@ mod tests {
     #[test]
     fn dataframe_groupby_agg_dict_list_rejects_empty_func_list() {
         let df = DataFrame::from_series(vec![
-            Series::from_values(
-                "grp",
-                vec![0_i64.into()],
-                vec![Scalar::Utf8("a".into())],
-            )
-            .unwrap(),
-            Series::from_values(
-                "val",
-                vec![0_i64.into()],
-                vec![Scalar::Float64(1.0)],
-            )
-            .unwrap(),
+            Series::from_values("grp", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("val", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
 
@@ -38648,18 +38803,8 @@ mod tests {
     #[test]
     fn dataframe_groupby_agg_dict_list_rejects_group_key_column() {
         let df = DataFrame::from_series(vec![
-            Series::from_values(
-                "grp",
-                vec![0_i64.into()],
-                vec![Scalar::Utf8("a".into())],
-            )
-            .unwrap(),
-            Series::from_values(
-                "val",
-                vec![0_i64.into()],
-                vec![Scalar::Float64(1.0)],
-            )
-            .unwrap(),
+            Series::from_values("grp", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("val", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
 
@@ -39368,27 +39513,15 @@ mod tests {
     #[test]
     fn dataframe_groupby_transform_fn_propagates_closure_errors() {
         let df = DataFrame::from_series(vec![
-            Series::from_values(
-                "g",
-                vec![0_i64.into()],
-                vec![Scalar::Utf8("a".into())],
-            )
-            .unwrap(),
-            Series::from_values(
-                "v",
-                vec![0_i64.into()],
-                vec![Scalar::Float64(1.0)],
-            )
-            .unwrap(),
+            Series::from_values("g", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
         ])
         .unwrap();
 
         let err = df
             .groupby(&["g"])
             .unwrap()
-            .transform_fn(|_s| {
-                Err(FrameError::CompatibilityRejected("user error".to_owned()))
-            })
+            .transform_fn(|_s| Err(FrameError::CompatibilityRejected("user error".to_owned())))
             .unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg == "user error"));
     }
@@ -40515,12 +40648,8 @@ mod tests {
         let mut cols = BTreeMap::new();
         cols.insert(
             "a".to_string(),
-            Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .unwrap(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
         );
         cols.insert(
             "b".to_string(),
@@ -40531,12 +40660,9 @@ mod tests {
             ])
             .unwrap(),
         );
-        let df = DataFrame::new_with_column_order(
-            index,
-            cols,
-            vec!["a".to_string(), "b".to_string()],
-        )
-        .unwrap();
+        let df =
+            DataFrame::new_with_column_order(index, cols, vec!["a".to_string(), "b".to_string()])
+                .unwrap();
         assert_eq!(df.iat(1, 0).unwrap(), Scalar::Int64(2));
         assert_eq!(df.iat(2, 1).unwrap(), Scalar::Utf8("z".into()));
     }
@@ -40545,7 +40671,10 @@ mod tests {
     fn dataframe_iat_negative_positions_count_from_end() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])],
+            vec![(
+                "a",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
         )
         .unwrap();
         assert_eq!(df.iat(-1, -1).unwrap(), Scalar::Int64(30));
@@ -40554,11 +40683,7 @@ mod tests {
 
     #[test]
     fn dataframe_iat_out_of_bounds_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
         assert!(df.iat(10, 0).is_err());
         assert!(df.iat(0, 10).is_err());
     }
@@ -40567,7 +40692,10 @@ mod tests {
     fn dataframe_set_axis_row_labels() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
         )
         .unwrap();
         let new_labels = vec![
@@ -40578,20 +40706,14 @@ mod tests {
         let reset = df.set_axis(new_labels.clone(), 0).unwrap();
         assert_eq!(reset.index().labels(), new_labels.as_slice());
         // Column data unchanged.
-        assert_eq!(
-            reset.column("a").unwrap().values()[0],
-            Scalar::Int64(1)
-        );
+        assert_eq!(reset.column("a").unwrap().values()[0], Scalar::Int64(1));
     }
 
     #[test]
     fn dataframe_set_axis_column_names() {
         let df = DataFrame::from_dict(
             &["a", "b"],
-            vec![
-                ("a", vec![Scalar::Int64(1)]),
-                ("b", vec![Scalar::Int64(2)]),
-            ],
+            vec![("a", vec![Scalar::Int64(1)]), ("b", vec![Scalar::Int64(2)])],
         )
         .unwrap();
         let new_labels = vec![

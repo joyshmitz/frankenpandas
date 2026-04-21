@@ -127,6 +127,19 @@ pub struct CsvReadOptions {
     /// Matches pandas `thousands` parameter. Must differ from `decimal`
     /// (otherwise the option is silently ignored, matching pandas).
     pub thousands: Option<u8>,
+    /// Character used to quote fields that contain the delimiter, a
+    /// newline, or the quote character itself. Defaults to `"` (ASCII
+    /// double-quote). Matches pandas `quotechar` parameter.
+    pub quotechar: u8,
+    /// Character used to escape the quote character inside a quoted
+    /// field when `doublequote` is false. `None` disables backslash-
+    /// style escaping entirely. Matches pandas `escapechar` parameter.
+    pub escapechar: Option<u8>,
+    /// When true (the default), a doubled quote character inside a
+    /// quoted field is interpreted as a single literal quote. When
+    /// false, `escapechar` must be used to quote the quote character.
+    /// Matches pandas `doublequote` parameter.
+    pub doublequote: bool,
 }
 
 impl Default for CsvReadOptions {
@@ -150,6 +163,9 @@ impl Default for CsvReadOptions {
             decimal: b'.',
             on_bad_lines: CsvOnBadLines::Error,
             thousands: None,
+            quotechar: b'"',
+            escapechar: None,
+            doublequote: true,
         }
     }
 }
@@ -567,7 +583,12 @@ fn should_skip_bad_csv_record(
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
     let mut builder = ReaderBuilder::new();
-    builder.has_headers(false).delimiter(options.delimiter);
+    builder
+        .has_headers(false)
+        .delimiter(options.delimiter)
+        .quote(options.quotechar)
+        .double_quote(options.doublequote)
+        .escape(options.escapechar);
     if options.on_bad_lines != CsvOnBadLines::Error {
         builder.flexible(true);
     }
@@ -2881,6 +2902,62 @@ mod tests {
         assert_eq!(
             frame.column("name").unwrap().values()[0],
             Scalar::Utf8("a,b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_quotechar_custom_single_quote() {
+        let input = "name,remark\n'alice','loves, cats'\n";
+        let options = CsvReadOptions {
+            quotechar: b'\'',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".to_string())
+        );
+        assert_eq!(
+            frame.column("remark").unwrap().values()[0],
+            Scalar::Utf8("loves, cats".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_doublequote_true_collapses_doubled_quotes() {
+        // The field is `she said ""hi""` with doubled inner quotes.
+        let input = "text\n\"she said \"\"hi\"\"\"\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("text").unwrap().values()[0],
+            Scalar::Utf8("she said \"hi\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_doublequote_false_requires_escapechar() {
+        // With doublequote=false and escapechar=\, \" escapes the quote.
+        let input = "text\n\"hi\\\"there\"\n";
+        let options = CsvReadOptions {
+            doublequote: false,
+            escapechar: Some(b'\\'),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(
+            frame.column("text").unwrap().values()[0],
+            Scalar::Utf8("hi\"there".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_escapechar_none_default_keeps_backslash_literal() {
+        // Without escapechar set, backslash is just a normal character.
+        let input = "text\n\"foo\\bar\"\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("text").unwrap().values()[0],
+            Scalar::Utf8("foo\\bar".to_string())
         );
     }
 

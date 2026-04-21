@@ -1904,11 +1904,7 @@ impl Column {
                     (_, fill_opt) => {
                         let default = fill_opt.unwrap_or(a);
                         let left = if a_miss { default } else { a };
-                        let right = if b_miss {
-                            fill_opt.unwrap_or(b)
-                        } else {
-                            b
-                        };
+                        let right = if b_miss { fill_opt.unwrap_or(b) } else { b };
                         func(left, right)
                     }
                 }
@@ -2936,12 +2932,33 @@ impl Column {
     /// Matches `pd.Series.factorize()` default behavior: missing values
     /// map to `-1`, and uniques preserve first-seen order.
     pub fn factorize(&self) -> Result<(Self, Self), ColumnError> {
+        self.factorize_with_options(false, true)
+    }
+
+    /// Encode the column as integer codes plus unique values.
+    ///
+    /// Matches `pd.Series.factorize(sort=..., use_na_sentinel=...)`.
+    /// When `sort=true`, uniques are sorted and codes are remapped to the
+    /// sorted positions. When `use_na_sentinel=false`, missing values are
+    /// emitted as a regular unique bucket instead of `-1`.
+    pub fn factorize_with_options(
+        &self,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> Result<(Self, Self), ColumnError> {
         let mut uniques: Vec<Scalar> = Vec::new();
         let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
 
         for value in &self.values {
             if value.is_missing() {
-                codes.push(Scalar::Int64(-1));
+                if use_na_sentinel {
+                    codes.push(Scalar::Int64(-1));
+                } else if let Some(position) = uniques.iter().position(Scalar::is_missing) {
+                    codes.push(Scalar::Int64(position as i64));
+                } else {
+                    codes.push(Scalar::Int64(uniques.len() as i64));
+                    uniques.push(value.clone());
+                }
                 continue;
             }
 
@@ -2951,6 +2968,33 @@ impl Column {
                 codes.push(Scalar::Int64(uniques.len() as i64));
                 uniques.push(value.clone());
             }
+        }
+
+        if sort && !uniques.is_empty() {
+            let mut ordering: Vec<usize> = (0..uniques.len()).collect();
+            ordering.sort_by(|left, right| {
+                compare_scalars_na_last(&uniques[*left], &uniques[*right], true)
+            });
+
+            let mut remap = vec![0usize; uniques.len()];
+            let sorted_uniques: Vec<Scalar> = ordering
+                .into_iter()
+                .enumerate()
+                .map(|(sorted_position, original_position)| {
+                    remap[original_position] = sorted_position;
+                    uniques[original_position].clone()
+                })
+                .collect();
+
+            for code in &mut codes {
+                if let Scalar::Int64(value) = code
+                    && *value >= 0
+                {
+                    *value = remap[*value as usize] as i64;
+                }
+            }
+
+            uniques = sorted_uniques;
         }
 
         let codes_col = Self::new(DType::Int64, codes)?;
@@ -5264,6 +5308,103 @@ mod tests {
             assert_eq!(codes.dtype(), DType::Int64);
             assert_eq!(uniques.dtype(), DType::Int64);
         }
+
+        #[test]
+        fn factorize_with_sort_sorts_uniques_and_relabels_codes() {
+            let col = Column::from_values(vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+            ])
+            .expect("col");
+
+            let (codes, uniques) = col.factorize_with_options(true, true).expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(0),
+                ]
+            );
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("c".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn factorize_with_use_na_sentinel_false_keeps_missing_in_uniques() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(1.5),
+            ])
+            .expect("col");
+
+            let (codes, uniques) = col.factorize_with_options(false, false).expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                ]
+            );
+            assert_eq!(uniques.dtype(), DType::Float64);
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Float64(1.5),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(2.5),
+                ]
+            );
+        }
+
+        #[test]
+        fn factorize_with_sort_and_use_na_sentinel_false_sorts_missing_last() {
+            let col = Column::from_values(vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+
+            let (codes, uniques) = col.factorize_with_options(true, false).expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                ]
+            );
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Null(NullKind::Null),
+                ]
+            );
+        }
     }
 
     mod aggregation_helpers {
@@ -5842,9 +5983,7 @@ mod tests {
             let out = a
                 .combine(
                     &b,
-                    |l, r| {
-                        Scalar::Int64(l.to_f64().unwrap() as i64 + r.to_f64().unwrap() as i64)
-                    },
+                    |l, r| Scalar::Int64(l.to_f64().unwrap() as i64 + r.to_f64().unwrap() as i64),
                     None,
                 )
                 .expect("combine");

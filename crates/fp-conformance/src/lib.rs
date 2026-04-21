@@ -6965,7 +6965,7 @@ fn run_fixture_operation(
         }
         FixtureOperation::SeriesValueCounts => {
             let left = require_left_series(fixture)?;
-            let series = build_series(left)?;
+            let series = build_series_with_optional_categorical(fixture, left)?;
             let actual = series
                 .value_counts_with_options(
                     resolve_value_counts_normalize(fixture),
@@ -13935,27 +13935,34 @@ fn build_series(series: &FixtureSeries) -> Result<Series, String> {
     .map_err(|err| err.to_string())
 }
 
-fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, String> {
-    let left = require_left_series(fixture)?;
+fn build_series_with_optional_categorical(
+    fixture: &PacketFixture,
+    series: &FixtureSeries,
+) -> Result<Series, String> {
     if let Some(categories) = fixture.categorical_categories.as_ref() {
         let ordered = fixture.categorical_ordered.unwrap_or(false);
-        let codes = left
+        let codes = series
             .values
             .iter()
             .enumerate()
             .map(|(idx, value)| match value {
                 Scalar::Int64(code) => Ok(*code),
                 other => Err(format!(
-                    "series_dtype_check requires int64 categorical codes at idx={idx}, got {other:?}"
+                    "categorical fixture requires int64 codes at idx={idx}, got {other:?}"
                 )),
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Series::from_categorical_codes(left.name.clone(), codes, categories.clone(), ordered)
+        Series::from_categorical_codes(series.name.clone(), codes, categories.clone(), ordered)
             .map_err(|err| err.to_string())
     } else {
-        build_series(left)
+        build_series(series)
     }
+}
+
+fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    build_series_with_optional_categorical(fixture, left)
 }
 
 fn run_series_categorical_from_codes(fixture: &PacketFixture) -> Result<Series, String> {
@@ -15246,7 +15253,7 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::SeriesValueCounts => {
             let left = require_left_series(fixture)?;
-            let series = build_series(left)?;
+            let series = build_series_with_optional_categorical(fixture, left)?;
             let actual = series
                 .value_counts_with_options(
                     resolve_value_counts_normalize(fixture),
@@ -21130,7 +21137,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-042", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-042"));
         assert!(
-            report.fixture_count >= 4,
+            report.fixture_count >= 6,
             "expected FP-P2D-042 series value_counts fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

@@ -2689,7 +2689,93 @@ impl Series {
     /// - `dropna=True` (missing values excluded)
     /// - sort by count descending
     /// - stable tie ordering by first appearance
+    fn categorical_value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Result<Self, FrameError> {
+        let categories = &self
+            .categorical
+            .as_ref()
+            .expect("categorical value_counts requires categorical metadata")
+            .categories;
+        let mut counts: Vec<(Scalar, usize)> = categories
+            .iter()
+            .cloned()
+            .map(|category| (category, 0))
+            .collect();
+        let mut null_count = 0_usize;
+
+        for (idx, value) in self.column.values().iter().enumerate() {
+            match value {
+                Scalar::Int64(code) if *code == -1 => {
+                    null_count += 1;
+                }
+                Scalar::Int64(code) if *code >= 0 => {
+                    let position = *code as usize;
+                    let (_, count) = counts.get_mut(position).ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!(
+                            "categorical value_counts encountered out-of-bounds code {code} at idx={idx}"
+                        ))
+                    })?;
+                    *count += 1;
+                }
+                other if other.is_missing() => {
+                    null_count += 1;
+                }
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "categorical value_counts requires int64 codes or missing values; found {:?} at idx={idx}",
+                        other.dtype()
+                    )));
+                }
+            }
+        }
+
+        if !dropna && null_count > 0 {
+            counts.push((Scalar::Null(NullKind::NaN), null_count));
+        }
+
+        if sort {
+            if ascending {
+                counts.sort_by_key(|(_, count)| *count);
+            } else {
+                counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            }
+        }
+
+        let total = if normalize {
+            counts.iter().map(|(_, count)| *count).sum::<usize>() as f64
+        } else {
+            1.0
+        };
+
+        let mut labels = Vec::with_capacity(counts.len());
+        let mut values = Vec::with_capacity(counts.len());
+        for (value, count) in counts {
+            labels.push(scalar_to_value_counts_index_label(&value));
+            if normalize {
+                let normalized = if total == 0.0 {
+                    0.0
+                } else {
+                    count as f64 / total
+                };
+                values.push(Scalar::Float64(normalized));
+            } else {
+                values.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
+            }
+        }
+
+        Self::from_values("count", labels, values)
+    }
+
     pub fn value_counts(&self) -> Result<Self, FrameError> {
+        if self.categorical.is_some() {
+            return self.categorical_value_counts_with_options(false, true, false, true);
+        }
+
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
 
         for value in self.column.values() {
@@ -2730,6 +2816,10 @@ impl Series {
         ascending: bool,
         dropna: bool,
     ) -> Result<Self, FrameError> {
+        if self.categorical.is_some() {
+            return self.categorical_value_counts_with_options(normalize, sort, ascending, dropna);
+        }
+
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
         let mut null_count = 0_usize;
 
@@ -29075,6 +29165,103 @@ mod tests {
             &[IndexLabel::from("True"), IndexLabel::from("False")]
         );
         assert_eq!(out.values(), &[Scalar::Int64(3), Scalar::Int64(2)]);
+    }
+
+    #[test]
+    fn series_value_counts_categorical_includes_unused_categories() {
+        let s = Series::from_categorical_codes(
+            "rating",
+            vec![1, 0, 1, -1],
+            vec![
+                Scalar::Utf8("low".to_owned()),
+                Scalar::Utf8("high".to_owned()),
+                Scalar::Utf8("unused".to_owned()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let out = s.value_counts().unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from("high"),
+                IndexLabel::from("low"),
+                IndexLabel::from("unused"),
+            ]
+        );
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn series_value_counts_categorical_sort_false_preserves_category_order() {
+        let s = Series::from_categorical_codes(
+            "rating",
+            vec![1, 0, 1, -1],
+            vec![
+                Scalar::Utf8("low".to_owned()),
+                Scalar::Utf8("high".to_owned()),
+                Scalar::Utf8("unused".to_owned()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let out = s
+            .value_counts_with_options(false, false, false, true)
+            .unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from("low"),
+                IndexLabel::from("high"),
+                IndexLabel::from("unused"),
+            ]
+        );
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn series_value_counts_categorical_dropna_false_adds_missing_bucket() {
+        let s = Series::from_categorical_codes(
+            "rating",
+            vec![1, 0, 1, -1],
+            vec![
+                Scalar::Utf8("low".to_owned()),
+                Scalar::Utf8("high".to_owned()),
+                Scalar::Utf8("unused".to_owned()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let out = s
+            .value_counts_with_options(false, true, false, false)
+            .unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from("high"),
+                IndexLabel::from("low"),
+                IndexLabel::from("<null>"),
+                IndexLabel::from("unused"),
+            ]
+        );
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+            ]
+        );
     }
 
     #[test]

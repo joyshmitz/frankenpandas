@@ -1021,6 +1021,11 @@ pub enum FixtureOperation {
     DataFrameResampleSum,
     #[serde(rename = "dataframe_resample_mean", alias = "data_frame_resample_mean")]
     DataFrameResampleMean,
+    #[serde(
+        rename = "dataframe_to_json_records",
+        alias = "data_frame_to_json_records"
+    )]
+    DataFrameToJsonRecords,
 }
 
 impl FixtureOperation {
@@ -1355,6 +1360,7 @@ impl FixtureOperation {
             Self::DataFrameRollingMean => "dataframe_rolling_mean",
             Self::DataFrameResampleSum => "dataframe_resample_sum",
             Self::DataFrameResampleMean => "dataframe_resample_mean",
+            Self::DataFrameToJsonRecords => "dataframe_to_json_records",
         }
     }
 }
@@ -2196,6 +2202,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         FixtureOperation::SeriesToArrowRoundTrip
         | FixtureOperation::CsvRoundTrip
         | FixtureOperation::CsvReadFrame
+        | FixtureOperation::DataFrameToJsonRecords
         | FixtureOperation::JsonRoundTrip
         | FixtureOperation::JsonlRoundTrip
         | FixtureOperation::ParquetRoundTrip
@@ -6834,6 +6841,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameToJsonRecords => {
+            let actual = execute_dataframe_to_json_records_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Scalar(expected) => {
+                    compare_scalar(&actual?, &expected, fixture.operation.operation_name())
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_to_json_records error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_to_json_records to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_to_json_records to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_scalar or expected_error is required for dataframe_to_json_records"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::JsonRoundTrip => {
             let actual = execute_json_round_trip_fixture_operation(fixture);
             run_bool_round_trip_match(actual, expected, "json_round_trip")
@@ -10067,7 +10099,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
-        | FixtureOperation::SeriesCount => fixture
+        | FixtureOperation::SeriesCount
+        | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
             .map(ResolvedExpected::Scalar)
@@ -10671,7 +10704,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
-        | FixtureOperation::SeriesCount => response
+        | FixtureOperation::SeriesCount
+        | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
             .ok_or_else(|| {
@@ -11916,6 +11950,15 @@ fn diff_bool_round_trip_result(
             "expected_bool or expected_error required for {op_name}"
         )),
     }
+}
+
+fn execute_dataframe_to_json_records_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<Scalar, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let json = frame.to_json("records").map_err(|err| err.to_string())?;
+    Ok(Scalar::Utf8(json))
 }
 
 fn execute_json_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -15114,6 +15157,48 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for csv_read_frame".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameToJsonRecords => {
+            let actual = execute_dataframe_to_json_records_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Scalar(expected) => Ok(diff_scalar(
+                    &actual?,
+                    &expected,
+                    fixture.operation.operation_name(),
+                )),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_to_json_records.error",
+                        format!(
+                            "expected dataframe_to_json_records error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_to_json_records.error",
+                        "expected dataframe_to_json_records to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_to_json_records.error",
+                        "expected dataframe_to_json_records to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_scalar or expected_error required for dataframe_to_json_records"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::JsonRoundTrip => {
@@ -21829,6 +21914,16 @@ mod tests {
         let report =
             run_packet_by_id(&cfg, "FP-P2D-432", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-432"));
+        assert_eq!(report.fixture_count, 1);
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_to_json_records_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-433", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-433"));
         assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }

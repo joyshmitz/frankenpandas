@@ -18024,6 +18024,60 @@ impl DataFrame {
         })
     }
 
+    /// Create a pivot table where each value column uses its own aggregation.
+    ///
+    /// Matches `df.pivot_table(values=[...], index=..., columns=..., aggfunc={'col1':'sum','col2':'mean'})`.
+    /// Each `(value_col, aggfunc)` entry is pivoted independently and the
+    /// result columns are prefixed with the value column name
+    /// (`{value_col}_{pivot_column}`), matching the layout of
+    /// `pivot_table_multi_values`. Duplicate value column names are rejected
+    /// (a dict has unique keys). Missing columns and unsupported aggfuncs
+    /// propagate from the single-value `pivot_table` call.
+    pub fn pivot_table_aggfunc_dict(
+        &self,
+        value_aggs: &[(&str, &str)],
+        index_col: &str,
+        columns_col: &str,
+    ) -> Result<Self, FrameError> {
+        if value_aggs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "pivot_table_aggfunc_dict: value_aggs must be non-empty".to_owned(),
+            ));
+        }
+
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (val_col, _) in value_aggs {
+            if !seen.insert(*val_col) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "pivot_table_aggfunc_dict: duplicate value column '{val_col}'"
+                )));
+            }
+        }
+
+        let mut combined_cols = BTreeMap::new();
+        let mut combined_order = Vec::new();
+        let mut shared_index: Option<Index> = None;
+
+        for (val_col, aggfunc) in value_aggs {
+            let pt = self.pivot_table(val_col, index_col, columns_col, aggfunc)?;
+            if shared_index.is_none() {
+                shared_index = Some(pt.index.clone());
+            }
+            for col_name in &pt.column_order {
+                let prefixed = format!("{val_col}_{col_name}");
+                combined_cols.insert(prefixed.clone(), pt.columns[col_name].clone());
+                combined_order.push(prefixed);
+            }
+        }
+
+        Ok(Self {
+            columns: combined_cols,
+            column_order: combined_order,
+            index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
+            column_multiindex: None,
+        })
+    }
+
     /// Create a pivot table with optional margin totals.
     ///
     /// Matches `df.pivot_table(values, index, columns, aggfunc, margins=True)`.
@@ -36000,6 +36054,166 @@ mod tests {
         assert!(pivoted.columns["c2"].values()[0].is_missing()); // missing cell → NaN
         assert!(pivoted.columns["c1"].values()[1].is_missing()); // missing cell → NaN
         assert_eq!(pivoted.columns["c2"].values()[1], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_aggfunc_dict_per_column_agg() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "region",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("E".into()),
+                    Scalar::Utf8("E".into()),
+                    Scalar::Utf8("W".into()),
+                    Scalar::Utf8("W".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "quarter",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("Q1".into()),
+                    Scalar::Utf8("Q2".into()),
+                    Scalar::Utf8("Q1".into()),
+                    Scalar::Utf8("Q2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "amount",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "qty",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df
+            .pivot_table_aggfunc_dict(
+                &[("amount", "sum"), ("qty", "mean")],
+                "region",
+                "quarter",
+            )
+            .unwrap();
+
+        // Columns: amount_Q1, amount_Q2, qty_Q1, qty_Q2 (in call order).
+        assert_eq!(
+            pivoted.column_order,
+            vec![
+                "amount_Q1".to_string(),
+                "amount_Q2".to_string(),
+                "qty_Q1".to_string(),
+                "qty_Q2".to_string(),
+            ]
+        );
+        // amount is summed
+        assert_eq!(pivoted.columns["amount_Q1"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(pivoted.columns["amount_Q2"].values()[0], Scalar::Float64(20.0));
+        assert_eq!(pivoted.columns["amount_Q1"].values()[1], Scalar::Float64(30.0));
+        assert_eq!(pivoted.columns["amount_Q2"].values()[1], Scalar::Float64(40.0));
+        // qty is averaged
+        assert_eq!(pivoted.columns["qty_Q1"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["qty_Q2"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(pivoted.columns["qty_Q1"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(pivoted.columns["qty_Q2"].values()[1], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_aggfunc_dict_rejects_empty() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
+                .unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
+                .unwrap(),
+            Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
+        ])
+        .unwrap();
+
+        let err = df.pivot_table_aggfunc_dict(&[], "r", "c").unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_aggfunc_dict_rejects_duplicate_value_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
+                .unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
+                .unwrap(),
+            Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
+        ])
+        .unwrap();
+
+        let err = df
+            .pivot_table_aggfunc_dict(&[("v", "sum"), ("v", "mean")], "r", "c")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_aggfunc_dict_single_value_matches_pivot_table() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "r",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "c",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.0), Scalar::Float64(4.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table_aggfunc_dict(&[("v", "sum")], "r", "c").unwrap();
+        // With a single value column, columns are prefixed "v_{pivot}".
+        assert_eq!(pivoted.column_order, vec!["v_x".to_string(), "v_y".to_string()]);
+        assert_eq!(pivoted.columns["v_x"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pivoted.columns["v_y"].values()[0], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_aggfunc_dict_propagates_unknown_aggfunc() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values("r", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
+                .unwrap(),
+            Series::from_values("c", vec![0_i64.into()], vec![Scalar::Utf8("x".into())])
+                .unwrap(),
+            Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
+        ])
+        .unwrap();
+
+        let err = df
+            .pivot_table_aggfunc_dict(&[("v", "no_such_agg")], "r", "c")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     #[test]

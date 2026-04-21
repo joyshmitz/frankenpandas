@@ -12260,7 +12260,7 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
             series
                 .str()
-                .split_expand(pat)
+                .split_expand_n(pat, fixture.str_split_n)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesExtractDf => {
@@ -22040,6 +22040,16 @@ mod tests {
         let report =
             run_packet_by_id(&cfg, "FP-P2D-430", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-430"));
+        assert_eq!(report.fixture_count, 1);
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_split_expand_n_padding_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-431", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-431"));
         assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }

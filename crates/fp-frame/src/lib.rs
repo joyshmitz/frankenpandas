@@ -9261,53 +9261,20 @@ impl StringAccessor<'_> {
     /// Returns a DataFrame where each column is a split part.
     /// Shorter splits are padded with NaN.
     pub fn split_expand(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        self.split_expand_n(pat, None)
+    }
+
+    /// Split strings by pattern with an optional split limit, expanding into a DataFrame.
+    ///
+    /// Analogous to `pandas.Series.str.split(pat, n=..., expand=True)`.
+    /// Shorter splits are padded with NaN.
+    pub fn split_expand_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
         if pat.is_empty() {
             return Err(FrameError::CompatibilityRejected(
                 "empty separator".to_string(),
             ));
         }
-
-        let mut all_parts: Vec<Vec<String>> = Vec::new();
-        let mut max_parts = 0;
-
-        for val in self.series.column().values() {
-            match val {
-                Scalar::Utf8(s) => {
-                    let parts: Vec<String> = s.split(pat).map(|p| p.to_string()).collect();
-                    if parts.len() > max_parts {
-                        max_parts = parts.len();
-                    }
-                    all_parts.push(parts);
-                }
-                _ => {
-                    all_parts.push(Vec::new());
-                }
-            }
-        }
-
-        let mut columns = BTreeMap::new();
-        let mut column_order = Vec::new();
-        for col_idx in 0..max_parts {
-            let name = format!("{col_idx}");
-            let vals: Vec<Scalar> = all_parts
-                .iter()
-                .map(|parts| {
-                    if col_idx < parts.len() {
-                        Scalar::Utf8(parts[col_idx].clone())
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect();
-            columns.insert(name.clone(), Column::from_values(vals)?);
-            column_order.push(name);
-        }
-
-        Ok(DataFrame {
-            columns,
-            column_order,
-            index: self.series.index().clone(),
-        })
+        self.split_df_n(pat, n)
     }
 
     /// Count non-overlapping matches of a regex pattern in each string.
@@ -48444,6 +48411,38 @@ mod tests {
             Scalar::Utf8("f".to_string())
         );
         assert!(result.columns["1"].values()[2].is_missing());
+    }
+
+    #[test]
+    fn str_split_expand_n_pads_short_rows() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a_b_c".to_string()),
+                Scalar::Utf8("d_e".to_string()),
+                Scalar::Utf8("f".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().split_expand_n("_", Some(1)).unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            result.columns["0"].values(),
+            &[
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("d".to_string()),
+                Scalar::Utf8("f".to_string())
+            ]
+        );
+        assert_eq!(
+            result.columns["1"].values(),
+            &[
+                Scalar::Utf8("b_c".to_string()),
+                Scalar::Utf8("e".to_string()),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
     }
 
     #[test]

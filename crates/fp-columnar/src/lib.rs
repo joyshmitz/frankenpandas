@@ -1271,6 +1271,120 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Rank the values of the column.
+    ///
+    /// Matches `pd.Series.rank(method=..., ascending=..., na_option='keep')`.
+    /// Supported `method` values are `"average"` (pandas default,
+    /// ties → average of tied ranks), `"min"` (ties → smallest tied
+    /// rank), `"max"` (ties → largest tied rank), `"first"` (ties →
+    /// appearance order), and `"dense"` (ties → consecutive integers
+    /// with no gaps between distinct groups).
+    ///
+    /// Missing input positions stay missing in the output (matching
+    /// pandas `na_option='keep'`). The result dtype is always Float64
+    /// so `"average"` can produce non-integer ranks.
+    pub fn rank(&self, method: &str, ascending: bool) -> Result<Self, ColumnError> {
+        let valid_method = matches!(method, "average" | "min" | "max" | "first" | "dense");
+        if !valid_method {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: method.to_string(),
+                dtype: self.dtype,
+            }));
+        }
+
+        let len = self.values.len();
+        let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
+        for (i, v) in self.values.iter().enumerate() {
+            if !v.is_missing() {
+                non_missing.push((i, v));
+            }
+        }
+        non_missing.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
+
+        let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
+        let n = non_missing.len();
+        let mut cursor = 0usize;
+        let mut dense_rank = 0f64;
+        while cursor < n {
+            let mut end = cursor + 1;
+            while end < n {
+                let same =
+                    compare_scalars_na_last(non_missing[cursor].1, non_missing[end].1, ascending)
+                        .is_eq();
+                if !same {
+                    break;
+                }
+                end += 1;
+            }
+            let start_rank = cursor as f64 + 1.0;
+            let end_rank = end as f64;
+            dense_rank += 1.0;
+            for (group_idx, entry) in non_missing.iter().enumerate().take(end).skip(cursor) {
+                let original = entry.0;
+                let value = match method {
+                    "average" => (start_rank + end_rank) / 2.0,
+                    "min" => start_rank,
+                    "max" => end_rank,
+                    "first" => group_idx as f64 + 1.0,
+                    "dense" => dense_rank,
+                    _ => unreachable!(),
+                };
+                ranks[original] = Scalar::Float64(value);
+            }
+            cursor = end;
+        }
+        Self::new(DType::Float64, ranks)
+    }
+
+    /// Position where `needle` would be inserted to preserve sort order.
+    ///
+    /// Matches `pd.Series.searchsorted(value, side)`. `side` is
+    /// `"left"` (first valid insertion position) or `"right"` (last).
+    /// The column is assumed sorted ascending with missing values at
+    /// the end (consistent with `sort_values(true)`). Missing
+    /// `needle` is rejected with a type error.
+    pub fn searchsorted(&self, needle: &Scalar, side: &str) -> Result<usize, ColumnError> {
+        if side != "left" && side != "right" {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: side.to_string(),
+                dtype: self.dtype,
+            }));
+        }
+        if needle.is_missing() {
+            return Err(ColumnError::Type(TypeError::ValueIsMissing {
+                kind: NullKind::NaN,
+            }));
+        }
+
+        let mut lo = 0usize;
+        let mut hi = self.values.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_val = &self.values[mid];
+            // Values that are "missing" sort to the end; treat needle as
+            // less than any missing slot.
+            let ord = if mid_val.is_missing() {
+                std::cmp::Ordering::Greater
+            } else {
+                compare_scalars_na_last(mid_val, needle, true)
+            };
+            use std::cmp::Ordering;
+            let go_right = match (ord, side) {
+                (Ordering::Less, _) => true,
+                (Ordering::Equal, "left") => false,
+                (Ordering::Equal, "right") => true,
+                (Ordering::Greater, _) => false,
+                _ => unreachable!(),
+            };
+            if go_right {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
     /// Cast the column to a target dtype.
     ///
     /// Matches `pd.Series.astype(dtype)`. Each value is routed through
@@ -3819,12 +3933,9 @@ mod tests {
 
         #[test]
         fn where_cond_keeps_true_positions() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let cond = Column::from_values(vec![
                 Scalar::Bool(true),
                 Scalar::Bool(false),
@@ -3840,12 +3951,9 @@ mod tests {
 
         #[test]
         fn mask_inverts_where_cond() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let cond = Column::from_values(vec![
                 Scalar::Bool(true),
                 Scalar::Bool(false),
@@ -3862,11 +3970,8 @@ mod tests {
         #[test]
         fn where_missing_cond_propagates_null() {
             let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
-            let cond = Column::from_values(vec![
-                Scalar::Bool(true),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("cond");
+            let cond = Column::from_values(vec![Scalar::Bool(true), Scalar::Null(NullKind::NaN)])
+                .expect("cond");
             let fill = Scalar::Int64(-1);
             let out = col.where_cond(&cond, &fill).expect("where");
             assert_eq!(out.values()[0], Scalar::Int64(1));
@@ -3980,8 +4085,8 @@ mod tests {
 
         #[test]
         fn astype_bool_to_int() {
-            let col = Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)])
-                .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("col");
             let out = col.astype(DType::Int64).expect("astype");
             assert_eq!(out.dtype(), DType::Int64);
             assert_eq!(out.values()[0], Scalar::Int64(1));
@@ -3990,11 +4095,8 @@ mod tests {
 
         #[test]
         fn astype_propagates_missing() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("col");
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                .expect("col");
             let out = col.astype(DType::Float64).expect("astype");
             assert_eq!(out.values()[0], Scalar::Float64(1.0));
             assert!(out.values()[1].is_missing());
@@ -4005,6 +4107,172 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Float64(1.5)]).expect("col");
             let err = col.astype(DType::Int64).unwrap_err();
             assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+    }
+
+    mod rank_searchsorted {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn rank_average_ties_get_midpoint() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ])
+            .expect("col");
+            let r = col.rank("average", true).expect("rank");
+            assert_eq!(r.values()[0], Scalar::Float64(1.0));
+            // Two tied values occupy positions 2 and 3 → avg = 2.5
+            assert_eq!(r.values()[1], Scalar::Float64(2.5));
+            assert_eq!(r.values()[2], Scalar::Float64(2.5));
+            assert_eq!(r.values()[3], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn rank_min_assigns_lowest_tied_rank() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let r = col.rank("min", true).expect("rank");
+            assert_eq!(r.values()[1], Scalar::Float64(2.0));
+            assert_eq!(r.values()[2], Scalar::Float64(2.0));
+            assert_eq!(r.values()[3], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn rank_max_assigns_highest_tied_rank() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let r = col.rank("max", true).expect("rank");
+            assert_eq!(r.values()[1], Scalar::Float64(3.0));
+            assert_eq!(r.values()[2], Scalar::Float64(3.0));
+            assert_eq!(r.values()[3], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn rank_first_breaks_ties_by_appearance_order() {
+            let col =
+                Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(3), Scalar::Int64(3)])
+                    .expect("col");
+            let r = col.rank("first", true).expect("rank");
+            // Sorted positions: (1,3), (2,3), (0,5) → ranks 1,2,3
+            assert_eq!(r.values()[0], Scalar::Float64(3.0));
+            assert_eq!(r.values()[1], Scalar::Float64(1.0));
+            assert_eq!(r.values()[2], Scalar::Float64(2.0));
+        }
+
+        #[test]
+        fn rank_dense_has_no_gaps() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let r = col.rank("dense", true).expect("rank");
+            assert_eq!(r.values()[0], Scalar::Float64(1.0));
+            assert_eq!(r.values()[1], Scalar::Float64(2.0));
+            assert_eq!(r.values()[2], Scalar::Float64(2.0));
+            assert_eq!(r.values()[3], Scalar::Float64(3.0));
+        }
+
+        #[test]
+        fn rank_null_inputs_stay_null() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+            ])
+            .expect("col");
+            let r = col.rank("average", true).expect("rank");
+            assert_eq!(r.values()[0], Scalar::Float64(1.0));
+            assert!(r.values()[1].is_missing());
+            assert_eq!(r.values()[2], Scalar::Float64(2.0));
+        }
+
+        #[test]
+        fn rank_descending_reverses_assignment() {
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
+            let r = col.rank("min", false).expect("rank");
+            assert_eq!(r.values()[0], Scalar::Float64(3.0));
+            assert_eq!(r.values()[1], Scalar::Float64(2.0));
+            assert_eq!(r.values()[2], Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn rank_invalid_method_errors() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col.rank("bogus", true).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        #[test]
+        fn searchsorted_left_finds_first_insertion() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            assert_eq!(col.searchsorted(&Scalar::Int64(2), "left").unwrap(), 1);
+            assert_eq!(col.searchsorted(&Scalar::Int64(0), "left").unwrap(), 0);
+            assert_eq!(col.searchsorted(&Scalar::Int64(6), "left").unwrap(), 4);
+        }
+
+        #[test]
+        fn searchsorted_right_finds_last_insertion() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            assert_eq!(col.searchsorted(&Scalar::Int64(2), "right").unwrap(), 3);
+        }
+
+        #[test]
+        fn searchsorted_rejects_invalid_side() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col.searchsorted(&Scalar::Int64(0), "middle").unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        #[test]
+        fn searchsorted_rejects_missing_needle() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col
+                .searchsorted(&Scalar::Null(NullKind::NaN), "left")
+                .unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        #[test]
+        fn searchsorted_treats_trailing_nulls_as_greater() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            // needle=3 should land at position 2 (before trailing null).
+            assert_eq!(col.searchsorted(&Scalar::Int64(3), "left").unwrap(), 2);
         }
     }
 

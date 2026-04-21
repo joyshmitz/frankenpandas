@@ -25747,6 +25747,74 @@ impl DataFrameGroupBy<'_> {
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
+    /// Aggregate with a per-column list of functions.
+    ///
+    /// Matches `df.groupby(col).agg({'a': ['sum', 'mean'], 'b': ['min']})`
+    /// semantics. For each entry in `func_map`, every function is applied to
+    /// the named input column, producing one output column per (input_col,
+    /// func) pair named `{col}_{func}`. Output column order follows the
+    /// original DataFrame's column order; funcs within a column follow the
+    /// slice order supplied. Columns not in `func_map` are excluded, group-by
+    /// key columns are rejected, and an empty func list is rejected.
+    pub fn agg_dict_list(
+        &self,
+        func_map: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let funcs = match func_map.get(col_name) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            if funcs.is_empty() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "agg_dict_list: function list for column '{col_name}' must be non-empty"
+                )));
+            }
+            if self.by.contains(col_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "cannot aggregate group-by key column: '{col_name}'"
+                )));
+            }
+
+            let col = &self.df.columns[col_name];
+
+            for func_name in funcs {
+                let out_name = format!("{col_name}_{func_name}");
+                let mut agg_vals = Vec::with_capacity(n_groups);
+
+                for gkey in &group_order {
+                    let row_indices = &groups[gkey];
+                    let group_vals: Vec<Scalar> = row_indices
+                        .iter()
+                        .map(|&i| col.values()[i].clone())
+                        .collect();
+
+                    let agg_val =
+                        Self::apply_agg_func(func_name.as_str(), &group_vals, col.dtype())?;
+                    agg_vals.push(agg_val);
+                }
+
+                result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
+                col_order.push(out_name);
+            }
+        }
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
     /// Named aggregation: each tuple is `(output_name, input_column, function)`.
     ///
     /// Matches `df.groupby('g').agg(out=('col', 'func'))` in pandas.
@@ -38361,6 +38429,218 @@ mod tests {
         assert_eq!(
             result.columns["val_mean"].values()[1],
             Scalar::Float64(35.0)
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_dict_list_per_column_funcs() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(7.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(50.0),
+                    Scalar::Float64(70.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        func_map.insert(
+            "x".to_string(),
+            vec!["sum".to_string(), "mean".to_string()],
+        );
+        func_map.insert("y".to_string(), vec!["min".to_string(), "max".to_string()]);
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&func_map)
+            .unwrap();
+
+        // Order follows self.df.column_order (grp, x, y). grp is skipped
+        // (not in func_map), so we get x_sum, x_mean, y_min, y_max.
+        assert_eq!(
+            result.column_order,
+            vec![
+                "x_sum".to_string(),
+                "x_mean".to_string(),
+                "y_min".to_string(),
+                "y_max".to_string(),
+            ]
+        );
+        assert_eq!(result.len(), 2);
+        // Group "a" (x=1,3; y=10,30)
+        assert_eq!(result.columns["x_sum"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["x_mean"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.columns["y_min"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(result.columns["y_max"].values()[0], Scalar::Float64(30.0));
+        // Group "b" (x=5,7; y=50,70)
+        assert_eq!(result.columns["x_sum"].values()[1], Scalar::Float64(12.0));
+        assert_eq!(result.columns["x_mean"].values()[1], Scalar::Float64(6.0));
+        assert_eq!(result.columns["y_min"].values()[1], Scalar::Float64(50.0));
+        assert_eq!(result.columns["y_max"].values()[1], Scalar::Float64(70.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_dict_list_single_func_per_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.0), Scalar::Float64(4.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        func_map.insert("val".to_string(), vec!["sum".to_string()]);
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&func_map)
+            .unwrap();
+        assert_eq!(result.column_order, vec!["val_sum".to_string()]);
+        assert_eq!(result.columns["val_sum"].values()[0], Scalar::Float64(6.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_dict_list_rejects_empty_func_list() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(1.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        func_map.insert("val".to_string(), Vec::new());
+
+        let err = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&func_map)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_dict_list_rejects_group_key_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into()],
+                vec![Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into()],
+                vec![Scalar::Float64(1.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        func_map.insert("grp".to_string(), vec!["count".to_string()]);
+
+        let err = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&func_map)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_dict_list_preserves_original_column_order() {
+        // func_map insertion order is arbitrary (HashMap); output order
+        // must match the original df.column_order.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "first_col",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "second_col",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        // Insert second_col first to make sure HashMap iteration order
+        // doesn't leak into output.
+        func_map.insert("second_col".to_string(), vec!["sum".to_string()]);
+        func_map.insert("first_col".to_string(), vec!["sum".to_string()]);
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_dict_list(&func_map)
+            .unwrap();
+        assert_eq!(
+            result.column_order,
+            vec!["first_col_sum".to_string(), "second_col_sum".to_string()]
         );
     }
 

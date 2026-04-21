@@ -18927,6 +18927,89 @@ impl DataFrame {
         })
     }
 
+    /// Single-cell access by integer (row_pos, col_pos).
+    ///
+    /// Matches `pd.DataFrame.iat[i, j]`. Negative positions count
+    /// from the end (pandas convention). Returns
+    /// `CompatibilityRejected` for out-of-range row or column
+    /// positions.
+    pub fn iat(&self, row_pos: i64, col_pos: i64) -> Result<Scalar, FrameError> {
+        let n_rows = self.index.labels().len();
+        let row_idx = if row_pos < 0 {
+            (n_rows as i64 + row_pos) as usize
+        } else {
+            row_pos as usize
+        };
+        if row_idx >= n_rows {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "DataFrame.iat: row position {row_pos} out of bounds for length {n_rows}"
+            )));
+        }
+        let n_cols = self.column_order.len();
+        let col_idx = if col_pos < 0 {
+            (n_cols as i64 + col_pos) as usize
+        } else {
+            col_pos as usize
+        };
+        if col_idx >= n_cols {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "DataFrame.iat: column position {col_pos} out of bounds for width {n_cols}"
+            )));
+        }
+        let col_name = &self.column_order[col_idx];
+        Ok(self.columns[col_name].values()[row_idx].clone())
+    }
+
+    /// Replace the row index or column names without touching data.
+    ///
+    /// Matches `pd.DataFrame.set_axis(labels, axis=0|1)`:
+    /// - `axis=0`: replace the row index with `labels`.
+    /// - `axis=1`: replace column names with stringified `labels`.
+    ///
+    /// Returns `LengthMismatch` when `labels.len()` doesn't match the
+    /// chosen axis; returns `CompatibilityRejected` for unknown axis.
+    pub fn set_axis(&self, labels: Vec<IndexLabel>, axis: usize) -> Result<Self, FrameError> {
+        match axis {
+            0 => {
+                if labels.len() != self.index.labels().len() {
+                    return Err(FrameError::LengthMismatch {
+                        index_len: labels.len(),
+                        column_len: self.index.labels().len(),
+                    });
+                }
+                let new_index = Index::new(labels);
+                Ok(Self {
+                    columns: self.columns.clone(),
+                    column_order: self.column_order.clone(),
+                    index: new_index,
+                    column_multiindex: self.column_multiindex.clone(),
+                })
+            }
+            1 => {
+                if labels.len() != self.column_order.len() {
+                    return Err(FrameError::LengthMismatch {
+                        index_len: labels.len(),
+                        column_len: self.column_order.len(),
+                    });
+                }
+                let new_names: Vec<String> = labels.iter().map(IndexLabel::to_string).collect();
+                let mut new_columns = BTreeMap::new();
+                for (old, new) in self.column_order.iter().zip(new_names.iter()) {
+                    new_columns.insert(new.clone(), self.columns[old].clone());
+                }
+                Ok(Self {
+                    columns: new_columns,
+                    column_order: new_names,
+                    index: self.index.clone(),
+                    column_multiindex: None,
+                })
+            }
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "set_axis: axis must be 0 or 1, got {other}"
+            ))),
+        }
+    }
+
     /// Single-cell access by (row label, column name).
     ///
     /// Matches `pd.DataFrame.at[label, col]`. Returns `None` when the
@@ -39657,6 +39740,122 @@ mod tests {
         ])
         .unwrap();
         assert!(df.to_dict("invalid").is_err());
+    }
+
+    #[test]
+    fn dataframe_iat_returns_cell_by_position() {
+        let index = Index::from_i64(vec![10, 20, 30]);
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .unwrap(),
+        );
+        cols.insert(
+            "b".to_string(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            index,
+            cols,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(df.iat(1, 0).unwrap(), Scalar::Int64(2));
+        assert_eq!(df.iat(2, 1).unwrap(), Scalar::Utf8("z".into()));
+    }
+
+    #[test]
+    fn dataframe_iat_negative_positions_count_from_end() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])],
+        )
+        .unwrap();
+        assert_eq!(df.iat(-1, -1).unwrap(), Scalar::Int64(30));
+        assert_eq!(df.iat(-2, 0).unwrap(), Scalar::Int64(20));
+    }
+
+    #[test]
+    fn dataframe_iat_out_of_bounds_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        assert!(df.iat(10, 0).is_err());
+        assert!(df.iat(0, 10).is_err());
+    }
+
+    #[test]
+    fn dataframe_set_axis_row_labels() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+        )
+        .unwrap();
+        let new_labels = vec![
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("y".into()),
+            IndexLabel::Utf8("z".into()),
+        ];
+        let reset = df.set_axis(new_labels.clone(), 0).unwrap();
+        assert_eq!(reset.index().labels(), new_labels.as_slice());
+        // Column data unchanged.
+        assert_eq!(
+            reset.column("a").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+    }
+
+    #[test]
+    fn dataframe_set_axis_column_names() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let new_labels = vec![
+            IndexLabel::Utf8("alpha".into()),
+            IndexLabel::Utf8("beta".into()),
+        ];
+        let renamed = df.set_axis(new_labels, 1).unwrap();
+        assert_eq!(renamed.column_names(), vec!["alpha", "beta"]);
+        // Data survived the rename.
+        assert_eq!(
+            renamed.column("alpha").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+    }
+
+    #[test]
+    fn dataframe_set_axis_wrong_length_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let err = df.set_axis(vec![IndexLabel::Int64(0)], 0).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn dataframe_set_axis_invalid_axis_errors() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let err = df.set_axis(vec![IndexLabel::Int64(0)], 2).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     #[test]

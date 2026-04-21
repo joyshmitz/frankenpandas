@@ -13956,6 +13956,31 @@ impl DataFrameDictResult {
     }
 }
 
+pub trait DataFrameApplyArg {
+    type Output;
+
+    fn execute(self, frame: &DataFrame, axis: usize) -> Result<Self::Output, FrameError>;
+}
+
+impl DataFrameApplyArg for &str {
+    type Output = Series;
+
+    fn execute(self, frame: &DataFrame, axis: usize) -> Result<Self::Output, FrameError> {
+        frame.apply_named(self, axis)
+    }
+}
+
+impl<F> DataFrameApplyArg for F
+where
+    F: Fn(&[Scalar]) -> Scalar,
+{
+    type Output = DataFrame;
+
+    fn execute(self, frame: &DataFrame, axis: usize) -> Result<Self::Output, FrameError> {
+        frame.apply_fn(self, axis)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataFrameCsvReadOptions {
     pub sep: char,
@@ -17020,7 +17045,7 @@ impl DataFrame {
     /// the original DataFrame index.
     ///
     /// Matches `df.apply(func, axis=...)` for built-in aggregations.
-    pub fn apply(&self, func: &str, axis: usize) -> Result<Series, FrameError> {
+    fn apply_named(&self, func: &str, axis: usize) -> Result<Series, FrameError> {
         if axis == 0 {
             // Column-wise: aggregate each column
             let mut labels = Vec::new();
@@ -17124,6 +17149,17 @@ impl DataFrame {
                 "axis must be 0 or 1, got {axis}"
             )))
         }
+    }
+
+    /// Apply either a built-in reducer name or a user closure along an axis.
+    ///
+    /// - `df.apply("sum", 0)` returns a `Series`.
+    /// - `df.apply(|vals| ..., 1)` returns a single-column `DataFrame`.
+    pub fn apply<A>(&self, func: A, axis: usize) -> Result<A::Output, FrameError>
+    where
+        A: DataFrameApplyArg,
+    {
+        func.execute(self, axis)
     }
 
     /// Transpose the DataFrame: rows become columns, columns become rows.
@@ -37543,6 +37579,70 @@ mod tests {
             )
             .unwrap();
         // Row 0: 1+10=11, Row 1: 3+20=23
+        assert_eq!(result.columns["result"].values()[0], Scalar::Float64(11.0));
+        assert_eq!(result.columns["result"].values()[1], Scalar::Float64(23.0));
+    }
+
+    #[test]
+    fn dataframe_apply_user_fn_column_wise_public_api() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .apply(
+                |vals: &[Scalar]| {
+                    let sum: f64 = vals.iter().filter_map(|v| v.to_f64().ok()).sum();
+                    Scalar::Float64(sum)
+                },
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(result.columns["result"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["result"].values()[1], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_apply_user_fn_row_wise_public_api() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .apply(
+                |vals: &[Scalar]| {
+                    let sum: f64 = vals.iter().filter_map(|v| v.to_f64().ok()).sum();
+                    Scalar::Float64(sum)
+                },
+                1,
+            )
+            .unwrap();
+
         assert_eq!(result.columns["result"].values()[0], Scalar::Float64(11.0));
         assert_eq!(result.columns["result"].values()[1], Scalar::Float64(23.0));
     }

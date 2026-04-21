@@ -18158,6 +18158,7 @@ impl DataFrame {
             "count" => |vals: &[f64]| vals.len() as f64,
             "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
             "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
             _ => {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "pivot_table aggfunc '{aggfunc}' not supported for margins"
@@ -18263,6 +18264,7 @@ impl DataFrame {
             "count" => |vals: &[f64]| vals.len() as f64,
             "min" => |vals: &[f64]| vals.iter().copied().fold(f64::INFINITY, f64::min),
             "max" => |vals: &[f64]| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            "first" => |vals: &[f64]| vals.first().copied().unwrap_or(f64::NAN),
             _ => {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "pivot_table aggfunc '{aggfunc}' not supported for margins"
@@ -36667,6 +36669,67 @@ mod tests {
         assert_eq!(pt.columns["All"].values()[2], Scalar::Float64(10.0));
 
         // Index should end with "All"
+        assert_eq!(pt.index().labels()[2], IndexLabel::Utf8("All".to_owned()));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_with_margins_first() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pt = df
+            .pivot_table_with_margins("val", "row", "col", "first", true)
+            .unwrap();
+
+        assert_eq!(pt.len(), 3);
+        assert_eq!(pt.column_names().len(), 3);
+
+        assert_eq!(pt.columns["c1"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pt.columns["c2"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pt.columns["All"].values()[0], Scalar::Float64(1.0));
+
+        assert_eq!(pt.columns["c1"].values()[1], Scalar::Float64(3.0));
+        assert_eq!(pt.columns["c2"].values()[1], Scalar::Float64(4.0));
+        assert_eq!(pt.columns["All"].values()[1], Scalar::Float64(3.0));
+
+        assert_eq!(pt.columns["c1"].values()[2], Scalar::Float64(1.0));
+        assert_eq!(pt.columns["c2"].values()[2], Scalar::Float64(2.0));
+        assert_eq!(pt.columns["All"].values()[2], Scalar::Float64(1.0));
+
         assert_eq!(pt.index().labels()[2], IndexLabel::Utf8("All".to_owned()));
     }
 

@@ -1352,6 +1352,91 @@ impl Column {
         nanall(&self.values)
     }
 
+    /// Element-wise difference between consecutive non-missing values.
+    ///
+    /// Unlike `diff(1)` — which inserts Null(NaN) for every missing
+    /// input — this walker-style helper skips nulls when picking the
+    /// "previous" value. Positions whose nearest preceding non-missing
+    /// neighbor lies before the start of the column (i.e. the first
+    /// non-missing value itself, or a missing input) emit Null(NaN).
+    /// Matches the common pandas idiom `s.dropna().diff().reindex(s.index)`.
+    pub fn diff_valid(&self) -> Result<Self, ColumnError> {
+        let mut prev: Option<f64> = None;
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            match v.to_f64() {
+                Ok(x) if !x.is_nan() => match prev {
+                    Some(p) => {
+                        out.push(Scalar::Float64(x - p));
+                        prev = Some(x);
+                    }
+                    None => {
+                        out.push(Scalar::Null(NullKind::NaN));
+                        prev = Some(x);
+                    }
+                },
+                Ok(_) => out.push(Scalar::Null(NullKind::NaN)),
+                Err(err) => return Err(ColumnError::Type(err)),
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Deterministic uniform sampling of `n` rows with a caller-supplied
+    /// seed.
+    ///
+    /// Matches the no-replacement subset of `pd.Series.sample(n,
+    /// random_state=seed)`. `n >= len()` returns a clone. Uses an
+    /// in-place partial Fisher-Yates shuffle driven by a stateless
+    /// LCG so callers can reproduce samples without dragging in
+    /// `rand`. Result dtype matches `self`.
+    pub fn sample(&self, n: usize, seed: u64) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        if n >= len {
+            return Ok(self.clone());
+        }
+        let mut indices: Vec<usize> = (0..len).collect();
+        let mut state = seed.wrapping_add(0x9E3779B97F4A7C15);
+        for i in 0..n {
+            // Standard LCG constants from Knuth (MMIX).
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let bound = (len - i) as u64;
+            let pick = i + (state.wrapping_shr(33) % bound) as usize;
+            indices.swap(i, pick);
+        }
+        let values: Vec<Scalar> = indices[..n]
+            .iter()
+            .map(|&idx| self.values[idx].clone())
+            .collect();
+        Self::new(self.dtype, values)
+    }
+
+    /// Position of the first non-missing value, or None when every
+    /// value is missing.
+    ///
+    /// Matches `pd.Series.first_valid_index()` for positional
+    /// indices — callers can map the returned position through their
+    /// own Index to recover a label.
+    #[must_use]
+    pub fn first_valid(&self) -> Option<usize> {
+        self.values.iter().position(|v| !v.is_missing())
+    }
+
+    /// Position of the last non-missing value, or None when every
+    /// value is missing.
+    ///
+    /// Matches `pd.Series.last_valid_index()` for positional indices.
+    #[must_use]
+    pub fn last_valid(&self) -> Option<usize> {
+        self.values.iter().rposition(|v| !v.is_missing())
+    }
+
     /// Sliding-window sum over `window` consecutive positions.
     ///
     /// Matches `pd.Series.rolling(window).sum()`. Positions with fewer
@@ -5514,6 +5599,97 @@ mod tests {
             assert!(r.values()[0].is_missing());
             assert!(r.values()[1].is_missing());
             assert_eq!(r.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn diff_valid_skips_missing_predecessors() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+                Scalar::Float64(7.0),
+            ])
+            .expect("col");
+            let r = col.diff_valid().expect("diff_valid");
+            assert!(r.values()[0].is_missing()); // null in, null out
+            assert!(r.values()[1].is_missing()); // first non-missing -> no prev
+            assert!(r.values()[2].is_missing()); // null in
+            assert_eq!(r.values()[3], Scalar::Float64(3.0)); // 4 - 1
+            assert_eq!(r.values()[4], Scalar::Float64(3.0)); // 7 - 4
+        }
+
+        #[test]
+        fn diff_valid_empty_column() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            let r = col.diff_valid().expect("diff_valid");
+            assert!(r.is_empty());
+            assert_eq!(r.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn sample_without_replacement_deterministic_by_seed() {
+            let col = Column::from_values(
+                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("col");
+            let a = col.sample(3, 42).expect("sample");
+            let b = col.sample(3, 42).expect("sample");
+            // Same seed → identical ordering.
+            assert_eq!(a.values(), b.values());
+            assert_eq!(a.len(), 3);
+            // All picks lie within the original range.
+            for v in a.values() {
+                match v {
+                    Scalar::Int64(x) => assert!((0..10).contains(x)),
+                    other => panic!("unexpected value {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn sample_different_seeds_likely_differ() {
+            let col = Column::from_values(
+                (0..100).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("col");
+            let a = col.sample(5, 1).expect("sample");
+            let b = col.sample(5, 2).expect("sample");
+            // Two independent seeds on a 100-element population: collision
+            // probability of the full 5-pick tuple is astronomically low.
+            assert_ne!(a.values(), b.values());
+        }
+
+        #[test]
+        fn sample_n_at_or_above_len_returns_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let r = col.sample(10, 42).expect("sample");
+            assert_eq!(r.values(), col.values());
+        }
+
+        #[test]
+        fn first_valid_last_valid_skip_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert_eq!(col.first_valid(), Some(2));
+            assert_eq!(col.last_valid(), Some(3));
+        }
+
+        #[test]
+        fn first_valid_last_valid_all_missing_is_none() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+            assert_eq!(col.first_valid(), None);
+            assert_eq!(col.last_valid(), None);
         }
 
         #[test]

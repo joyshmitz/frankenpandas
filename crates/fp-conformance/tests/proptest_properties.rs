@@ -9761,17 +9761,13 @@ proptest! {
             "Excel default round-trip must preserve column names");
     }
 
-    /// Excel round-trip preserves DataFrame shape when the writer omits
-    /// the row index to match the reader's default recovery path.
+    /// Excel default round-trip preserves both index labels and Int64 values
+    /// without falling back to index=false writer options.
     #[test]
-    fn prop_excel_round_trip_preserves_shape_when_index_false(df in arb_int64_dataframe(8, 4)) {
-        let bytes = fp_io::write_excel_bytes_with_options(
-            &df,
-            &fp_io::ExcelWriteOptions {
-                index: false,
-                ..fp_io::ExcelWriteOptions::default()
-            },
-        );
+    fn prop_excel_default_round_trip_preserves_index_and_int64_values(
+        df in arb_int64_dataframe(8, 4)
+    ) {
+        let bytes = fp_io::write_excel_bytes(&df);
         prop_assert!(bytes.is_ok(), "Excel write must succeed");
         let bytes = bytes.unwrap();
 
@@ -9779,10 +9775,27 @@ proptest! {
         prop_assert!(parsed.is_ok(), "Excel parse must succeed: {:?}", parsed.err());
         let parsed = parsed.unwrap();
 
-        prop_assert_eq!(parsed.index().len(), df.index().len(),
-            "Excel round-trip must preserve row count");
-        prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
-            "Excel round-trip must preserve column count when index=false");
+        prop_assert_eq!(
+            parsed.index().labels(),
+            df.index().labels(),
+            "Excel default round-trip must preserve index labels"
+        );
+        prop_assert_eq!(
+            parsed.index().name(),
+            df.index().name(),
+            "Excel default round-trip must preserve index name"
+        );
+
+        for name in df.column_names() {
+            let orig_col = df.column(name).unwrap();
+            let parsed_col = parsed.column(name).unwrap();
+            prop_assert_eq!(
+                orig_col.values(),
+                parsed_col.values(),
+                "Excel default round-trip must preserve Int64 values for column {}",
+                name
+            );
+        }
     }
 
     /// Excel round-trip preserves Int64 values exactly.

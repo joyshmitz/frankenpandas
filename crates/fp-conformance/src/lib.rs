@@ -4656,6 +4656,31 @@ pub struct CiGateResult {
     pub errors: Vec<String>,
 }
 
+const LIVE_ORACLE_SKIP_MARKER: &str = "live pandas unavailable; skipping";
+
+/// Aggregate outcome for the dedicated live-oracle parity test slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveOracleReport {
+    pub expected_tests: usize,
+    pub total_tests: usize,
+    pub passed: usize,
+    pub ran: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub command_ok: bool,
+    pub exit_code: Option<i32>,
+}
+
+impl LiveOracleReport {
+    #[must_use]
+    pub fn is_green(&self, require_live_oracle: bool) -> bool {
+        self.command_ok
+            && self.failed == 0
+            && self.total_tests == self.expected_tests
+            && (!require_live_oracle || self.skipped == 0)
+    }
+}
+
 /// Result of a full CI gate pipeline run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiPipelineResult {
@@ -4749,6 +4774,141 @@ pub fn build_ci_forensics_report(result: &CiPipelineResult) -> CiForensicsReport
     }
 }
 
+fn live_oracle_report_path(config: &HarnessConfig) -> PathBuf {
+    config
+        .repo_root
+        .join("artifacts/ci/live_oracle_report.json")
+}
+
+fn configure_live_oracle_cargo_command<'a>(
+    config: &HarnessConfig,
+    command: &'a mut Command,
+) -> &'a mut Command {
+    command
+        .current_dir(&config.repo_root)
+        .arg("test")
+        .arg("-p")
+        .arg("fp-conformance")
+        .arg("--lib")
+        .arg("live_oracle_")
+        .env("CARGO_TERM_COLOR", "never")
+        .env("FP_PYTHON_BIN", &config.python_bin)
+        .env(
+            "FP_REQUIRE_LIVE_ORACLE",
+            if config.require_live_oracle { "1" } else { "0" },
+        );
+
+    if config.allow_system_pandas_fallback {
+        command.env("FP_ALLOW_SYSTEM_PANDAS_FALLBACK", "1");
+    } else {
+        command.env_remove("FP_ALLOW_SYSTEM_PANDAS_FALLBACK");
+    }
+
+    command
+}
+
+fn count_live_oracle_selected_tests(config: &HarnessConfig) -> Result<usize, HarnessError> {
+    let mut command = Command::new("cargo");
+    configure_live_oracle_cargo_command(config, &mut command)
+        .arg("--")
+        .arg("--list");
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(HarnessError::FixtureFormat(format!(
+            "live oracle test listing failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.trim_end().ends_with(": test"))
+        .count())
+}
+
+fn parse_test_result_count(line: &str, label: &str) -> Option<usize> {
+    let needle = format!(" {label};");
+    let prefix = line.split(&needle).next()?;
+    prefix.rsplit_once(' ')?.1.parse().ok()
+}
+
+fn parse_live_oracle_report_output(
+    output: &str,
+    expected_tests: usize,
+    command_ok: bool,
+    exit_code: Option<i32>,
+) -> LiveOracleReport {
+    let mut total_tests = 0usize;
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("running ")
+            && let Some(count) = rest
+                .strip_suffix(" tests")
+                .and_then(|s| s.parse::<usize>().ok())
+        {
+            total_tests += count;
+        }
+        if trimmed.starts_with("test result:") {
+            passed += parse_test_result_count(trimmed, "passed").unwrap_or(0);
+            failed += parse_test_result_count(trimmed, "failed").unwrap_or(0);
+        }
+    }
+
+    let total_tests = total_tests.max(passed.saturating_add(failed));
+    let skipped = output.matches(LIVE_ORACLE_SKIP_MARKER).count().min(passed);
+    let ran = total_tests.saturating_sub(skipped.saturating_add(failed));
+
+    LiveOracleReport {
+        expected_tests,
+        total_tests,
+        passed,
+        ran,
+        skipped,
+        failed,
+        command_ok,
+        exit_code,
+    }
+}
+
+fn run_live_oracle_report(config: &HarnessConfig) -> Result<LiveOracleReport, HarnessError> {
+    let expected_tests = count_live_oracle_selected_tests(config)?;
+    let mut command = Command::new("cargo");
+    configure_live_oracle_cargo_command(config, &mut command)
+        .arg("--")
+        .arg("--nocapture")
+        .arg("--test-threads=1");
+
+    let output = command.output()?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !combined.is_empty() && !output.stderr.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    Ok(parse_live_oracle_report_output(
+        &combined,
+        expected_tests,
+        output.status.success(),
+        output.status.code(),
+    ))
+}
+
+fn write_live_oracle_report(
+    config: &HarnessConfig,
+    report: &LiveOracleReport,
+) -> Result<PathBuf, HarnessError> {
+    let path = live_oracle_report_path(config);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(report)?)?;
+    Ok(path)
+}
+
 impl std::fmt::Display for CiPipelineResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.all_passed {
@@ -4812,25 +4972,87 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
     let (passed, summary, errors) = match gate {
         CiGate::G6Conformance => {
             let options = SuiteOptions::default();
-            match run_packet_suite_with_options(&config.harness_config, &options) {
-                Ok(report) => {
-                    if report.is_green() {
-                        (
-                            true,
-                            format!("All {} fixtures passed", report.fixture_count),
-                            vec![],
-                        )
-                    } else {
-                        let errs = build_g6_conformance_errors(&config.harness_config, &report);
-                        (
-                            false,
-                            format!("{}/{} fixtures failed", report.failed, report.fixture_count),
-                            errs,
-                        )
+            let (mut passed, mut summary, mut errors) =
+                match run_packet_suite_with_options(&config.harness_config, &options) {
+                    Ok(report) => {
+                        if report.is_green() {
+                            (
+                                true,
+                                format!("All {} fixtures passed", report.fixture_count),
+                                vec![],
+                            )
+                        } else {
+                            let errs = build_g6_conformance_errors(&config.harness_config, &report);
+                            (
+                                false,
+                                format!(
+                                    "{}/{} fixtures failed",
+                                    report.failed, report.fixture_count
+                                ),
+                                errs,
+                            )
+                        }
+                    }
+                    Err(e) => (false, format!("Harness error: {e}"), vec![e.to_string()]),
+                };
+
+            if !cfg!(test) {
+                match run_live_oracle_report(&config.harness_config) {
+                    Ok(live_report) => {
+                        match write_live_oracle_report(&config.harness_config, &live_report) {
+                            Ok(path) => {
+                                summary = format!(
+                                    "{summary}; live-oracle ran={} skipped={} failed={} observed={}/{} report={}",
+                                    live_report.ran,
+                                    live_report.skipped,
+                                    live_report.failed,
+                                    live_report.total_tests,
+                                    live_report.expected_tests,
+                                    path.display()
+                                );
+                            }
+                            Err(err) => {
+                                passed = false;
+                                errors.push(format!("live_oracle_report_write_failed={err}"));
+                            }
+                        }
+
+                        if !live_report.command_ok {
+                            passed = false;
+                            errors.push(format!(
+                                "live_oracle_command_exit={}",
+                                live_report
+                                    .exit_code
+                                    .map_or_else(|| "signal".to_owned(), |code| code.to_string())
+                            ));
+                        }
+                        if live_report.total_tests != live_report.expected_tests {
+                            passed = false;
+                            errors.push(format!(
+                                "live_oracle_total_tests={} expected={}",
+                                live_report.total_tests, live_report.expected_tests
+                            ));
+                        }
+                        if config.harness_config.require_live_oracle && live_report.skipped > 0 {
+                            passed = false;
+                            errors.push(format!(
+                                "live_oracle_skipped={} while FP_REQUIRE_LIVE_ORACLE=1",
+                                live_report.skipped
+                            ));
+                        }
+                        if live_report.failed > 0 {
+                            passed = false;
+                            errors.push(format!("live_oracle_failed={}", live_report.failed));
+                        }
+                    }
+                    Err(err) => {
+                        passed = false;
+                        errors.push(format!("live_oracle_report_error={err}"));
                     }
                 }
-                Err(e) => (false, format!("Harness error: {e}"), vec![e.to_string()]),
             }
+
+            (passed, summary, errors)
         }
         CiGate::G8E2e => {
             let e2e_config = E2eConfig::default_all_phases();
@@ -32104,6 +32326,71 @@ mod tests {
         assert!(
             nightly.contains("-max_total_time=60"),
             "expected nightly fuzz workflow to spend real time mutating"
+        );
+    }
+
+    #[test]
+    fn parse_live_oracle_report_counts_runs_skips_and_failures() {
+        let output = "\
+running 5 tests
+test a ... ok
+live pandas unavailable; skipping dataframe foo oracle test: missing pandas
+test b ... ok
+test c ... FAILED
+test d ... ok
+test e ... ok
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+
+        let report = super::parse_live_oracle_report_output(output, 5, false, Some(101));
+        assert_eq!(report.expected_tests, 5);
+        assert_eq!(report.total_tests, 5);
+        assert_eq!(report.passed, 4);
+        assert_eq!(report.ran, 3);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.failed, 1);
+        assert!(!report.command_ok);
+        assert_eq!(report.exit_code, Some(101));
+    }
+
+    #[test]
+    fn write_live_oracle_report_json_machine_readable_artifact() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.repo_root = tmp.path().to_path_buf();
+
+        let report = super::LiveOracleReport {
+            expected_tests: 89,
+            total_tests: 89,
+            passed: 89,
+            ran: 89,
+            skipped: 0,
+            failed: 0,
+            command_ok: true,
+            exit_code: Some(0),
+        };
+
+        let path = super::write_live_oracle_report(&cfg, &report).expect("write live report");
+        assert!(
+            path.ends_with("artifacts/ci/live_oracle_report.json"),
+            "unexpected live oracle report path: {}",
+            path.display()
+        );
+
+        let written: super::LiveOracleReport =
+            serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("json");
+        assert_eq!(written, report);
+        assert!(written.is_green(true));
+    }
+
+    #[test]
+    fn ci_workflow_uploads_live_oracle_report_artifact() {
+        let root = repo_root();
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+        assert!(
+            ci.contains("artifacts/ci/live_oracle_report.json"),
+            "expected CI artifact upload for live_oracle_report.json"
         );
     }
 

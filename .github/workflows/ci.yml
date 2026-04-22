@@ -76,7 +76,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-gate-forensics
-          path: artifacts/ci/gate_forensics.json
+          path: |
+            artifacts/ci/gate_forensics.json
+            artifacts/ci/live_oracle_report.json
           if-no-files-found: warn
 
       - name: Total-parity governance gate

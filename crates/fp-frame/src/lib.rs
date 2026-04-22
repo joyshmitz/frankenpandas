@@ -25899,6 +25899,49 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
+    /// Build a row MultiIndex whose levels are the group-by key columns in
+    /// order, one row per aggregated group. Returns `None` when there is only
+    /// a single group-by key (flat Index is already correct) or when the key
+    /// columns contain a Scalar variant the MultiIndex projection cannot hold.
+    ///
+    /// Slice 2/6 of br-frankenpandas-1zzp — retires the `"v1, v2"` flattening
+    /// that `group_key_label` still does for the flat-Index storage fallback
+    /// by also emitting a real MultiIndex alongside it.
+    fn group_keys_as_row_multiindex(
+        &self,
+        group_order: &[GroupKey<'_>],
+        groups: &GroupMap<'_>,
+    ) -> Result<Option<fp_index::MultiIndex>, FrameError> {
+        if self.by.len() <= 1 {
+            return Ok(None);
+        }
+        let mut level_arrays: Vec<Vec<IndexLabel>> = (0..self.by.len())
+            .map(|_| Vec::with_capacity(group_order.len()))
+            .collect();
+        for gkey in group_order {
+            let first_row = groups[gkey][0];
+            for (level_idx, col_name) in self.by.iter().enumerate() {
+                let value = &self.df.columns[col_name].values()[first_row];
+                let label = match value {
+                    Scalar::Int64(v) => IndexLabel::Int64(*v),
+                    Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+                    Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+                    Scalar::Bool(v) => IndexLabel::Utf8(if *v {
+                        "True".to_owned()
+                    } else {
+                        "False".to_owned()
+                    }),
+                    other => IndexLabel::Utf8(format!("{other:?}")),
+                };
+                level_arrays[level_idx].push(label);
+            }
+        }
+        let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+        Ok(Some(
+            fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names),
+        ))
+    }
+
     /// Helper to format the final aggregated DataFrame respecting `as_index`.
     fn format_output(
         &self,
@@ -25910,13 +25953,14 @@ impl DataFrameGroupBy<'_> {
     ) -> Result<DataFrame, FrameError> {
         let n_groups = group_order.len();
         if self.as_index {
-            Ok(DataFrame {
-                columns: result_cols,
-                column_order: col_order,
-                index: Index::new(labels),
-                column_multiindex: None,
-                row_multiindex: None,
-            })
+            let row_multiindex = self.group_keys_as_row_multiindex(group_order, groups)?;
+            DataFrame::new_with_axes(
+                Index::new(labels),
+                row_multiindex,
+                result_cols,
+                col_order,
+                None,
+            )
         } else {
             // as_index=False: group keys become regular columns, index is
             // a default integer range (pandas semantics).
@@ -26527,13 +26571,7 @@ impl DataFrameGroupBy<'_> {
             col_order.push(output_name.to_owned());
         }
 
-        Ok(DataFrame {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(labels),
-            column_multiindex: None,
-            row_multiindex: None,
-        })
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// Apply a named aggregation function to a group's values.
@@ -62180,6 +62218,172 @@ mod tests {
         assert!(result.column("avg_qty").is_some());
         assert!(result.column("revenue").is_none());
         assert!(result.column("qty").is_none());
+    }
+
+    #[test]
+    fn groupby_sum_multikey_attaches_row_multiindex() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.groupby(&["region", "product"]).unwrap().sum().unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("east, A".into()),
+                IndexLabel::Utf8("east, B".into()),
+                IndexLabel::Utf8("west, A".into()),
+            ]
+        );
+        let row_multiindex = result
+            .row_multiindex()
+            .expect("multi-key groupby should attach row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.names(),
+            &[Some("region".into()), Some("product".into())]
+        );
+        let level0 = row_multiindex.get_level_values(0).unwrap();
+        let level1 = row_multiindex.get_level_values(1).unwrap();
+        assert_eq!(
+            level0.labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("west".into()),
+            ]
+        );
+        assert_eq!(
+            level1.labels(),
+            &[
+                IndexLabel::Utf8("A".into()),
+                IndexLabel::Utf8("B".into()),
+                IndexLabel::Utf8("A".into()),
+            ]
+        );
+        assert!(matches!(
+            result.row_index(),
+            fp_index::MultiIndexOrIndex::Multi(ref multiindex) if multiindex == row_multiindex
+        ));
+        assert_eq!(
+            result.column("sales").unwrap().values(),
+            &[Scalar::Int64(15), Scalar::Int64(20), Scalar::Int64(30),]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_named_multikey_attaches_row_multiindex() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales", "qty"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "qty",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(4),
+                        Scalar::Int64(6),
+                        Scalar::Int64(8),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .groupby(&["region", "product"])
+            .unwrap()
+            .agg_named(&[("total_sales", "sales", "sum"), ("avg_qty", "qty", "mean")])
+            .unwrap();
+
+        let row_multiindex = result
+            .row_multiindex()
+            .expect("multi-key agg_named should attach row MultiIndex metadata");
+        let level0 = row_multiindex.get_level_values(0).unwrap();
+        let level1 = row_multiindex.get_level_values(1).unwrap();
+        assert_eq!(
+            level0.labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("west".into()),
+            ]
+        );
+        assert_eq!(
+            level1.labels(),
+            &[
+                IndexLabel::Utf8("A".into()),
+                IndexLabel::Utf8("B".into()),
+                IndexLabel::Utf8("A".into()),
+            ]
+        );
+        assert_eq!(
+            result.column("total_sales").unwrap().values(),
+            &[Scalar::Int64(15), Scalar::Int64(20), Scalar::Int64(30),]
+        );
+        assert_eq!(
+            result.column("avg_qty").unwrap().values(),
+            &[
+                Scalar::Float64(5.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ]
+        );
     }
 
     #[test]

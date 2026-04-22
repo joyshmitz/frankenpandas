@@ -109,8 +109,7 @@ impl Scalar {
                     diff / max_abs < 1e-14
                 }
             }
-            (Self::Null(NullKind::NaN), Self::Float64(v))
-            | (Self::Float64(v), Self::Null(NullKind::NaN)) => v.is_nan(),
+            (Self::Null(_), Self::Float64(v)) | (Self::Float64(v), Self::Null(_)) => v.is_nan(),
             // All Null kinds (Null / NaN / NaT) mark missingness; they are
             // semantically indistinguishable for oracle-parity checks even
             // though derived PartialEq would reject a cross-kind pair.
@@ -1118,6 +1117,13 @@ mod tests {
     fn semantic_eq_treats_nan_as_equal() {
         let left = Scalar::Float64(f64::NAN);
         let right = Scalar::Null(NullKind::NaN);
+        assert!(left.semantic_eq(&right));
+    }
+
+    #[test]
+    fn semantic_eq_treats_nan_as_missing_null() {
+        let left = Scalar::Float64(f64::NAN);
+        let right = Scalar::Null(NullKind::Null);
         assert!(left.semantic_eq(&right));
     }
 

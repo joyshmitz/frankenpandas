@@ -5466,6 +5466,83 @@ pub fn fuzz_ipc_stream_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
     }
 }
 
+fn fuzz_semantic_eq_scalar(dtype_tag: u8, value_tag: u8) -> Scalar {
+    let dtype = fuzz_dtype_from_byte(dtype_tag);
+    match value_tag % 8 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Null(NullKind::NaN),
+        2 => Scalar::Null(NullKind::NaT),
+        3 if dtype == DType::Float64 => Scalar::Float64(f64::NAN),
+        _ => fuzz_feather_scalar_for_dtype(dtype, &[value_tag, value_tag.rotate_left(1)]),
+    }
+}
+
+/// Structure-aware fuzz entrypoint for `Scalar::semantic_eq(...)` invariants.
+///
+/// Four bytes select `(dtype_a, dtype_b, value_a, value_b)`, which are
+/// projected into two `Scalar`s. Semantic equality must remain symmetric and
+/// reflexive, all `Null(_)` pairs must remain equivalent, and `Float64(NaN)`
+/// must stay bridged to missing null markers.
+pub fn fuzz_semantic_eq_bytes(input: &[u8]) -> Result<(), String> {
+    let [dtype_a, dtype_b, value_a, value_b, ..] = input else {
+        return Ok(());
+    };
+
+    let left = fuzz_semantic_eq_scalar(*dtype_a, *value_a);
+    let right = fuzz_semantic_eq_scalar(*dtype_b, *value_b);
+
+    let forward = left.semantic_eq(&right);
+    let reverse = right.semantic_eq(&left);
+    if forward != reverse {
+        return Err(format!(
+            "semantic_eq symmetry mismatch: left={left:?} right={right:?} forward={forward} reverse={reverse}"
+        ));
+    }
+
+    if !left.semantic_eq(&left) {
+        return Err(format!("semantic_eq lost reflexivity for left={left:?}"));
+    }
+    if !right.semantic_eq(&right) {
+        return Err(format!("semantic_eq lost reflexivity for right={right:?}"));
+    }
+
+    if matches!(left, Scalar::Null(_)) && matches!(right, Scalar::Null(_)) && !forward {
+        return Err(format!(
+            "semantic_eq no longer bridges null kinds: left={left:?} right={right:?}"
+        ));
+    }
+
+    let null_variants = [
+        Scalar::Null(NullKind::Null),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Null(NullKind::NaT),
+    ];
+    for lhs in &null_variants {
+        for rhs in &null_variants {
+            if !lhs.semantic_eq(rhs) || !rhs.semantic_eq(lhs) {
+                return Err(format!(
+                    "semantic_eq null bridge mismatch: left={lhs:?} right={rhs:?}"
+                ));
+            }
+        }
+    }
+
+    let nan = Scalar::Float64(f64::NAN);
+    for missing in [
+        Scalar::Null(NullKind::NaN),
+        Scalar::Null(NullKind::Null),
+        Scalar::Null(NullKind::NaT),
+    ] {
+        if !nan.semantic_eq(&missing) || !missing.semantic_eq(&nan) {
+            return Err(format!(
+                "semantic_eq NaN bridge mismatch: nan={nan:?} missing={missing:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Structure-aware fuzz entrypoint for the `fp-types` common-dtype lattice.
 ///
 /// Two input bytes are projected onto `DType` variants. Incompatible pairs are
@@ -20933,14 +21010,15 @@ mod tests {
         fuzz_feather_io_bytes, fuzz_fixture_parse_bytes, fuzz_format_cross_round_trip_bytes,
         fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes,
         fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes,
-        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
-        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
-        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_case_evidence_jsonl,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_failure_surface_jsonl,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        fuzz_semantic_eq_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
+        run_differential_by_id, run_differential_suite, run_e2e_suite,
+        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_failure_surface_jsonl, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -21421,6 +21499,16 @@ mod tests {
     #[test]
     fn fuzz_format_cross_round_trip_bytes_accepts_empty_input() {
         fuzz_format_cross_round_trip_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_semantic_eq_bytes_accepts_empty_input() {
+        fuzz_semantic_eq_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_semantic_eq_bytes_locks_nan_missing_bridge() {
+        fuzz_semantic_eq_bytes(&[3, 0, 3, 0]).expect("nan/missing bridge seed should hold");
     }
 
     #[test]

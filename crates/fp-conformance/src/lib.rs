@@ -329,12 +329,27 @@ pub enum FixtureOperation {
     DataFrameIdxmax,
     #[serde(rename = "dataframe_sem", alias = "dataframe_sem_default")]
     DataFrameSem,
+    #[serde(
+        rename = "dataframe_apply_sem_axis0",
+        alias = "data_frame_apply_sem_axis0"
+    )]
+    DataFrameApplySemAxis0,
     #[serde(rename = "dataframe_skew", alias = "dataframe_skew_default")]
     DataFrameSkew,
     #[serde(rename = "dataframe_kurtosis", alias = "dataframe_kurtosis_default")]
     DataFrameKurtosis,
     #[serde(rename = "dataframe_prod", alias = "dataframe_prod_default")]
     DataFrameProd,
+    #[serde(
+        rename = "dataframe_apply_prod_axis1",
+        alias = "data_frame_apply_prod_axis1"
+    )]
+    DataFrameApplyProdAxis1,
+    #[serde(
+        rename = "dataframe_apply_product_axis1",
+        alias = "data_frame_apply_product_axis1"
+    )]
+    DataFrameApplyProductAxis1,
     #[serde(rename = "dataframe_sum", alias = "dataframe_sum_default")]
     DataFrameSum,
     #[serde(rename = "dataframe_mean", alias = "dataframe_mean_default")]
@@ -355,6 +370,11 @@ pub enum FixtureOperation {
     DataFrameAll,
     #[serde(rename = "dataframe_nunique", alias = "dataframe_nunique_default")]
     DataFrameNunique,
+    #[serde(
+        rename = "dataframe_apply_nunique_axis0",
+        alias = "data_frame_apply_nunique_axis0"
+    )]
+    DataFrameApplyNuniqueAxis0,
     #[serde(rename = "dataframe_quantile", alias = "dataframe_quantile_default")]
     DataFrameQuantile,
     #[serde(
@@ -1110,9 +1130,12 @@ impl FixtureOperation {
             Self::DataFrameIdxmin => "dataframe_idxmin",
             Self::DataFrameIdxmax => "dataframe_idxmax",
             Self::DataFrameSem => "dataframe_sem",
+            Self::DataFrameApplySemAxis0 => "dataframe_apply_sem_axis0",
             Self::DataFrameSkew => "dataframe_skew",
             Self::DataFrameKurtosis => "dataframe_kurtosis",
             Self::DataFrameProd => "dataframe_prod",
+            Self::DataFrameApplyProdAxis1 => "dataframe_apply_prod_axis1",
+            Self::DataFrameApplyProductAxis1 => "dataframe_apply_product_axis1",
             Self::DataFrameSum => "dataframe_sum",
             Self::DataFrameMean => "dataframe_mean",
             Self::DataFrameStd => "dataframe_std",
@@ -1123,6 +1146,7 @@ impl FixtureOperation {
             Self::DataFrameAny => "dataframe_any",
             Self::DataFrameAll => "dataframe_all",
             Self::DataFrameNunique => "dataframe_nunique",
+            Self::DataFrameApplyNuniqueAxis0 => "dataframe_apply_nunique_axis0",
             Self::DataFrameQuantile => "dataframe_quantile",
             Self::DataFrameValueCounts => "dataframe_value_counts",
             Self::DataFrameMemoryUsage => "dataframe_memory_usage",
@@ -2065,9 +2089,12 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameApplySemAxis0
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
+        | FixtureOperation::DataFrameApplyProdAxis1
+        | FixtureOperation::DataFrameApplyProductAxis1
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
@@ -2078,6 +2105,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
+        | FixtureOperation::DataFrameApplyNuniqueAxis0
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage
@@ -7742,9 +7770,12 @@ fn run_fixture_operation(
         FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameApplySemAxis0
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
+        | FixtureOperation::DataFrameApplyProdAxis1
+        | FixtureOperation::DataFrameApplyProductAxis1
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
@@ -7755,6 +7786,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
+        | FixtureOperation::DataFrameApplyNuniqueAxis0
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage => {
@@ -7765,11 +7797,20 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameApplySemAxis0 => {
+                    frame.apply("sem", 0).map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameApplyProdAxis1 => {
+                    frame.apply("prod", 1).map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameApplyProductAxis1 => {
+                    frame.apply("product", 1).map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
@@ -7783,6 +7824,9 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => {
                     frame.nunique().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameApplyNuniqueAxis0 => {
+                    frame.apply("nunique", 0).map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameQuantile => {
                     frame.quantile(0.5).map_err(|err| err.to_string())
@@ -9929,9 +9973,12 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameApplySemAxis0
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
+        | FixtureOperation::DataFrameApplyProdAxis1
+        | FixtureOperation::DataFrameApplyProductAxis1
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
@@ -9942,6 +9989,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
+        | FixtureOperation::DataFrameApplyNuniqueAxis0
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage
@@ -10540,9 +10588,12 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameApplySemAxis0
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
+        | FixtureOperation::DataFrameApplyProdAxis1
+        | FixtureOperation::DataFrameApplyProductAxis1
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
@@ -10553,6 +10604,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
+        | FixtureOperation::DataFrameApplyNuniqueAxis0
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage
@@ -12272,6 +12324,29 @@ fn execute_dataframe_window_fixture_operation(
         _ => Err(format!(
             "unsupported dataframe window operation: {:?}",
             fixture.operation
+        )),
+    }
+}
+
+fn execute_dataframe_apply_alias_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+
+    match fixture.operation {
+        FixtureOperation::DataFrameApplySemAxis0 => {
+            frame.apply("sem", 0).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameApplyNuniqueAxis0 => {
+            frame.apply("nunique", 0).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameApplyProdAxis1 => {
+            frame.apply("prod", 1).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameApplyProductAxis1 => {
+            frame.apply("product", 1).map_err(|err| err.to_string())
+        }
+        other => Err(format!(
+            "unsupported dataframe apply alias operation: {other:?}"
         )),
     }
 }
@@ -16288,9 +16363,12 @@ fn execute_and_compare_differential(
         FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameApplySemAxis0
         | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameKurtosis
         | FixtureOperation::DataFrameProd
+        | FixtureOperation::DataFrameApplyProdAxis1
+        | FixtureOperation::DataFrameApplyProductAxis1
         | FixtureOperation::DataFrameSum
         | FixtureOperation::DataFrameMean
         | FixtureOperation::DataFrameStd
@@ -16301,6 +16379,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameAny
         | FixtureOperation::DataFrameAll
         | FixtureOperation::DataFrameNunique
+        | FixtureOperation::DataFrameApplyNuniqueAxis0
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage => {
@@ -16311,11 +16390,20 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameApplySemAxis0 => {
+                    frame.apply("sem", 0).map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameApplyProdAxis1 => {
+                    frame.apply("prod", 1).map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameApplyProductAxis1 => {
+                    frame.apply("product", 1).map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameStd => frame.std_agg().map_err(|err| err.to_string()),
@@ -16329,6 +16417,9 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameNunique => {
                     frame.nunique().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameApplyNuniqueAxis0 => {
+                    frame.apply("nunique", 0).map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameQuantile => {
                     frame.quantile(0.5).map_err(|err| err.to_string())
@@ -26217,6 +26308,174 @@ mod tests {
                 .is_some_and(|message| message.contains("boolean scalar")),
             "{actual:?}"
         );
+    }
+
+    fn assert_live_oracle_dataframe_apply_alias_series_parity(fixture: super::PacketFixture) {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe apply alias oracle test {}: {message}",
+                fixture.case_id
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_dataframe_apply_alias_fixture_operation(&fixture).expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_apply_sem_axis0_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-434",
+            "case_id": "dataframe_apply_sem_axis0_live",
+            "mode": "strict",
+            "operation": "dataframe_apply_sem_axis0",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "column_order": ["x", "y"],
+                "columns": {
+                    "x": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "y": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_apply_alias_series_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_apply_nunique_axis0_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-435",
+            "case_id": "dataframe_apply_nunique_axis0_live",
+            "mode": "strict",
+            "operation": "dataframe_apply_nunique_axis0",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_apply_alias_series_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_apply_prod_axis1_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-436",
+            "case_id": "dataframe_apply_prod_axis1_live",
+            "mode": "strict",
+            "operation": "dataframe_apply_prod_axis1",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "c": [
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 6.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_apply_alias_series_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_apply_product_axis1_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-437",
+            "case_id": "dataframe_apply_product_axis1_live",
+            "mode": "strict",
+            "operation": "dataframe_apply_product_axis1",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "c": [
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 6.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_apply_alias_series_parity(fixture);
     }
 
     #[test]

@@ -58391,6 +58391,130 @@ mod tests {
     }
 
     #[test]
+    fn groupby_rolling_min_max_count_int64_input_widens_to_float() {
+        // x5oy covers the Float64 baseline; 4hkt complements with Int64
+        // input to lock the dtype-coercion path on grouped rolling
+        // min/max/count. Pandas widens Int64 -> Float64 on rolling
+        // aggregations (matching Series.rolling() dtype semantics)
+        // because NaN must be representable alongside partial-window
+        // results. Verifies fp-frame follows the same rule.
+        let df = DataFrame::from_dict(
+            &["grp", "v"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(7),
+                        Scalar::Int64(4),
+                        Scalar::Int64(2),
+                        Scalar::Int64(8),
+                        Scalar::Int64(5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let mins = gb.rolling(2).min().unwrap();
+        let min_vals = mins.column("v").unwrap().values();
+        // Output dtype widens Int64 -> Float64 (pandas parity).
+        assert_eq!(mins.column("v").unwrap().dtype(), DType::Float64);
+        // group a rows 0,2,4 = [10, 4, 8]; window=2 mins: NaN, min(10,4)=4, min(4,8)=4
+        assert!(min_vals[0].is_missing());
+        assert!(min_vals[1].is_missing());
+        assert_eq!(min_vals[2], Scalar::Float64(4.0));
+        // group b rows 1,3,5 = [7, 2, 5]; window=2 mins: NaN, min(7,2)=2, min(2,5)=2
+        assert_eq!(min_vals[3], Scalar::Float64(2.0));
+        assert_eq!(min_vals[4], Scalar::Float64(4.0));
+        assert_eq!(min_vals[5], Scalar::Float64(2.0));
+
+        let maxs = gb.rolling(2).max().unwrap();
+        let max_vals = maxs.column("v").unwrap().values();
+        assert_eq!(maxs.column("v").unwrap().dtype(), DType::Float64);
+        assert!(max_vals[0].is_missing());
+        assert!(max_vals[1].is_missing());
+        assert_eq!(max_vals[2], Scalar::Float64(10.0));
+        assert_eq!(max_vals[3], Scalar::Float64(7.0));
+        assert_eq!(max_vals[4], Scalar::Float64(8.0));
+        assert_eq!(max_vals[5], Scalar::Float64(5.0));
+
+        let counts = gb.rolling(2).count().unwrap();
+        assert_eq!(counts.column("v").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn groupby_rolling_window_one_emits_per_row_identity() {
+        // Window=1 is degenerate: every row's window is the row itself.
+        // min == max == original value; count == 1 for non-null rows,
+        // NaN for null rows. Locks this invariant against future
+        // min_periods-default drift.
+        let df = DataFrame::from_dict(
+            &["grp", "v"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(7.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let mins = gb.rolling(1).min().unwrap();
+        let maxs = gb.rolling(1).max().unwrap();
+        let counts = gb.rolling(1).count().unwrap();
+
+        let min_vals = mins.column("v").unwrap().values();
+        let max_vals = maxs.column("v").unwrap().values();
+        let count_vals = counts.column("v").unwrap().values();
+
+        // min == max == original for non-null rows.
+        assert_eq!(min_vals[0], Scalar::Float64(3.0));
+        assert_eq!(max_vals[0], Scalar::Float64(3.0));
+        assert!(min_vals[1].is_missing());
+        assert!(max_vals[1].is_missing());
+        assert_eq!(min_vals[2], Scalar::Float64(7.0));
+        assert_eq!(max_vals[2], Scalar::Float64(7.0));
+        assert_eq!(min_vals[3], Scalar::Float64(9.0));
+        assert_eq!(max_vals[3], Scalar::Float64(9.0));
+
+        // count == 1 for non-null, missing for null.
+        assert_eq!(count_vals[0], Scalar::Float64(1.0));
+        assert!(count_vals[1].is_missing());
+        assert_eq!(count_vals[2], Scalar::Float64(1.0));
+        assert_eq!(count_vals[3], Scalar::Float64(1.0));
+    }
+
+    #[test]
     fn groupby_rolling_std_var_respect_group_boundaries_and_missing_windows() {
         let df = DataFrame::from_dict(
             &["grp", "val"],

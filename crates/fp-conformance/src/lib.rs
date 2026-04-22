@@ -61,9 +61,20 @@ pub struct HarnessConfig {
     pub strict_mode: bool,
     pub python_bin: String,
     pub allow_system_pandas_fallback: bool,
+    pub require_live_oracle: bool,
 }
 
 impl HarnessConfig {
+    #[must_use]
+    fn env_flag(name: &str) -> bool {
+        std::env::var(name).ok().is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    }
+
     #[must_use]
     pub fn default_paths() -> Self {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -78,12 +89,15 @@ impl HarnessConfig {
                 }
             })
             .unwrap_or_else(|| "python3".to_owned());
+        let allow_system_pandas_fallback = Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK");
+        let require_live_oracle = Self::env_flag("FP_REQUIRE_LIVE_ORACLE");
         Self {
             oracle_root: repo_root.join("legacy_pandas_code/pandas"),
             fixture_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures"),
             strict_mode: true,
             python_bin,
-            allow_system_pandas_fallback: false,
+            allow_system_pandas_fallback,
+            require_live_oracle,
             repo_root,
         }
     }
@@ -108,6 +122,11 @@ impl HarnessConfig {
     pub fn oracle_script_path(&self) -> PathBuf {
         self.repo_root
             .join("crates/fp-conformance/oracle/pandas_oracle.py")
+    }
+
+    #[must_use]
+    pub fn allows_live_oracle_fallback(&self) -> bool {
+        self.allow_system_pandas_fallback || self.require_live_oracle
     }
 }
 
@@ -2872,6 +2891,8 @@ pub enum HarnessError {
     FixtureFormat(String),
     #[error("oracle is unavailable: {0}")]
     OracleUnavailable(String),
+    #[error("live oracle is required but unavailable: {0}")]
+    LiveOracleRequired(String),
     #[error("oracle command failed: status={status}, stderr={stderr}")]
     OracleCommandFailed { status: i32, stderr: String },
     #[error("raptorq error: {0}")]
@@ -5038,6 +5059,7 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
         strict_mode: true,
         python_bin: "python3".to_owned(),
         allow_system_pandas_fallback: false,
+        require_live_oracle: false,
     };
     let policy = match fixture.mode {
         RuntimeMode::Strict => RuntimePolicy::strict(),
@@ -11282,20 +11304,32 @@ fn capture_live_oracle_expected(
     config: &HarnessConfig,
     fixture: &PacketFixture,
 ) -> Result<ResolvedExpected, HarnessError> {
-    let expects_error = fixture.expected_error_contains.is_some();
+    fn oracle_unavailable(config: &HarnessConfig, message: String) -> HarnessError {
+        if config.require_live_oracle {
+            HarnessError::LiveOracleRequired(message)
+        } else {
+            HarnessError::OracleUnavailable(message)
+        }
+    }
 
-    if !config.oracle_root.exists() && !config.allow_system_pandas_fallback {
-        return Err(HarnessError::OracleUnavailable(format!(
-            "legacy oracle root does not exist: {}",
-            config.oracle_root.display()
-        )));
+    let expects_error = fixture.expected_error_contains.is_some();
+    let allow_system_pandas_fallback = config.allows_live_oracle_fallback();
+
+    if !config.oracle_root.exists() && !allow_system_pandas_fallback {
+        return Err(oracle_unavailable(
+            config,
+            format!(
+                "legacy oracle root does not exist: {}",
+                config.oracle_root.display()
+            ),
+        ));
     }
     let script = config.oracle_script_path();
     if !script.exists() {
-        return Err(HarnessError::OracleUnavailable(format!(
-            "oracle script does not exist: {}",
-            script.display()
-        )));
+        return Err(oracle_unavailable(
+            config,
+            format!("oracle script does not exist: {}", script.display()),
+        ));
     }
 
     let payload = OracleRequest {
@@ -11428,11 +11462,7 @@ fn capture_live_oracle_expected(
         .arg("--legacy-root")
         .arg(&config.oracle_root)
         .arg("--strict-legacy")
-        .args(
-            config
-                .allow_system_pandas_fallback
-                .then_some("--allow-system-pandas-fallback"),
-        )
+        .args(allow_system_pandas_fallback.then_some("--allow-system-pandas-fallback"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -11453,7 +11483,7 @@ fn capture_live_oracle_expected(
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
-            return Err(HarnessError::OracleUnavailable(error));
+            return Err(oracle_unavailable(config, error));
         }
 
         let code = output.status.code().unwrap_or(-1);
@@ -11470,7 +11500,7 @@ fn capture_live_oracle_expected(
         if expects_error {
             return Ok(ResolvedExpected::ErrorAny);
         }
-        return Err(HarnessError::OracleUnavailable(error));
+        return Err(oracle_unavailable(config, error));
     }
 
     if expects_error {
@@ -31328,6 +31358,7 @@ mod tests {
             strict_mode: true,
             python_bin: "python3".to_owned(),
             allow_system_pandas_fallback: false,
+            require_live_oracle: false,
         };
         let report = PacketParityReport {
             suite: format!("phase2c_packets:{packet_id}"),
@@ -31382,6 +31413,43 @@ mod tests {
         assert!(
             written.gate_result_path.exists(),
             "missing gate result artifact"
+        );
+    }
+
+    #[test]
+    fn live_oracle_requirement_escalates_missing_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = HarnessConfig {
+            repo_root: dir.path().to_path_buf(),
+            oracle_root: dir.path().join("legacy_pandas_code/pandas"),
+            fixture_root: dir.path().join("fixtures"),
+            strict_mode: true,
+            python_bin: "python3".to_owned(),
+            allow_system_pandas_fallback: false,
+            require_live_oracle: true,
+        };
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-REQ",
+            "case_id": "live_oracle_required_missing_script",
+            "mode": "strict",
+            "operation": "series_constructor",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "nums",
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "int64", "value": 1 }]
+            }
+        }))
+        .expect("fixture");
+
+        let result = super::capture_live_oracle_expected(&config, &fixture);
+        assert!(
+            matches!(
+                result,
+                Err(super::HarnessError::LiveOracleRequired(ref message))
+                    if message.contains("oracle script does not exist")
+            ),
+            "expected required live oracle failure, got {result:?}"
         );
     }
 

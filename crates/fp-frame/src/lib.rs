@@ -58627,6 +58627,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn groupby_resample_first_last_skip_missing_within_buckets() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(8.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(7.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-20".into(),
+                "2024-02-01".into(),
+                "2024-02-25".into(),
+                "2024-01-05".into(),
+                "2024-01-25".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+
+        let first_result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let last_result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        let expected_index = &[
+            IndexLabel::Utf8("2024-01".to_string()),
+            IndexLabel::Utf8("2024-02".to_string()),
+            IndexLabel::Utf8("2024-01".to_string()),
+            IndexLabel::Utf8("2024-02".to_string()),
+        ];
+        let expected_groups = &[
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("b".to_string()),
+            Scalar::Utf8("b".to_string()),
+        ];
+
+        assert_eq!(first_result.column_names(), vec!["grp", "val"]);
+        assert_eq!(first_result.index().labels(), expected_index);
+        assert_eq!(
+            first_result.column("grp").unwrap().values(),
+            expected_groups
+        );
+        assert_eq!(
+            first_result.column("val").unwrap().values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(7.0),
+            ]
+        );
+
+        assert_eq!(last_result.column_names(), vec!["grp", "val"]);
+        assert_eq!(last_result.index().labels(), expected_index);
+        assert_eq!(last_result.column("grp").unwrap().values(), expected_groups);
+        assert_eq!(
+            last_result.column("val").unwrap().values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(7.0),
+            ]
+        );
+    }
+
     // ── DataFrame.astype (all columns) ──────────────────────────────
 
     #[test]

@@ -87,8 +87,12 @@ def setup_pandas(args: argparse.Namespace):
 def label_from_json(value: dict[str, Any]) -> Any:
     kind = value.get("kind")
     raw = value.get("value")
+    if kind == "bool":
+        return bool(raw)
     if kind == "int64":
         return int(raw)
+    if kind == "float64":
+        return float(raw)
     if kind == "utf8":
         return str(raw)
     raise OracleError(f"unsupported index label kind: {kind!r}")
@@ -134,10 +138,43 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
 
 def label_to_json(value: Any) -> dict[str, Any]:
     if isinstance(value, bool):
-        return {"kind": "utf8", "value": str(value)}
+        return {"kind": "bool", "value": value}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     return {"kind": "utf8", "value": str(value)}
+
+
+def tuple_label_to_flat_string(values: tuple[Any, ...]) -> str:
+    return "|".join(str(value) for value in values)
+
+
+def multiindex_from_json(pd, raw: dict[str, Any]):
+    tuples_raw = raw.get("tuples")
+    if not isinstance(tuples_raw, list):
+        raise OracleError("row_multiindex.tuples must be a list")
+
+    tuples: list[tuple[Any, ...]] = []
+    for position, tuple_raw in enumerate(tuples_raw):
+        if not isinstance(tuple_raw, list):
+            raise OracleError(
+                f"row_multiindex.tuples[{position}] must be a list of labels"
+            )
+        tuples.append(tuple(label_from_json(item) for item in tuple_raw))
+
+    names_raw = raw.get("names", [])
+    if not isinstance(names_raw, list):
+        raise OracleError("row_multiindex.names must be a list when provided")
+    names = [None if name is None else str(name) for name in names_raw]
+    return pd.MultiIndex.from_tuples(tuples, names=names or None)
+
+
+def multiindex_to_json(index) -> dict[str, Any]:
+    return {
+        "tuples": [
+            [label_to_json(value) for value in values] for values in index.tolist()
+        ],
+        "names": [None if name is None else str(name) for name in index.names],
+    }
 
 
 def scalar_is_missing(value: Any) -> bool:
@@ -1785,6 +1822,7 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
     columns_raw = payload.get("columns")
     column_order_raw = payload.get("column_order")
     categorical_columns_raw = payload.get("categorical_columns")
+    row_multiindex_raw = payload.get("row_multiindex")
     if not isinstance(index_raw, list):
         raise OracleError("frame payload requires index list")
     if not isinstance(columns_raw, dict):
@@ -1828,6 +1866,11 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
 
     frame = pd.DataFrame(columns, index=index)
     frame = frame.reindex(columns=column_order)
+
+    if row_multiindex_raw is not None:
+        if not isinstance(row_multiindex_raw, dict):
+            raise OracleError("frame payload row_multiindex must be an object")
+        frame.index = multiindex_from_json(pd, row_multiindex_raw)
 
     if categorical_columns_raw is not None:
         if not isinstance(categorical_columns_raw, dict):
@@ -1873,11 +1916,18 @@ def dataframe_to_json(frame) -> dict[str, Any]:
         columns[key] = values
         column_order.append(key)
 
-    return {
+    response = {
         "index": [label_to_json(v) for v in frame.index.tolist()],
         "columns": columns,
         "column_order": column_order,
     }
+    if hasattr(frame.index, "nlevels") and getattr(frame.index, "nlevels", 1) > 1:
+        response["index"] = [
+            label_to_json(tuple_label_to_flat_string(values))
+            for values in frame.index.tolist()
+        ]
+        response["row_multiindex"] = multiindex_to_json(frame.index)
+    return response
 
 
 def require_expr_payload(payload: dict[str, Any], op_name: str) -> str:
@@ -2410,6 +2460,14 @@ def op_dataframe_memory_usage(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_identity(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_identity requires frame payload")
+    frame = dataframe_from_json(pd, frame_payload)
+    return {"expected_frame": dataframe_to_json(frame)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -2670,9 +2728,15 @@ def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     labels = [label_from_json(item) for item in loc_labels]
 
     try:
-        out = frame.loc[labels]
+        if hasattr(frame.index, "nlevels") and getattr(frame.index, "nlevels", 1) > 1:
+            out = frame.loc[tuple(labels)]
+        else:
+            out = frame.loc[labels]
     except KeyError as exc:
         raise OracleError(f"dataframe_loc label lookup failed: {exc}") from exc
+
+    if not hasattr(out, "columns"):
+        raise OracleError("dataframe_loc currently requires DataFrame-shaped selections")
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -2680,15 +2744,21 @@ def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_dataframe_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     xs_key = payload.get("xs_key")
+    xs_level = payload.get("xs_level")
     if frame_payload is None:
         raise OracleError("dataframe_xs requires frame payload")
     if xs_key is None:
         raise OracleError("dataframe_xs requires xs_key payload")
+    if xs_level is not None and (isinstance(xs_level, bool) or not isinstance(xs_level, int)):
+        raise OracleError("dataframe_xs xs_level must be an integer when provided")
 
     frame = dataframe_from_json(pd, frame_payload)
     key = label_from_json(xs_key)
     try:
-        out = frame.xs(key)
+        if xs_level is None:
+            out = frame.xs(key)
+        else:
+            out = frame.xs(key, level=int(xs_level))
     except Exception as exc:
         raise OracleError(f"dataframe_xs failed: {exc}") from exc
 
@@ -2890,6 +2960,53 @@ def op_dataframe_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.groupby(columns, observed=observed).sum()
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_sum failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_agg_multi(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    agg_multi = payload.get("groupby_agg_multi")
+    observed = payload.get("groupby_observed", True)
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_agg_multi requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError(
+            "dataframe_groupby_agg_multi requires non-empty groupby_columns list"
+        )
+    if not isinstance(agg_multi, dict) or not agg_multi:
+        raise OracleError(
+            "dataframe_groupby_agg_multi requires non-empty groupby_agg_multi object"
+        )
+    if not isinstance(observed, bool):
+        raise OracleError("dataframe_groupby_agg_multi groupby_observed must be a boolean")
+
+    columns = [str(entry).strip() for entry in groupby_columns]
+    if any(not entry for entry in columns):
+        raise OracleError(
+            "dataframe_groupby_agg_multi groupby_columns entries must be non-empty strings"
+        )
+
+    func_map: dict[str, list[str]] = {}
+    for raw_name, raw_funcs in agg_multi.items():
+        name = str(raw_name)
+        if not isinstance(raw_funcs, list) or not raw_funcs:
+            raise OracleError(
+                f"dataframe_groupby_agg_multi groupby_agg_multi[{name!r}] must be a non-empty list"
+            )
+        funcs = [str(func).strip() for func in raw_funcs]
+        if any(not func for func in funcs):
+            raise OracleError(
+                f"dataframe_groupby_agg_multi groupby_agg_multi[{name!r}] contains empty aggfuncs"
+            )
+        func_map[name] = funcs
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns, observed=observed).agg(func_map)
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_agg_multi failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -4598,6 +4715,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_extract_df(pd, payload)
     if op == "series_extractall":
         return op_series_extractall(pd, payload)
+    if op in {"dataframe_identity", "data_frame_identity"}:
+        return op_dataframe_identity(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
     if op in {"dataframe_xs", "data_frame_xs"}:
@@ -4616,6 +4735,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_all(pd, payload)
     if op in {"dataframe_groupby_sum", "data_frame_groupby_sum"}:
         return op_dataframe_groupby_sum(pd, payload)
+    if op in {"dataframe_groupby_agg_multi", "data_frame_groupby_agg_multi"}:
+        return op_dataframe_groupby_agg_multi(pd, payload)
     if op in {"dataframe_groupby_get_group", "data_frame_groupby_get_group"}:
         return op_dataframe_groupby_get_group(pd, payload)
     if op in {"dataframe_groupby_ffill", "data_frame_groupby_ffill"}:

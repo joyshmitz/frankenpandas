@@ -757,6 +757,8 @@ pub enum FixtureOperation {
     SeriesDtToPydatetime,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
+    #[serde(rename = "dataframe_identity", alias = "data_frame_identity")]
+    DataFrameIdentity,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
@@ -1336,6 +1338,7 @@ impl FixtureOperation {
             Self::SeriesDtToTimestamp => "series_dt_to_timestamp",
             Self::SeriesDtToPydatetime => "series_dt_to_pydatetime",
             Self::DataFrameLoc => "dataframe_loc",
+            Self::DataFrameIdentity => "dataframe_identity",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
             Self::DataFrameGroupBySum => "dataframe_groupby_sum",
@@ -1512,6 +1515,8 @@ pub struct FixtureDataFrame {
     pub column_order: Option<Vec<String>>,
     #[serde(default)]
     pub categorical_columns: Option<BTreeMap<String, FixtureCategoricalColumn>>,
+    #[serde(default)]
+    pub row_multiindex: Option<FixtureMultiIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1522,11 +1527,20 @@ pub struct FixtureCategoricalColumn {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureMultiIndex {
+    pub tuples: Vec<Vec<IndexLabel>>,
+    #[serde(default)]
+    pub names: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureExpectedDataFrame {
     pub index: Vec<IndexLabel>,
     pub columns: BTreeMap<String, Vec<Scalar>>,
     #[serde(default)]
     pub column_order: Option<Vec<String>>,
+    #[serde(default)]
+    pub row_multiindex: Option<FixtureMultiIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1798,6 +1812,8 @@ pub struct PacketFixture {
     pub group_name: Option<String>,
     #[serde(default)]
     pub xs_key: Option<IndexLabel>,
+    #[serde(default)]
+    pub xs_level: Option<usize>,
     #[serde(default)]
     pub cut_bins: Option<usize>,
     #[serde(default)]
@@ -2348,6 +2364,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesUnstack
         | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameLoc
+        | FixtureOperation::DataFrameIdentity
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameGroupBySum
@@ -3105,6 +3122,8 @@ struct OracleRequest {
     group_name: Option<String>,
     #[serde(default)]
     xs_key: Option<IndexLabel>,
+    #[serde(default)]
+    xs_level: Option<usize>,
     #[serde(default)]
     cut_bins: Option<usize>,
     #[serde(default)]
@@ -9563,9 +9582,15 @@ fn run_fixture_operation(
             let frame = require_frame(fixture)?;
             let labels = require_loc_labels(fixture)?;
             let frame = build_dataframe(frame)?;
-            let actual = frame
-                .loc_with_columns(labels, fixture.column_order.as_deref())
-                .map_err(|err| err.to_string());
+            let actual = if frame.row_multiindex().is_some() {
+                frame
+                    .loc_tuple_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .loc_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            };
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -9587,6 +9612,24 @@ fn run_fixture_operation(
                 _ => {
                     Err("expected_frame or expected_error is required for dataframe_loc".to_owned())
                 }
+            }
+        }
+        FixtureOperation::DataFrameIdentity => {
+            let frame = build_dataframe(require_frame(fixture)?)?;
+            match expected {
+                ResolvedExpected::Frame(frame_expected) => {
+                    compare_dataframe_expected(&frame, &frame_expected)
+                }
+                ResolvedExpected::ErrorContains(substr) => Err(format!(
+                    "expected dataframe_identity error containing '{substr}', but operation succeeded"
+                )),
+                ResolvedExpected::ErrorAny => {
+                    Err("expected dataframe_identity to fail but operation succeeded".to_owned())
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_identity"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameIloc => {
@@ -11068,6 +11111,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                 ))
             }),
         FixtureOperation::DataFrameLoc
+        | FixtureOperation::DataFrameIdentity
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
         | FixtureOperation::SeriesUnstack
@@ -11343,6 +11387,7 @@ fn capture_live_oracle_expected(
         repeat_counts: fixture.repeat_counts.clone(),
         group_name: fixture.group_name.clone(),
         xs_key: fixture.xs_key.clone(),
+        xs_level: fixture.xs_level,
         cut_bins: fixture.cut_bins,
         qcut_quantiles: fixture.qcut_quantiles,
         take_axis: fixture.take_axis,
@@ -11695,6 +11740,7 @@ fn capture_live_oracle_expected(
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
         FixtureOperation::DataFrameLoc
+        | FixtureOperation::DataFrameIdentity
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
         | FixtureOperation::SeriesUnstack
@@ -14068,6 +14114,22 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
         }
+        FixtureOperation::DataFrameLoc => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let labels = require_loc_labels(fixture)?;
+            if frame.row_multiindex().is_some() {
+                frame
+                    .loc_tuple_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .loc_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::DataFrameIdentity => build_dataframe(require_frame(fixture)?)
+            .map_err(|err| format!("frame build failed: {err}")),
         FixtureOperation::DataFrameGroupBySum => {
             execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_sum")
         }
@@ -14080,9 +14142,15 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFrameXs => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
-            frame
-                .xs(require_xs_key(fixture, "dataframe_xs")?)
-                .map_err(|err| err.to_string())
+            if let Some(level) = fixture.xs_level {
+                frame
+                    .xs_level(require_xs_key(fixture, "dataframe_xs")?, level)
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .xs(require_xs_key(fixture, "dataframe_xs")?)
+                    .map_err(|err| err.to_string())
+            }
         }
         FixtureOperation::DataFrameGroupByIdxMin => {
             execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_idxmin")
@@ -15378,17 +15446,58 @@ fn build_fixture_categorical_series(
     .map_err(|err| err.to_string())
 }
 
-fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
-    let column_order = resolve_frame_column_order(frame)?;
-    if let Some(categorical_columns) = frame.categorical_columns.as_ref() {
-        let row_index = frame.index.clone();
+fn build_fixture_multiindex(spec: &FixtureMultiIndex) -> Result<fp_index::MultiIndex, String> {
+    let mut multiindex =
+        fp_index::MultiIndex::from_tuples(spec.tuples.clone()).map_err(|err| err.to_string())?;
+    if !spec.names.is_empty() {
+        multiindex = multiindex.set_names(spec.names.clone());
+    }
+    Ok(multiindex)
+}
+
+fn multiindex_to_fixture(multiindex: &fp_index::MultiIndex) -> Result<FixtureMultiIndex, String> {
+    let tuples = (0..multiindex.len())
+        .map(|position| {
+            multiindex
+                .get_tuple(position)
+                .ok_or_else(|| format!("row MultiIndex position {position} out of bounds"))
+                .map(|tuple| tuple.into_iter().cloned().collect::<Vec<_>>())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FixtureMultiIndex {
+        tuples,
+        names: multiindex.names().to_vec(),
+    })
+}
+
+fn attach_fixture_row_multiindex(
+    frame: DataFrame,
+    spec: Option<&FixtureMultiIndex>,
+) -> Result<DataFrame, String> {
+    let Some(spec) = spec else {
+        return Ok(frame);
+    };
+
+    let row_multiindex = build_fixture_multiindex(spec)?;
+    DataFrame::new_with_row_multiindex(
+        frame.index().clone(),
+        row_multiindex,
+        frame.columns().clone(),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn build_dataframe(frame_spec: &FixtureDataFrame) -> Result<DataFrame, String> {
+    let column_order = resolve_frame_column_order(frame_spec)?;
+    if let Some(categorical_columns) = frame_spec.categorical_columns.as_ref() {
+        let row_index = frame_spec.index.clone();
         let default_index = (0..row_index.len() as i64)
             .map(IndexLabel::from)
             .collect::<Vec<_>>();
         let mut series_list = Vec::with_capacity(column_order.len());
 
         for name in &column_order {
-            let values = frame
+            let values = frame_spec
                 .columns
                 .get(name)
                 .ok_or_else(|| format!("frame is missing column '{name}'"))?;
@@ -15413,14 +15522,15 @@ fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
                 Ok((name.as_str(), values))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        return DataFrame::from_dict_with_index(rebuilt_columns, row_index)
-            .map_err(|err| err.to_string());
+        let frame = DataFrame::from_dict_with_index(rebuilt_columns, row_index)
+            .map_err(|err| err.to_string())?;
+        return attach_fixture_row_multiindex(frame, frame_spec.row_multiindex.as_ref());
     }
 
     let columns = column_order
         .iter()
         .map(|name| {
-            frame
+            frame_spec
                 .columns
                 .get(name)
                 .cloned()
@@ -15429,7 +15539,9 @@ fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    DataFrame::from_dict_with_index(columns, frame.index.clone()).map_err(|err| err.to_string())
+    let frame = DataFrame::from_dict_with_index(columns, frame_spec.index.clone())
+        .map_err(|err| err.to_string())?;
+    attach_fixture_row_multiindex(frame, frame_spec.row_multiindex.as_ref())
 }
 
 fn compare_series_expected(
@@ -15500,6 +15612,17 @@ fn compare_dataframe_expected(
                 "dataframe column set mismatch: actual={actual_names:?}, expected={expected_names:?}"
             ));
         }
+    }
+
+    let actual_row_multiindex = actual
+        .row_multiindex()
+        .map(multiindex_to_fixture)
+        .transpose()?;
+    if actual_row_multiindex != expected.row_multiindex {
+        return Err(format!(
+            "dataframe row_multiindex mismatch: actual={actual_row_multiindex:?}, expected={:?}",
+            expected.row_multiindex
+        ));
     }
 
     for (name, expected_values) in &expected.columns {
@@ -18475,9 +18598,15 @@ fn execute_and_compare_differential(
             let frame = require_frame(fixture)?;
             let labels = require_loc_labels(fixture)?;
             let frame = build_dataframe(frame)?;
-            let actual = frame
-                .loc_with_columns(labels, fixture.column_order.as_deref())
-                .map_err(|err| err.to_string());
+            let actual = if frame.row_multiindex().is_some() {
+                frame
+                    .loc_tuple_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .loc_with_columns(labels, fixture.column_order.as_deref())
+                    .map_err(|err| err.to_string())
+            };
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -18507,6 +18636,41 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_loc".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameIdentity => {
+            let actual = build_dataframe(require_frame(fixture)?);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_identity.error",
+                        format!(
+                            "expected dataframe_identity error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_identity.error",
+                        "expected dataframe_identity to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_identity.error",
+                        "expected dataframe_identity to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_identity".to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameIloc => {
@@ -19763,6 +19927,32 @@ fn diff_dataframe(actual: &DataFrame, expected: &FixtureExpectedDataFrame) -> Ve
                 expected.index
             ),
         ));
+    }
+
+    let actual_row_multiindex = actual
+        .row_multiindex()
+        .map(multiindex_to_fixture)
+        .transpose();
+    match actual_row_multiindex {
+        Ok(actual_row_multiindex) => {
+            if actual_row_multiindex != expected.row_multiindex {
+                drifts.push(make_drift_record(
+                    ComparisonCategory::Index,
+                    DriftLevel::Critical,
+                    "dataframe.row_multiindex",
+                    format!(
+                        "row_multiindex mismatch: actual={actual_row_multiindex:?}, expected={:?}",
+                        expected.row_multiindex
+                    ),
+                ));
+            }
+        }
+        Err(message) => drifts.push(make_drift_record(
+            ComparisonCategory::Index,
+            DriftLevel::Critical,
+            "dataframe.row_multiindex",
+            format!("failed to serialize actual row_multiindex: {message}"),
+        )),
     }
 
     let actual_names = actual.columns().keys().cloned().collect::<Vec<_>>();
@@ -27485,6 +27675,347 @@ mod tests {
 
         let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual");
         super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    fn row_multiindex_three_level_frame_json() -> serde_json::Value {
+        serde_json::json!({
+            "index": [
+                { "kind": "utf8", "value": "north|apple|2023" },
+                { "kind": "utf8", "value": "north|apple|2024" },
+                { "kind": "utf8", "value": "north|pear|2023" },
+                { "kind": "utf8", "value": "south|apple|2023" }
+            ],
+            "row_multiindex": {
+                "tuples": [
+                    [
+                        { "kind": "utf8", "value": "north" },
+                        { "kind": "utf8", "value": "apple" },
+                        { "kind": "int64", "value": 2023 }
+                    ],
+                    [
+                        { "kind": "utf8", "value": "north" },
+                        { "kind": "utf8", "value": "apple" },
+                        { "kind": "int64", "value": 2024 }
+                    ],
+                    [
+                        { "kind": "utf8", "value": "north" },
+                        { "kind": "utf8", "value": "pear" },
+                        { "kind": "int64", "value": 2023 }
+                    ],
+                    [
+                        { "kind": "utf8", "value": "south" },
+                        { "kind": "utf8", "value": "apple" },
+                        { "kind": "int64", "value": 2023 }
+                    ]
+                ],
+                "names": ["region", "product", "year"]
+            },
+            "column_order": ["sales", "cost"],
+            "columns": {
+                "sales": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 15 },
+                    { "kind": "int64", "value": 30 }
+                ],
+                "cost": [
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 7 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 12 }
+                ]
+            }
+        })
+    }
+
+    fn groupby_multikey_source_frame_json() -> serde_json::Value {
+        serde_json::json!({
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["region", "product", "sales", "qty"],
+            "columns": {
+                "region": [
+                    { "kind": "utf8", "value": "north" },
+                    { "kind": "utf8", "value": "north" },
+                    { "kind": "utf8", "value": "north" },
+                    { "kind": "utf8", "value": "south" },
+                    { "kind": "utf8", "value": "south" }
+                ],
+                "product": [
+                    { "kind": "utf8", "value": "apple" },
+                    { "kind": "utf8", "value": "apple" },
+                    { "kind": "utf8", "value": "pear" },
+                    { "kind": "utf8", "value": "apple" },
+                    { "kind": "utf8", "value": "apple" }
+                ],
+                "sales": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 15 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "qty": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 6 }
+                ]
+            }
+        })
+    }
+
+    fn live_oracle_expected_frame_or_skip(
+        fixture: &super::PacketFixture,
+        context: &str,
+    ) -> Option<super::FixtureExpectedDataFrame> {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping {context}: {message}");
+            return None;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload for {context}, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return None;
+        };
+        Some(expected)
+    }
+
+    fn assert_live_oracle_dataframe_frame_parity(
+        fixture: super::PacketFixture,
+        actual: fp_frame::DataFrame,
+        context: &str,
+    ) {
+        let Some(expected) = live_oracle_expected_frame_or_skip(&fixture, context) else {
+            return;
+        };
+        let comparison = super::compare_dataframe_expected(&actual, &expected);
+        assert!(
+            comparison.is_ok(),
+            "{context}: pandas parity failed: {}",
+            comparison.err().unwrap_or_default()
+        );
+    }
+
+    fn assert_live_oracle_dataframe_fixture_parity(fixture: super::PacketFixture, context: &str) {
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        assert_live_oracle_dataframe_frame_parity(fixture, actual, context);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_identity_row_multiindex_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-453",
+            "case_id": "dataframe_identity_row_multiindex_live",
+            "mode": "strict",
+            "operation": "dataframe_identity",
+            "oracle_source": "live_legacy_pandas",
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe identity row multiindex oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_sum_multikey_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-454",
+            "case_id": "dataframe_groupby_sum_multikey_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_sum",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["region", "product"],
+            "frame": groupby_multikey_source_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe groupby multikey sum oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_agg_multi_multikey_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-455",
+            "case_id": "dataframe_groupby_agg_multi_multikey_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_agg_multi",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["region", "product"],
+            "groupby_agg_multi": {
+                "sales": ["sum", "mean", "max"],
+                "qty": ["count", "min"]
+            },
+            "frame": groupby_multikey_source_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe groupby multikey agg_multi oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_loc_prefix_row_multiindex_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-456",
+            "case_id": "dataframe_loc_prefix_row_multiindex_live",
+            "mode": "strict",
+            "operation": "dataframe_loc",
+            "oracle_source": "live_legacy_pandas",
+            "loc_labels": [
+                { "kind": "utf8", "value": "north" }
+            ],
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe loc prefix row multiindex oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_xs_level_row_multiindex_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-457",
+            "case_id": "dataframe_xs_level_row_multiindex_live",
+            "mode": "strict",
+            "operation": "dataframe_xs",
+            "oracle_source": "live_legacy_pandas",
+            "xs_key": { "kind": "utf8", "value": "north" },
+            "xs_level": 0,
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe xs level row multiindex oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_reset_index_row_multiindex_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-458",
+            "case_id": "dataframe_reset_index_row_multiindex_live",
+            "mode": "strict",
+            "operation": "dataframe_reset_index",
+            "oracle_source": "live_legacy_pandas",
+            "reset_index_drop": false,
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_fixture_parity(
+            fixture,
+            "dataframe reset_index row multiindex oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_csv_row_multiindex_roundtrip_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-459",
+            "case_id": "dataframe_csv_row_multiindex_roundtrip_live",
+            "mode": "strict",
+            "operation": "dataframe_identity",
+            "oracle_source": "live_legacy_pandas",
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        let source = super::execute_dataframe_fixture_operation(&fixture).expect("source frame");
+        let csv = fp_io::write_csv_string_with_options(
+            &source,
+            &fp_io::CsvWriteOptions {
+                include_index: true,
+                ..fp_io::CsvWriteOptions::default()
+            },
+        )
+        .expect("write csv");
+        let actual = fp_io::read_csv_with_index_cols(
+            &csv,
+            &super::CsvReadOptions::default(),
+            &["region", "product", "year"],
+        )
+        .expect("read csv");
+
+        assert_live_oracle_dataframe_frame_parity(
+            fixture,
+            actual,
+            "dataframe csv row multiindex roundtrip oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_json_split_row_multiindex_roundtrip_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-460",
+            "case_id": "dataframe_json_split_row_multiindex_roundtrip_live",
+            "mode": "strict",
+            "operation": "dataframe_identity",
+            "oracle_source": "live_legacy_pandas",
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        let source = super::execute_dataframe_fixture_operation(&fixture).expect("source frame");
+        let encoded =
+            super::write_json_string(&source, super::JsonOrient::Split).expect("write json");
+        let actual = super::read_json_str(&encoded, super::JsonOrient::Split).expect("read json");
+
+        assert_live_oracle_dataframe_frame_parity(
+            fixture,
+            actual,
+            "dataframe json split row multiindex roundtrip oracle test",
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_parquet_row_multiindex_roundtrip_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-461",
+            "case_id": "dataframe_parquet_row_multiindex_roundtrip_live",
+            "mode": "strict",
+            "operation": "dataframe_identity",
+            "oracle_source": "live_legacy_pandas",
+            "frame": row_multiindex_three_level_frame_json()
+        }))
+        .expect("fixture");
+
+        let source = super::execute_dataframe_fixture_operation(&fixture).expect("source frame");
+        let encoded = super::write_parquet_bytes(&source).expect("write parquet");
+        let actual = super::read_parquet_bytes(&encoded).expect("read parquet");
+
+        assert_live_oracle_dataframe_frame_parity(
+            fixture,
+            actual,
+            "dataframe parquet row multiindex roundtrip oracle test",
+        );
     }
 
     #[test]

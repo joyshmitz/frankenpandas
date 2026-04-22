@@ -14674,6 +14674,38 @@ impl DataFrame {
         ))
     }
 
+    fn reset_index_multi_column_names(
+        &self,
+        row_multiindex: &fp_index::MultiIndex,
+    ) -> Result<Vec<String>, FrameError> {
+        let mut names = Vec::with_capacity(row_multiindex.nlevels());
+        let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
+        for (level, name) in row_multiindex.names().iter().enumerate() {
+            let candidate = name.clone().unwrap_or_else(|| format!("level_{level}"));
+            if !used.insert(candidate.clone()) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "cannot insert {candidate}, already exists"
+                )));
+            }
+            names.push(candidate);
+        }
+        Ok(names)
+    }
+
+    fn index_labels_to_scalars(labels: &[IndexLabel]) -> Vec<Scalar> {
+        let has_int = labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(_)));
+        let has_utf8 = labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(_)));
+        if has_int && has_utf8 {
+            labels.iter().map(index_label_to_utf8_scalar).collect()
+        } else {
+            labels.iter().map(index_label_to_scalar).collect()
+        }
+    }
+
     fn new_with_axes(
         index: Index,
         row_multiindex: Option<fp_index::MultiIndex>,
@@ -16299,38 +16331,37 @@ impl DataFrame {
     pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
         let index = range_index(self.len())?;
         if drop {
-            return Self::new_with_column_order(
+            return Self::new_with_axes(
                 index,
+                None,
                 self.columns.clone(),
                 self.column_order.clone(),
+                self.column_multiindex.clone(),
             );
         }
 
-        let has_int = self
-            .index
-            .labels()
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Int64(_)));
-        let has_utf8 = self
-            .index
-            .labels()
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Utf8(_)));
+        if let Some(row_multiindex) = self.row_multiindex.as_ref() {
+            let mut columns = self.columns.clone();
+            let mut column_order = self.reset_index_multi_column_names(row_multiindex)?;
+            for (level, column_name) in column_order.iter().enumerate() {
+                let level_index = row_multiindex.get_level_values(level)?;
+                columns.insert(
+                    column_name.clone(),
+                    Column::from_values(Self::index_labels_to_scalars(level_index.labels()))?,
+                );
+            }
+            column_order.extend(self.column_order.iter().cloned());
+            return Self::new_with_axes(
+                index,
+                None,
+                columns,
+                column_order,
+                self.column_multiindex.clone(),
+            );
+        }
 
         let index_column_name = self.reset_index_column_name()?;
-        let index_values = if has_int && has_utf8 {
-            self.index
-                .labels()
-                .iter()
-                .map(index_label_to_utf8_scalar)
-                .collect::<Vec<_>>()
-        } else {
-            self.index
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect::<Vec<_>>()
-        };
+        let index_values = Self::index_labels_to_scalars(self.index.labels());
 
         let mut columns = self.columns.clone();
         columns.insert(
@@ -16341,7 +16372,45 @@ impl DataFrame {
         column_order.push(index_column_name);
         column_order.extend(self.column_order.iter().cloned());
 
-        Self::new_with_column_order(index, columns, column_order)
+        Self::new_with_axes(
+            index,
+            None,
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )
+    }
+
+    fn rebuild_with_row_multiindex(
+        &self,
+        row_multiindex: fp_index::MultiIndex,
+    ) -> Result<Self, FrameError> {
+        let index = Self::flatten_row_multiindex(&row_multiindex, "|");
+        Self::new_with_axes(
+            index,
+            Some(row_multiindex),
+            self.columns.clone(),
+            self.column_order.clone(),
+            self.column_multiindex.clone(),
+        )
+    }
+
+    fn rebuild_with_row_index(
+        &self,
+        row_index: fp_index::MultiIndexOrIndex,
+    ) -> Result<Self, FrameError> {
+        match row_index {
+            fp_index::MultiIndexOrIndex::Index(index) => Self::new_with_axes(
+                index,
+                None,
+                self.columns.clone(),
+                self.column_order.clone(),
+                self.column_multiindex.clone(),
+            ),
+            fp_index::MultiIndexOrIndex::Multi(row_multiindex) => {
+                self.rebuild_with_row_multiindex(row_multiindex)
+            }
+        }
     }
 
     /// Return a new DataFrame sorted by index labels.
@@ -25865,6 +25934,14 @@ impl DataFrame {
     ///
     /// Matches `df.droplevel(0)` for single-level index.
     pub fn droplevel(&self) -> Result<Self, FrameError> {
+        self.droplevel_level(0)
+    }
+
+    /// Drop a specific row-MultiIndex level.
+    pub fn droplevel_level(&self, level: usize) -> Result<Self, FrameError> {
+        if let Some(row_multiindex) = self.row_multiindex.as_ref() {
+            return self.rebuild_with_row_index(row_multiindex.droplevel(level)?);
+        }
         let n = self.len();
         let new_labels: Vec<IndexLabel> = (0..n).map(|i| (i as i64).into()).collect();
         Ok(DataFrame {
@@ -25882,6 +25959,9 @@ impl DataFrame {
     /// the components to produce "(b, a)". Non-composite labels are returned
     /// unchanged.
     pub fn swaplevel(&self) -> Self {
+        if self.row_multiindex.is_some() {
+            return self.swaplevel_levels(0, 1).unwrap_or_else(|_| self.clone());
+        }
         let new_labels: Vec<IndexLabel> = self
             .index
             .labels()
@@ -25905,6 +25985,18 @@ impl DataFrame {
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
         }
+    }
+
+    /// Swap two row-MultiIndex levels.
+    pub fn swaplevel_levels(&self, i: usize, j: usize) -> Result<Self, FrameError> {
+        let row_multiindex = self.require_row_multiindex()?;
+        self.rebuild_with_row_multiindex(row_multiindex.swaplevel(i, j)?)
+    }
+
+    /// Reorder row-MultiIndex levels.
+    pub fn reorder_levels(&self, order: &[usize]) -> Result<Self, FrameError> {
+        let row_multiindex = self.require_row_multiindex()?;
+        self.rebuild_with_row_multiindex(row_multiindex.reorder_levels(order)?)
     }
 }
 
@@ -61545,6 +61637,264 @@ mod tests {
         assert_eq!(
             out.column("sales").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(5)]
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_roundtrips_row_multiindex_levels() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "year", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "year",
+                    vec![
+                        Scalar::Int64(2024),
+                        Scalar::Int64(2025),
+                        Scalar::Int64(2024),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let indexed = df
+            .set_index_multi(&["region", "product", "year"], true, "|")
+            .unwrap();
+        let reset = indexed.reset_index(false).unwrap();
+        assert_eq!(
+            reset.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
+        assert!(reset.row_multiindex().is_none());
+        assert_eq!(
+            reset
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "region".to_owned(),
+                "product".to_owned(),
+                "year".to_owned(),
+                "sales".to_owned()
+            ]
+        );
+        assert_eq!(
+            reset.column("region").unwrap().values(),
+            &[
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into())
+            ]
+        );
+
+        let roundtrip = reset
+            .set_index_multi(&["region", "product", "year"], true, "|")
+            .unwrap();
+        assert_eq!(roundtrip.index().labels(), indexed.index().labels());
+        assert_eq!(roundtrip.row_multiindex(), indexed.row_multiindex());
+    }
+
+    #[test]
+    fn dataframe_droplevel_level_on_row_multiindex_preserves_remaining_levels() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "year", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "year",
+                    vec![
+                        Scalar::Int64(2024),
+                        Scalar::Int64(2025),
+                        Scalar::Int64(2024),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product", "year"], true, "|")
+        .unwrap();
+
+        let dropped = df.droplevel_level(1).unwrap();
+        let row_multiindex = dropped
+            .row_multiindex()
+            .expect("droplevel_level should preserve a 2-level row MultiIndex");
+        assert_eq!(
+            row_multiindex.names(),
+            &[Some("region".into()), Some("year".into())]
+        );
+        assert_eq!(
+            dropped.index().labels(),
+            &[
+                IndexLabel::Utf8("east|2024".into()),
+                IndexLabel::Utf8("east|2025".into()),
+                IndexLabel::Utf8("west|2024".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_swaplevel_levels_on_row_multiindex_swaps_requested_levels() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "year", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "year",
+                    vec![
+                        Scalar::Int64(2024),
+                        Scalar::Int64(2025),
+                        Scalar::Int64(2024),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product", "year"], true, "|")
+        .unwrap();
+
+        let swapped = df.swaplevel_levels(0, 2).unwrap();
+        let row_multiindex = swapped
+            .row_multiindex()
+            .expect("swaplevel_levels should preserve row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.names(),
+            &[
+                Some("year".into()),
+                Some("product".into()),
+                Some("region".into())
+            ]
+        );
+        assert_eq!(
+            swapped.index().labels(),
+            &[
+                IndexLabel::Utf8("2024|A|east".into()),
+                IndexLabel::Utf8("2025|B|east".into()),
+                IndexLabel::Utf8("2024|A|west".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_reorder_levels_on_row_multiindex_rebuilds_flat_fallback_index() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "year", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "year",
+                    vec![
+                        Scalar::Int64(2024),
+                        Scalar::Int64(2025),
+                        Scalar::Int64(2024),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product", "year"], true, "|")
+        .unwrap();
+
+        let reordered = df.reorder_levels(&[2, 0, 1]).unwrap();
+        let row_multiindex = reordered
+            .row_multiindex()
+            .expect("reorder_levels should preserve row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.names(),
+            &[
+                Some("year".into()),
+                Some("region".into()),
+                Some("product".into())
+            ]
+        );
+        assert_eq!(
+            reordered.index().labels(),
+            &[
+                IndexLabel::Utf8("2024|east|A".into()),
+                IndexLabel::Utf8("2025|east|B".into()),
+                IndexLabel::Utf8("2024|west|A".into())
+            ]
         );
     }
 

@@ -1894,7 +1894,7 @@ def locals_from_payload(payload: dict[str, Any], op_name: str) -> dict[str, Any]
     return {str(name): scalar_from_json(value) for name, value in locals_raw.items()}
 
 
-def op_dataframe_eval(pd, payload: dict[str, Any]) -> dict[str, Any]:
+def op_dataframe_expression(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
         raise OracleError("dataframe_eval requires frame payload")
@@ -1903,7 +1903,8 @@ def op_dataframe_eval(pd, payload: dict[str, Any]) -> dict[str, Any]:
     expr = require_expr_payload(payload, "dataframe_eval")
     local_dict = locals_from_payload(payload, "dataframe_eval")
     try:
-        out = frame.eval(expr, local_dict=local_dict)
+        eval_method = getattr(frame, "eval")
+        out = eval_method(expr, local_dict=local_dict)
     except Exception as exc:
         raise OracleError(f"dataframe_eval failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -2746,6 +2747,57 @@ def op_dataframe_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def required_groupby_columns(payload: dict[str, Any], op_name: str) -> list[str]:
+    columns = parse_optional_string_list(payload, "groupby_columns", op_name)
+    if not columns:
+        raise OracleError(f"{op_name} requires non-empty groupby_columns list")
+    return columns
+
+
+def format_groupby_resample_bucket_label(value: Any, freq: str) -> str:
+    if freq == "M" and hasattr(value, "strftime"):
+        try:
+            return value.strftime("%Y-%m")
+        except Exception:
+            pass
+    return str(value)
+
+
+def normalize_groupby_resample_frame(frame, freq: str):
+    out = frame.copy()
+    labels = []
+    for label in out.index.tolist():
+        if isinstance(label, tuple) and label:
+            parts = [str(part) for part in label[:-1]]
+            parts.append(format_groupby_resample_bucket_label(label[-1], freq))
+            labels.append(f"({', '.join(parts)})")
+        else:
+            labels.append(format_groupby_resample_bucket_label(label, freq))
+    out.index = labels
+    return out
+
+
+def op_dataframe_groupby_resample_builtin(
+    pd, payload: dict[str, Any], func: str, op_name: str
+) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+
+    columns = required_groupby_columns(payload, op_name)
+    freq = required_string_payload(payload, "resample_freq", op_name)
+    frame = dataframe_from_json(pd, frame_payload)
+    frame.index = pd.DatetimeIndex(frame.index)
+
+    try:
+        out = getattr(frame.groupby(columns).resample(freq), func)()
+        out = normalize_groupby_resample_frame(out, freq)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_groupby_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     groupby_columns = payload.get("groupby_columns")
@@ -3050,6 +3102,24 @@ def op_dataframe_groupby_ohlc(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError(f"dataframe_groupby_ohlc failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_resample_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_resample_builtin(
+        pd, payload, "min", "dataframe_groupby_resample_min"
+    )
+
+
+def op_dataframe_groupby_resample_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_resample_builtin(
+        pd, payload, "max", "dataframe_groupby_resample_max"
+    )
+
+
+def op_dataframe_groupby_resample_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_resample_builtin(
+        pd, payload, "count", "dataframe_groupby_resample_count"
+    )
 
 
 def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4298,7 +4368,7 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }:
         return op_dataframe_constructor_list_like(pd, payload)
     if op in {"dataframe_eval", "data_frame_eval"}:
-        return op_dataframe_eval(pd, payload)
+        return op_dataframe_expression(pd, payload)
     if op in {"dataframe_query", "data_frame_query"}:
         return op_dataframe_query(pd, payload)
     if op in {"dataframe_pivot", "data_frame_pivot"}:
@@ -4463,6 +4533,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_kurtosis(pd, payload)
     if op in {"dataframe_groupby_ohlc", "data_frame_groupby_ohlc"}:
         return op_dataframe_groupby_ohlc(pd, payload)
+    if op in {"dataframe_groupby_resample_min", "data_frame_groupby_resample_min"}:
+        return op_dataframe_groupby_resample_min(pd, payload)
+    if op in {"dataframe_groupby_resample_max", "data_frame_groupby_resample_max"}:
+        return op_dataframe_groupby_resample_max(pd, payload)
+    if op in {"dataframe_groupby_resample_count", "data_frame_groupby_resample_count"}:
+        return op_dataframe_groupby_resample_count(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

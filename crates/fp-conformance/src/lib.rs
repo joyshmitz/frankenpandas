@@ -28,8 +28,8 @@ use fp_io::{
     JsonOrient, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
     read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
     series_from_arrow_array, series_to_arrow_array, write_csv_string,
-    write_excel_bytes_with_options, write_feather_bytes, write_ipc_stream_bytes,
-    write_json_string, write_jsonl_string, write_parquet_bytes,
+    write_excel_bytes_with_options, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
+    write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -812,6 +812,21 @@ pub enum FixtureOperation {
         alias = "data_frame_groupby_ngroup"
     )]
     DataFrameGroupByNgroup,
+    #[serde(
+        rename = "dataframe_groupby_resample_min",
+        alias = "data_frame_groupby_resample_min"
+    )]
+    DataFrameGroupByResampleMin,
+    #[serde(
+        rename = "dataframe_groupby_resample_max",
+        alias = "data_frame_groupby_resample_max"
+    )]
+    DataFrameGroupByResampleMax,
+    #[serde(
+        rename = "dataframe_groupby_resample_count",
+        alias = "data_frame_groupby_resample_count"
+    )]
+    DataFrameGroupByResampleCount,
     #[serde(rename = "dataframe_asof", alias = "data_frame_asof")]
     DataFrameAsof,
     #[serde(rename = "dataframe_at_time", alias = "data_frame_at_time")]
@@ -1293,6 +1308,9 @@ impl FixtureOperation {
             Self::DataFrameGroupByOhlc => "dataframe_groupby_ohlc",
             Self::DataFrameGroupByCumcount => "dataframe_groupby_cumcount",
             Self::DataFrameGroupByNgroup => "dataframe_groupby_ngroup",
+            Self::DataFrameGroupByResampleMin => "dataframe_groupby_resample_min",
+            Self::DataFrameGroupByResampleMax => "dataframe_groupby_resample_max",
+            Self::DataFrameGroupByResampleCount => "dataframe_groupby_resample_count",
             Self::DataFrameAsof => "dataframe_asof",
             Self::DataFrameAtTime => "dataframe_at_time",
             Self::DataFrameBetweenTime => "dataframe_between_time",
@@ -2357,7 +2375,10 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesResampleCount
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
-        | FixtureOperation::DataFrameResampleMean => &["CC-004"],
+        | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount => &["CC-004"],
     }
 }
 
@@ -9087,6 +9108,36 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount => {
+            let op_name = fixture.operation.operation_name();
+            let actual = execute_dataframe_groupby_resample_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected {op_name} error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected {op_name} to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "expected {op_name} to fail but operation succeeded"
+                        ))
+                    }
+                }
+                _ => Err(format!(
+                    "expected_frame or expected_error is required for {op_name}"
+                )),
+            }
+        }
         FixtureOperation::DataFrameGroupByCumcount => {
             let actual = execute_dataframe_groupby_series_fixture_operation(fixture, false);
             match expected {
@@ -10139,7 +10190,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::CsvReadFrame
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
-        | FixtureOperation::DataFrameResampleMean => fixture
+        | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -10754,7 +10808,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::CsvReadFrame
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
-        | FixtureOperation::DataFrameResampleMean => response
+        | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -11205,6 +11262,16 @@ fn require_groupby_columns(
     } else {
         Ok(columns)
     }
+}
+
+fn require_resample_freq<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a str, String> {
+    fixture
+        .resample_freq
+        .as_deref()
+        .ok_or_else(|| format!("resample_freq required for {operation_name}"))
 }
 
 fn require_groupby_agg_multi(
@@ -13077,6 +13144,11 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFrameGroupByOhlc => {
             execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_ohlc")
         }
+        FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount => {
+            execute_dataframe_groupby_resample_fixture_operation(fixture)
+        }
         FixtureOperation::DataFrameAtTime => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -13138,6 +13210,39 @@ fn execute_dataframe_groupby_frame_fixture_operation(
         "dataframe_groupby_ohlc" => groupby.ohlc().map_err(|err| err.to_string()),
         other => Err(format!(
             "unsupported dataframe groupby frame operation: {other}"
+        )),
+    }
+}
+
+fn execute_dataframe_groupby_resample_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let op_name = fixture.operation.operation_name();
+    let groupby_columns = require_groupby_columns(fixture, op_name)?;
+    let groupby_refs = groupby_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let freq = require_resample_freq(fixture, op_name)?;
+    let groupby = frame
+        .groupby(&groupby_refs)
+        .map_err(|err| err.to_string())?;
+
+    match fixture.operation {
+        FixtureOperation::DataFrameGroupByResampleMin => {
+            groupby.resample(freq).min().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameGroupByResampleMax => {
+            groupby.resample(freq).max().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameGroupByResampleCount => groupby
+            .resample(freq)
+            .count()
+            .map_err(|err| err.to_string()),
+        other => Err(format!(
+            "unsupported dataframe groupby resample operation: {other:?}"
         )),
     }
 }
@@ -18370,8 +18475,18 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameGetDummies
         | FixtureOperation::SeriesUnstack
         | FixtureOperation::SeriesStrGetDummies
+        | FixtureOperation::DataFrameGroupByResampleMin
+        | FixtureOperation::DataFrameGroupByResampleMax
+        | FixtureOperation::DataFrameGroupByResampleCount
         | FixtureOperation::DataFrameCombineFirst => {
-            let actual = execute_dataframe_fixture_operation(fixture);
+            let actual = match fixture.operation {
+                FixtureOperation::DataFrameGroupByResampleMin
+                | FixtureOperation::DataFrameGroupByResampleMax
+                | FixtureOperation::DataFrameGroupByResampleCount => {
+                    execute_dataframe_groupby_resample_fixture_operation(fixture)
+                }
+                _ => execute_dataframe_fixture_operation(fixture),
+            };
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -26334,6 +26449,177 @@ mod tests {
                 .is_some_and(|message| message.contains("boolean scalar")),
             "{actual:?}"
         );
+    }
+
+    fn assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture: super::PacketFixture) {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby resample oracle test {}: {message}",
+                fixture.case_id
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_groupby_resample_fixture_operation(&fixture)
+            .expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_resample_min_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-441",
+            "case_id": "dataframe_groupby_resample_min_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_resample_min",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "resample_freq": "M",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01" },
+                    { "kind": "utf8", "value": "2024-01-15" },
+                    { "kind": "utf8", "value": "2024-02-01" },
+                    { "kind": "utf8", "value": "2024-02-20" },
+                    { "kind": "utf8", "value": "2024-01-05" },
+                    { "kind": "utf8", "value": "2024-02-05" },
+                    { "kind": "utf8", "value": "2024-02-25" }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 7.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 9.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_resample_max_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-442",
+            "case_id": "dataframe_groupby_resample_max_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_resample_max",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "resample_freq": "M",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01" },
+                    { "kind": "utf8", "value": "2024-01-15" },
+                    { "kind": "utf8", "value": "2024-02-01" },
+                    { "kind": "utf8", "value": "2024-02-20" },
+                    { "kind": "utf8", "value": "2024-01-05" },
+                    { "kind": "utf8", "value": "2024-02-05" },
+                    { "kind": "utf8", "value": "2024-02-25" }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 7.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 9.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_resample_count_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-443",
+            "case_id": "dataframe_groupby_resample_count_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_resample_count",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "resample_freq": "M",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01" },
+                    { "kind": "utf8", "value": "2024-01-15" },
+                    { "kind": "utf8", "value": "2024-02-10" },
+                    { "kind": "utf8", "value": "2024-03-05" },
+                    { "kind": "utf8", "value": "2024-01-20" },
+                    { "kind": "utf8", "value": "2024-02-02" },
+                    { "kind": "utf8", "value": "2024-02-25" }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "float64", "value": 7.0 },
+                        { "kind": "float64", "value": 9.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture);
     }
 
     fn assert_live_oracle_dataframe_apply_alias_series_parity(fixture: super::PacketFixture) {

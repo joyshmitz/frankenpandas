@@ -3,17 +3,53 @@
 //! Performance baseline measurements for join and filter workloads (frankenpandas-n3t).
 //!
 //! These tests generate representative datasets and measure p50/p95/p99 latencies
-//! for key operations. Results are printed to stderr for capture.
+//! for key operations. Results are printed to stderr for capture and compared
+//! against committed p95 budgets for regression gating.
 //!
-//! Run with: `cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored`
-//! (Tests are `#[ignore]` by default to avoid slowing CI.)
+//! Run with:
+//! `cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored --skip perf_run_all_baselines`
+//! (Tests stay `#[ignore]` so CI can opt into them explicitly.)
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use fp_frame::{DataFrame, Series};
 use fp_index::IndexLabel;
 use fp_join::{JoinType, join_series};
 use fp_types::Scalar;
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct PerfBudget {
+    p95_secs: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PerfSummary {
+    mean: Duration,
+    p50: Duration,
+    p95: Duration,
+    p99: Duration,
+}
+
+static PERF_BUDGETS: OnceLock<BTreeMap<String, PerfBudget>> = OnceLock::new();
+
+fn perf_budgets_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/perf_budgets.json")
+}
+
+fn load_perf_budgets() -> &'static BTreeMap<String, PerfBudget> {
+    PERF_BUDGETS.get_or_init(|| {
+        serde_json::from_str(
+            &std::fs::read_to_string(perf_budgets_path()).expect("read perf_budgets.json"),
+        )
+        .expect("parse perf_budgets.json")
+    })
+}
 
 /// Run a closure `iters` times and return sorted durations.
 fn bench_iters<F: FnMut()>(mut f: F, iters: usize) -> Vec<Duration> {
@@ -27,25 +63,38 @@ fn bench_iters<F: FnMut()>(mut f: F, iters: usize) -> Vec<Duration> {
     durations
 }
 
-/// Extract p50, p95, p99 from sorted durations.
-fn percentiles(sorted: &[Duration]) -> (Duration, Duration, Duration) {
+fn summarize(sorted: &[Duration]) -> PerfSummary {
     let n = sorted.len();
-    let p50 = sorted[n / 2];
-    let p95 = sorted[(n * 95) / 100];
-    let p99 = sorted[(n * 99) / 100];
-    (p50, p95, p99)
+    PerfSummary {
+        mean: sorted.iter().sum::<Duration>() / sorted.len() as u32,
+        p50: sorted[n / 2],
+        p95: sorted[(n * 95) / 100],
+        p99: sorted[(n * 99) / 100],
+    }
 }
 
 /// Print baseline results in standard format.
-fn report(name: &str, sorted: &[Duration]) {
-    let (p50, p95, p99) = percentiles(sorted);
-    let mean: Duration = sorted.iter().sum::<Duration>() / sorted.len() as u32;
+fn report(name: &str, sorted: &[Duration]) -> PerfSummary {
+    let summary = summarize(sorted);
     eprintln!("[PERF] {name}");
     eprintln!("  iters: {}", sorted.len());
-    eprintln!("  mean:  {:.6} s", mean.as_secs_f64());
-    eprintln!("  p50:   {:.6} s", p50.as_secs_f64());
-    eprintln!("  p95:   {:.6} s", p95.as_secs_f64());
-    eprintln!("  p99:   {:.6} s", p99.as_secs_f64());
+    eprintln!("  mean:  {:.6} s", summary.mean.as_secs_f64());
+    eprintln!("  p50:   {:.6} s", summary.p50.as_secs_f64());
+    eprintln!("  p95:   {:.6} s", summary.p95.as_secs_f64());
+    eprintln!("  p99:   {:.6} s", summary.p99.as_secs_f64());
+    summary
+}
+
+fn report_and_assert(name: &str, sorted: &[Duration]) {
+    let summary = report(name, sorted);
+    let budgets = load_perf_budgets();
+    let budget = budgets.get(name).copied().expect("missing perf budget");
+    let observed_p95 = summary.p95.as_secs_f64();
+    assert!(
+        observed_p95 <= budget.p95_secs,
+        "{name} p95 regression: observed {observed_p95:.6}s > budget {:.6}s",
+        budget.p95_secs
+    );
 }
 
 /// Generate a numeric Series with `n` rows and index labels from `0..n`.
@@ -84,7 +133,7 @@ fn perf_join_inner_10k() {
         50,
     );
 
-    report("join_inner_10k (50% overlap)", &durations);
+    report_and_assert("join_inner_10k (50% overlap)", &durations);
 }
 
 #[test]
@@ -102,7 +151,7 @@ fn perf_join_left_10k() {
         50,
     );
 
-    report("join_left_10k (50% overlap)", &durations);
+    report_and_assert("join_left_10k (50% overlap)", &durations);
 }
 
 #[test]
@@ -120,7 +169,7 @@ fn perf_join_outer_10k() {
         50,
     );
 
-    report("join_outer_10k (50% overlap)", &durations);
+    report_and_assert("join_outer_10k (50% overlap)", &durations);
 }
 
 #[test]
@@ -138,7 +187,7 @@ fn perf_join_inner_100k() {
         20,
     );
 
-    report("join_inner_100k (50% overlap)", &durations);
+    report_and_assert("join_inner_100k (50% overlap)", &durations);
 }
 
 #[test]
@@ -156,7 +205,7 @@ fn perf_join_outer_100k() {
         20,
     );
 
-    report("join_outer_100k (50% overlap)", &durations);
+    report_and_assert("join_outer_100k (50% overlap)", &durations);
 }
 
 // ── Filter Benchmarks ──────────────────────────────────────────────
@@ -178,7 +227,7 @@ fn perf_filter_boolean_mask_10k() {
         50,
     );
 
-    report(
+    report_and_assert(
         "filter_boolean_mask_10k (5 cols, 50% selectivity)",
         &durations,
     );
@@ -200,7 +249,7 @@ fn perf_filter_boolean_mask_100k() {
         20,
     );
 
-    report(
+    report_and_assert(
         "filter_boolean_mask_100k (5 cols, 50% selectivity)",
         &durations,
     );
@@ -218,7 +267,7 @@ fn perf_filter_head_tail_100k() {
         },
         50,
     );
-    report("head(1000)_100k (5 cols)", &head_durations);
+    report_and_assert("head(1000)_100k (5 cols)", &head_durations);
 
     let tail_durations = bench_iters(
         || {
@@ -226,7 +275,7 @@ fn perf_filter_head_tail_100k() {
         },
         50,
     );
-    report("tail(1000)_100k (5 cols)", &tail_durations);
+    report_and_assert("tail(1000)_100k (5 cols)", &tail_durations);
 }
 
 // ── DataFrame Arithmetic Benchmarks ──────────────────────────────────
@@ -244,7 +293,7 @@ fn perf_df_add_scalar_100k() {
         20,
     );
 
-    report("df_add_scalar_100k (5 cols)", &durations);
+    report_and_assert("df_add_scalar_100k (5 cols)", &durations);
 }
 
 #[test]
@@ -261,7 +310,7 @@ fn perf_df_add_df_aligned_100k() {
         20,
     );
 
-    report("df_add_df_aligned_100k (5 cols, same index)", &durations);
+    report_and_assert("df_add_df_aligned_100k (5 cols, same index)", &durations);
 }
 
 #[test]
@@ -278,7 +327,7 @@ fn perf_df_eq_scalar_100k() {
         20,
     );
 
-    report("df_eq_scalar_100k (5 cols)", &durations);
+    report_and_assert("df_eq_scalar_100k (5 cols)", &durations);
 }
 
 // ── Series Alignment Benchmarks ──────────────────────────────────────
@@ -302,7 +351,7 @@ fn perf_series_add_with_alignment_10k() {
         50,
     );
 
-    report("series_add_aligned_10k (50% overlap)", &durations);
+    report_and_assert("series_add_aligned_10k (50% overlap)", &durations);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────

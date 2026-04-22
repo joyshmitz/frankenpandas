@@ -55,8 +55,8 @@ jobs:
       - name: Conformance tests
         run: cargo test -p fp-conformance -- --nocapture
 
-      - name: Bench harness smoke
-        run: cargo bench
+      - name: Performance regression gate
+        run: cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored --skip perf_run_all_baselines
 
       - name: Phase2C gate check
         run: ./scripts/phase2c_gate_check.sh

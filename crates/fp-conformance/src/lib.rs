@@ -32464,6 +32464,24 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
     }
 
     #[test]
+    fn ci_workflow_runs_perf_regression_gate_instead_of_noop_bench() {
+        let root = repo_root();
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+        assert!(
+            ci.contains("Performance regression gate"),
+            "expected named performance regression gate in ci.yml"
+        );
+        assert!(
+            ci.contains("cargo test -p fp-conformance --test perf_baselines -- --nocapture --ignored --skip perf_run_all_baselines"),
+            "expected CI to run ignored perf_baselines with the summary case skipped"
+        );
+        assert!(
+            !ci.contains("run: cargo bench"),
+            "expected CI to stop using the no-op cargo bench smoke step"
+        );
+    }
+
+    #[test]
     fn ci_gate_rule_ids_are_stable_and_nonempty() {
         let expected = vec![
             (CiGate::G1Compile, "G1"),

@@ -1,0 +1,15 @@
+{
+  "df_add_df_aligned_100k (5 cols, same index)": { "p95_secs": 1.2 },
+  "df_add_scalar_100k (5 cols)": { "p95_secs": 0.3 },
+  "df_eq_scalar_100k (5 cols)": { "p95_secs": 0.32 },
+  "filter_boolean_mask_100k (5 cols, 50% selectivity)": { "p95_secs": 0.75 },
+  "filter_boolean_mask_10k (5 cols, 50% selectivity)": { "p95_secs": 0.15 },
+  "head(1000)_100k (5 cols)": { "p95_secs": 0.02 },
+  "join_inner_100k (50% overlap)": { "p95_secs": 1.7 },
+  "join_inner_10k (50% overlap)": { "p95_secs": 0.18 },
+  "join_left_10k (50% overlap)": { "p95_secs": 0.22 },
+  "join_outer_100k (50% overlap)": { "p95_secs": 3.2 },
+  "join_outer_10k (50% overlap)": { "p95_secs": 0.26 },
+  "series_add_aligned_10k (50% overlap)": { "p95_secs": 0.25 },
+  "tail(1000)_100k (5 cols)": { "p95_secs": 0.02 }
+}

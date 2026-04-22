@@ -33,7 +33,7 @@
 | Column MultiIndex | Yes | No | Yes (foundation) |
 | Row MultiIndex | Yes | No | Scaffolded (standalone type; DataFrame row-axis integration pending — see Limitations) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
-| 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes | Partial | Yes |
+| 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: SQLite-only via rusqlite; PostgreSQL/MySQL planned) |
 | Conformance testing against pandas oracle | - | - | Yes (20+ packet suites) |
 
 ## Quick Example
@@ -1373,6 +1373,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | MultiIndex not yet integrated as DataFrame row index | Foundation type exists; tracked by `frankenpandas-1zzp` | Use `set_index_multi()` for flat composite keys only |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
+| SQL IO is SQLite-only | `read_sql` / `write_sql` hardcode `rusqlite::Connection`; no DBAPI2 / SqlConnection trait yet; no PostgreSQL, MySQL, MS SQL, or Oracle backends; no chunksize streaming; `coerce_float` absent. Tracked by `frankenpandas-fd90` (SQL backend abstraction epic) | Use SQLite via `rusqlite::Connection::open[_in_memory]` today; export to Parquet/Feather for other DBs |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
 | No plotting | Requires graphics library | Export to pandas/matplotlib for visualization |
 

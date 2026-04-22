@@ -1972,6 +1972,194 @@ impl MultiIndex {
         Some(self.levels.iter().map(|level| &level[position]).collect())
     }
 
+    /// Select rows by positional index.
+    pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
+        for &position in positions {
+            if position >= self.len() {
+                return Err(IndexError::OutOfBounds {
+                    position,
+                    length: self.len(),
+                });
+            }
+        }
+
+        let mut levels = Vec::with_capacity(self.nlevels());
+        for level in &self.levels {
+            let selected = positions
+                .iter()
+                .map(|&position| level[position].clone())
+                .collect();
+            levels.push(selected);
+        }
+
+        Ok(Self {
+            levels,
+            names: self.names.clone(),
+        })
+    }
+
+    fn validate_key_arity(
+        &self,
+        key: &[IndexLabel],
+        allow_partial: bool,
+    ) -> Result<(), IndexError> {
+        let nlevels = self.nlevels();
+        if key.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "MultiIndex key must contain at least one level".to_owned(),
+            ));
+        }
+        if (!allow_partial && key.len() != nlevels) || (allow_partial && key.len() > nlevels) {
+            return Err(IndexError::InvalidArgument(format!(
+                "wrong tuple arity: expected {}{}, got {}",
+                if allow_partial { "1.." } else { "" },
+                nlevels,
+                key.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn row_matches_prefix(&self, row: usize, key: &[IndexLabel]) -> bool {
+        key.iter()
+            .enumerate()
+            .all(|(level, expected)| &self.levels[level][row] == expected)
+    }
+
+    fn row_prefix_cmp(&self, row: usize, key: &[IndexLabel]) -> std::cmp::Ordering {
+        for (level, expected) in key.iter().enumerate() {
+            let ord = self.levels[level][row].cmp(expected);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Return matching row positions for an exact tuple key.
+    pub fn get_loc_tuple(&self, key: &[IndexLabel]) -> Result<Vec<usize>, IndexError> {
+        self.validate_key_arity(key, false)?;
+        let positions: Vec<usize> = (0..self.len())
+            .filter(|&row| self.row_matches_prefix(row, key))
+            .collect();
+        if positions.is_empty() {
+            return Err(IndexError::InvalidArgument(format!(
+                "tuple key not found: {:?}",
+                key
+            )));
+        }
+        Ok(positions)
+    }
+
+    /// Return row positions for an exact tuple, partial-prefix tuple, or a single level key.
+    ///
+    /// `level=None` treats `key` as an exact tuple when it has full arity, or a
+    /// prefix tuple when shorter than `nlevels()`. `level=Some(n)` treats
+    /// `key` as a single label lookup on that level.
+    pub fn get_loc(
+        &self,
+        key: &[IndexLabel],
+        level: Option<usize>,
+    ) -> Result<Vec<usize>, IndexError> {
+        if let Some(level) = level {
+            if level >= self.nlevels() {
+                return Err(IndexError::OutOfBounds {
+                    position: level,
+                    length: self.nlevels(),
+                });
+            }
+            if key.len() != 1 {
+                return Err(IndexError::InvalidArgument(format!(
+                    "level lookup expects exactly one label, got {}",
+                    key.len()
+                )));
+            }
+            let positions: Vec<usize> = self.levels[level]
+                .iter()
+                .enumerate()
+                .filter_map(|(row, label)| if label == &key[0] { Some(row) } else { None })
+                .collect();
+            if positions.is_empty() {
+                return Err(IndexError::InvalidArgument(format!(
+                    "level key not found at level {level}: {:?}",
+                    key[0]
+                )));
+            }
+            return Ok(positions);
+        }
+
+        self.validate_key_arity(key, true)?;
+        let positions: Vec<usize> = (0..self.len())
+            .filter(|&row| self.row_matches_prefix(row, key))
+            .collect();
+        if positions.is_empty() {
+            return Err(IndexError::InvalidArgument(format!(
+                "tuple key not found: {:?}",
+                key
+            )));
+        }
+        Ok(positions)
+    }
+
+    /// pandas-style partial tuple lookup returning matching positions and the remaining index.
+    pub fn get_loc_level(
+        &self,
+        key: &[IndexLabel],
+    ) -> Result<(Vec<usize>, Option<MultiIndexOrIndex>), IndexError> {
+        let positions = self.get_loc(key, None)?;
+        if key.len() == self.nlevels() {
+            return Ok((positions, None));
+        }
+
+        let mut remaining = MultiIndexOrIndex::Multi(self.take(&positions)?);
+        for _ in 0..key.len() {
+            remaining = match remaining {
+                MultiIndexOrIndex::Multi(mi) => mi.droplevel(0)?,
+                MultiIndexOrIndex::Index(_) => {
+                    return Err(IndexError::InvalidArgument(
+                        "cannot drop more levels than remain".to_owned(),
+                    ));
+                }
+            };
+        }
+
+        Ok((positions, Some(remaining)))
+    }
+
+    /// Return `(start, stop)` bounds for a lexicographic tuple slice.
+    ///
+    /// The returned `stop` is exclusive, matching pandas `slice_locs`.
+    pub fn slice_locs(
+        &self,
+        start: Option<&[IndexLabel]>,
+        end: Option<&[IndexLabel]>,
+    ) -> Result<(usize, usize), IndexError> {
+        if let Some(start) = start {
+            self.validate_key_arity(start, true)?;
+        }
+        if let Some(end) = end {
+            self.validate_key_arity(end, true)?;
+        }
+
+        let start_pos = match start {
+            Some(start_key) => (0..self.len())
+                .find(|&row| self.row_prefix_cmp(row, start_key) != std::cmp::Ordering::Less)
+                .unwrap_or(self.len()),
+            None => 0,
+        };
+        let end_pos = match end {
+            Some(end_key) => (0..self.len())
+                .rfind(|&row| self.row_prefix_cmp(row, end_key) != std::cmp::Ordering::Greater)
+                .map_or(0, |row| row + 1),
+            None => self.len(),
+        };
+
+        if end_pos < start_pos {
+            return Ok((start_pos, start_pos));
+        }
+        Ok((start_pos, end_pos))
+    }
+
     /// Compute a non-unique indexer against another MultiIndex.
     ///
     /// Matches `pd.MultiIndex.get_indexer_non_unique(target)` by expanding
@@ -4352,6 +4540,62 @@ mod tests {
     fn multi_index_get_tuple_out_of_bounds() {
         let mi = MultiIndex::from_tuples(vec![vec!["a".into()]]).unwrap();
         assert!(mi.get_tuple(1).is_none());
+    }
+
+    #[test]
+    fn multi_index_get_loc_tuple_exact_and_duplicates() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["east".into(), "east".into(), "west".into(), "east".into()],
+            vec!["A".into(), "B".into(), "A".into(), "A".into()],
+        ])
+        .unwrap();
+
+        let positions = mi
+            .get_loc_tuple(&[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("A".into()),
+            ])
+            .unwrap();
+        assert_eq!(positions, vec![0, 3]);
+    }
+
+    #[test]
+    fn multi_index_get_loc_level_prefix_returns_remaining_index() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["east".into(), "east".into(), "west".into()],
+            vec!["A".into(), "B".into(), "A".into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("region".into()), Some("product".into())]);
+
+        let (positions, remaining) = mi
+            .get_loc_level(&[IndexLabel::Utf8("east".into())])
+            .unwrap();
+        assert_eq!(positions, vec![0, 1]);
+        assert!(matches!(
+            &remaining,
+            Some(super::MultiIndexOrIndex::Index(index))
+                if index.labels()
+                    == [IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
+                    && index.name() == Some("product")
+        ));
+    }
+
+    #[test]
+    fn multi_index_slice_locs_uses_lexicographic_bounds() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["east".into(), "east".into(), "west".into(), "west".into()],
+            vec![1_i64.into(), 2_i64.into(), 1_i64.into(), 2_i64.into()],
+        ])
+        .unwrap();
+
+        let (start, stop) = mi
+            .slice_locs(
+                Some(&[IndexLabel::Utf8("east".into()), IndexLabel::Int64(2)]),
+                Some(&[IndexLabel::Utf8("west".into()), IndexLabel::Int64(1)]),
+            )
+            .unwrap();
+        assert_eq!((start, stop), (1, 3));
     }
 
     #[test]

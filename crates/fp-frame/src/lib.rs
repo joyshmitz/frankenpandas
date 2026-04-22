@@ -14498,6 +14498,21 @@ impl DataFrame {
         Ok(fp_index::MultiIndex::from_arrays(arrays)?.set_names(row_multiindex.names().to_vec()))
     }
 
+    fn flatten_row_multiindex(row_multiindex: &fp_index::MultiIndex, sep: &str) -> Index {
+        let joined_name = row_multiindex
+            .names()
+            .iter()
+            .filter_map(|name| name.clone())
+            .collect::<Vec<_>>()
+            .join(sep);
+        let flat = row_multiindex.to_flat_index(sep);
+        if joined_name.is_empty() {
+            flat
+        } else {
+            flat.set_name(&joined_name)
+        }
+    }
+
     fn resolve_column_selector(
         &self,
         column_selector: Option<&[String]>,
@@ -16522,6 +16537,77 @@ impl DataFrame {
         Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
     }
 
+    fn require_row_multiindex(&self) -> Result<&fp_index::MultiIndex, FrameError> {
+        self.row_multiindex.as_ref().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "operation requires a row MultiIndex on the DataFrame".to_owned(),
+            )
+        })
+    }
+
+    /// Tuple-/prefix-key row selection against a row MultiIndex.
+    ///
+    /// Exact tuple keys (`[lvl0, lvl1, ...]`) match full composite rows.
+    /// Shorter keys act as prefix selection, mirroring `df.loc[(a, slice(None))]`
+    /// for the leading levels.
+    pub fn loc_tuple(&self, key: &[IndexLabel]) -> Result<Self, FrameError> {
+        let positions = self.get_loc(key, None)?;
+        self.take_rows_by_positions(&positions)
+    }
+
+    /// Tuple-/prefix-key row selection with an optional column subset.
+    pub fn loc_tuple_with_columns(
+        &self,
+        key: &[IndexLabel],
+        column_selector: Option<&[String]>,
+    ) -> Result<Self, FrameError> {
+        let positions = self.get_loc(key, None)?;
+        let selected_columns = self.resolve_column_selector(column_selector)?;
+        let mut columns = BTreeMap::new();
+        for name in &selected_columns {
+            let column = self.columns.get(name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+            })?;
+            let values = positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect::<Vec<_>>();
+            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
+        }
+
+        let index = self.index.take(&positions);
+        let row_multiindex = self
+            .row_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_row_multiindex(multiindex, &positions))
+            .transpose()?;
+        Self::new_with_axes(index, row_multiindex, columns, selected_columns, None)
+    }
+
+    /// Return row positions for a row-MultiIndex tuple or a single level key.
+    ///
+    /// `level=None` performs exact or prefix tuple lookup depending on key arity.
+    /// `level=Some(n)` performs a single-label lookup on the N-th level.
+    pub fn get_loc(
+        &self,
+        key: &[IndexLabel],
+        level: Option<usize>,
+    ) -> Result<Vec<usize>, FrameError> {
+        self.require_row_multiindex()?
+            .get_loc(key, level)
+            .map_err(FrameError::Index)
+    }
+
+    /// pandas-style tuple lookup returning matching positions and the remaining row index.
+    pub fn get_loc_level(
+        &self,
+        key: &[IndexLabel],
+    ) -> Result<(Vec<usize>, Option<fp_index::MultiIndexOrIndex>), FrameError> {
+        self.require_row_multiindex()?
+            .get_loc_level(key)
+            .map_err(FrameError::Index)
+    }
+
     /// Position-based row selection for list-like indexers.
     ///
     /// Matches `df.iloc[[...]]` for list selectors. Requested positions are
@@ -16736,6 +16822,19 @@ impl DataFrame {
             })?;
 
         self.row_to_series(pos)
+    }
+
+    /// Return a single row as a Series by exact row-MultiIndex tuple.
+    pub fn loc_row_tuple(&self, key: &[IndexLabel]) -> Result<Series, FrameError> {
+        let positions = self.require_row_multiindex()?.get_loc_tuple(key)?;
+        if positions.len() != 1 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "loc_row_tuple expected exactly 1 row for {:?}, found {}",
+                key,
+                positions.len()
+            )));
+        }
+        self.row_to_series(positions[0])
     }
 
     /// Return a single row as a Series by position.
@@ -25704,6 +25803,9 @@ impl DataFrame {
     ///
     /// Matches `df.xs(key)`. Returns all rows whose index matches `key`.
     pub fn xs(&self, key: &IndexLabel) -> Result<Self, FrameError> {
+        if self.row_multiindex.is_some() {
+            return self.xs_level(key, 0);
+        }
         let labels = self.index.labels();
         let matching: Vec<usize> = labels
             .iter()
@@ -25719,6 +25821,44 @@ impl DataFrame {
         }
 
         self.take_rows_by_positions(&matching)
+    }
+
+    /// Select a cross-section of rows by a specific row-MultiIndex level.
+    ///
+    /// Matches `df.xs(key, level=...)` and drops the selected level from the
+    /// resulting row index.
+    pub fn xs_level(&self, key: &IndexLabel, level: usize) -> Result<Self, FrameError> {
+        let row_multiindex = self.require_row_multiindex()?;
+        let positions = row_multiindex
+            .get_loc(std::slice::from_ref(key), Some(level))
+            .map_err(FrameError::Index)?;
+        let subset = self.take_rows_by_positions(&positions)?;
+        let subset_row_multiindex = subset
+            .row_multiindex
+            .as_ref()
+            .ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "xs_level lost row MultiIndex metadata during row selection".to_owned(),
+                )
+            })?
+            .clone();
+        let dropped = subset_row_multiindex.droplevel(level)?;
+        match dropped {
+            fp_index::MultiIndexOrIndex::Index(index) => DataFrame::new_with_axes(
+                index,
+                None,
+                subset.columns.clone(),
+                subset.column_order.clone(),
+                subset.column_multiindex.clone(),
+            ),
+            fp_index::MultiIndexOrIndex::Multi(row_multiindex) => DataFrame::new_with_axes(
+                Self::flatten_row_multiindex(&row_multiindex, "|"),
+                Some(row_multiindex),
+                subset.columns.clone(),
+                subset.column_order.clone(),
+                subset.column_multiindex.clone(),
+            ),
+        }
     }
 
     /// Drop the index level (reset to default integer index).
@@ -61149,6 +61289,262 @@ mod tests {
         assert_eq!(
             level1.labels(),
             &[IndexLabel::Utf8("C".into()), IndexLabel::Utf8("A".into())]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_tuple_exact_selects_matching_row_multiindex_rows() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let out = df
+            .loc_tuple(&[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("A".into()),
+            ])
+            .unwrap();
+        assert_eq!(out.index().labels().len(), 2);
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("east|A".into()),
+                IndexLabel::Utf8("east|A".into())
+            ]
+        );
+        assert_eq!(
+            out.column("sales").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(5)]
+        );
+        let row_multiindex = out
+            .row_multiindex()
+            .expect("loc_tuple should preserve row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.get_level_values(0).unwrap().labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("east".into())
+            ]
+        );
+        assert_eq!(
+            row_multiindex.get_level_values(1).unwrap().labels(),
+            &[IndexLabel::Utf8("A".into()), IndexLabel::Utf8("A".into())]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_tuple_prefix_selects_leading_multiindex_level() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let out = df.loc_tuple(&[IndexLabel::Utf8("east".into())]).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("east|A".into()),
+                IndexLabel::Utf8("east|B".into())
+            ]
+        );
+        assert_eq!(
+            out.column("sales").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+        let row_multiindex = out
+            .row_multiindex()
+            .expect("prefix loc_tuple should preserve row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.get_level_values(0).unwrap().labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("east".into())
+            ]
+        );
+        assert_eq!(
+            row_multiindex.get_level_values(1).unwrap().labels(),
+            &[IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
+        );
+    }
+
+    #[test]
+    fn dataframe_get_loc_and_get_loc_level_use_row_multiindex() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let exact = df
+            .get_loc(
+                &[
+                    IndexLabel::Utf8("east".into()),
+                    IndexLabel::Utf8("A".into()),
+                ],
+                None,
+            )
+            .unwrap();
+        assert_eq!(exact, vec![0, 3]);
+
+        let by_level = df
+            .get_loc(&[IndexLabel::Utf8("east".into())], Some(0))
+            .unwrap();
+        assert_eq!(by_level, vec![0, 1, 3]);
+
+        let (positions, remaining) = df
+            .get_loc_level(&[IndexLabel::Utf8("east".into())])
+            .unwrap();
+        assert_eq!(positions, vec![0, 1, 3]);
+        assert!(matches!(
+            &remaining,
+            Some(fp_index::MultiIndexOrIndex::Index(index))
+                if index.labels()
+                    == [
+                        IndexLabel::Utf8("A".into()),
+                        IndexLabel::Utf8("B".into()),
+                        IndexLabel::Utf8("A".into())
+                    ]
+                    && index.name() == Some("product")
+        ));
+    }
+
+    #[test]
+    fn dataframe_xs_level_drops_selected_row_multiindex_level() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let out = df.xs_level(&IndexLabel::Utf8("east".into()), 0).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("A".into()),
+                IndexLabel::Utf8("B".into()),
+                IndexLabel::Utf8("A".into())
+            ]
+        );
+        assert!(out.row_multiindex().is_none());
+        assert_eq!(
+            out.column("sales").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(5)]
         );
     }
 

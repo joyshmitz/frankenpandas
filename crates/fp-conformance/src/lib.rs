@@ -4770,19 +4770,7 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
                             vec![],
                         )
                     } else {
-                        let errs = build_failure_surface_entries_for_report(&report)
-                            .into_iter()
-                            .map(|entry| {
-                                format!(
-                                    "packet_id={} case_id={} mode={} mismatch_class={} mismatch={}",
-                                    entry.packet_id,
-                                    entry.case_id,
-                                    runtime_mode_slug(entry.mode),
-                                    entry.mismatch_class,
-                                    entry.mismatch,
-                                )
-                            })
-                            .collect();
+                        let errs = build_g6_conformance_errors(&config.harness_config, &report);
                         (
                             false,
                             format!("{}/{} fixtures failed", report.failed, report.fixture_count),
@@ -4881,6 +4869,37 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
         summary,
         errors,
     }
+}
+
+fn build_g6_conformance_errors(config: &HarnessConfig, report: &PacketParityReport) -> Vec<String> {
+    let mut errors: Vec<_> = build_failure_surface_entries_for_report(report)
+        .into_iter()
+        .map(|entry| {
+            format!(
+                "packet_id={} case_id={} mode={} mismatch_class={} mismatch={}",
+                entry.packet_id,
+                entry.case_id,
+                runtime_mode_slug(entry.mode),
+                entry.mismatch_class,
+                entry.mismatch,
+            )
+        })
+        .collect();
+
+    match write_case_evidence_jsonl(config, std::slice::from_ref(report)) {
+        Ok(paths) => {
+            errors.extend(
+                paths
+                    .into_iter()
+                    .map(|path| format!("case_evidence_artifact={}", path.display())),
+            );
+        }
+        Err(err) => {
+            errors.push(format!("case_evidence_artifact_write_failed={err}"));
+        }
+    }
+
+    errors
 }
 
 /// Run the full CI gate pipeline with fail-fast and forensics.
@@ -21781,12 +21800,12 @@ mod tests {
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         build_failure_surface_entries, build_failure_surface_entries_for_report,
-        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
-        fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_dataframe_eval_bytes,
-        fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_format_cross_round_trip_bytes, fuzz_groupby_agg_bytes, fuzz_groupby_sum_bytes,
-        fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes,
-        fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_pivot_table_bytes,
+        build_g6_conformance_errors, enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate,
+        fuzz_column_arith_bytes, fuzz_common_dtype_bytes, fuzz_csv_parse_bytes,
+        fuzz_dataframe_eval_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes,
+        fuzz_fixture_parse_bytes, fuzz_format_cross_round_trip_bytes, fuzz_groupby_agg_bytes,
+        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes,
+        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_pivot_table_bytes,
         fuzz_rolling_window_bytes, fuzz_scalar_cast_bytes, fuzz_semantic_eq_bytes,
         fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
         run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
@@ -21925,15 +21944,26 @@ mod tests {
             !result.errors.is_empty(),
             "{label} expected actionable ci gate errors\n{result:#?}"
         );
+        let mut saw_structured_failure = false;
         for error in &result.errors {
+            if error.contains("packet_id=")
+                && error.contains("case_id=")
+                && error.contains("mismatch_class=")
+                && error.contains("mismatch=")
+            {
+                saw_structured_failure = true;
+                continue;
+            }
             assert!(
-                error.contains("packet_id=")
-                    && error.contains("case_id=")
-                    && error.contains("mismatch_class=")
-                    && error.contains("mismatch="),
+                error.starts_with("case_evidence_artifact=")
+                    || error.starts_with("case_evidence_artifact_write_failed="),
                 "{label} expected structured ci gate error rows\n{result:#?}",
             );
         }
+        assert!(
+            saw_structured_failure,
+            "{label} expected at least one structured failure row\n{result:#?}"
+        );
     }
 
     fn sample_failure_digest() -> FailureDigest {
@@ -31330,6 +31360,61 @@ mod tests {
 
         let aggregated = build_case_evidence_entries(&[report]);
         assert_eq!(aggregated.len(), 2);
+    }
+
+    #[test]
+    fn g6_conformance_errors_include_case_evidence_artifacts() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.repo_root = tmp.path().to_path_buf();
+
+        let report = PacketParityReport {
+            suite: "phase2c_packets:FP-P2C-001".to_owned(),
+            packet_id: Some("FP-P2C-001".to_owned()),
+            oracle_present: true,
+            fixture_count: 1,
+            passed: 0,
+            failed: 1,
+            results: vec![CaseResult {
+                packet_id: "FP-P2C-001".to_owned(),
+                case_id: "case_a".to_owned(),
+                mode: RuntimeMode::Strict,
+                operation: FixtureOperation::SeriesAdd,
+                status: CaseStatus::Fail,
+                mismatch: Some(
+                    "[Value/Critical] value mismatch at idx=1: actual=Int64(2), expected=Int64(3)"
+                        .to_owned(),
+                ),
+                mismatch_class: Some("value_critical".to_owned()),
+                replay_key: "FP-P2C-001/case_a/strict".to_owned(),
+                trace_id: "FP-P2C-001:case_a:strict".to_owned(),
+                elapsed_us: 7,
+                evidence_records: 1,
+            }],
+        };
+
+        let errors = build_g6_conformance_errors(&cfg, &report);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("packet_id=FP-P2C-001")
+                    && error.contains("case_id=case_a")
+                    && error.contains("mismatch_class=value_critical")
+            }),
+            "expected structured failure row: {errors:#?}"
+        );
+
+        let artifact_line = errors
+            .iter()
+            .find(|error| error.starts_with("case_evidence_artifact="))
+            .expect("expected case evidence artifact");
+        let artifact_path = artifact_line
+            .strip_prefix("case_evidence_artifact=")
+            .expect("artifact prefix");
+        let content = fs::read_to_string(artifact_path).expect("read case evidence artifact");
+        assert!(
+            content.contains("\"ledger_id\""),
+            "expected machine-readable ledger id in artifact: {content}"
+        );
     }
 
     #[test]

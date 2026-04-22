@@ -58975,6 +58975,184 @@ mod tests {
         );
     }
 
+    #[test]
+    fn groupby_resample_first_last_int64_input_preserves_value_dtype() {
+        // a7v2 covers Float64 inputs; auwr complements with Int64 to lock
+        // the dtype-coercion path on grouped resample first/last.
+        // Pandas first()/last() on Int64 + monthly buckets keeps Int64
+        // values (no NaN to widen).
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(11),
+                        Scalar::Int64(13),
+                        Scalar::Int64(20),
+                        Scalar::Int64(22),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-05".into(),
+                "2024-01-25".into(),
+                "2024-01-10".into(),
+                "2024-01-30".into(),
+            ],
+        )
+        .unwrap();
+
+        let firsts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let lasts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        // First row of group 'a' bucket 2024-01 is Int64(11).
+        assert_eq!(firsts.column("val").unwrap().values()[0], Scalar::Int64(11));
+        // Last row of group 'a' bucket 2024-01 is Int64(13).
+        assert_eq!(lasts.column("val").unwrap().values()[0], Scalar::Int64(13));
+        // Same for group 'b'.
+        assert_eq!(firsts.column("val").unwrap().values()[1], Scalar::Int64(20));
+        assert_eq!(lasts.column("val").unwrap().values()[1], Scalar::Int64(22));
+    }
+
+    #[test]
+    fn groupby_resample_first_last_all_null_bucket_emits_nan() {
+        // Both groups have a 2024-02 bucket whose only value is NaN.
+        // first()/last() must emit NaN for those buckets (no synthetic
+        // value substitution); the 2024-01 buckets serve as a sanity
+        // baseline to confirm the same call still produces real values
+        // elsewhere.
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(7.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(11.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-15".into(),
+                "2024-02-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+        )
+        .unwrap();
+
+        let firsts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let lasts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        // 2024-01 buckets: real values present.
+        assert_eq!(firsts.column("val").unwrap().values()[0], Scalar::Float64(7.0));
+        assert_eq!(lasts.column("val").unwrap().values()[0], Scalar::Float64(7.0));
+        assert_eq!(firsts.column("val").unwrap().values()[2], Scalar::Float64(11.0));
+        assert_eq!(lasts.column("val").unwrap().values()[2], Scalar::Float64(11.0));
+        // 2024-02 buckets: only-NaN value -> first/last must be NaN.
+        assert!(firsts.column("val").unwrap().values()[1].is_missing());
+        assert!(lasts.column("val").unwrap().values()[1].is_missing());
+        assert!(firsts.column("val").unwrap().values()[3].is_missing());
+        assert!(lasts.column("val").unwrap().values()[3].is_missing());
+    }
+
+    #[test]
+    fn groupby_resample_first_eq_last_for_single_row_buckets() {
+        // When every bucket has exactly one row, first() must equal
+        // last() for every output cell. Locks the degenerate case so
+        // future agg-broadcasting changes can't silently diverge them.
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-15".into(),
+                "2024-02-15".into(),
+                "2024-01-15".into(),
+                "2024-02-15".into(),
+            ],
+        )
+        .unwrap();
+
+        let firsts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let lasts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        let firsts_vals = firsts.column("val").unwrap().values();
+        let lasts_vals = lasts.column("val").unwrap().values();
+        assert_eq!(firsts_vals.len(), 4);
+        assert_eq!(firsts_vals, lasts_vals);
+        assert_eq!(firsts_vals[0], Scalar::Float64(1.0));
+        assert_eq!(firsts_vals[1], Scalar::Float64(2.0));
+        assert_eq!(firsts_vals[2], Scalar::Float64(3.0));
+        assert_eq!(firsts_vals[3], Scalar::Float64(4.0));
+    }
+
     // ── DataFrame.astype (all columns) ──────────────────────────────
 
     #[test]

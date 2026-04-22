@@ -93,6 +93,42 @@ jobs:
           path: artifacts/ci/governance_gate_report.json
           if-no-files-found: warn
 
+  security:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-audit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: RustSec advisory audit
+        run: cargo audit --deny warnings
+
+  licenses:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-deny
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: License and source policy audit
+        run: cargo deny check advisories bans licenses sources
+
   fuzz-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 90

@@ -862,6 +862,16 @@ pub enum FixtureOperation {
         alias = "data_frame_groupby_resample_count"
     )]
     DataFrameGroupByResampleCount,
+    #[serde(
+        rename = "dataframe_groupby_resample_first",
+        alias = "data_frame_groupby_resample_first"
+    )]
+    DataFrameGroupByResampleFirst,
+    #[serde(
+        rename = "dataframe_groupby_resample_last",
+        alias = "data_frame_groupby_resample_last"
+    )]
+    DataFrameGroupByResampleLast,
     #[serde(rename = "dataframe_asof", alias = "data_frame_asof")]
     DataFrameAsof,
     #[serde(rename = "dataframe_at_time", alias = "data_frame_at_time")]
@@ -1353,6 +1363,8 @@ impl FixtureOperation {
             Self::DataFrameGroupByResampleMin => "dataframe_groupby_resample_min",
             Self::DataFrameGroupByResampleMax => "dataframe_groupby_resample_max",
             Self::DataFrameGroupByResampleCount => "dataframe_groupby_resample_count",
+            Self::DataFrameGroupByResampleFirst => "dataframe_groupby_resample_first",
+            Self::DataFrameGroupByResampleLast => "dataframe_groupby_resample_last",
             Self::DataFrameAsof => "dataframe_asof",
             Self::DataFrameAtTime => "dataframe_at_time",
             Self::DataFrameBetweenTime => "dataframe_between_time",
@@ -2427,7 +2439,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
-        | FixtureOperation::DataFrameGroupByResampleCount => &["CC-004"],
+        | FixtureOperation::DataFrameGroupByResampleCount
+        | FixtureOperation::DataFrameGroupByResampleFirst
+        | FixtureOperation::DataFrameGroupByResampleLast => &["CC-004"],
     }
 }
 
@@ -9678,7 +9692,9 @@ fn run_fixture_operation(
         }
         FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
-        | FixtureOperation::DataFrameGroupByResampleCount => {
+        | FixtureOperation::DataFrameGroupByResampleCount
+        | FixtureOperation::DataFrameGroupByResampleFirst
+        | FixtureOperation::DataFrameGroupByResampleLast => {
             let op_name = fixture.operation.operation_name();
             let actual = execute_dataframe_groupby_resample_fixture_operation(fixture);
             match expected {
@@ -10802,7 +10818,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
-        | FixtureOperation::DataFrameGroupByResampleCount => fixture
+        | FixtureOperation::DataFrameGroupByResampleCount
+        | FixtureOperation::DataFrameGroupByResampleFirst
+        | FixtureOperation::DataFrameGroupByResampleLast => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -11427,7 +11445,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
-        | FixtureOperation::DataFrameGroupByResampleCount => response
+        | FixtureOperation::DataFrameGroupByResampleCount
+        | FixtureOperation::DataFrameGroupByResampleFirst
+        | FixtureOperation::DataFrameGroupByResampleLast => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -13866,6 +13886,13 @@ fn execute_dataframe_groupby_resample_fixture_operation(
             .resample(freq)
             .count()
             .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameGroupByResampleFirst => groupby
+            .resample(freq)
+            .first()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameGroupByResampleLast => {
+            groupby.resample(freq).last().map_err(|err| err.to_string())
+        }
         other => Err(format!(
             "unsupported dataframe groupby resample operation: {other:?}"
         )),
@@ -19161,6 +19188,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount
+        | FixtureOperation::DataFrameGroupByResampleFirst
+        | FixtureOperation::DataFrameGroupByResampleLast
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameGroupByRollingMean
@@ -19172,7 +19201,9 @@ fn execute_and_compare_differential(
                 }
                 FixtureOperation::DataFrameGroupByResampleMin
                 | FixtureOperation::DataFrameGroupByResampleMax
-                | FixtureOperation::DataFrameGroupByResampleCount => {
+                | FixtureOperation::DataFrameGroupByResampleCount
+                | FixtureOperation::DataFrameGroupByResampleFirst
+                | FixtureOperation::DataFrameGroupByResampleLast => {
                     execute_dataframe_groupby_resample_fixture_operation(fixture)
                 }
                 _ => execute_dataframe_fixture_operation(fixture),
@@ -28207,6 +28238,108 @@ mod tests {
                         { "kind": "float64", "value": 7.0 },
                         { "kind": "float64", "value": 9.0 },
                         { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_resample_first_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-451",
+            "case_id": "dataframe_groupby_resample_first_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_resample_first",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "resample_freq": "M",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01" },
+                    { "kind": "utf8", "value": "2024-01-20" },
+                    { "kind": "utf8", "value": "2024-02-01" },
+                    { "kind": "utf8", "value": "2024-02-25" },
+                    { "kind": "utf8", "value": "2024-01-05" },
+                    { "kind": "utf8", "value": "2024-01-25" },
+                    { "kind": "utf8", "value": "2024-02-05" },
+                    { "kind": "utf8", "value": "2024-02-20" }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 7.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_resample_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_resample_last_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-452",
+            "case_id": "dataframe_groupby_resample_last_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_resample_last",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "resample_freq": "M",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01" },
+                    { "kind": "utf8", "value": "2024-01-20" },
+                    { "kind": "utf8", "value": "2024-02-01" },
+                    { "kind": "utf8", "value": "2024-02-25" },
+                    { "kind": "utf8", "value": "2024-01-05" },
+                    { "kind": "utf8", "value": "2024-01-25" },
+                    { "kind": "utf8", "value": "2024-02-05" },
+                    { "kind": "utf8", "value": "2024-02-20" }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 7.0 }
                     ]
                 }
             }

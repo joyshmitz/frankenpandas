@@ -3165,6 +3165,18 @@ def op_dataframe_groupby_resample_count(pd, payload: dict[str, Any]) -> dict[str
     )
 
 
+def op_dataframe_groupby_resample_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_resample_builtin(
+        pd, payload, "first", "dataframe_groupby_resample_first"
+    )
+
+
+def op_dataframe_groupby_resample_last(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_resample_builtin(
+        pd, payload, "last", "dataframe_groupby_resample_last"
+    )
+
+
 def op_dataframe_groupby_rolling_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return op_dataframe_groupby_rolling_builtin(
         pd, payload, "mean", "dataframe_groupby_rolling_mean"
@@ -4624,6 +4636,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_resample_max(pd, payload)
     if op in {"dataframe_groupby_resample_count", "data_frame_groupby_resample_count"}:
         return op_dataframe_groupby_resample_count(pd, payload)
+    if op in {"dataframe_groupby_resample_first", "data_frame_groupby_resample_first"}:
+        return op_dataframe_groupby_resample_first(pd, payload)
+    if op in {"dataframe_groupby_resample_last", "data_frame_groupby_resample_last"}:
+        return op_dataframe_groupby_resample_last(pd, payload)
     if op in {"dataframe_groupby_rolling_mean", "data_frame_groupby_rolling_mean"}:
         return op_dataframe_groupby_rolling_mean(pd, payload)
     if op in {"dataframe_groupby_rolling_sum", "data_frame_groupby_rolling_sum"}:

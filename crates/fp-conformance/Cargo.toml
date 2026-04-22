@@ -29,6 +29,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 fp-io = { path = "../fp-io" }
 fp-join = { path = "../fp-join" }
-proptest = "1.10.0"
+proptest = "1.11.0"
 rusqlite = { workspace = true }
 tempfile = "3.14.0"

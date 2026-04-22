@@ -58446,6 +58446,132 @@ mod tests {
         assert!(var_vals[6].is_missing());
     }
 
+    #[test]
+    fn groupby_rolling_std_var_int64_input_widens_to_float_with_ddof1_semantics() {
+        // Complements groupby_rolling_std_var_respect_group_boundaries...
+        // by exercising Int64 inputs and explicit ddof=1 sample-variance
+        // semantics on a constant window (var=0, std=0). Uses two
+        // multi-row groups with a constant tail to lock numeric
+        // expectations and dtype coercion to Float64 output.
+        let df = DataFrame::from_dict(
+            &["grp", "v"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(4),
+                        Scalar::Int64(4),
+                        Scalar::Int64(4),
+                        Scalar::Int64(10),
+                        Scalar::Int64(10),
+                        Scalar::Int64(10),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let stds = gb.rolling(3).std().unwrap();
+        let std_vals = stds.column("v").unwrap().values();
+        // group a windows (positions 0..3 in original order):
+        //   [2,4,4]   -> mean 10/3, ssq = (2-10/3)^2 + 2*(4-10/3)^2 = 8/3 → ddof=1 var = (8/3)/2 = 4/3
+        // group a windows (positions 1..3):
+        //   [4,4,4]   -> var = 0
+        // group b windows: [10,10,10] -> var = 0
+        assert!(std_vals[0].is_missing());
+        assert!(std_vals[1].is_missing());
+        assert!((expect_float64(&std_vals[2]) - (4.0_f64 / 3.0).sqrt()).abs() < 1e-10);
+        assert!((expect_float64(&std_vals[3]) - 0.0).abs() < 1e-12);
+        assert!(std_vals[4].is_missing());
+        assert!(std_vals[5].is_missing());
+        assert!((expect_float64(&std_vals[6]) - 0.0).abs() < 1e-12);
+
+        let vars = gb.rolling(3).var().unwrap();
+        let var_vals = vars.column("v").unwrap().values();
+        assert!(var_vals[0].is_missing());
+        assert!(var_vals[1].is_missing());
+        assert!((expect_float64(&var_vals[2]) - (4.0_f64 / 3.0)).abs() < 1e-10);
+        assert!((expect_float64(&var_vals[3]) - 0.0).abs() < 1e-12);
+        assert!(var_vals[4].is_missing());
+        assert!(var_vals[5].is_missing());
+        assert!((expect_float64(&var_vals[6]) - 0.0).abs() < 1e-12);
+
+        // Output dtype must widen Int64 -> Float64 (variance is fractional).
+        assert_eq!(stds.column("v").unwrap().dtype(), DType::Float64);
+        assert_eq!(vars.column("v").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn groupby_rolling_std_var_all_nan_window_emits_nan() {
+        // When every value inside a group's rolling window is NaN, std/var
+        // must emit NaN (pandas oracle). Group b is all-NaN to exercise
+        // this end-to-end; group a serves as a sanity baseline.
+        let df = DataFrame::from_dict(
+            &["grp", "v"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let stds = gb.rolling(2).std().unwrap();
+        let std_vals = stds.column("v").unwrap().values();
+        // group a positions 0,2,4: window=2 -> first valid at idx 2.
+        assert!(std_vals[0].is_missing());
+        assert!(std_vals[1].is_missing());
+        assert!((expect_float64(&std_vals[2]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
+        assert!(std_vals[3].is_missing());
+        assert!((expect_float64(&std_vals[4]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
+        assert!(std_vals[5].is_missing());
+
+        let vars = gb.rolling(2).var().unwrap();
+        let var_vals = vars.column("v").unwrap().values();
+        assert!(var_vals[0].is_missing());
+        assert!(var_vals[1].is_missing());
+        assert!((expect_float64(&var_vals[2]) - 0.5).abs() < 1e-10);
+        assert!(var_vals[3].is_missing());
+        assert!((expect_float64(&var_vals[4]) - 0.5).abs() < 1e-10);
+        assert!(var_vals[5].is_missing());
+    }
+
     // ── GroupBy resample tests ───────────────────────────────────────
 
     #[test]

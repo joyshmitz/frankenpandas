@@ -296,6 +296,18 @@ cargo test -p fp-conformance -- --nocapture
 cargo bench
 ```
 
+### Fixture Regeneration Playbook
+
+When pandas behavior changes or fixture provenance needs to move forward:
+
+1. Bump `crates/fp-conformance/oracle/requirements.txt`
+2. Regenerate the affected fixtures with `crates/fp-conformance/oracle/pandas_oracle.py`
+3. Run `./scripts/check_fixture_freshness.sh`
+4. Review every fixture diff with `git diff crates/fp-conformance/fixtures/packets`
+5. Document intentional divergences in `crates/fp-conformance/DISCREPANCIES.md`
+6. Commit the fixture corpus, oracle changes, and pin bump atomically
+7. Never land fixture changes without matching `fixture_provenance`
+
 ---
 
 ## ast-grep vs ripgrep

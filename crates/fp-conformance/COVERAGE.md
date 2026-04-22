@@ -220,7 +220,8 @@ The following pandas operations are NOT yet covered by conformance fixtures:
 ## Fixture Provenance
 
 **Generator:** `crates/fp-conformance/oracle/pandas_oracle.py`
-**pandas version:** System pandas (typically 2.x)
+**pandas version:** `2.2.3` (pinned in `crates/fp-conformance/oracle/requirements.txt`)
+**Stale-fixture gate:** `./scripts/check_fixture_freshness.sh`
 **Generation command:**
 ```bash
 python3 crates/fp-conformance/oracle/pandas_oracle.py \

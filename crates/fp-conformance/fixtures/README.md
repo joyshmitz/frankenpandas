@@ -10,7 +10,7 @@ This folder stores normalized oracle-vs-target fixtures for fp-conformance.
 ## Provenance
 
 **Generator:** `../oracle/pandas_oracle.py`
-**Reference implementation:** pandas (system install, typically 2.x)
+**Reference implementation:** pandas `2.2.3` (pinned in `../oracle/requirements.txt`)
 **Generation workflow:**
 ```bash
 # Generate fixture from oracle
@@ -19,6 +19,11 @@ python3 ../oracle/pandas_oracle.py \
   < request.json > response.json
 ```
 
+Every packet fixture now carries a top-level `fixture_provenance` object with:
+- `pandas_version`
+- `oracle_script_sha256`
+- `generated_at`
+
 ## Fixture Format
 
 Each packet fixture is a JSON object with:
@@ -26,6 +31,7 @@ Each packet fixture is a JSON object with:
 - `case_id`: Human-readable test case name
 - `mode`: "strict" or "hardened"
 - `operation`: The pandas operation being tested
+- `fixture_provenance`: Oracle/version/timestamp metadata for stale-fixture detection
 - `left`, `right`, `frame`: Input data
 - `expected_*`: Expected output from pandas oracle
 
@@ -34,10 +40,12 @@ Each packet fixture is a JSON object with:
 When pandas behavior changes or new operations are added:
 
 1. Update the oracle script to handle new operations
-2. Generate new fixtures via the oracle
-3. Review diff: `git diff fixtures/`
-4. Document any divergences in `../DISCREPANCIES.md`
-5. Commit with message referencing the change
+2. If pandas behavior changed, bump `../oracle/requirements.txt` first
+3. Generate new fixtures via the oracle
+4. Run `../../scripts/check_fixture_freshness.sh`
+5. Review diff: `git diff fixtures/`
+6. Document any divergences in `../DISCREPANCIES.md`
+7. Commit with message referencing the change
 
 ## Current Coverage
 

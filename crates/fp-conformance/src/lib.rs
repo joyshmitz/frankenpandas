@@ -1588,12 +1588,21 @@ pub struct FixtureExpectedJoin {
     pub right_values: Vec<Scalar>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureProvenance {
+    pub pandas_version: String,
+    pub oracle_script_sha256: String,
+    pub generated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PacketFixture {
     pub packet_id: String,
     pub case_id: String,
     pub mode: RuntimeMode,
     pub operation: FixtureOperation,
+    #[serde(default)]
+    pub fixture_provenance: Option<FixtureProvenance>,
     #[serde(default)]
     pub oracle_source: Option<FixtureOracleSource>,
     #[serde(default)]
@@ -3229,6 +3238,8 @@ struct OracleResponse {
     expected_scalar: Option<Scalar>,
     #[serde(default)]
     expected_dtype: Option<String>,
+    #[serde(default)]
+    fixture_provenance: Option<FixtureProvenance>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -11496,6 +11507,7 @@ fn capture_live_oracle_expected(
     }
 
     let response: OracleResponse = serde_json::from_slice(&output.stdout)?;
+    let _ = response.fixture_provenance.as_ref();
     if let Some(error) = response.error {
         if expects_error {
             return Ok(ResolvedExpected::ErrorAny);
@@ -32244,5 +32256,60 @@ mod tests {
             values[1].is_missing(),
             "malformed string should produce NaT"
         );
+    }
+
+    #[test]
+    fn packet_fixture_deserializes_without_fixture_provenance() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2C-LEGACY",
+            "case_id": "legacy_fixture_without_provenance",
+            "mode": "strict",
+            "operation": "series_add",
+            "left": {
+                "name": "left",
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "int64", "value": 1 }]
+            },
+            "right": {
+                "name": "right",
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "int64", "value": 2 }]
+            },
+            "expected_series": {
+                "index": [{ "kind": "int64", "value": 0 }],
+                "values": [{ "kind": "int64", "value": 3 }]
+            }
+        }))
+        .expect("legacy packet fixture should deserialize");
+
+        assert!(fixture.fixture_provenance.is_none());
+    }
+
+    #[test]
+    fn oracle_response_deserializes_with_fixture_provenance() {
+        let response: super::OracleResponse = serde_json::from_value(serde_json::json!({
+            "expected_series": null,
+            "expected_join": null,
+            "expected_frame": null,
+            "expected_alignment": null,
+            "expected_bool": true,
+            "expected_positions": null,
+            "expected_scalar": null,
+            "expected_dtype": null,
+            "fixture_provenance": {
+                "pandas_version": "2.2.3",
+                "oracle_script_sha256": "abc123",
+                "generated_at": "2026-04-22T21:00:00Z"
+            },
+            "error": null
+        }))
+        .expect("oracle response should deserialize");
+
+        let provenance = response
+            .fixture_provenance
+            .expect("expected fixture provenance");
+        assert_eq!(provenance.pandas_version, "2.2.3");
+        assert_eq!(provenance.oracle_script_sha256, "abc123");
+        assert_eq!(provenance.generated_at, "2026-04-22T21:00:00Z");
     }
 }

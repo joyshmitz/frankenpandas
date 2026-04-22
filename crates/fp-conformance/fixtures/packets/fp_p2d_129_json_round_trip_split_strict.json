@@ -3,6 +3,11 @@
   "case_id": "json_round_trip_split_strict",
   "mode": "strict",
   "operation": "json_round_trip",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
+    "generated_at": "2026-04-22T21:02:48Z"
+  },
   "json_input": "{\"columns\": [\"A\", \"B\"], \"index\": [0, 1, 2], \"data\": [[1, 10], [2, 20], [3, 30]]}",
   "json_orient": "split",
   "expected_bool": true

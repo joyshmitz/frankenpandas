@@ -11,6 +11,7 @@ This script is strict by default when --strict-legacy is provided:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import io
 import json
@@ -19,6 +20,7 @@ import os
 import struct
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -4934,7 +4936,10 @@ def main() -> int:
     args = parse_args()
     try:
         pd = setup_pandas(args)
-        payload = json.load(sys.stdin)
+        try:
+            payload = json.load(sys.stdin)
+        except json.JSONDecodeError as exc:
+            raise OracleError(f"invalid oracle request JSON: {exc}") from exc
         response = dispatch(pd, payload)
         response.setdefault("expected_series", None)
         response.setdefault("expected_join", None)
@@ -4944,6 +4949,16 @@ def main() -> int:
         response.setdefault("expected_positions", None)
         response.setdefault("expected_scalar", None)
         response.setdefault("expected_dtype", None)
+        with open(__file__, "rb") as script_handle:
+            oracle_script_sha256 = hashlib.sha256(script_handle.read()).hexdigest()
+        response["fixture_provenance"] = {
+            "pandas_version": str(pd.__version__),
+            "oracle_script_sha256": oracle_script_sha256,
+            "generated_at": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
         response["error"] = None
         json.dump(response, sys.stdout)
         return 0
@@ -4958,6 +4973,7 @@ def main() -> int:
                 "expected_positions": None,
                 "expected_scalar": None,
                 "expected_dtype": None,
+                "fixture_provenance": None,
                 "error": str(exc),
             },
             sys.stdout,
@@ -4974,6 +4990,7 @@ def main() -> int:
                 "expected_positions": None,
                 "expected_scalar": None,
                 "expected_dtype": None,
+                "fixture_provenance": None,
                 "error": f"unexpected oracle failure: {exc}",
             },
             sys.stdout,

@@ -2086,6 +2086,38 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
     }
 }
 
+fn infer_writer_emitted_default_excel_index_col(
+    headers: &[String],
+    header_generated: &[bool],
+    columns: &[Vec<Scalar>],
+    options: &ExcelReadOptions,
+) -> Option<usize> {
+    if !options.has_headers
+        || options.index_col.is_some()
+        || options.usecols.is_some()
+        || options.names.is_some()
+    {
+        return None;
+    }
+
+    if headers.first()?.as_str() != "column_0"
+        || !header_generated.first().copied().unwrap_or(false)
+    {
+        return None;
+    }
+
+    let first_col = columns.first()?;
+    if first_col
+        .iter()
+        .enumerate()
+        .all(|(idx, scalar)| matches!(scalar, Scalar::Int64(value) if *value == idx as i64))
+    {
+        Some(0)
+    } else {
+        None
+    }
+}
+
 /// Shared parsing logic for Excel data after extracting rows from a workbook.
 fn parse_excel_rows(
     rows: Vec<Vec<calamine::Data>>,
@@ -2183,7 +2215,7 @@ fn parse_excel_rows(
         }
         pos
     } else {
-        None
+        infer_writer_emitted_default_excel_index_col(&headers, &header_generated, &columns, options)
     };
 
     let index_name = index_col_idx.and_then(|idx_pos| {
@@ -5545,22 +5577,41 @@ mod tests {
     }
 
     #[test]
-    fn excel_default_read_exposes_written_index_as_first_column() {
+    fn excel_default_read_promotes_writer_range_index_back_to_index() {
         let frame = make_test_dataframe();
         let bytes = super::write_excel_bytes(&frame).expect("write excel");
 
         let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
             .expect("read excel");
 
-        let order: Vec<&str> = frame2
-            .column_names()
-            .iter()
-            .map(|name| name.as_str())
-            .collect();
-        assert_eq!(order, vec!["column_0", "ints", "floats", "names"]);
+        assert_eq!(frame2.index().labels(), frame.index().labels());
+        assert_eq!(frame2.index().name(), None);
+        assert_eq!(frame2.column_names(), vec!["ints", "floats", "names"],);
+        assert!(frame2.column("column_0").is_none());
+    }
+
+    #[test]
+    fn excel_default_read_keeps_non_range_generated_leading_column_as_data() {
+        let rows = vec![
+            vec![
+                calamine::Data::Empty,
+                calamine::Data::String("value".to_owned()),
+            ],
+            vec![calamine::Data::Int(10), calamine::Data::Int(1)],
+            vec![calamine::Data::Int(20), calamine::Data::Int(2)],
+        ];
+
+        let frame = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
+            .expect("parse excel rows");
+
         assert_eq!(
-            frame2.column("column_0").unwrap().values(),
-            &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2),]
+            frame.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(frame.column_names(), vec!["column_0", "value"]);
+        assert_eq!(
+            frame.column("column_0").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)],
         );
     }
 

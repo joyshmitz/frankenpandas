@@ -59364,6 +59364,149 @@ mod tests {
         assert_eq!(firsts_vals[3], Scalar::Float64(4.0));
     }
 
+    #[test]
+    fn groupby_resample_first_last_three_groups_negative_values() {
+        // icm3 complement: a7v2/auwr cover 2 groups + non-negative values.
+        // Add a 3-group case with negative values to exercise group-key
+        // hashing/ordering at higher cardinality and value-bound min/max
+        // relevant nuances (first/last care about position, not magnitude,
+        // but a stable test against negatives prevents future agg-broadcast
+        // changes from accidentally collapsing first/last into min/max).
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("c".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("c".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(-3.0),
+                        Scalar::Float64(-1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(-5.0),
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-05".into(),
+                "2024-01-10".into(),
+                "2024-01-15".into(),
+                "2024-01-25".into(),
+                "2024-01-20".into(),
+                "2024-01-30".into(),
+            ],
+        )
+        .unwrap();
+
+        let firsts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let lasts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        // Three groups, one bucket each: row order within bucket reflects
+        // input order. first=row1, last=row2 within each group.
+        let firsts_vals = firsts.column("val").unwrap().values();
+        let lasts_vals = lasts.column("val").unwrap().values();
+        assert_eq!(firsts_vals.len(), 3);
+        assert_eq!(lasts_vals.len(), 3);
+        assert_eq!(firsts_vals[0], Scalar::Float64(-3.0));
+        assert_eq!(firsts_vals[1], Scalar::Float64(-1.0));
+        assert_eq!(firsts_vals[2], Scalar::Float64(2.0));
+        assert_eq!(lasts_vals[0], Scalar::Float64(-5.0));
+        assert_eq!(lasts_vals[1], Scalar::Float64(-2.0));
+        assert_eq!(lasts_vals[2], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn groupby_resample_first_last_sparse_groups_one_bucket_only() {
+        // icm3 complement: groups with very different bucket coverage.
+        // Group a spans 3 monthly buckets; group b only one. Verifies
+        // the harness emits the correct number of output rows per group
+        // (3 + 1 = 4) and per-bucket first/last semantics.
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(11.0),
+                        Scalar::Float64(12.0),
+                        Scalar::Float64(21.0),
+                        Scalar::Float64(31.0),
+                        Scalar::Float64(32.0),
+                        Scalar::Float64(99.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-05".into(),
+                "2024-01-25".into(),
+                "2024-02-10".into(),
+                "2024-03-05".into(),
+                "2024-03-20".into(),
+                "2024-02-15".into(),
+            ],
+        )
+        .unwrap();
+
+        let firsts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .first()
+            .unwrap();
+        let lasts = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .last()
+            .unwrap();
+
+        let firsts_vals = firsts.column("val").unwrap().values();
+        let lasts_vals = lasts.column("val").unwrap().values();
+        // 3 buckets for a + 1 bucket for b = 4 output rows
+        assert_eq!(firsts_vals.len(), 4);
+        assert_eq!(lasts_vals.len(), 4);
+        // Group a: 2024-01 first=11, last=12; 2024-02 first=last=21; 2024-03 first=31, last=32
+        assert_eq!(firsts_vals[0], Scalar::Float64(11.0));
+        assert_eq!(lasts_vals[0], Scalar::Float64(12.0));
+        assert_eq!(firsts_vals[1], Scalar::Float64(21.0));
+        assert_eq!(lasts_vals[1], Scalar::Float64(21.0));
+        assert_eq!(firsts_vals[2], Scalar::Float64(31.0));
+        assert_eq!(lasts_vals[2], Scalar::Float64(32.0));
+        // Group b: 2024-02 single value
+        assert_eq!(firsts_vals[3], Scalar::Float64(99.0));
+        assert_eq!(lasts_vals[3], Scalar::Float64(99.0));
+    }
+
     // ── DataFrame.astype (all columns) ──────────────────────────────
 
     #[test]

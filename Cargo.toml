@@ -24,7 +24,7 @@ license-file = "LICENSE"
 arrow = { version = "54.3.0", default-features = false, features = ["prettyprint", "ipc"] }
 bumpalo = { version = "3.20.2", features = ["collections"] }
 bytes = "1.11.1"
-calamine = "0.26.1"
+calamine = "0.34.0"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"

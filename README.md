@@ -30,7 +30,8 @@
 | Index alignment semantics | Yes | No (no index) | Yes (AACE) |
 | GroupBy with named aggregation | Yes | Yes (different syntax) | Yes (`agg_named`) |
 | `eval()`/`query()` string expressions | Yes | No | Yes |
-| MultiIndex | Yes | No | Yes (foundation) |
+| Column MultiIndex | Yes | No | Yes (foundation) |
+| Row MultiIndex | Yes | No | Scaffolded (standalone type; DataFrame row-axis integration pending — see Limitations) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
 | 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes | Partial | Yes |
 | Conformance testing against pandas oracle | - | - | Yes (20+ packet suites) |
@@ -393,7 +394,7 @@ MultiIndex {
 
 Constructors mirror pandas: `from_tuples`, `from_arrays`, `from_product` (Cartesian product). Operations: `get_level_values(level)`, `droplevel(level)` → `MultiIndexOrIndex`, `swaplevel(i,j)`, `reorder_levels(order)`, `to_flat_index(sep)`.
 
-DataFrame integration via `set_index_multi(&["col1", "col2"], drop, sep)` creates composite index labels, and `to_multi_index(&["col1", "col2"])` extracts a standalone MultiIndex from columns.
+DataFrame integration via `set_index_multi(&["col1", "col2"], drop, sep)` currently flattens the composite keys into a single `Index<IndexLabel>` using a separator (e.g. `"a|1"`); `to_multi_index(&["col1", "col2"])` extracts a standalone tuple-keyed `MultiIndex` from columns. Tuple-keyed `.loc[("a", 1)]` indexing and real row-MultiIndex output from `groupby([k1, k2]).sum` / `stack` / `unstack` / `reset_index` round-trips are scaffolded but not behaviorally complete — tracked under the Row MultiIndex row in the capability table and the Limitations section.
 
 ### String Accessor
 

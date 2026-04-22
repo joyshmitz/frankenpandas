@@ -6,7 +6,7 @@
   "pivot_values": ["sales"],
   "pivot_index": "region",
   "pivot_columns": "product",
-  "pivot_aggfunc": "median",
+  "pivot_aggfunc": "geo_mean",
   "frame": {
     "index": [
       { "kind": "int64", "value": 0 },

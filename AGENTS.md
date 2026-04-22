@@ -52,6 +52,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
+- **Toolchain pin:** `rust-toolchain.toml` must use an exact dated nightly and list the required components; when bumping that pin, keep CI reading the same file-backed channel instead of floating `nightly`
 - **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`). If narrow unsafe usage is unavoidable, isolate it behind audited interfaces and tests.
 
 ### Key Dependencies

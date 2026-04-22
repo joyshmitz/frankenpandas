@@ -32482,6 +32482,47 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
     }
 
     #[test]
+    fn rust_toolchain_is_date_pinned_with_required_components() {
+        let root = repo_root();
+        let toolchain =
+            fs::read_to_string(root.join("rust-toolchain.toml")).expect("read rust-toolchain");
+        assert!(
+            toolchain.contains("channel = \"nightly-2026-04-22\""),
+            "expected rust-toolchain.toml to pin an exact nightly date"
+        );
+        assert!(
+            toolchain.contains("components = [\"rustfmt\", \"clippy\", \"rust-src\"]"),
+            "expected rust-toolchain.toml to pin rustfmt, clippy, and rust-src"
+        );
+    }
+
+    #[test]
+    fn ci_workflow_uses_pinned_rust_toolchain_from_file() {
+        let root = repo_root();
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+        assert!(
+            ci.contains("Resolve pinned Rust toolchain"),
+            "expected ci.yml to resolve the pinned toolchain from rust-toolchain.toml"
+        );
+        assert!(
+            ci.contains("print(f\"channel={tomllib.load(fh)['toolchain']['channel']}\")"),
+            "expected ci.yml to read the toolchain channel from rust-toolchain.toml"
+        );
+        assert!(
+            ci.contains("uses: dtolnay/rust-toolchain@master"),
+            "expected ci.yml to use dtolnay/rust-toolchain@master for explicit toolchain inputs"
+        );
+        assert!(
+            ci.contains("toolchain: ${{ steps.rust_toolchain.outputs.channel }}"),
+            "expected ci.yml to pass the resolved pinned toolchain into setup steps"
+        );
+        assert!(
+            !ci.contains("uses: dtolnay/rust-toolchain@nightly"),
+            "expected ci.yml to stop floating the GitHub Action nightly ref"
+        );
+    }
+
+    #[test]
     fn ci_workflow_runs_workspace_rustdoc_gate() {
         let root = repo_root();
         let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");

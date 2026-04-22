@@ -18,10 +18,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (nightly + fmt/clippy)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly + fmt/clippy/rust-src)
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -107,8 +119,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -125,8 +150,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -144,8 +182,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked

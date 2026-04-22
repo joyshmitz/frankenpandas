@@ -61,6 +61,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_dataframe_eval"
+path = "fuzz_targets/fuzz_dataframe_eval.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_parquet_io"
 path = "fuzz_targets/fuzz_parquet_io.rs"
 test = false

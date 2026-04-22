@@ -5334,6 +5334,95 @@ fn fuzz_feather_frame_from_bytes(bytes: &[u8]) -> Result<DataFrame, FpIoError> {
     DataFrame::new_with_column_order(index, columns, column_order).map_err(FpIoError::from)
 }
 
+fn fuzz_eval_frame_from_bytes(bytes: &[u8]) -> Result<DataFrame, FrameError> {
+    let row_count = usize::from(bytes.first().copied().unwrap_or(3) % 8) + 1;
+    let column_count = usize::from(bytes.get(1).copied().unwrap_or(1) % 3) + 2;
+    let byte_at = |idx: usize| -> u8 { bytes.get(idx).copied().unwrap_or_default() };
+    let column_names = ["a", "b", "c", "d"];
+
+    let index = Index::new(
+        (0..row_count)
+            .map(|idx| IndexLabel::Int64(idx as i64))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for (col_idx, column_name) in column_names.iter().enumerate().take(column_count) {
+        let dtype = if byte_at(2 + col_idx).is_multiple_of(2) {
+            DType::Int64
+        } else {
+            DType::Float64
+        };
+        let name = (*column_name).to_owned();
+        let values = (0..row_count)
+            .map(|row_idx| {
+                let tag = byte_at(8 + col_idx * 17 + row_idx * 2);
+                let payload = byte_at(9 + col_idx * 17 + row_idx * 2);
+                if tag % 7 == 0 {
+                    Scalar::missing_for_dtype(dtype)
+                } else {
+                    match dtype {
+                        DType::Int64 => Scalar::Int64(i64::from(payload % 17) - 8),
+                        DType::Float64 => Scalar::Float64(match payload % 6 {
+                            0 => 0.0,
+                            1 => 1.0,
+                            2 => -1.0,
+                            3 => 1.5,
+                            4 => 2.5,
+                            _ => f64::NAN,
+                        }),
+                        _ => unreachable!("eval fuzz only projects numeric dtypes"),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let column = Column::new(dtype, values)?;
+        column_order.push(name.clone());
+        columns.insert(name, column);
+    }
+
+    DataFrame::new_with_column_order(index, columns, column_order)
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrame.eval(...)`.
+///
+/// The first byte selects strict vs hardened runtime policy. The full byte
+/// stream is projected into a small numeric `DataFrame` with columns `a..d`,
+/// and the remaining bytes are interpreted as a lossy UTF-8 expression. Parser
+/// errors are allowed; panics are not. Successful evals must preserve row
+/// count.
+pub fn fuzz_dataframe_eval_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&policy_tag, expr_bytes)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let frame = fuzz_eval_frame_from_bytes(input)
+        .map_err(|err| format!("eval fuzz frame projection failed: {err}"))?;
+    let expr = String::from_utf8_lossy(&expr_bytes[..expr_bytes.len().min(96)]).into_owned();
+    let policy = if policy_tag.is_multiple_of(2) {
+        RuntimePolicy::strict()
+    } else {
+        RuntimePolicy::hardened(Some(100_000))
+    };
+    let mut ledger = EvidenceLedger::new();
+
+    match eval_str_with_locals(&expr, &frame, &BTreeMap::new(), &policy, &mut ledger) {
+        Ok(series) => {
+            if series.len() != frame.index().len() {
+                return Err(format!(
+                    "eval result length mismatch: expr={expr:?} result_len={} frame_len={}",
+                    series.len(),
+                    frame.index().len()
+                ));
+            }
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 /// Structure-aware fuzz entrypoint for the `fp-io` Feather reader.
 ///
 /// Inputs use a dual-mode envelope. Raw mode (`tag % 2 == 0`) feeds the
@@ -5375,6 +5464,77 @@ pub fn fuzz_ipc_stream_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
         let frame = fuzz_feather_frame_from_bytes(payload)?;
         assert_ipc_stream_roundtrip(&frame)
     }
+}
+
+fn write_read_through_format(
+    frame: &DataFrame,
+    fmt: FuzzArrowFormat,
+) -> Result<DataFrame, FpIoError> {
+    match fmt {
+        FuzzArrowFormat::Parquet => {
+            let bytes = write_parquet_bytes(frame)?;
+            read_parquet_bytes(&bytes)
+        }
+        FuzzArrowFormat::Feather => {
+            let bytes = write_feather_bytes(frame)?;
+            read_feather_bytes(&bytes)
+        }
+        FuzzArrowFormat::IpcStream => {
+            let bytes = write_ipc_stream_bytes(frame)?;
+            read_ipc_stream_bytes(&bytes)
+        }
+    }
+}
+
+fn fuzz_arrow_format_from_byte(byte: u8) -> FuzzArrowFormat {
+    match byte % 3 {
+        0 => FuzzArrowFormat::Parquet,
+        1 => FuzzArrowFormat::Feather,
+        _ => FuzzArrowFormat::IpcStream,
+    }
+}
+
+/// Structure-aware fuzz entrypoint for cross-format round-trip parity.
+///
+/// Synth mode projects bytes into a small DataFrame, round-trips it
+/// through TWO Arrow-backed binary formats independently, and asserts
+/// that the recovered frames are semantically equal to each other AND
+/// to the original. This catches the entire class of drift where
+/// format X loses metadata (or normalizes a value differently) than
+/// format Y. Recent IO drift bugs (br-989b excel index leak, br-mxho
+/// fuzz-excel leak, calamine 0.34.0 dependency bump) suggest
+/// format-specific assumptions can silently diverge — this target
+/// surfaces them.
+///
+/// Excel is intentionally excluded from the cross-format set because
+/// its public default emits the row index as a leading column
+/// (br-frankenpandas-ho6t / arnn) — it does not round-trip cleanly
+/// against the other Arrow-backed formats and would dominate the
+/// fuzz signal with a known divergence.
+pub fn fuzz_format_cross_round_trip_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let [primary_tag, secondary_tag, payload @ ..] = input else {
+        return Ok(());
+    };
+
+    let primary = fuzz_arrow_format_from_byte(*primary_tag);
+    let secondary = fuzz_arrow_format_from_byte(*secondary_tag);
+
+    let frame = fuzz_feather_frame_from_bytes(payload)?;
+
+    let through_primary = write_read_through_format(&frame, primary)?;
+    let through_secondary = write_read_through_format(&frame, secondary)?;
+
+    if !through_primary.equals(&through_secondary) {
+        return Err(FpIoError::Io(std::io::Error::other(format!(
+            "cross-format round-trip drifted: {primary:?} vs {secondary:?} produced different frames",
+        ))));
+    }
+    if !frame.equals(&through_primary) {
+        return Err(FpIoError::Io(std::io::Error::other(format!(
+            "cross-format round-trip drifted: {primary:?} did not preserve original frame",
+        ))));
+    }
+    Ok(())
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-types` common-dtype lattice.
@@ -20840,18 +21000,18 @@ mod tests {
         build_differential_validation_log, build_failure_forensics, build_failure_surface_entries,
         build_failure_surface_entries_for_report, enforce_packet_gates, evaluate_ci_gate,
         evaluate_parity_gate, fuzz_column_arith_bytes, fuzz_common_dtype_bytes,
-        fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_format_cross_round_trip_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
-        fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
-        fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
-        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
-        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
-        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
-        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
-        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
-        write_compat_closure_final_evidence_pack, write_differential_validation_log,
-        write_failure_surface_jsonl, write_fault_injection_validation_report,
-        write_packet_artifacts,
+        fuzz_csv_parse_bytes, fuzz_dataframe_eval_bytes, fuzz_excel_io_bytes,
+        fuzz_feather_io_bytes, fuzz_fixture_parse_bytes, fuzz_format_cross_round_trip_bytes,
+        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes,
+        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes,
+        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
+        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
+        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
+        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
+        verify_packet_sidecar_integrity, write_case_evidence_jsonl,
+        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
+        write_differential_validation_log, write_failure_surface_jsonl,
+        write_fault_injection_validation_report, write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -21332,6 +21492,21 @@ mod tests {
     #[test]
     fn fuzz_format_cross_round_trip_bytes_accepts_empty_input() {
         fuzz_format_cross_round_trip_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_dataframe_eval_bytes_accepts_empty_input() {
+        fuzz_dataframe_eval_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
+        let mut seed = vec![0, b'a', b'+', b'b'];
+        seed.extend([
+            4, 2, 0, 1, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19,
+            29, 20, 30, 21, 31,
+        ]);
+        fuzz_dataframe_eval_bytes(&seed).expect("simple eval seed should satisfy invariants");
     }
 
     #[test]

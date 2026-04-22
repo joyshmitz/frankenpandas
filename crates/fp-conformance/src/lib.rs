@@ -5023,6 +5023,103 @@ fn assert_ipc_stream_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FuzzArrowFormat {
+    Parquet,
+    Feather,
+    IpcStream,
+}
+
+impl FuzzArrowFormat {
+    fn from_byte(byte: u8) -> Self {
+        match byte % 3 {
+            0 => Self::Parquet,
+            1 => Self::Feather,
+            _ => Self::IpcStream,
+        }
+    }
+
+    fn distinct_from_byte(primary: Self, byte: u8) -> Self {
+        match primary {
+            Self::Parquet => {
+                if byte.is_multiple_of(2) {
+                    Self::Feather
+                } else {
+                    Self::IpcStream
+                }
+            }
+            Self::Feather => {
+                if byte.is_multiple_of(2) {
+                    Self::Parquet
+                } else {
+                    Self::IpcStream
+                }
+            }
+            Self::IpcStream => {
+                if byte.is_multiple_of(2) {
+                    Self::Parquet
+                } else {
+                    Self::Feather
+                }
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Parquet => "parquet",
+            Self::Feather => "feather",
+            Self::IpcStream => "ipc_stream",
+        }
+    }
+}
+
+fn fuzz_roundtrip_frame_via_format(
+    format: FuzzArrowFormat,
+    frame: &DataFrame,
+) -> Result<DataFrame, FpIoError> {
+    match format {
+        FuzzArrowFormat::Parquet => {
+            let encoded = write_parquet_bytes(frame)?;
+            read_parquet_bytes(&encoded)
+        }
+        FuzzArrowFormat::Feather => {
+            let encoded = write_feather_bytes(frame)?;
+            read_feather_bytes(&encoded)
+        }
+        FuzzArrowFormat::IpcStream => {
+            let encoded = write_ipc_stream_bytes(frame)?;
+            read_ipc_stream_bytes(&encoded)
+        }
+    }
+}
+
+/// Structure-aware fuzz entrypoint for cross-format Arrow-backed IO parity.
+///
+/// The input always runs in synth mode: bytes are projected into a small typed
+/// `DataFrame`, round-tripped through a primary Arrow-backed format, then
+/// round-tripped again through a distinct secondary format. The logical frame
+/// recovered from both stages must converge to the same content.
+pub fn fuzz_format_cross_round_trip_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let primary = FuzzArrowFormat::from_byte(input.first().copied().unwrap_or_default());
+    let secondary =
+        FuzzArrowFormat::distinct_from_byte(primary, input.get(1).copied().unwrap_or(1));
+    let payload = input.get(2..).unwrap_or(&[]);
+    let source = fuzz_feather_frame_from_bytes(payload)?;
+    let primary_frame = fuzz_roundtrip_frame_via_format(primary, &source)?;
+    let secondary_frame = fuzz_roundtrip_frame_via_format(secondary, &primary_frame)?;
+
+    if !primary_frame.equals(&secondary_frame) {
+        return Err(FpIoError::Io(std::io::Error::other(format!(
+            "cross-format round-trip drifted between {} and {}",
+            primary.name(),
+            secondary.name()
+        ))));
+    }
+
+    Ok(())
+}
+
 fn fuzz_dtype_from_byte(byte: u8) -> DType {
     match byte % 5 {
         0 => DType::Null,
@@ -20525,16 +20622,16 @@ mod tests {
         build_failure_surface_entries_for_report, enforce_packet_gates, evaluate_ci_gate,
         evaluate_parity_gate, fuzz_column_arith_bytes, fuzz_common_dtype_bytes,
         fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes,
-        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes,
-        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
-        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
-        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_compat_closure_e2e_scenario_report,
-        write_compat_closure_final_evidence_pack, write_differential_validation_log,
-        write_failure_surface_jsonl, write_fault_injection_validation_report,
-        write_packet_artifacts,
+        fuzz_format_cross_round_trip_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
+        fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
+        fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
+        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
+        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
+        write_differential_validation_log, write_failure_surface_jsonl,
+        write_fault_injection_validation_report, write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -20996,6 +21093,25 @@ mod tests {
             matches!(err, fp_io::IoError::Arrow(_)),
             "expected Arrow parse error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn fuzz_format_cross_round_trip_bytes_accepts_all_arrow_format_pairs() {
+        let payload = [
+            3, 2, 0, 1, 2, 3, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18,
+            28, 19, 29, 20, 30, 21, 31, 22, 32, 23, 33, 24, 34,
+        ];
+        let pairs = [(0_u8, 0_u8), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)];
+        for (primary, secondary) in pairs {
+            let mut seed = vec![primary, secondary];
+            seed.extend(payload);
+            fuzz_format_cross_round_trip_bytes(&seed).expect("cross-format seed should converge");
+        }
+    }
+
+    #[test]
+    fn fuzz_format_cross_round_trip_bytes_accepts_empty_input() {
+        fuzz_format_cross_round_trip_bytes(&[]).expect("empty input should be a no-op");
     }
 
     #[test]

@@ -7133,6 +7133,7 @@ impl Rolling<'_> {
             column_order: col_order,
             index: self.series.index().clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 }
@@ -8046,6 +8047,7 @@ impl DataFrameRolling<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -8143,6 +8145,7 @@ impl DataFrameRolling<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -8214,6 +8217,7 @@ impl DataFrameRolling<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 }
@@ -8254,6 +8258,7 @@ impl DataFrameExpanding<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -8366,6 +8371,7 @@ impl DataFrameEwm<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -8434,6 +8440,7 @@ impl DataFrameResample<'_> {
             column_order: col_order,
             index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -8520,6 +8527,7 @@ impl DataFrameResample<'_> {
             column_order: col_order,
             index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 }
@@ -8971,6 +8979,7 @@ impl SeriesGroupBy<'_> {
             column_order: col_order,
             index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 }
@@ -9989,6 +9998,7 @@ impl StringAccessor<'_> {
             column_order: df.column_order,
             index: self.series.index().clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -10072,6 +10082,7 @@ impl StringAccessor<'_> {
             column_order,
             index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -14119,6 +14130,8 @@ fn concat_dataframes_axis1(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataFrame {
     index: Index,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_multiindex: Option<fp_index::MultiIndex>,
     columns: BTreeMap<String, Column>,
     #[serde(skip)]
     column_order: Vec<String>,
@@ -14461,6 +14474,30 @@ impl DataFrame {
         )
     }
 
+    fn project_row_multiindex(
+        row_multiindex: &fp_index::MultiIndex,
+        positions: &[usize],
+    ) -> Result<fp_index::MultiIndex, FrameError> {
+        let mut arrays = Vec::with_capacity(row_multiindex.nlevels());
+        for level in 0..row_multiindex.nlevels() {
+            let level_values = row_multiindex.get_level_values(level)?;
+            let labels = positions
+                .iter()
+                .map(|&position| {
+                    level_values.labels().get(position).cloned().ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!(
+                            "row position {position} out of bounds for MultiIndex height {}",
+                            row_multiindex.len()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            arrays.push(labels);
+        }
+
+        Ok(fp_index::MultiIndex::from_arrays(arrays)?.set_names(row_multiindex.names().to_vec()))
+    }
+
     fn resolve_column_selector(
         &self,
         column_selector: Option<&[String]>,
@@ -14534,6 +14571,11 @@ impl DataFrame {
         }
 
         let index = self.index.take(positions);
+        let row_multiindex = self
+            .row_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
+            .transpose()?;
         let mut columns = BTreeMap::new();
         for name in &self.column_order {
             let column = self
@@ -14547,8 +14589,9 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
-        Self::new_with_column_order_and_multiindex(
+        Self::new_with_axes(
             index,
+            row_multiindex,
             columns,
             self.column_order.clone(),
             self.column_multiindex.clone(),
@@ -14569,6 +14612,11 @@ impl DataFrame {
             .iter()
             .map(|&position| self.index.labels()[position].clone())
             .collect::<Vec<_>>();
+        let row_multiindex = self
+            .row_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
+            .transpose()?;
         let mut columns = BTreeMap::new();
         for name in &self.column_order {
             let column = self
@@ -14582,8 +14630,9 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
-        Self::new_with_column_order_and_multiindex(
+        Self::new_with_axes(
             Index::new(labels),
+            row_multiindex,
             columns,
             self.column_order.clone(),
             self.column_multiindex.clone(),
@@ -14610,13 +14659,23 @@ impl DataFrame {
         ))
     }
 
-    fn new_with_column_order_and_multiindex(
+    fn new_with_axes(
         index: Index,
+        row_multiindex: Option<fp_index::MultiIndex>,
         columns: BTreeMap<String, Column>,
         column_order: Vec<String>,
         column_multiindex: Option<fp_index::MultiIndex>,
     ) -> Result<Self, FrameError> {
         Self::validate_column_lengths(&index, &columns)?;
+        if let Some(multiindex) = row_multiindex.as_ref()
+            && multiindex.len() != index.len()
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "row MultiIndex height {} does not match index length {}",
+                multiindex.len(),
+                index.len()
+            )));
+        }
         let column_order = Self::normalize_column_order(&columns, column_order)?;
         if let Some(multiindex) = column_multiindex.as_ref()
             && multiindex.len() != column_order.len()
@@ -14629,10 +14688,20 @@ impl DataFrame {
         }
         Ok(Self {
             index,
+            row_multiindex,
             columns,
             column_order,
             column_multiindex,
         })
+    }
+
+    fn new_with_column_order_and_multiindex(
+        index: Index,
+        columns: BTreeMap<String, Column>,
+        column_order: Vec<String>,
+        column_multiindex: Option<fp_index::MultiIndex>,
+    ) -> Result<Self, FrameError> {
+        Self::new_with_axes(index, None, columns, column_order, column_multiindex)
     }
 
     pub fn new(index: Index, columns: BTreeMap<String, Column>) -> Result<Self, FrameError> {
@@ -14646,6 +14715,15 @@ impl DataFrame {
         column_order: Vec<String>,
     ) -> Result<Self, FrameError> {
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
+    }
+
+    pub fn new_with_row_multiindex(
+        index: Index,
+        row_multiindex: fp_index::MultiIndex,
+        columns: BTreeMap<String, Column>,
+    ) -> Result<Self, FrameError> {
+        let column_order = columns.keys().cloned().collect();
+        Self::new_with_axes(index, Some(row_multiindex), columns, column_order, None)
     }
 
     /// AG-05: Pre-compute N-way union index across all series first, then
@@ -15457,6 +15535,23 @@ impl DataFrame {
         &self.index
     }
 
+    /// Return the logical DataFrame row index.
+    ///
+    /// When row MultiIndex metadata is present, this returns it instead of the
+    /// flat storage fallback in `index()`.
+    #[must_use]
+    pub fn row_index(&self) -> fp_index::MultiIndexOrIndex {
+        match &self.row_multiindex {
+            Some(multiindex) => fp_index::MultiIndexOrIndex::Multi(multiindex.clone()),
+            None => fp_index::MultiIndexOrIndex::Index(self.index.clone()),
+        }
+    }
+
+    #[must_use]
+    pub fn row_multiindex(&self) -> Option<&fp_index::MultiIndex> {
+        self.row_multiindex.as_ref()
+    }
+
     #[must_use]
     pub fn columns(&self) -> &BTreeMap<String, Column> {
         &self.columns
@@ -16127,22 +16222,10 @@ impl DataFrame {
             }
         }
 
-        // Build composite index labels by joining column values.
-        let nrows = self.index.len();
-        let labels: Vec<IndexLabel> = (0..nrows)
-            .map(|row_idx| {
-                let parts: Vec<String> = columns
-                    .iter()
-                    .map(|&col_name| {
-                        self.columns[col_name]
-                            .value(row_idx)
-                            .map_or_else(String::new, |s| s.to_string())
-                    })
-                    .collect();
-                IndexLabel::Utf8(parts.join(sep))
-            })
-            .collect();
-
+        let row_multiindex = self.to_multi_index(columns)?;
+        // Keep the flat storage fallback index for now so the existing API
+        // surface keeps working while row MultiIndex support lands incrementally.
+        let labels = row_multiindex.to_flat_index(sep).labels().to_vec();
         let new_name_parts: Vec<String> = columns.iter().map(|c| (*c).to_owned()).collect();
         let index = Index::new(labels).set_name(&new_name_parts.join(sep));
 
@@ -16156,7 +16239,7 @@ impl DataFrame {
             }
         }
 
-        Self::new_with_column_order(index, out_columns, out_order)
+        Self::new_with_axes(index, Some(row_multiindex), out_columns, out_order, None)
     }
 
     /// Extract a `MultiIndex` from the specified columns.
@@ -16960,6 +17043,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         }
     }
 
@@ -16977,6 +17061,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         }
     }
 
@@ -17966,6 +18051,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -18029,6 +18115,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -18138,6 +18225,7 @@ impl DataFrame {
             column_order: col_order,
             index: new_index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18278,6 +18366,7 @@ impl DataFrame {
             column_order: result_col_order,
             index: Index::new(new_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18352,6 +18441,7 @@ impl DataFrame {
             column_order: combined_order,
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18406,6 +18496,7 @@ impl DataFrame {
             column_order: combined_order,
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18525,6 +18616,7 @@ impl DataFrame {
             column_order: new_col_order,
             index: Index::new(new_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18631,6 +18723,7 @@ impl DataFrame {
             column_order: col_order,
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18652,6 +18745,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -18679,6 +18773,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -18739,6 +18834,7 @@ impl DataFrame {
             column_order: combined_order,
             index: first.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18907,6 +19003,7 @@ impl DataFrame {
             column_order: numeric_cols,
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -18999,6 +19096,7 @@ impl DataFrame {
             column_order: numeric_cols,
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -19051,6 +19149,7 @@ impl DataFrame {
             column_order: numeric_cols,
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -19232,6 +19331,7 @@ impl DataFrame {
             column_order: col_order,
             index: self.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -19257,6 +19357,7 @@ impl DataFrame {
             column_order: vec!["nunique".to_string()],
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -19316,6 +19417,7 @@ impl DataFrame {
                     column_order: self.column_order.clone(),
                     index: new_index,
                     column_multiindex: self.column_multiindex.clone(),
+                    row_multiindex: None,
                 })
             }
             1 => {
@@ -19335,6 +19437,7 @@ impl DataFrame {
                     column_order: new_names,
                     index: self.index.clone(),
                     column_multiindex: None,
+                    row_multiindex: None,
                 })
             }
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -19689,6 +19792,11 @@ impl DataFrame {
         }
         let labels = self.index.labels();
         let new_labels: Vec<IndexLabel> = indices.iter().map(|&i| labels[i].clone()).collect();
+        let row_multiindex = self
+            .row_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_row_multiindex(multiindex, indices))
+            .transpose()?;
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let col = &self.columns[col_name];
@@ -19700,6 +19808,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex,
         })
     }
 
@@ -19753,6 +19862,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         })
     }
 
@@ -19780,6 +19890,7 @@ impl DataFrame {
                     column_order: col_order,
                     index: self.index.clone(),
                     column_multiindex: None,
+                    row_multiindex: None,
                 })
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
@@ -19826,6 +19937,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         })
     }
 
@@ -19875,6 +19987,7 @@ impl DataFrame {
             column_order: col_order,
             index: self.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -19923,6 +20036,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -20009,6 +20123,7 @@ impl DataFrame {
             column_order: col_order,
             index: Index::new(union_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -20069,6 +20184,7 @@ impl DataFrame {
             column_order: col_order,
             index: plan.union_index,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -20150,6 +20266,7 @@ impl DataFrame {
             columns: result_cols,
             column_order: union_cols,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -21649,6 +21766,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         })
     }
 
@@ -21766,6 +21884,7 @@ impl DataFrame {
             column_order: vec!["value".to_string()],
             index: Index::new(new_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -21850,6 +21969,7 @@ impl DataFrame {
             column_order: col_order,
             index: Index::new(new_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -21878,6 +21998,7 @@ impl DataFrame {
                 column_order: vec!["result".to_string()],
                 index: s.index().clone(),
                 column_multiindex: None,
+                row_multiindex: None,
             })
         } else {
             // Row-wise: apply func to each row
@@ -21898,6 +22019,7 @@ impl DataFrame {
                 column_order: vec!["result".to_string()],
                 index: self.index.clone(),
                 column_multiindex: None,
+                row_multiindex: None,
             })
         }
     }
@@ -21947,6 +22069,7 @@ impl DataFrame {
                     column_order: col_order,
                     index: self.index.clone(),
                     column_multiindex: None,
+                    row_multiindex: None,
                 })
             }
             "broadcast" => {
@@ -21990,6 +22113,7 @@ impl DataFrame {
                     column_order: self.column_order.clone(),
                     index: self.index.clone(),
                     column_multiindex: self.column_multiindex.clone(),
+                    row_multiindex: self.row_multiindex.clone(),
                 })
             }
             _ => {
@@ -22017,6 +22141,7 @@ impl DataFrame {
                     column_order: vec!["result".to_string()],
                     index: self.index.clone(),
                     column_multiindex: None,
+                    row_multiindex: None,
                 })
             }
         }
@@ -22158,6 +22283,7 @@ impl DataFrame {
             column_order,
             columns,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -23226,6 +23352,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -23390,6 +23517,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             columns: out_cols,
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -23504,6 +23632,7 @@ impl DataFrame {
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
+            row_multiindex: left.row_multiindex.clone(),
         })
     }
 
@@ -23613,6 +23742,7 @@ impl DataFrame {
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
+            row_multiindex: left.row_multiindex.clone(),
         })
     }
 
@@ -23732,6 +23862,7 @@ impl DataFrame {
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
+            row_multiindex: left.row_multiindex.clone(),
         })
     }
 
@@ -23823,6 +23954,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -23975,6 +24107,7 @@ impl DataFrame {
             column_order: col_order,
             index: self.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -24055,6 +24188,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24091,6 +24225,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24116,6 +24251,7 @@ impl DataFrame {
             column_order: new_order,
             index: self.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -24152,6 +24288,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24217,6 +24354,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             columns: out_columns,
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24277,6 +24415,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             columns: out_columns,
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24348,6 +24487,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24396,6 +24536,7 @@ impl DataFrame {
             column_order: all_cols,
             columns: result_cols,
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -24415,6 +24556,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24439,6 +24581,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24699,6 +24842,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24744,6 +24888,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -24776,6 +24921,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
         })
     }
 
@@ -25354,6 +25500,7 @@ impl DataFrame {
             column_order: col_order,
             index: Index::new(index_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -25424,6 +25571,7 @@ impl DataFrame {
                     column_order: ct.column_order,
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
+                    row_multiindex: ct.row_multiindex,
                 })
             }
             "columns" => {
@@ -25456,6 +25604,7 @@ impl DataFrame {
                     column_order: ct.column_order,
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
+                    row_multiindex: ct.row_multiindex,
                 })
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
@@ -25540,6 +25689,7 @@ impl DataFrame {
             column_order: col_order,
             index: Index::new(new_indices),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         };
         if ignore_index {
             out.reset_index(true)
@@ -25582,6 +25732,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         })
     }
 
@@ -25612,6 +25763,7 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
         }
     }
 }
@@ -25763,6 +25915,7 @@ impl DataFrameGroupBy<'_> {
                 column_order: col_order,
                 index: Index::new(labels),
                 column_multiindex: None,
+                row_multiindex: None,
             })
         } else {
             // as_index=False: group keys become regular columns, index is
@@ -25794,6 +25947,7 @@ impl DataFrameGroupBy<'_> {
                 column_order: full_order,
                 index: Index::new(int_labels),
                 column_multiindex: None,
+                row_multiindex: None,
             })
         }
     }
@@ -26378,6 +26532,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -26524,6 +26679,7 @@ impl DataFrameGroupBy<'_> {
                 column_order: group_col_order,
                 index: Index::new(group_labels),
                 column_multiindex: None,
+                row_multiindex: None,
             };
 
             result_frames.push(func(&group_df)?);
@@ -26536,6 +26692,7 @@ impl DataFrameGroupBy<'_> {
                 column_order: Vec::new(),
                 index: Index::new(Vec::new()),
                 column_multiindex: None,
+                row_multiindex: None,
             });
         }
 
@@ -26612,6 +26769,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -26673,6 +26831,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -26744,6 +26903,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -26811,6 +26971,7 @@ impl DataFrameGroupBy<'_> {
                 column_order: group_col_order,
                 index: Index::new(group_labels),
                 column_multiindex: None,
+                row_multiindex: None,
             };
 
             if func(&group_df)? {
@@ -26842,6 +27003,7 @@ impl DataFrameGroupBy<'_> {
             column_order: self.df.column_order.clone(),
             index: Index::new(out_labels),
             column_multiindex: self.df.column_multiindex.clone(),
+            row_multiindex: None,
         })
     }
 
@@ -26894,6 +27056,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27127,6 +27290,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27262,6 +27426,7 @@ impl DataFrameGroupBy<'_> {
             column_order: vec!["count".to_string()],
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27374,6 +27539,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27556,6 +27722,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27628,6 +27795,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27705,6 +27873,7 @@ impl DataFrameGroupBy<'_> {
             column_order: col_order,
             index: Index::new(out_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27883,6 +28052,7 @@ impl DataFrameGroupBy<'_> {
             column_order: value_cols,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -27934,6 +28104,7 @@ impl DataFrameGroupBy<'_> {
             column_order: value_cols,
             index: self.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -28049,6 +28220,7 @@ impl GroupByRolling<'_> {
             column_order: col_order,
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -28188,6 +28360,7 @@ impl GroupByResample<'_> {
             column_order: col_order,
             index: Index::new(all_labels),
             column_multiindex: None,
+            row_multiindex: None,
         })
     }
 
@@ -60809,6 +60982,20 @@ mod tests {
             indexed.index().labels()[2],
             IndexLabel::Utf8("east_A".into())
         );
+        let row_multiindex = indexed
+            .row_multiindex()
+            .expect("set_index_multi should attach row MultiIndex metadata");
+        assert_eq!(
+            row_multiindex.names(),
+            &[Some("region".into()), Some("product".into())]
+        );
+        let level0 = row_multiindex.get_level_values(0).unwrap();
+        assert_eq!(level0.labels()[0], IndexLabel::Utf8("east".into()));
+        assert_eq!(level0.labels()[1], IndexLabel::Utf8("west".into()));
+        assert!(matches!(
+            indexed.row_index(),
+            fp_index::MultiIndexOrIndex::Multi(ref multiindex) if multiindex == row_multiindex
+        ));
         // Only "sales" column remains when drop=true
         assert_eq!(indexed.column_names().len(), 1);
         assert!(indexed.column("sales").is_some());
@@ -60831,8 +61018,100 @@ mod tests {
 
         let indexed = df.set_index_multi(&["a", "b"], false, "|").unwrap();
         assert_eq!(indexed.index().labels()[0], IndexLabel::Utf8("1|x".into()));
+        assert!(indexed.row_multiindex().is_some());
         // All columns kept when drop=false
         assert_eq!(indexed.column_names().len(), 3);
+    }
+
+    #[test]
+    fn dataframe_new_with_row_multiindex_round_trips_logical_row_axis() {
+        let row_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("west".into()),
+                IndexLabel::Utf8("east".into()),
+            ],
+            vec![
+                IndexLabel::Int64(2024),
+                IndexLabel::Int64(2025),
+                IndexLabel::Int64(2026),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("region".into()), Some("year".into())]);
+        let flat_index = row_multiindex.to_flat_index("|").set_name("region|year");
+
+        let df = DataFrame::new_with_row_multiindex(
+            flat_index.clone(),
+            row_multiindex.clone(),
+            BTreeMap::from([(
+                "value".to_string(),
+                Column::from_values(vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(30),
+                ])
+                .unwrap(),
+            )]),
+        )
+        .unwrap();
+
+        assert_eq!(df.index(), &flat_index);
+        assert_eq!(df.row_multiindex(), Some(&row_multiindex));
+        assert!(matches!(
+            df.row_index(),
+            fp_index::MultiIndexOrIndex::Multi(ref multiindex) if multiindex == &row_multiindex
+        ));
+    }
+
+    #[test]
+    fn dataframe_take_rows_preserves_row_multiindex_projection() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("C".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let subset = df.take_rows(&[2, 0]).unwrap();
+        let row_multiindex = subset
+            .row_multiindex()
+            .expect("take_rows should preserve row MultiIndex metadata");
+        let level0 = row_multiindex.get_level_values(0).unwrap();
+        let level1 = row_multiindex.get_level_values(1).unwrap();
+        assert_eq!(
+            level0.labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("east".into())
+            ]
+        );
+        assert_eq!(
+            level1.labels(),
+            &[IndexLabel::Utf8("C".into()), IndexLabel::Utf8("A".into())]
+        );
     }
 
     #[test]

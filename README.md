@@ -791,8 +791,11 @@ match result {
 | `from_dict_index(data)` | `pd.DataFrame.from_dict(data, orient='index')` | Row-keyed dict |
 | `from_dict_index_columns(data, cols)` | Same with column names | Row-keyed + col names |
 | `DataFrame::new(index, columns)` | Low-level construction | Direct index + BTreeMap |
+| `DataFrame::new_with_row_multiindex(index, row_multiindex, columns)` | `pd.DataFrame(..., index=pd.MultiIndex(...))` foundation | Flat storage index + logical row MultiIndex metadata |
 
 When constructing from multiple Series with different indexes, `from_series` automatically performs N-way index alignment (AG-05 leapfrog triejoin) to produce a DataFrame with the union of all index labels.
+
+For row-axis MultiIndex foundation work, `DataFrame::row_index()` returns the logical row axis as `MultiIndexOrIndex`, and `DataFrame::row_multiindex()` exposes the optional row-side `MultiIndex` metadata directly. `DataFrame::index()` remains the flat storage fallback until the full `frankenpandas-1zzp` row-axis integration epic lands.
 
 ## Merge: Advanced Options
 

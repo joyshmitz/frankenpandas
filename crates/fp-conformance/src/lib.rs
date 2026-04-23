@@ -1512,6 +1512,27 @@ pub enum FixtureOracleSource {
     LiveLegacyPandas,
 }
 
+/// Per-fixture conformance requirement level, mirroring RFC 2119
+/// conventions (MUST / SHOULD / MAY).
+///
+/// Per br-frankenpandas-nato. A fixture tagged `Must` represents a
+/// contract clause we ship only if the test passes. `Should` is a
+/// strong preference; regressions are warnings but not ship-blockers.
+/// `May` is optional behavior that divergence gets documented in
+/// DISCREPANCIES.md rather than blocking a release.
+///
+/// Fixtures without an explicit tag default to `Must` (the most
+/// conservative assumption) via `RequirementLevel::default()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequirementLevel {
+    #[default]
+    Must,
+    Should,
+    May,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureSeries {
     pub name: String,
@@ -1604,6 +1625,13 @@ pub struct PacketFixture {
     pub fixture_provenance: Option<FixtureProvenance>,
     #[serde(default)]
     pub oracle_source: Option<FixtureOracleSource>,
+    /// Conformance requirement level (MUST / SHOULD / MAY). Per
+    /// br-frankenpandas-nato. Absence in fixture JSON deserializes to
+    /// `None`, which the comparator treats as `Must` (conservative
+    /// default). Populating this across the 1,249-fixture corpus is
+    /// Phase 3 of the nato tracker.
+    #[serde(default)]
+    pub requirement_level: Option<RequirementLevel>,
     #[serde(default)]
     pub left: Option<FixtureSeries>,
     #[serde(default)]

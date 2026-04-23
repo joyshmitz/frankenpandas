@@ -172,5 +172,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_sql_read"
+path = "fuzz_targets/fuzz_sql_read.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

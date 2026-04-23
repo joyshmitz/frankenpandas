@@ -24,12 +24,11 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
-    read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
-    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
-    series_from_arrow_array, series_to_arrow_array, write_csv_string, write_excel_bytes,
-    write_feather_bytes, write_ipc_stream_bytes, write_json_string, write_jsonl_string,
-    write_parquet_bytes,
+    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str,
+    read_csv_with_options, read_excel_bytes, read_feather_bytes, read_ipc_stream_bytes,
+    read_json_str, read_jsonl_str, read_parquet_bytes, read_sql, series_from_arrow_array,
+    series_to_arrow_array, write_csv_string, write_excel_bytes, write_feather_bytes,
+    write_ipc_stream_bytes, write_json_string, write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -6013,6 +6012,44 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
         }
         Err(_) => Ok(()),
     }
+}
+
+/// Structure-aware fuzz entrypoint for `fp_io::read_sql(...)` against an
+/// in-memory SQLite connection.
+///
+/// Per br-frankenpandas-gpxk Phase 1: fp-io exposes six pub fns that accept
+/// untrusted query strings (`read_sql`, `read_sql_with_options`,
+/// `read_sql_with_index_col`, `read_sql_table`, `read_sql_table_with_index_col`,
+/// `read_sql_table_columns`). None had fuzz coverage. This target covers the
+/// narrowest surface (`read_sql`) using rusqlite's in-memory connection, which
+/// is good-enough: all higher-level SQL entrypoints ultimately route through
+/// the same `SqlConnection::query` trait method.
+///
+/// Harness shape:
+/// - Construct a fixed-schema in-memory SQLite (two small tables populated
+///   with deterministic rows).
+/// - Convert input bytes to lossy UTF-8, clamp to 4 KB.
+/// - Call `read_sql(&conn, &query_str)`; Ok and Err are both acceptable,
+///   panics are not.
+pub fn fuzz_read_sql_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() > 4 * 1024 {
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open_in_memory()
+        .map_err(|e| format!("open_in_memory failed: {e}"))?;
+    conn.execute_batch(
+        "CREATE TABLE t1 (a INTEGER, b TEXT);
+         INSERT INTO t1 (a, b) VALUES (1, 'one'), (2, 'two'), (3, 'three');
+         CREATE TABLE t2 (k TEXT PRIMARY KEY, v REAL);
+         INSERT INTO t2 (k, v) VALUES ('x', 1.5), ('y', 2.5), ('z', 3.5);
+         CREATE TABLE empty_t (x INTEGER);",
+    )
+    .map_err(|e| format!("execute_batch failed: {e}"))?;
+
+    let query = String::from_utf8_lossy(input);
+    let _ = read_sql(&conn, &query);
+    Ok(())
 }
 
 /// Structure-aware fuzz entrypoint for `DataFrame::pivot_table(...)`.

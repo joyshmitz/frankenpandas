@@ -1,0 +1,81 @@
+name: Conformance Divergence
+description: Report that frankenpandas produces a different result than pandas on an input where we claim parity
+title: "[CONFORMANCE] "
+labels: ["conformance", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Conformance divergences are specially triaged — they may land as:
+          - A fix (our bug).
+          - A DISCREPANCIES.md entry (intentional deviation, documented).
+          - A packet fixture backport (we test the new case).
+
+        Please don't use this template for outright crashes — use the Bug Report template for those.
+
+  - type: input
+    id: pandas_method
+    attributes:
+      label: pandas method
+      placeholder: "df.groupby([k1, k2]).sum() / series.rolling(3).std() / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: Input DataFrame / Series
+      description: Reproducible construction in pandas syntax (we'll translate to Rust)
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: pandas_output
+    attributes:
+      label: pandas output
+      description: `repr()` or shape summary of what pandas produces
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: frankenpandas_output
+    attributes:
+      label: frankenpandas output
+      description: Same shape summary for our output. Show the diff clearly.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: level
+    attributes:
+      label: Expected parity level
+      description: |
+        MUST = pandas documents this behavior and users rely on it.
+        SHOULD = pandas does this by convention; divergence surprises users.
+        MAY = edge case with no clear contract; either behavior is defensible.
+      options:
+        - MUST — pandas docs the behavior
+        - SHOULD — convention / common usage
+        - MAY — edge case
+        - Unsure
+    validations:
+      required: true
+
+  - type: input
+    id: pandas_version
+    attributes:
+      label: pandas version used for comparison
+      placeholder: "pandas 2.2.3 (pinned in fp-conformance/oracle/requirements.txt)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: Pre-filing checks
+      options:
+        - label: I have checked `crates/fp-conformance/DISCREPANCIES.md` — this is NOT a documented intentional divergence.
+        - label: I have verified the pandas output on the pinned pandas version (not a pandas-between-versions difference).

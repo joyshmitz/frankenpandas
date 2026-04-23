@@ -1,0 +1,73 @@
+name: Bug Report
+description: Report a defect in shipped frankenpandas code (not a pandas-parity divergence — use the Conformance template for that)
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill in every field — incomplete reports often bounce.
+
+        If this is a pandas-behavior divergence rather than an outright crash, use the Conformance Divergence template instead.
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Affected crate
+      options:
+        - fp-frame (DataFrame / Series core)
+        - fp-io (CSV / JSON / Parquet / Excel / Feather / Arrow IPC / SQL)
+        - fp-groupby
+        - fp-join
+        - fp-expr (eval / query / parse)
+        - fp-index (Index / MultiIndex)
+        - fp-runtime (RuntimePolicy / EvidenceLedger)
+        - fp-conformance (harness / fixtures / oracle)
+        - fp-types (Scalar / DType / NullKind)
+        - fp-columnar
+        - frankenpandas (umbrella prelude)
+        - Unsure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: frankenpandas version
+      placeholder: "0.1.0 (or git SHA for pre-release)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Smallest Rust program that triggers the bug. Include `use` lines and any fixture data inline.
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened. Link pandas docs if the expectation comes from pandas parity.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead. Include panic message / error text / diff.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: Pre-filing checks
+      options:
+        - label: I have checked `crates/fp-conformance/DISCREPANCIES.md` for a documented intentional divergence that matches my observation.
+        - label: I have searched the bead tracker (`br list --status open`) for an existing frankenpandas-* bead covering this behavior.
+        - label: My reproducer uses the latest published crate version (or a pinned git SHA).

@@ -1,0 +1,56 @@
+name: Feature Request
+description: Request a new pandas method or API surface
+title: "[FEATURE] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the request. frankenpandas tracks pandas API parity, so feature requests almost always map to a specific pandas method. Please link the method docs.
+
+  - type: input
+    id: pandas_method
+    attributes:
+      label: pandas method name
+      placeholder: "pd.DataFrame.pivot_table / Series.str.extract / pd.merge_asof / ..."
+    validations:
+      required: true
+
+  - type: input
+    id: pandas_docs
+    attributes:
+      label: pandas docs URL
+      placeholder: "https://pandas.pydata.org/docs/reference/api/..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Target crate (best guess)
+      options:
+        - fp-frame (DataFrame / Series core)
+        - fp-io (new IO format or option)
+        - fp-groupby
+        - fp-join
+        - fp-expr
+        - fp-index
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Minimal motivating example
+      description: Show how you'd call the method. pandas-style snippet is fine; we'll translate the signature to Rust during design.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: signature_sketch
+    attributes:
+      label: Proposed Rust signature (optional)
+      description: If you have a preferred Rust API shape, share it. We'll use pandas semantics as the north star otherwise.
+      render: rust

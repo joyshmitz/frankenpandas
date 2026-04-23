@@ -1,0 +1,60 @@
+name: Fuzz corpus minimization
+
+# Weekly cmin/tmin pass over the fp-fuzz corpus + crash artifacts.
+# Per br-frankenpandas-i9rj + /testing-fuzzing Rule 8 (corpus minimization
+# is a correctness requirement) and Rule 9 (tmin crash artifacts before
+# triage).
+#
+# Runs every Sunday at 07:00 UTC; also supports manual dispatch.
+
+on:
+  schedule:
+    # Sunday 07:00 UTC — off-peak; low contention with regular CI.
+    - cron: "0 7 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run corpus minimization
+        run: ./scripts/fuzz_minimize.sh
+
+      - name: Upload minimized corpus + artifact diff
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-minimize-${{ github.run_id }}
+          path: |
+            fuzz/corpus
+            fuzz/artifacts
+          if-no-files-found: warn

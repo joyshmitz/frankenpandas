@@ -525,12 +525,92 @@ Evidence-driven optimization with formal isomorphism proofs and baseline/opportu
 
 | Metric | Value |
 |--------|-------|
-| Total commits | 269 |
-| Date range | 2026-02-13 to 2026-03-17 |
-| Tags / releases | None (pre-release) |
+| Total commits | 990 |
+| Date range | 2026-02-13 to 2026-04-23 |
+| Tags / releases | None (pre-release; 0.1.0 publish tracked by br-frankenpandas-4clx) |
 | Workspace crates | 12 |
-| Lines of Rust | 84,000+ |
-| Public functions | 788 |
+| Lines of Rust | 146,000+ |
+| Public functions | 1,532 |
 | IO formats | 7 |
-| Conformance packets | 55+ |
+| Conformance packets | 430 (across 1,249 fixtures, all green) |
 | License | MIT + OpenAI/Anthropic rider |
+
+*(Stats regenerated 2026-04-23 by br-frankenpandas-60du catch-up.
+Prior row-by-row values were 12-day / 671-commit stale.)*
+
+---
+
+## Unreleased
+
+### Added (highlights since 2026-03-17)
+
+- **Row MultiIndex epic (br-frankenpandas-1zzp, closed 2026-04-22):**
+  six-slice umbrella shipped — DataFrame row_multiindex field,
+  GroupBy multi-key emit, tuple .loc/.xs/.get_loc, reshape
+  round-trips, IO n-level multi-index, live-oracle conformance.
+- **SQL backend foundation (br-frankenpandas-fd90 slice 1):**
+  generic SqlConnection trait added (sqlite today; postgres/mysql
+  planned under fd90 slices 2-3).
+- **Live-oracle CI enforcement (br-frankenpandas-d6xa):** 89
+  live_oracle_* tests now actually run in CI against pinned pandas
+  (previously skipped silently when legacy_pandas_code/ absent).
+- **Fuzz regression corpus in CI (br-frankenpandas-zjme):** new
+  fuzz-regression job runs the fuzz corpus on every PR.
+- **Fixture provenance + staleness gate (br-frankenpandas-boyr):**
+  pandas version pinned in oracle/requirements.txt; fixture
+  regeneration tracked.
+- **Live-oracle aggregate counter (br-frankenpandas-qi6y):**
+  ran/skipped/failed counters surfaced through fp-ci-gates.
+- **Supply-chain gates (br-frankenpandas-36qc):** cargo-audit +
+  cargo-deny jobs + dependabot.yml; cargo-machete added 2026-04-23
+  via br-frankenpandas-npki.
+- **Perf regression gate (br-frankenpandas-ing6):** perf_baselines
+  activated in CI with budgets.
+- **Rustdoc + # Panics: contract (br-frankenpandas-7cfm):**
+  cargo doc gated in CI with -D warnings.
+- **Nightly date pin (br-frankenpandas-1d9y):**
+  rust-toolchain.toml carries a dated nightly; CI reads it.
+- **#[non_exhaustive] on all 5 pub error enums (br-frankenpandas-tne4,
+  2026-04-23):** FrameError / IoError / ExprError / IndexError /
+  HarnessError — future variant additions stop being semver-major.
+- **Release-day metadata (br-frankenpandas-h8a8 + br-frankenpandas-lz1e,
+  2026-04-23):** workspace.package inheritance + per-crate
+  descriptions + keywords / categories / repository / authors +
+  license-file path via workspace root.
+- **Docs.rs metadata per crate (br-frankenpandas-wskz, 2026-04-23):**
+  [package.metadata.docs.rs] with all-features=true + docsrs cfg
+  + x86_64-linux target across all 12 crates.
+- **rustfmt.toml (br-frankenpandas-thty, 2026-04-23):** style
+  opinions captured (edition 2024, max_width 100, imports_granularity
+  Crate, group_imports StdExternalCrate, nightly-gated unstable
+  features enabled).
+- **Security + community infrastructure (2026-04-23):**
+  SECURITY.md (br-8k1i), AUTHORS.md (br-3d5q partial),
+  .github/FUNDING.yml (br-weh1), .github/PULL_REQUEST_TEMPLATE.md
+  (br-6d5s partial), .github/ISSUE_TEMPLATE/ 5 YAML forms
+  (br-3xtv), .mailmap (br-29lw), CITATION.cff (br-8opp),
+  .editorconfig + .gitattributes (br-xgsf).
+- **CI polish:** concurrency cancel-in-progress group
+  (br-frankenpandas-0iyb, 2026-04-23); removed dead cargo-llvm-cov
+  install step (br-frankenpandas-0a83, 2026-04-23).
+- **Monolith split progress (br-frankenpandas-lxhr, open):**
+  fp-conformance/src/lib.rs reduced from 63,391 → 27,937 lines
+  via 13 test-module extractions under src/tests/. Ongoing —
+  319 inline tests remain for future sessions.
+
+### Session metadata
+
+- **2026-04-22** cc-pandas review-mode session (19 passes, 58 beads
+  filed honest-rated). Handoff committed at `REVIEW_SESSION_HANDOFF.md`.
+- **2026-04-22** PANDAS COMPLETE declaration recorded in `UPGRADE_LOG.md`.
+- **2026-04-23** cc-pandas solo implementation session (COD agents
+  hit Codex quota until 2026-04-28). ~16 beads shipped across
+  supply-chain, release-day metadata, CI polish, community
+  infrastructure, and monolith-split cohesive-slice extraction.
+
+### Automation status
+
+- **CHANGELOG catch-up** (br-frankenpandas-60du, this commit): one-shot
+  backfill — stats table accurate as of 2026-04-23. Further
+  automation via git-cliff or release-plz is the next release-bead
+  slice (br-frankenpandas-4clx).

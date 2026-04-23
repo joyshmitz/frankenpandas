@@ -37,6 +37,30 @@
 - **Tests affected:** `csv_none_is_default_na`
 - **Review date:** 2026-04-15
 
+### DISC-006: Row MultiIndex is scaffolded, not full pandas parity
+- **Reference:** pandas `MultiIndex` supports arbitrary-level hierarchical row labels with full slicing, `xs`, `droplevel`, `swaplevel`, `reindex`, `sort_index`, etc.
+- **Our impl:** Row-MultiIndex first slice ships struct + constructor + level access. Full slicing / xs / droplevel / swaplevel coverage lands in subsequent slices (umbrella tracked by br-frankenpandas-1zzp).
+- **Impact:** DataFrames built with a row MultiIndex may reject operations that pandas accepts, or return partial results. Error messages identify which operation is pending.
+- **Resolution:** INVESTIGATING - slices land under br-1zzp child beads until coverage parity is reached.
+- **Tests affected:** `live_oracle_dataframe_row_multiindex_*` suite (scoped to shipped operations).
+- **Review date:** 2026-04-23
+
+### DISC-007: SQL IO is SQLite-only; pandas supports multiple backends
+- **Reference:** pandas `read_sql` / `to_sql` accept any SQLAlchemy-compatible backend (SQLite, PostgreSQL, MySQL, Oracle, MSSQL, etc.).
+- **Our impl:** fp-io's `read_sql` / `write_sql` only accept a `rusqlite::Connection`. PostgreSQL / MySQL / Oracle connectors not shipped.
+- **Impact:** Users whose pipelines depend on non-SQLite backends cannot drop-in replace pandas IO calls.
+- **Resolution:** INVESTIGATING - tracked by br-frankenpandas-fd90 (SQL backend epic, 7 slices). SQLite remains the supported scope until slices 2+ land.
+- **Tests affected:** `live_oracle_sql_*` suite (SQLite only).
+- **Review date:** 2026-04-23
+
+### DISC-008: No Python bindings shipped; pandas' Python-level drop-in positioning differs
+- **Reference:** pandas IS a Python library. Users `import pandas`.
+- **Our impl:** frankenpandas is a Rust library. Users `use frankenpandas::*` from Rust code. Python bindings (e.g. via PyO3) are not shipped.
+- **Impact:** README's "drop-in pandas replacement" positioning applies at the API-shape level, not at the import-statement level. A Python pandas user cannot adopt frankenpandas without first porting to Rust.
+- **Resolution:** ACCEPTED - README was updated to qualify the claim (br-frankenpandas-diic closed by wording rather than bindings). PyO3 bindings remain a future-epic candidate, not in scope for 0.1.0.
+- **Tests affected:** N/A - positioning / documentation divergence, not behavioral.
+- **Review date:** 2026-04-23
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics

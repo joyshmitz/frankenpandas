@@ -1,0 +1,57 @@
+# Codeowners for frankenpandas. Routes PR review requests automatically.
+#
+# Pattern: later matches take precedence.
+# See: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Tracked under br-frankenpandas-6d5s.
+
+# Default owner for everything not matched below.
+*                                           @Dicklesworthstone
+
+# Core data crates
+/crates/fp-types/                           @Dicklesworthstone
+/crates/fp-columnar/                        @Dicklesworthstone
+/crates/fp-index/                           @Dicklesworthstone
+/crates/fp-frame/                           @Dicklesworthstone
+/crates/fp-groupby/                         @Dicklesworthstone
+/crates/fp-join/                            @Dicklesworthstone
+
+# IO + query crates
+/crates/fp-io/                              @Dicklesworthstone
+/crates/fp-expr/                            @Dicklesworthstone
+
+# Runtime + test / oracle infrastructure
+/crates/fp-runtime/                         @Dicklesworthstone
+/crates/fp-conformance/                     @Dicklesworthstone
+/crates/fp-conformance/oracle/              @Dicklesworthstone
+/crates/fp-conformance/fixtures/            @Dicklesworthstone
+/crates/fp-conformance/DISCREPANCIES.md     @Dicklesworthstone
+/crates/fp-conformance/COVERAGE.md          @Dicklesworthstone
+
+# Umbrella crate + TUI
+/crates/frankenpandas/                      @Dicklesworthstone
+/crates/fp-frankentui/                      @Dicklesworthstone
+
+# Fuzz infrastructure
+/fuzz/                                      @Dicklesworthstone
+
+# CI / workflows / hooks
+/.github/                                   @Dicklesworthstone
+/githooks/                                  @Dicklesworthstone
+/scripts/                                   @Dicklesworthstone
+
+# Release + policy files
+/Cargo.toml                                 @Dicklesworthstone
+/rust-toolchain.toml                        @Dicklesworthstone
+/rustfmt.toml                               @Dicklesworthstone
+/deny.toml                                  @Dicklesworthstone
+/LICENSE                                    @Dicklesworthstone
+/SECURITY.md                                @Dicklesworthstone
+/CHANGELOG.md                               @Dicklesworthstone
+/README.md                                  @Dicklesworthstone
+/AUTHORS.md                                 @Dicklesworthstone
+/CITATION.cff                               @Dicklesworthstone
+
+# Beads tracker (swarm coordination)
+/.beads/                                    @Dicklesworthstone
+/AGENTS.md                                  @Dicklesworthstone

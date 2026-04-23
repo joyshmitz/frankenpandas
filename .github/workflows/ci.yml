@@ -179,6 +179,19 @@ jobs:
       - name: License and source policy audit
         run: cargo deny check advisories bans licenses sources
 
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   fuzz-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 90

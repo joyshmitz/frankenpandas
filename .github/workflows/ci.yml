@@ -184,7 +184,15 @@ jobs:
         run: mkdir -p .tmp .target-conformance
 
       - name: Install pinned pandas oracle dependency
-        run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
+        run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements-dev.txt
+
+      - name: Oracle pytest suite
+        # Per br-frankenpandas-urhy: the 4985-LOC pandas_oracle.py is the
+        # conformance spec's "source of truth". Running its pytest suite
+        # before the cargo conformance tests catches oracle-side
+        # normalize_* / dispatch regressions that would otherwise silently
+        # corrupt every generated fixture.
+        run: python -m pytest crates/fp-conformance/oracle/tests/ -v
 
       - name: Fixture freshness
         run: ./scripts/check_fixture_freshness.sh

@@ -11,6 +11,13 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+# Emit `tracing` spans/events for hot-path operations (groupby, rolling,
+# resample, IO). Off by default so users who don't attach a tracing
+# subscriber pay no dependency cost. Per br-frankenpandas-7gd4.
+tracing = ["dep:tracing"]
+
 [dependencies]
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
@@ -22,6 +29,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
 unicode-casefold = { workspace = true }
 
 [package.metadata.docs.rs]

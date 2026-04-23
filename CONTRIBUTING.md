@@ -94,6 +94,29 @@ full protocol.
 - Shell: `set -euo pipefail` at the top; LF line endings enforced
   by [`.gitattributes`](.gitattributes).
 
+### Observability / tracing (br-frankenpandas-7gd4)
+
+Frankenpandas ships an optional `tracing` feature on `fp-frame` (more
+crates to follow). Opt in to emit `tracing::Span` events around hot-
+path operations:
+
+```toml
+# consumer Cargo.toml
+fp-frame = { version = "0.1", features = ["tracing"] }
+```
+
+Then attach any `tracing-subscriber` at process start:
+
+```rust
+tracing_subscriber::fmt::init();
+let frame = /* ... */;
+let out = frame.groupby(&["k"])?.sum()?;  // spans emitted per op
+```
+
+The default build carries no `tracing` dependency — users who don't
+opt in pay zero dependency cost. `#[tracing::instrument]` annotations
+on concrete pub fns land incrementally in follow-up slices.
+
 ### Commit signing (br-frankenpandas-3d5q)
 
 Starting from 0.1.0 prep, commits on `main` are expected to be SSH-signed.

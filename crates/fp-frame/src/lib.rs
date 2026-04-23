@@ -24,6 +24,7 @@ use thiserror::Error;
 use unicode_casefold::UnicodeCaseFold;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum FrameError {
     #[error("index length ({index_len}) does not match column length ({column_len})")]
     LengthMismatch { index_len: usize, column_len: usize },

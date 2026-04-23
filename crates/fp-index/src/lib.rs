@@ -1264,6 +1264,7 @@ pub struct AlignmentPlan {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexError {
     #[error("alignment vectors must have equal lengths")]
     InvalidAlignmentVectors,

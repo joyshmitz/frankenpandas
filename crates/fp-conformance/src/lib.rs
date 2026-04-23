@@ -2887,6 +2887,7 @@ pub struct PacketDriftHistoryEntry {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum HarnessError {
     #[error(transparent)]
     Io(#[from] std::io::Error),

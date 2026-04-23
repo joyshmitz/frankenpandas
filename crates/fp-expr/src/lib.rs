@@ -139,6 +139,7 @@ impl EvalContext {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ExprError {
     #[error("unknown series reference: {0}")]
     UnknownSeries(String),

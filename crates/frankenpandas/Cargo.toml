@@ -1,9 +1,15 @@
 [package]
 name = "frankenpandas"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
-description = "Clean-room Rust reimplementation of the pandas API"
+description = "Clean-room Rust reimplementation of the pandas API — DataFrame, Series, GroupBy, Rolling, Resample, MultiIndex, 7 IO formats. Zero unsafe."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 fp-columnar = { path = "../fp-columnar" }

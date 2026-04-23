@@ -1,8 +1,15 @@
 [package]
 name = "fp-io"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, Excel, Feather, Arrow IPC, SQL (SQLite today; PostgreSQL/MySQL planned)."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono = { workspace = true }

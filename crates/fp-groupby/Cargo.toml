@@ -1,8 +1,15 @@
 [package]
 name = "fp-groupby"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+description = "GroupBy engine for fp-frame with dense-key / arena-backed / hash-map execution paths."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 bumpalo = { workspace = true }

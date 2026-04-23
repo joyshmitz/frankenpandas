@@ -19,6 +19,13 @@ members = [
 edition = "2024"
 version = "0.1.0"
 license-file = "LICENSE"
+authors = ["Jeffrey Emanuel <jeff141421@gmail.com>"]
+repository = "https://github.com/Dicklesworthstone/frankenpandas"
+homepage = "https://github.com/Dicklesworthstone/frankenpandas"
+documentation = "https://docs.rs/frankenpandas"
+readme = "README.md"
+keywords = ["dataframe", "pandas", "analytics", "columnar", "rust"]
+categories = ["data-structures", "science"]
 
 [workspace.dependencies]
 arrow = { version = "58.1.0", default-features = false, features = ["prettyprint", "ipc"] }

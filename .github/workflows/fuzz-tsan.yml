@@ -1,0 +1,68 @@
+name: Fuzz TSan campaign
+
+# Weekly ThreadSanitizer campaign over concurrency-oriented fuzz targets.
+# Per br-frankenpandas-bahw + /testing-fuzzing Rule 6 (separate sanitizer
+# campaigns — ASan + TSan cannot coexist) and Rule 5 (sanitizer discipline).
+#
+# Runs every Sunday at 09:00 UTC (2h after fuzz-minimize to avoid overlap);
+# also supports manual dispatch.
+
+on:
+  schedule:
+    - cron: "0 9 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target-tsan
+      RUSTFLAGS: "-Zsanitizer=thread"
+      RUSTDOCFLAGS: "-Zsanitizer=thread"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly + rust-src for sanitizer std)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: TSan campaign — parallel dataframe target
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/fuzz_parallel_dataframe
+          cargo fuzz run fuzz_parallel_dataframe corpus/fuzz_parallel_dataframe -- \
+            -runs=5000 \
+            -rss_limit_mb=1024 \
+            -timeout=60 \
+            -artifact_prefix="artifacts/fuzz_parallel_dataframe/"
+
+      - name: Upload TSan artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-tsan-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: warn

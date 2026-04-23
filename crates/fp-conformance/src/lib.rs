@@ -6014,6 +6014,64 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Concurrency-oriented fuzz entrypoint: exercise per-thread `DataFrame`
+/// clones in parallel.
+///
+/// Per br-frankenpandas-bahw Phase 1: /testing-fuzzing Rule 6 + Rule 7
+/// (concurrency archetype, TSan campaign). `DataFrame` is `Send` but
+/// currently not `Sync` (some internal cached-sort caches use
+/// `std::cell::OnceCell`, which is `!Sync`). The valid parallel-use
+/// pattern is therefore "clone per thread", not "share `Arc`". This
+/// harness verifies that pattern stays panic-free and that every
+/// independently-cloned reader observes the same shape invariants as
+/// the source frame.
+///
+/// Shape:
+/// - Project bytes into a small frame via the existing helper.
+/// - Spawn 4 threads; each takes ownership of an independent clone.
+/// - Each thread does a read-only traversal (index len, column_names
+///   len) in a hot loop and returns the observed shape.
+/// - Join all threads; assert all four observed shapes match.
+///
+/// Under TSan (`RUSTFLAGS="-Zsanitizer=thread" cargo +nightly fuzz run
+/// fuzz_parallel_dataframe`) this harness detects any hidden shared-
+/// state race that the clone-per-thread pattern should prevent.
+pub fn fuzz_parallel_dataframe_bytes(input: &[u8]) -> Result<(), String> {
+    use std::thread;
+
+    if input.is_empty() || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+
+    let frame = fuzz_eval_frame_from_bytes(input)
+        .map_err(|err| format!("parallel fuzz frame projection failed: {err}"))?;
+    let expected_index_len = frame.index().len();
+    let expected_col_count = frame.column_names().len();
+
+    let mut handles = Vec::with_capacity(4);
+    for _ in 0..4 {
+        let f = frame.clone();
+        handles.push(thread::spawn(move || -> (usize, usize) {
+            let mut last = (0, 0);
+            for _ in 0..64 {
+                last = (f.index().len(), f.column_names().len());
+            }
+            last
+        }));
+    }
+    for handle in handles {
+        let (idx_len, col_count) = handle
+            .join()
+            .map_err(|_| "parallel fuzz thread panicked".to_string())?;
+        if idx_len != expected_index_len || col_count != expected_col_count {
+            return Err(format!(
+                "parallel read divergence: expected ({expected_index_len}, {expected_col_count}) got ({idx_len}, {col_count})"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Stateful fuzz entrypoint: apply a sequence of `DataFrame` operations.
 ///
 /// Per br-frankenpandas-wr9n Phase 1: all 22 existing fuzz targets run a

@@ -186,5 +186,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_parallel_dataframe"
+path = "fuzz_targets/fuzz_parallel_dataframe.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

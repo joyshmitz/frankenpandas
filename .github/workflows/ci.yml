@@ -46,9 +46,6 @@ jobs:
       - name: Install pinned pandas oracle dependency
         run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
 
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-
       - name: Format
         run: cargo fmt --check
 

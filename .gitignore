@@ -150,3 +150,6 @@ rustc-ice-*.txt
 
 # br-frankenpandas-zk1j: generated pandas API listing
 artifacts/pandas_api_listing.json
+
+# br-frankenpandas-k05t: generated scale fixtures (regenerate via oracle/generate_scale_fixtures.py)
+crates/fp-conformance/fixtures/packets_scale/

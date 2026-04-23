@@ -525,18 +525,21 @@ Evidence-driven optimization with formal isomorphism proofs and baseline/opportu
 
 | Metric | Value |
 |--------|-------|
-| Total commits | 990 |
+| Total commits | 1,015 |
 | Date range | 2026-02-13 to 2026-04-23 |
 | Tags / releases | None (pre-release; 0.1.0 publish tracked by br-frankenpandas-4clx) |
 | Workspace crates | 12 |
-| Lines of Rust | 146,000+ |
+| Lines of Rust | 146,933 |
 | Public functions | 1,532 |
 | IO formats | 7 |
 | Conformance packets | 430 (across 1,249 fixtures, all green) |
 | License | MIT + OpenAI/Anthropic rider |
 
-*(Stats regenerated 2026-04-23 by br-frankenpandas-60du catch-up.
-Prior row-by-row values were 12-day / 671-commit stale.)*
+*(Stats regenerated 2026-04-23 16:30 UTC by br-frankenpandas-60du
+re-catch-up. Numbers above come from: `git log --oneline | wc -l`
+for commits; `find crates -name '*.rs' | xargs wc -l` for LOC;
+`grep -rE '^pub (fn|async fn)' crates/*/src/` for public fn count;
+fixtures directory listing for packet/fixture totals.)*
 
 ---
 

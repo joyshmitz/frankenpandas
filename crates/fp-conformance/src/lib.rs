@@ -22276,6 +22276,10 @@ mod live_oracle_series_to_datetime_variants;
 mod live_oracle_series_misc;
 
 #[cfg(test)]
+#[path = "tests/live_oracle_harness_availability.rs"]
+mod live_oracle_harness_availability;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
@@ -22304,12 +22308,12 @@ mod tests {
         fuzz_rolling_window_bytes, fuzz_scalar_cast_bytes, fuzz_semantic_eq_bytes,
         fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
         run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
-        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_case_evidence_jsonl,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_failure_surface_jsonl,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        run_packet_by_id, run_packet_suite, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_failure_surface_jsonl, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -25439,92 +25443,6 @@ mod tests {
         let json = serde_json::to_string(&expected).expect("serialize");
         let back: FixtureExpectedAlignment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, expected);
-    }
-
-    #[test]
-    fn live_oracle_mode_executes_or_returns_structured_failure() {
-        let cfg = HarnessConfig::default_paths();
-        let options = SuiteOptions {
-            packet_filter: Some("FP-P2C-001".to_owned()),
-            oracle_mode: OracleMode::LiveLegacyPandas,
-        };
-        let result = run_packet_suite_with_options(&cfg, &options);
-        match result {
-            Ok(report) => assert!(report.fixture_count >= 1),
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains("oracle"),
-                    "expected oracle-class error, got {message}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn live_oracle_unavailable_propagates_without_fallback() {
-        let mut cfg = HarnessConfig::default_paths();
-        cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
-        cfg.allow_system_pandas_fallback = false;
-
-        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
-            .expect("expected report even when cases fail");
-        assert!(
-            !report.is_green(),
-            "expected non-green report without fallback: {report:?}"
-        );
-        assert!(
-            report.results.iter().all(|case| {
-                case.mismatch
-                    .as_deref()
-                    .is_some_and(|message| message.contains("legacy oracle root does not exist"))
-            }),
-            "expected oracle-unavailable mismatches in all failed cases: {report:?}"
-        );
-    }
-
-    #[test]
-    fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
-        let mut cfg = HarnessConfig::default_paths();
-        cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
-        cfg.allow_system_pandas_fallback = true;
-
-        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
-            .expect("fixture fallback should recover live-oracle unavailability");
-        assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-001"));
-        assert!(
-            report.is_green(),
-            "expected green fallback report: {report:?}"
-        );
-    }
-
-    #[test]
-    fn live_oracle_non_oracle_unavailable_errors_still_propagate() {
-        let mut cfg = HarnessConfig::default_paths();
-        if !cfg.oracle_root.exists() {
-            eprintln!(
-                "oracle repo missing at {}; skipping python-missing check",
-                cfg.oracle_root.display()
-            );
-            return;
-        }
-        cfg.allow_system_pandas_fallback = true;
-        cfg.python_bin = "/__fp_missing_python__/python3".to_owned();
-
-        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
-            .expect("expected report even when command spawn fails");
-        assert!(
-            !report.is_green(),
-            "expected non-green report for missing python binary: {report:?}"
-        );
-        assert!(
-            report.results.iter().all(|case| {
-                case.mismatch
-                    .as_deref()
-                    .is_some_and(|message| message.contains("No such file or directory"))
-            }),
-            "expected command-spawn io error mismatches in all failed cases: {report:?}"
-        );
     }
 
     #[test]

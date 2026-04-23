@@ -147,3 +147,6 @@ fuzz/target/
 
 # Compiler crash reports
 rustc-ice-*.txt
+
+# br-frankenpandas-zk1j: generated pandas API listing
+artifacts/pandas_api_listing.json

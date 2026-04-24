@@ -694,6 +694,40 @@ def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
     return pd.Series(values, index=index, name=payload.get("name", "series"))
 
 
+def op_series_categorical_from_codes(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_categorical_from_codes requires left payload")
+    categories_raw = payload.get("categorical_categories")
+    if not isinstance(categories_raw, list):
+        raise OracleError("series_categorical_from_codes requires categorical_categories")
+    ordered_raw = payload.get("categorical_ordered", False)
+    if not isinstance(ordered_raw, bool):
+        raise OracleError("series_categorical_from_codes categorical_ordered must be a boolean")
+
+    codes: list[int] = []
+    for idx, raw_code in enumerate(left["values"]):
+        code = scalar_from_json(raw_code)
+        if not isinstance(code, int):
+            raise OracleError(
+                f"series_categorical_from_codes requires int codes at idx={idx}"
+            )
+        codes.append(code)
+
+    categories = [scalar_from_json(item) for item in categories_raw]
+    try:
+        categorical = pd.Categorical.from_codes(
+            codes,
+            categories=categories,
+            ordered=ordered_raw,
+        )
+    except Exception as exc:
+        raise OracleError(f"series_categorical_from_codes failed: {exc}") from exc
+
+    out = pd.Series(categorical, name=left.get("name", "series"))
+    return {"expected_series": series_to_expected(out)}
+
+
 def optional_series_payload(
     pd, payload: dict[str, Any], key: str, op_name: str
 ):
@@ -4756,6 +4790,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_cut(pd, payload)
     if op == "series_qcut":
         return op_series_qcut(pd, payload)
+    if op == "series_categorical_from_codes":
+        return op_series_categorical_from_codes(pd, payload)
     if op == "series_value_counts":
         return op_series_value_counts(pd, payload)
     if op == "series_sort_index":

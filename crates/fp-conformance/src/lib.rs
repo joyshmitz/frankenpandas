@@ -3166,6 +3166,10 @@ struct OracleRequest {
     #[serde(default)]
     na_action_ignore: Option<bool>,
     #[serde(default)]
+    categorical_categories: Option<Vec<Scalar>>,
+    #[serde(default)]
+    categorical_ordered: Option<bool>,
+    #[serde(default)]
     subset: Option<Vec<String>>,
     #[serde(default)]
     keep: Option<String>,
@@ -11943,6 +11947,8 @@ fn capture_live_oracle_expected(
         replace_to_find: fixture.replace_to_find.clone(),
         replace_to_value: fixture.replace_to_value.clone(),
         na_action_ignore: fixture.na_action_ignore,
+        categorical_categories: fixture.categorical_categories.clone(),
+        categorical_ordered: fixture.categorical_ordered,
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
@@ -22621,6 +22627,10 @@ mod conformance_index;
 #[cfg(test)]
 #[path = "tests/conformance_dataframe.rs"]
 mod conformance_dataframe;
+
+#[cfg(test)]
+#[path = "tests/conformance_categorical.rs"]
+mod conformance_categorical;
 
 #[cfg(test)]
 #[path = "tests/conformance_groupby.rs"]

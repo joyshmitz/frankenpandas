@@ -22672,6 +22672,10 @@ mod conformance_multiindex;
 mod conformance_reshape;
 
 #[cfg(test)]
+#[path = "tests/conformance_window.rs"]
+mod conformance_window;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;

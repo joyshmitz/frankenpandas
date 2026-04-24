@@ -825,6 +825,158 @@ def op_series_combine_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def resolve_window_size(payload: dict[str, Any], op_name: str) -> int:
+    raw = payload.get("window_size", 3)
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
+        raise OracleError(f"{op_name} requires positive integer window_size")
+    return raw
+
+
+def resolve_min_periods(payload: dict[str, Any], op_name: str) -> int | None:
+    raw = payload.get("min_periods")
+    if raw is None:
+        return None
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+        raise OracleError(f"{op_name} requires non-negative integer min_periods")
+    return raw
+
+
+def op_series_rolling_builtin(
+    pd, payload: dict[str, Any], func: str, op_name: str
+) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("left"), op_name)
+    window_size = resolve_window_size(payload, op_name)
+    min_periods = resolve_min_periods(payload, op_name)
+    center = bool(payload.get("window_center", False))
+    try:
+        out = getattr(
+            series.rolling(window=window_size, min_periods=min_periods, center=center),
+            func,
+        )()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_rolling_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "mean", "series_rolling_mean")
+
+
+def op_series_rolling_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "sum", "series_rolling_sum")
+
+
+def op_series_rolling_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "std", "series_rolling_std")
+
+
+def op_series_rolling_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "min", "series_rolling_min")
+
+
+def op_series_rolling_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "max", "series_rolling_max")
+
+
+def op_series_rolling_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "var", "series_rolling_var")
+
+
+def op_series_rolling_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_rolling_builtin(pd, payload, "count", "series_rolling_count")
+
+
+def op_series_expanding_builtin(
+    pd, payload: dict[str, Any], func: str, op_name: str
+) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("left"), op_name)
+    min_periods = resolve_min_periods(payload, op_name)
+    try:
+        out = getattr(series.expanding(min_periods=min_periods), func)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_expanding_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "count", "series_expanding_count")
+
+
+def op_series_expanding_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "sum", "series_expanding_sum")
+
+
+def op_series_expanding_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "mean", "series_expanding_mean")
+
+
+def op_series_expanding_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "min", "series_expanding_min")
+
+
+def op_series_expanding_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "max", "series_expanding_max")
+
+
+def op_series_expanding_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "std", "series_expanding_std")
+
+
+def op_series_expanding_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_expanding_builtin(pd, payload, "var", "series_expanding_var")
+
+
+def op_series_expanding_quantile(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("left"), "series_expanding_quantile")
+    min_periods = resolve_min_periods(payload, "series_expanding_quantile")
+    q = payload.get("quantile_value", 0.5)
+    if not isinstance(q, (int, float)) or isinstance(q, bool) or q < 0.0 or q > 1.0:
+        raise OracleError("series_expanding_quantile requires 0.0 <= quantile_value <= 1.0")
+    try:
+        out = series.expanding(min_periods=min_periods).quantile(float(q))
+    except Exception as exc:
+        raise OracleError(f"series_expanding_quantile failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_ewm_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("left"), "series_ewm_mean")
+    span = payload.get("ewm_span")
+    alpha = payload.get("ewm_alpha")
+    if span is None and alpha is None:
+        span = 10.0
+    if span is not None and (not isinstance(span, (int, float)) or span <= 1.0):
+        raise OracleError("series_ewm_mean requires ewm_span > 1")
+    if alpha is not None and (
+        not isinstance(alpha, (int, float)) or alpha <= 0.0 or alpha > 1.0
+    ):
+        raise OracleError("series_ewm_mean requires 0.0 < ewm_alpha <= 1.0")
+    try:
+        out = series.ewm(
+            span=None if span is None else float(span),
+            alpha=None if alpha is None else float(alpha),
+            adjust=False,
+            ignore_na=True,
+        ).mean()
+    except Exception as exc:
+        raise OracleError(f"series_ewm_mean failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_rolling_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_rolling_mean requires frame payload")
+    window_size = resolve_window_size(payload, "dataframe_rolling_mean")
+    min_periods = resolve_min_periods(payload, "dataframe_rolling_mean")
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.rolling(window=window_size, min_periods=min_periods).mean()
+    except Exception as exc:
+        raise OracleError(f"dataframe_rolling_mean failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -4891,6 +5043,38 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_extract_df(pd, payload)
     if op == "series_extractall":
         return op_series_extractall(pd, payload)
+    if op == "series_rolling_mean":
+        return op_series_rolling_mean(pd, payload)
+    if op == "series_rolling_sum":
+        return op_series_rolling_sum(pd, payload)
+    if op == "series_rolling_std":
+        return op_series_rolling_std(pd, payload)
+    if op == "series_rolling_min":
+        return op_series_rolling_min(pd, payload)
+    if op == "series_rolling_max":
+        return op_series_rolling_max(pd, payload)
+    if op == "series_rolling_var":
+        return op_series_rolling_var(pd, payload)
+    if op == "series_rolling_count":
+        return op_series_rolling_count(pd, payload)
+    if op == "series_expanding_count":
+        return op_series_expanding_count(pd, payload)
+    if op == "series_expanding_quantile":
+        return op_series_expanding_quantile(pd, payload)
+    if op == "series_expanding_sum":
+        return op_series_expanding_sum(pd, payload)
+    if op == "series_expanding_mean":
+        return op_series_expanding_mean(pd, payload)
+    if op == "series_expanding_min":
+        return op_series_expanding_min(pd, payload)
+    if op == "series_expanding_max":
+        return op_series_expanding_max(pd, payload)
+    if op == "series_expanding_std":
+        return op_series_expanding_std(pd, payload)
+    if op == "series_expanding_var":
+        return op_series_expanding_var(pd, payload)
+    if op == "series_ewm_mean":
+        return op_series_ewm_mean(pd, payload)
     if op in {"dataframe_identity", "data_frame_identity"}:
         return op_dataframe_identity(pd, payload)
     if op in {"dataframe_to_json_records", "data_frame_to_json_records"}:
@@ -4953,6 +5137,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_rolling_std(pd, payload)
     if op in {"dataframe_groupby_rolling_var", "data_frame_groupby_rolling_var"}:
         return op_dataframe_groupby_rolling_var(pd, payload)
+    if op in {"dataframe_rolling_mean", "data_frame_rolling_mean"}:
+        return op_dataframe_rolling_mean(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

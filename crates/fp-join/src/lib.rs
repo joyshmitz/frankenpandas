@@ -262,6 +262,30 @@ fn reindex_outer_join_column(
     Ok(Column::new(fp_types::DType::Float64, values)?)
 }
 
+fn sort_outer_join_rows(
+    out_labels: &mut Vec<IndexLabel>,
+    left_positions: &mut [Option<usize>],
+    right_positions: &mut [Option<usize>],
+) {
+    if out_labels.len() <= 1 {
+        return;
+    }
+
+    let mut rows = out_labels
+        .drain(..)
+        .zip(left_positions.iter().copied())
+        .zip(right_positions.iter().copied())
+        .map(|((label, left_pos), right_pos)| (label, left_pos, right_pos))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (idx, (label, left_pos, right_pos)) in rows.into_iter().enumerate() {
+        out_labels.push(label);
+        left_positions[idx] = left_pos;
+        right_positions[idx] = right_pos;
+    }
+}
+
 fn join_series_with_global_allocator(
     left: &Series,
     right: &Series,
@@ -333,6 +357,10 @@ fn join_series_with_global_allocator(
                 }
             }
         }
+    }
+
+    if matches!(join_type, JoinType::Outer) {
+        sort_outer_join_rows(&mut out_labels, &mut left_positions, &mut right_positions);
     }
 
     let left_values = if matches!(join_type, JoinType::Outer) {
@@ -422,6 +450,14 @@ fn join_series_with_arena(
                 }
             }
         }
+    }
+
+    if matches!(join_type, JoinType::Outer) {
+        sort_outer_join_rows(
+            &mut out_labels,
+            left_positions.as_mut_slice(),
+            right_positions.as_mut_slice(),
+        );
     }
 
     let left_values = if matches!(join_type, JoinType::Outer) {
@@ -1947,6 +1983,7 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
 
 #[cfg(test)]
 mod tests {
+    use fp_frame::Series;
     use fp_index::IndexLabel;
     use fp_types::{NullKind, Scalar};
 
@@ -1954,7 +1991,6 @@ mod tests {
         DataFrameMergeExt, JoinExecutionOptions, JoinType, join_series, join_series_with_options,
         join_series_with_trace,
     };
-    use fp_frame::Series;
 
     #[test]
     fn inner_join_multiplies_cardinality_for_duplicates() {
@@ -2234,6 +2270,48 @@ mod tests {
     }
 
     #[test]
+    fn outer_join_sorts_union_labels_like_pandas() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["b".into(), "c".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let out = join_series(&left, &right, JoinType::Outer).expect("join");
+        assert_eq!(
+            out.index.labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into())
+            ]
+        );
+        assert_eq!(
+            out.left_values.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0)
+            ]
+        );
+        assert_eq!(
+            out.right_values.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0)
+            ]
+        );
+    }
+
+    #[test]
     fn outer_join_with_duplicates() {
         let left = Series::from_values(
             "left",
@@ -2363,11 +2441,12 @@ mod tests {
 
     // ---- DataFrame merge tests (bd-2gi.17) ----
 
+    use fp_frame::DataFrame;
+
     use super::{
         MergeExecutionOptions, MergeValidateMode, merge_dataframes, merge_dataframes_on,
         merge_dataframes_on_with, merge_dataframes_on_with_options,
     };
-    use fp_frame::DataFrame;
 
     fn make_left_df() -> DataFrame {
         DataFrame::from_dict(
@@ -3742,8 +3821,9 @@ mod tests {
 
     #[test]
     fn dataframe_merge_via_trait() {
-        use super::{DataFrameMergeExt, merge_dataframes_on};
         use fp_frame::DataFrame;
+
+        use super::{DataFrameMergeExt, merge_dataframes_on};
 
         let left = DataFrame::from_series(vec![
             Series::from_values(

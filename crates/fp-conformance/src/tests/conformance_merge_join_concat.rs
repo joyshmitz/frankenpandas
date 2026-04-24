@@ -301,6 +301,18 @@ fn conformance_series_join_inner_misaligned_index() {
 }
 
 #[test]
+fn conformance_series_join_outer_sorts_union_index() {
+    let fixture = series_join_fixture(
+        "FP-CONF-MJC-006B",
+        "series_join_outer_sorts_union_index",
+        series("left", vec![s("a"), s("c")], vec![f(1.0), f(3.0)]),
+        series("right", vec![s("b"), s("c")], vec![f(20.0), f(30.0)]),
+        "outer",
+    );
+    check_fixture(fixture);
+}
+
+#[test]
 fn conformance_concat_axis0_outer_column_union() {
     let fixture = frame_fixture(
         "FP-CONF-MJC-007",
@@ -339,6 +351,30 @@ fn conformance_concat_axis1_outer_index_alignment() {
             vec![s("b"), s("c")],
             &["right_val"],
             &[("right_val", vec![f(20.0), f(30.0)])],
+        ),
+        &[
+            ("concat_axis", serde_json::json!(1)),
+            ("concat_join", serde_json::json!("outer")),
+        ],
+    );
+    check_fixture(fixture);
+}
+
+#[test]
+fn conformance_concat_axis1_outer_int_columns_promote_to_float() {
+    let fixture = frame_fixture(
+        "FP-CONF-MJC-008B",
+        "concat_axis1_outer_int_columns_promote_to_float",
+        "dataframe_concat",
+        frame(
+            vec![s("a"), s("c")],
+            &["left_val"],
+            &[("left_val", vec![i(1), i(3)])],
+        ),
+        frame(
+            vec![s("b"), s("c")],
+            &["right_val"],
+            &[("right_val", vec![i(20), i(30)])],
         ),
         &[
             ("concat_axis", serde_json::json!(1)),

@@ -17,7 +17,7 @@ use fp_index::{
     format_datetime_ns, validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, Timedelta, common_dtype};
+use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -14155,6 +14155,33 @@ fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, Fra
     DataFrame::new_with_column_order(index, columns, shared_columns)
 }
 
+fn reindex_concat_axis1_column(
+    column: &Column,
+    positions: &[Option<usize>],
+) -> Result<Column, FrameError> {
+    let has_missing = positions
+        .iter()
+        .any(|slot| slot.is_none_or(|idx| idx >= column.len()));
+    if !has_missing || !matches!(column.dtype(), DType::Int64 | DType::Float64) {
+        return Ok(column.reindex_by_positions(positions)?);
+    }
+
+    let values = positions
+        .iter()
+        .map(|slot| match slot {
+            Some(idx) => column
+                .values()
+                .get(*idx)
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::NaN)),
+            None => Scalar::Null(NullKind::NaN),
+        })
+        .map(|value| cast_scalar_owned(value, DType::Float64).map_err(ColumnError::from))
+        .collect::<Result<Vec<_>, ColumnError>>()?;
+
+    Ok(Column::new(DType::Float64, values)?)
+}
+
 /// Column-wise DataFrame concat with deterministic outer index alignment.
 ///
 /// Matches `pd.concat([df1, df2, ...], axis=1, join="outer", sort=False)` for
@@ -14234,7 +14261,10 @@ fn concat_dataframes_axis1(
                 )));
             }
 
-            columns.insert(name.clone(), column.reindex_by_positions(&positions)?);
+            columns.insert(
+                name.clone(),
+                reindex_concat_axis1_column(column, &positions)?,
+            );
             output_column_order.push(name.clone());
         }
     }
@@ -30169,17 +30199,17 @@ mod tests {
         assert_eq!(
             out.column("a").unwrap().values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             out.column("b").unwrap().values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(10),
-                Scalar::Int64(20)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0)
             ]
         );
     }

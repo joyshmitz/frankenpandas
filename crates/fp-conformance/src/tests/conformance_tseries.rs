@@ -9,7 +9,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use fp_index::{DateOffset, Index, IndexLabel, apply_date_offset, bdate_range, date_range};
+use fp_index::{
+    DateOffset, Index, IndexLabel, apply_date_offset, bdate_range, date_range,
+    infer_freq_from_timestamps,
+};
 use fp_types::Timedelta;
 use serde::Deserialize;
 
@@ -43,6 +46,12 @@ struct DateOffsetCase<'a> {
     offset: DateOffset,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InferFreqCase<'a> {
+    case_id: &'a str,
+    timestamps: &'a [&'a str],
+}
+
 #[derive(Debug, Deserialize)]
 struct PandasDateRange {
     values: Vec<i64>,
@@ -52,6 +61,14 @@ struct PandasDateRange {
 #[derive(Debug, Deserialize)]
 struct PandasOffsetResult {
     value: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PandasInferFreqResult {
+    ok: bool,
+    value: Option<String>,
+    error_type: Option<String>,
+    message: Option<String>,
 }
 
 fn pandas_tseries_range_or_skip(
@@ -284,6 +301,97 @@ print(json.dumps({"value": int(result.value)}, separators=(",", ":")))
         .map_err(|err| format!("parse pandas offset json failed: {err}"))
 }
 
+fn pandas_infer_freq_or_skip(
+    config: &HarnessConfig,
+    case: InferFreqCase<'_>,
+) -> Result<Option<PandasInferFreqResult>, String> {
+    if !config.oracle_root.exists() && !config.allows_live_oracle_fallback() {
+        eprintln!(
+            "live pandas unavailable; skipping tseries conformance test {}: legacy oracle root does not exist: {}",
+            case.case_id,
+            config.oracle_root.display()
+        );
+        return Ok(None);
+    }
+
+    let payload = serde_json::json!({
+        "timestamps": case.timestamps,
+    });
+
+    let script = r#"
+import importlib
+import json
+import os
+import sys
+
+legacy_root = os.path.abspath(sys.argv[1])
+allow_system_fallback = sys.argv[2] == "1"
+candidate_parent = os.path.dirname(legacy_root)
+if os.path.isdir(candidate_parent):
+    sys.path.insert(0, candidate_parent)
+
+try:
+    import pandas as pd
+except Exception:
+    if not allow_system_fallback:
+        raise
+    while candidate_parent in sys.path:
+        sys.path.remove(candidate_parent)
+    sys.modules.pop("pandas", None)
+    pd = importlib.import_module("pandas")
+
+request = json.loads(sys.stdin.read())
+try:
+    value = pd.infer_freq(pd.DatetimeIndex(request["timestamps"]))
+    print(json.dumps({"ok": True, "value": value}, separators=(",", ":")))
+except Exception as exc:
+    print(json.dumps({
+        "ok": False,
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+    }, separators=(",", ":")))
+"#;
+
+    let mut child = Command::new(&config.python_bin)
+        .arg("-c")
+        .arg(script)
+        .arg(&config.oracle_root)
+        .arg(if config.allows_live_oracle_fallback() {
+            "1"
+        } else {
+            "0"
+        })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn pandas infer_freq oracle failed: {err}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "pandas infer_freq oracle stdin unavailable".to_owned())?;
+    stdin
+        .write_all(payload.to_string().as_bytes())
+        .map_err(|err| format!("write pandas infer_freq oracle payload failed: {err}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("wait for pandas infer_freq oracle failed: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pandas infer_freq oracle failed for {}: {}",
+            case.case_id,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .map(Some)
+        .map_err(|err| format!("parse pandas infer_freq json failed: {err}"))
+}
+
 fn datetime_labels(index: &Index) -> Result<Vec<i64>, String> {
     index
         .labels()
@@ -363,6 +471,34 @@ fn assert_offset_matches_pandas(case: DateOffsetCase<'_>) -> Result<(), String> 
         "pandas.tseries offset value parity drift for {}",
         case.case_id
     );
+    Ok(())
+}
+
+fn assert_infer_freq_matches_pandas(case: InferFreqCase<'_>) -> Result<(), String> {
+    let config = HarnessConfig::default_paths();
+    let Some(expected) = pandas_infer_freq_or_skip(&config, case)? else {
+        return Ok(());
+    };
+
+    let actual = infer_freq_from_timestamps(case.timestamps);
+    if expected.ok {
+        let actual =
+            actual.map_err(|err| format!("fp infer_freq failed for {}: {err}", case.case_id))?;
+        assert_eq!(
+            actual, expected.value,
+            "pandas.tseries infer_freq value parity drift for {}",
+            case.case_id
+        );
+    } else {
+        assert!(
+            actual.is_err(),
+            "pandas.tseries infer_freq error parity drift for {}: pandas returned {:?} {:?}, fp returned {:?}",
+            case.case_id,
+            expected.error_type,
+            expected.message,
+            actual
+        );
+    }
     Ok(())
 }
 
@@ -584,5 +720,82 @@ fn conformance_tseries_offsets_month_end_negative_rolls_back() -> Result<(), Str
         timestamp: "2024-02-10",
         pandas_offset: "MonthEnd",
         offset: DateOffset::MonthEnd(-1),
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_daily() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_daily",
+        timestamps: &["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_two_day() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_two_day",
+        timestamps: &["2024-01-01", "2024-01-03", "2024-01-05", "2024-01-07"],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_six_hour() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_six_hour",
+        timestamps: &[
+            "2024-01-01 00:00:00",
+            "2024-01-01 06:00:00",
+            "2024-01-01 12:00:00",
+            "2024-01-01 18:00:00",
+        ],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_business_day() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_business_day",
+        timestamps: &[
+            "2024-01-01",
+            "2024-01-02",
+            "2024-01-03",
+            "2024-01-04",
+            "2024-01-05",
+            "2024-01-08",
+            "2024-01-09",
+        ],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_month_end_leap_year() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_month_end_leap_year",
+        timestamps: &["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_irregular_returns_none() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_irregular_returns_none",
+        timestamps: &["2024-01-01", "2024-01-02", "2024-01-04", "2024-01-07"],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_duplicate_returns_none() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_duplicate_returns_none",
+        timestamps: &["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-03"],
+    })
+}
+
+#[test]
+fn conformance_tseries_infer_freq_too_few_dates_errors() -> Result<(), String> {
+    assert_infer_freq_matches_pandas(InferFreqCase {
+        case_id: "tseries_infer_freq_too_few_dates_errors",
+        timestamps: &["2024-01-01", "2024-01-02"],
     })
 }

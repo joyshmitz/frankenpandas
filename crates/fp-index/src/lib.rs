@@ -1796,6 +1796,8 @@ pub fn timedelta_range(
 pub enum DateRangeError {
     #[error("must specify at least two of start, end, periods")]
     InsufficientParams,
+    #[error("need at least 3 dates to infer frequency")]
+    InsufficientDates,
     #[error("must specify no more than two of start, end, periods")]
     TooManyParams,
     #[error("freq must be positive")]
@@ -2021,6 +2023,12 @@ fn add_months_to_month_end(
     last_day_of_month(year, month)
 }
 
+fn month_ordinal(date: chrono::NaiveDate) -> i64 {
+    use chrono::Datelike;
+
+    i64::from(date.year()) * 12 + i64::from(date.month()) - 1
+}
+
 fn apply_month_end_offset(
     date: chrono::NaiveDate,
     months: i32,
@@ -2042,6 +2050,141 @@ fn apply_month_end_offset(
         months
     };
     add_months_to_month_end(current_month_end, month_steps)
+}
+
+fn fixed_frequency_name(diff: i64) -> Option<String> {
+    if diff <= 0 {
+        return None;
+    }
+
+    let units = [
+        (Timedelta::NANOS_PER_DAY, "D"),
+        (Timedelta::NANOS_PER_HOUR, "h"),
+        (Timedelta::NANOS_PER_MIN, "min"),
+        (Timedelta::NANOS_PER_SEC, "s"),
+        (Timedelta::NANOS_PER_MILLI, "ms"),
+        (Timedelta::NANOS_PER_MICRO, "us"),
+        (1, "ns"),
+    ];
+    for (unit_nanos, suffix) in units {
+        if diff % unit_nanos == 0 {
+            let count = diff / unit_nanos;
+            return if count == 1 {
+                Some(suffix.to_owned())
+            } else {
+                Some(format!("{count}{suffix}"))
+            };
+        }
+    }
+    None
+}
+
+fn infer_business_day_freq(dates: &[(chrono::NaiveDate, i64)]) -> Option<String> {
+    if dates.iter().any(|(date, _)| !is_business_day(*date)) {
+        return None;
+    }
+    let first_time = dates[0].1;
+    if dates.iter().any(|(_, time)| *time != first_time) {
+        return None;
+    }
+    for window in dates.windows(2) {
+        let expected = next_business_day(checked_day_step(window[0].0, 1).ok()?).ok()?;
+        if window[1].0 != expected {
+            return None;
+        }
+    }
+    Some("B".to_owned())
+}
+
+fn infer_month_end_freq(dates: &[(chrono::NaiveDate, i64)]) -> Option<String> {
+    use chrono::Datelike;
+
+    let first_time = dates[0].1;
+    if dates.iter().any(|(_, time)| *time != first_time) {
+        return None;
+    }
+    for (date, _) in dates {
+        if *date != last_day_of_month(date.year(), date.month()).ok()? {
+            return None;
+        }
+    }
+
+    let step = month_ordinal(dates[1].0) - month_ordinal(dates[0].0);
+    if step <= 0 {
+        return None;
+    }
+    if dates
+        .windows(2)
+        .all(|window| month_ordinal(window[1].0) - month_ordinal(window[0].0) == step)
+    {
+        if step == 1 {
+            Some("ME".to_owned())
+        } else {
+            Some(format!("{step}ME"))
+        }
+    } else {
+        None
+    }
+}
+
+/// Infer a pandas-style frequency string from a DatetimeIndex.
+///
+/// Returns `Ok(None)` for irregular or duplicate timestamp sequences. Returns
+/// an error for the pandas-compatible "fewer than 3 dates" case.
+pub fn infer_freq(index: &Index) -> Result<Option<String>, DateRangeError> {
+    let mut values = Vec::with_capacity(index.len());
+    for label in index.labels() {
+        match label {
+            IndexLabel::Datetime64(value) if *value != i64::MIN => values.push(*value),
+            IndexLabel::Datetime64(_) => return Ok(None),
+            _ => {
+                return Err(DateRangeError::ParseError(
+                    "expected datetime64 index".to_owned(),
+                ));
+            }
+        }
+    }
+    infer_freq_from_nanos(&values)
+}
+
+/// Infer a pandas-style frequency string from timestamp strings.
+pub fn infer_freq_from_timestamps(timestamps: &[&str]) -> Result<Option<String>, DateRangeError> {
+    let values: Vec<i64> = timestamps
+        .iter()
+        .map(|timestamp| parse_datetime_to_nanos(timestamp))
+        .collect::<Result<_, _>>()?;
+    infer_freq_from_nanos(&values)
+}
+
+/// Infer a pandas-style frequency string from nanosecond timestamps.
+pub fn infer_freq_from_nanos(values: &[i64]) -> Result<Option<String>, DateRangeError> {
+    if values.len() < 3 {
+        return Err(DateRangeError::InsufficientDates);
+    }
+    if values.windows(2).any(|window| window[1] <= window[0]) {
+        return Ok(None);
+    }
+
+    let first_diff = values[1] - values[0];
+    if values
+        .windows(2)
+        .all(|window| window[1] - window[0] == first_diff)
+    {
+        return Ok(fixed_frequency_name(first_diff));
+    }
+
+    let dates: Vec<(chrono::NaiveDate, i64)> = values
+        .iter()
+        .map(|value| split_datetime_nanos(*value))
+        .collect::<Result<_, _>>()?;
+    if let Some(freq) = infer_business_day_freq(&dates) {
+        return Ok(Some(freq));
+    }
+    if let Some(freq) = infer_month_end_freq(&dates) {
+        return Ok(Some(freq));
+    }
+
+    Ok(None)
 }
 
 /// Create a DatetimeIndex with evenly spaced values.
@@ -2816,7 +2959,7 @@ mod tests {
 
     use super::{
         DateOffset, Index, IndexLabel, MultiIndex, align_union, apply_date_offset, bdate_range,
-        validate_alignment_plan,
+        infer_freq_from_timestamps, validate_alignment_plan,
     };
 
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
@@ -2868,6 +3011,43 @@ mod tests {
     fn date_offset_month_end_handles_leap_year() {
         let nanos = apply_date_offset("2024-02-10", DateOffset::MonthEnd(1)).unwrap();
         assert_eq!(nanos, 1_709_164_800_000_000_000);
+    }
+
+    #[test]
+    fn infer_freq_detects_fixed_and_calendar_offsets() {
+        assert_eq!(
+            infer_freq_from_timestamps(&["2024-01-01", "2024-01-03", "2024-01-05"]).unwrap(),
+            Some("2D".to_owned())
+        );
+        assert_eq!(
+            infer_freq_from_timestamps(&[
+                "2024-01-01",
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-04",
+                "2024-01-05",
+                "2024-01-08",
+                "2024-01-09",
+            ])
+            .unwrap(),
+            Some("B".to_owned())
+        );
+        assert_eq!(
+            infer_freq_from_timestamps(&["2024-01-31", "2024-02-29", "2024-03-31"]).unwrap(),
+            Some("ME".to_owned())
+        );
+    }
+
+    #[test]
+    fn infer_freq_returns_none_for_irregular_or_duplicate_values() {
+        assert_eq!(
+            infer_freq_from_timestamps(&["2024-01-01", "2024-01-02", "2024-01-04"]).unwrap(),
+            None
+        );
+        assert_eq!(
+            infer_freq_from_timestamps(&["2024-01-01", "2024-01-02", "2024-01-02"]).unwrap(),
+            None
+        );
     }
 
     #[test]

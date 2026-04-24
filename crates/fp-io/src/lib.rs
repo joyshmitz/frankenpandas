@@ -3086,6 +3086,7 @@ pub trait SqlConnection {
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
+#[cfg(feature = "sql-sqlite")]
 fn dtype_to_sql(dtype: DType) -> &'static str {
     match dtype {
         DType::Int64 => "INTEGER",
@@ -3099,6 +3100,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
 }
 
 /// Convert an SQLite column value to a Scalar.
+#[cfg(feature = "sql-sqlite")]
 fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
     match value {
         rusqlite::types::Value::Null => Scalar::Null(NullKind::Null),
@@ -3109,6 +3111,7 @@ fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
     }
 }
 
+#[cfg(feature = "sql-sqlite")]
 fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
     match scalar {
         Scalar::Int64(v) => rusqlite::types::Value::Integer(*v),
@@ -3153,6 +3156,7 @@ fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
     }
 }
 
+#[cfg(feature = "sql-sqlite")]
 impl SqlConnection for rusqlite::Connection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
         let mut stmt = self
@@ -3235,6 +3239,7 @@ impl SqlConnection for rusqlite::Connection {
     }
 }
 
+#[cfg(feature = "sql-sqlite")]
 fn sql_dtype_from_index(index: &Index) -> &'static str {
     for label in index.labels() {
         match label {

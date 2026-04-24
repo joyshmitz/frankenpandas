@@ -33,7 +33,7 @@
 | Column MultiIndex | Yes | No | Yes (foundation) |
 | Row MultiIndex | Yes | No | Yes (DataFrame/groupby/indexing/reshape/IO integration) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
-| 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: SQLite-only via rusqlite; PostgreSQL/MySQL planned) |
+| 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: generic `SqlConnection`, SQLite default backend; PostgreSQL/MySQL planned) |
 | Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1249 fixtures, all green) |
 
 ## Quick Example
@@ -145,7 +145,7 @@ frankenpandas/
 | **Excel** | `read_excel_bytes` | `write_excel_bytes` | Yes | Yes | sheet_name, has_headers, index_col, skip_rows; .xlsx/.xls/.xlsb/.ods |
 | **Feather** | `read_feather_bytes` | `write_feather_bytes` | Yes | Yes | Arrow IPC file format (random-access footer) |
 | **Arrow IPC stream** | `read_ipc_stream_bytes` | `write_ipc_stream_bytes` | Yes | Yes | Streaming wire format (forward-only; pipes + zero-copy interchange) |
-| **SQL** | `read_sql` | `write_sql` | N/A | SQLite | query or table, SqlIfExists (Fail/Replace/Append), transaction-wrapped |
+| **SQL** | `read_sql` | `write_sql` | N/A | `SqlConnection` trait; SQLite backend by default | query or table, SqlIfExists (Fail/Replace/Append), transaction-wrapped |
 
 All formats accessible through `DataFrameIoExt` trait methods on DataFrame.
 
@@ -166,6 +166,10 @@ fp-frame = { path = "crates/fp-frame" }
 fp-io = { path = "crates/fp-io" }
 fp-types = { path = "crates/fp-types" }
 ```
+
+`fp-io` enables `sql-sqlite` by default. Disable default features to build
+without the SQLite dependency; implement `SqlConnection` for another backend to
+route the same `read_sql` / `write_sql` APIs through that connection type.
 
 ### Build from Source
 
@@ -1376,7 +1380,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | No native Datetime dtype | Datetimes stored as ISO 8601 Utf8 strings | Use `to_datetime()` for normalization |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
-| SQL IO is SQLite-only | `read_sql` / `write_sql` hardcode `rusqlite::Connection`; no DBAPI2 / SqlConnection trait yet; no PostgreSQL, MySQL, MS SQL, or Oracle backends; no chunksize streaming; `coerce_float` absent. Tracked by `frankenpandas-fd90` (SQL backend abstraction epic) | Use SQLite via `rusqlite::Connection::open[_in_memory]` today; export to Parquet/Feather for other DBs |
+| SQL IO has one built-in backend | `read_sql` / `write_sql` are generic over `SqlConnection`, and `rusqlite::Connection` implements it behind the default `sql-sqlite` feature. PostgreSQL/MySQL/MS SQL/Oracle concrete adapters, chunksize streaming, and `coerce_float` are not built in yet. | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend while native adapters land |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
 | No plotting | Requires graphics library | Export to pandas/matplotlib for visualization |
 

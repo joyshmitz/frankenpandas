@@ -436,6 +436,8 @@ pub enum FixtureOperation {
     SeriesDropNa,
     #[serde(rename = "series_count", alias = "series_count_default")]
     SeriesCount,
+    #[serde(rename = "series_nunique", alias = "series_nunique_default")]
+    SeriesNunique,
     #[serde(rename = "series_mode", alias = "series_mode_default")]
     SeriesMode,
     #[serde(rename = "series_rank", alias = "series_rank_default")]
@@ -1248,6 +1250,7 @@ impl FixtureOperation {
             Self::SeriesFillNa => "series_fillna",
             Self::SeriesDropNa => "series_dropna",
             Self::SeriesCount => "series_count",
+            Self::SeriesNunique => "series_nunique",
             Self::SeriesMode => "series_mode",
             Self::SeriesRank => "series_rank",
             Self::SeriesDescribe => "series_describe",
@@ -2222,6 +2225,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesCount
+        | FixtureOperation::SeriesNunique
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -3019,6 +3023,8 @@ struct OracleRequest {
     operation: FixtureOperation,
     left: Option<FixtureSeries>,
     right: Option<FixtureSeries>,
+    #[serde(default)]
+    series: Option<FixtureSeries>,
     #[serde(default)]
     groupby_keys: Option<Vec<FixtureSeries>>,
     #[serde(default)]
@@ -9438,15 +9444,23 @@ fn run_fixture_operation(
                 ),
             }
         }
-        FixtureOperation::SeriesCount => {
+        FixtureOperation::SeriesCount | FixtureOperation::SeriesNunique => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = Scalar::Int64(series.count() as i64);
+            let value = match fixture.operation {
+                FixtureOperation::SeriesCount => series.count(),
+                FixtureOperation::SeriesNunique => series.nunique(),
+                _ => unreachable!(),
+            };
+            let actual = Scalar::Int64(value as i64);
             match expected {
                 ResolvedExpected::Scalar(scalar) => {
                     compare_scalar(&actual, &scalar, fixture.operation.operation_name())
                 }
-                _ => Err("expected_scalar is required for series_count".to_owned()),
+                _ => Err(format!(
+                    "expected_scalar is required for {}",
+                    fixture.operation.operation_name()
+                )),
             }
         }
         FixtureOperation::DataFrameCount => {
@@ -11780,6 +11794,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
         | FixtureOperation::SeriesCount
+        | FixtureOperation::SeriesNunique
         | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
@@ -11855,6 +11870,7 @@ fn capture_live_oracle_expected(
         operation: fixture.operation,
         left: fixture.left.clone(),
         right: fixture.right.clone(),
+        series: fixture.left.clone(),
         groupby_keys: fixture.groupby_keys.clone(),
         groupby_columns: fixture.groupby_columns.clone(),
         groupby_observed: fixture.groupby_observed,
@@ -12412,6 +12428,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
         | FixtureOperation::SeriesCount
+        | FixtureOperation::SeriesNunique
         | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -18159,17 +18176,25 @@ fn execute_and_compare_differential(
                 _ => Err("expected_series or expected_error required for series_dropna".to_owned()),
             }
         }
-        FixtureOperation::SeriesCount => {
+        FixtureOperation::SeriesCount | FixtureOperation::SeriesNunique => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = Scalar::Int64(series.count() as i64);
+            let value = match fixture.operation {
+                FixtureOperation::SeriesCount => series.count(),
+                FixtureOperation::SeriesNunique => series.nunique(),
+                _ => unreachable!(),
+            };
+            let actual = Scalar::Int64(value as i64);
             match expected {
                 ResolvedExpected::Scalar(scalar) => Ok(diff_scalar(
                     &actual,
                     &scalar,
                     fixture.operation.operation_name(),
                 )),
-                _ => Err("expected_scalar required for series_count".to_owned()),
+                _ => Err(format!(
+                    "expected_scalar required for {}",
+                    fixture.operation.operation_name()
+                )),
             }
         }
         FixtureOperation::DataFrameCount => {
@@ -22580,6 +22605,10 @@ mod fuzz_seed_fixtures;
 #[cfg(test)]
 #[path = "tests/packet_filter_runs.rs"]
 mod packet_filter_runs;
+
+#[cfg(test)]
+#[path = "tests/conformance_series.rs"]
+mod conformance_series;
 
 #[cfg(test)]
 mod tests {

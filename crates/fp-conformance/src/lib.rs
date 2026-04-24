@@ -22654,6 +22654,10 @@ mod conformance_categorical;
 mod conformance_datetime;
 
 #[cfg(test)]
+#[path = "tests/conformance_tseries.rs"]
+mod conformance_tseries;
+
+#[cfg(test)]
 #[path = "tests/conformance_groupby.rs"]
 mod conformance_groupby;
 

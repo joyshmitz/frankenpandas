@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::str::FromStr;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    str::FromStr,
+};
 
 use chrono::{
     DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc,
 };
 use chrono_tz::Tz;
-use regex::Regex;
-
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
 use fp_index::{
     AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
@@ -18,6 +18,7 @@ use fp_index::{
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
 use fp_types::{DType, NullKind, Scalar, Timedelta, common_dtype};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -586,6 +587,31 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => Value::Null,
         Scalar::Timedelta64(v) => Value::String(Timedelta::format(*v)),
     }
+}
+
+fn column_promotes_int_json_values_to_float(column: &Column) -> bool {
+    let mut saw_int = false;
+    let mut saw_missing = false;
+
+    for value in column.values() {
+        match value {
+            Scalar::Int64(_) => saw_int = true,
+            Scalar::Null(_) => saw_missing = true,
+            Scalar::Float64(_) => {}
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
+        }
+    }
+
+    saw_int && saw_missing
+}
+
+fn scalar_to_json_value_with_column_promotion(value: &Scalar, promote_int_to_float: bool) -> Value {
+    if promote_int_to_float && let Scalar::Int64(v) = value {
+        return serde_json::Number::from_f64(*v as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
+    }
+    scalar_to_json_value(value)
 }
 
 fn index_label_to_json_value(label: &IndexLabel) -> Value {
@@ -21231,13 +21257,23 @@ impl DataFrame {
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
         match orient {
             "records" => {
+                let column_float_promotions = self
+                    .column_order
+                    .iter()
+                    .map(|name| column_promotes_int_json_values_to_float(&self.columns[name]))
+                    .collect::<Vec<_>>();
                 let mut rows = Vec::with_capacity(self.len());
                 for row_idx in 0..self.len() {
                     let mut row = Map::new();
-                    for name in &self.column_order {
+                    for (name, promote_int_to_float) in
+                        self.column_order.iter().zip(column_float_promotions.iter())
+                    {
                         row.insert(
                             name.clone(),
-                            scalar_to_json_value(&self.columns[name].values()[row_idx]),
+                            scalar_to_json_value_with_column_promotion(
+                                &self.columns[name].values()[row_idx],
+                                *promote_int_to_float,
+                            ),
                         );
                     }
                     rows.push(Value::Object(row));
@@ -28801,13 +28837,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Duration;
-    use serde_json::Value;
-
+    use fp_columnar::Column;
+    use fp_index::{AlignMode, Index};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{DType, NullKind, Scalar};
-
-    use fp_columnar::Column;
-    use fp_index::AlignMode;
+    use serde_json::Value;
 
     use super::{
         DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DataFrameDictAxisLabels,
@@ -28815,7 +28849,6 @@ mod tests {
         TzLocalizeOptions, TzNonexistentPolicy, cut, index_to_frame, index_to_series, qcut,
         to_numeric,
     };
-    use fp_index::Index;
 
     fn expect_float64(value: &Scalar) -> f64 {
         if let Scalar::Float64(v) = value {
@@ -45368,6 +45401,19 @@ mod tests {
         assert!(json.ends_with(']'));
         assert!(json.contains("\"a\":1"));
         assert!(json.contains("\"b\":\"hello\""));
+    }
+
+    #[test]
+    fn dataframe_to_json_records_promotes_nullable_int_column_to_float() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
+            vec!["row".into(), "row".into()],
+        )
+        .unwrap();
+
+        let json = df.to_json("records").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!([{"a": 1.0}, {"a": null}]));
     }
 
     #[test]

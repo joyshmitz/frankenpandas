@@ -120,6 +120,18 @@ fn conformance_io_read_csv_missing_heavy_values() {
 }
 
 #[test]
+fn conformance_io_read_csv_missing_heavy_numeric_column() {
+    let fixture = csv_fixture(
+        "FP-CONF-IO-011",
+        "io_read_csv_missing_heavy_numeric_column",
+        "csv_read_frame",
+        "a,b,c\n,NA,NaN\n1,,x\n",
+        &[],
+    );
+    check_io_fixture(fixture);
+}
+
+#[test]
 fn conformance_io_read_csv_quoted_commas_and_newlines() {
     let fixture = csv_fixture(
         "FP-CONF-IO-004",
@@ -159,6 +171,33 @@ fn conformance_io_read_csv_true_false_values() {
 }
 
 #[test]
+fn conformance_io_read_csv_numeric_true_false_values_remain_ints() {
+    let fixture = csv_fixture(
+        "FP-CONF-IO-012",
+        "io_read_csv_numeric_true_false_values_remain_ints",
+        "csv_read_frame",
+        "flag\n1\n0\n",
+        &[
+            ("csv_true_values", serde_json::json!(["1"])),
+            ("csv_false_values", serde_json::json!(["0"])),
+        ],
+    );
+    check_io_fixture(fixture);
+}
+
+#[test]
+fn conformance_io_read_csv_decimal_comma_quoted_values() {
+    let fixture = csv_fixture(
+        "FP-CONF-IO-013",
+        "io_read_csv_decimal_comma_quoted_values",
+        "csv_read_frame",
+        "price\n\"1,50\"\n\"3,75\"\n",
+        &[("csv_decimal", serde_json::json!(","))],
+    );
+    check_io_fixture(fixture);
+}
+
+#[test]
 fn conformance_io_read_csv_parse_dates_iso_dates() {
     let fixture = csv_fixture(
         "FP-CONF-IO-007",
@@ -181,6 +220,18 @@ fn conformance_io_read_csv_parse_dates_combined_columns() {
             "csv_parse_date_combinations",
             serde_json::json!([["date", "time"]]),
         )],
+    );
+    check_io_fixture(fixture);
+}
+
+#[test]
+fn conformance_io_read_csv_parse_dates_mixed_inferred_format_stays_object() {
+    let fixture = csv_fixture(
+        "FP-CONF-IO-014",
+        "io_read_csv_parse_dates_mixed_inferred_format_stays_object",
+        "csv_read_frame",
+        "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n",
+        &[("csv_parse_dates", serde_json::json!(["ts"]))],
     );
     check_io_fixture(fixture);
 }
@@ -225,6 +276,32 @@ fn conformance_io_dataframe_to_json_records_ignores_duplicate_index() {
                 ]
             },
             "column_order": ["b", "a", "flag"]
+        }
+    }))
+    .expect("fixture");
+    check_io_fixture(fixture);
+}
+
+#[test]
+fn conformance_io_dataframe_to_json_records_nullable_numeric_duplicate_index() {
+    let fixture: PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-CONF-IO-015",
+        "case_id": "io_dataframe_to_json_records_nullable_numeric_duplicate_index",
+        "mode": "strict",
+        "operation": "dataframe_to_json_records",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "row" },
+                { "kind": "utf8", "value": "row" }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "null", "value": "null" }
+                ]
+            },
+            "column_order": ["a"]
         }
     }))
     .expect("fixture");

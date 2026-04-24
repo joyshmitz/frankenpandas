@@ -1,22 +1,26 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::Arc;
-
-use arrow::array::{
-    Array, BooleanArray, BooleanBuilder, Date32Array, Date64Array, Float64Array, Float64Builder,
-    Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Arc,
 };
-use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
+
+use arrow::{
+    array::{
+        Array, BooleanArray, BooleanBuilder, Date32Array, Date64Array, Float64Array,
+        Float64Builder, Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    },
+    datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
+};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
-use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -429,13 +433,6 @@ fn parse_scalar_with_options(
         }
     }
 
-    if true_values.iter().any(|value| value == trimmed) {
-        return Scalar::Bool(true);
-    }
-    if false_values.iter().any(|value| value == trimmed) {
-        return Scalar::Bool(false);
-    }
-
     // `thousands` is silently ignored if it equals the decimal separator,
     // matching pandas semantics.
     let thousands_effective = thousands.filter(|t| *t != decimal);
@@ -462,6 +459,14 @@ fn parse_scalar_with_options(
     if let Ok(value) = float_candidate.parse::<f64>() {
         return Scalar::Float64(value);
     }
+
+    if true_values.iter().any(|value| value == trimmed) {
+        return Scalar::Bool(true);
+    }
+    if false_values.iter().any(|value| value == trimmed) {
+        return Scalar::Bool(false);
+    }
+
     if trimmed.eq_ignore_ascii_case("true") {
         return Scalar::Bool(true);
     }
@@ -557,14 +562,9 @@ fn apply_parse_dates(
             index_labels,
             columns[column_idx].clone(),
         )?;
-        let parsed = to_datetime_with_options(
-            &series,
-            ToDatetimeOptions {
-                infer_mixed_timezone: false,
-                ..ToDatetimeOptions::default()
-            },
-        )?;
-        columns[column_idx] = parsed.values().to_vec();
+        if let Some(parsed) = parse_csv_datetime_column(&series)? {
+            columns[column_idx] = parsed.values().to_vec();
+        }
     }
 
     Ok(())
@@ -625,13 +625,7 @@ fn apply_one_parse_date_combination(
     );
     let combined_series =
         Series::from_values(combined_name.clone(), index_labels, combined_values)?;
-    let parsed = to_datetime_with_options(
-        &combined_series,
-        ToDatetimeOptions {
-            infer_mixed_timezone: false,
-            ..ToDatetimeOptions::default()
-        },
-    )?;
+    let parsed = parse_csv_datetime_column(&combined_series)?.unwrap_or(combined_series);
 
     for idx in positions.iter().rev() {
         headers.remove(*idx);
@@ -640,6 +634,61 @@ fn apply_one_parse_date_combination(
     headers.insert(positions[0], combined_name);
     columns.insert(positions[0], parsed.values().to_vec());
     Ok(())
+}
+
+fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError> {
+    let parsed = to_datetime_with_options(
+        series,
+        ToDatetimeOptions {
+            infer_mixed_timezone: true,
+            ..ToDatetimeOptions::default()
+        },
+    )?;
+    let parse_failed = series
+        .values()
+        .iter()
+        .zip(parsed.values())
+        .any(|(original, parsed)| !original.is_missing() && parsed.is_missing());
+
+    if parse_failed {
+        Ok(None)
+    } else {
+        Ok(Some(parsed))
+    }
+}
+
+fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
+    let mut saw_numeric = false;
+    let mut saw_missing = false;
+    let mut saw_float = false;
+
+    for value in values {
+        match value {
+            Scalar::Int64(_) => saw_numeric = true,
+            Scalar::Float64(_) => {
+                saw_numeric = true;
+                saw_float = true;
+            }
+            Scalar::Null(_) => saw_missing = true,
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
+        }
+    }
+
+    saw_numeric && (saw_missing || saw_float)
+}
+
+fn apply_pandas_csv_numeric_promotions(columns: &mut [Vec<Scalar>]) {
+    for column in columns {
+        if !pandas_csv_numeric_column_requires_float(column) {
+            continue;
+        }
+
+        for value in column {
+            if let Scalar::Int64(v) = value {
+                *value = Scalar::Float64(*v as f64);
+            }
+        }
+    }
 }
 
 fn apply_parse_date_combinations(
@@ -864,6 +913,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         apply_parse_dates(&headers, &mut columns, parse_dates)?;
     }
 
+    apply_pandas_csv_numeric_promotions(&mut columns);
+
     // Apply dtype coercion if specified.
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
@@ -1023,6 +1074,32 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
             }
         }
     }
+}
+
+fn column_promotes_int_json_values_to_float(values: &[Scalar]) -> bool {
+    let mut saw_int = false;
+    let mut saw_missing = false;
+
+    for value in values {
+        match value {
+            Scalar::Int64(_) => saw_int = true,
+            Scalar::Null(_) => saw_missing = true,
+            Scalar::Float64(_) => {}
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
+        }
+    }
+
+    saw_int && saw_missing
+}
+
+fn scalar_to_json_with_column_promotion(
+    scalar: &Scalar,
+    promote_int_to_float: bool,
+) -> serde_json::Value {
+    if promote_int_to_float && let Scalar::Int64(v) = scalar {
+        return serde_json::json!(*v as f64);
+    }
+    scalar_to_json(scalar)
 }
 
 fn json_value_to_index_label(value: &serde_json::Value) -> IndexLabel {
@@ -1487,14 +1564,26 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
 
     match orient {
         JsonOrient::Records => {
+            let column_float_promotions = headers
+                .iter()
+                .map(|name| {
+                    frame.column(name).is_some_and(|column| {
+                        column_promotes_int_json_values_to_float(column.values())
+                    })
+                })
+                .collect::<Vec<_>>();
             let mut records = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let mut obj = serde_json::Map::new();
-                for name in &headers {
+                for (name, promote_int_to_float) in
+                    headers.iter().zip(column_float_promotions.iter())
+                {
                     let val = frame
                         .column(name)
                         .and_then(|c| c.value(row_idx))
-                        .map(scalar_to_json)
+                        .map(|value| {
+                            scalar_to_json_with_column_promotion(value, *promote_int_to_float)
+                        })
                         .unwrap_or(serde_json::Value::Null);
                     obj.insert(name.clone(), val);
                 }
@@ -3730,8 +3819,10 @@ impl DataFrameIoExt for DataFrame {
 mod tests {
     use std::collections::BTreeMap;
 
-    use arrow::array::{Array, Int64Array};
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::{
+        array::{Array, Int64Array},
+        datatypes::DataType as ArrowDataType,
+    };
     use fp_columnar::Column;
     use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
@@ -4694,7 +4785,7 @@ mod tests {
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
         assert_eq!(
             frame.column("b").unwrap().values()[1],
-            Scalar::Null(NullKind::Null)
+            Scalar::Null(NullKind::NaN)
         );
     }
 
@@ -4949,6 +5040,18 @@ mod tests {
     }
 
     #[test]
+    fn json_records_write_promotes_nullable_int_column_to_float() {
+        let frame = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
+            vec!["row".into(), "row".into()],
+        )
+        .unwrap();
+        let json = write_json_string(&frame, JsonOrient::Records).expect("write");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!([{"a": 1.0}, {"a": null}]));
+    }
+
+    #[test]
     fn json_records_empty_array() {
         let input = r#"[]"#;
         let frame = read_json_str(input, JsonOrient::Records).expect("parse");
@@ -5009,7 +5112,10 @@ mod tests {
         );
         assert!(frame.column("id").is_none());
         assert!(frame.column("val").unwrap().values()[0].is_missing());
-        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Int64(2));
+        assert_eq!(
+            frame.column("val").unwrap().values()[1],
+            Scalar::Float64(2.0)
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -7106,11 +7212,26 @@ mod tests {
     }
 
     #[test]
-    fn csv_true_false_values_override_numeric_inference() {
+    fn csv_true_false_values_do_not_override_numeric_inference() {
         let input = "flag\n1\n0\n";
         let opts = CsvReadOptions {
             true_values: vec!["1".to_owned()],
             false_values: vec!["0".to_owned()],
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("flag").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn csv_true_false_values_convert_non_numeric_tokens() {
+        let input = "flag\nyes\nno\n";
+        let opts = CsvReadOptions {
+            true_values: vec!["yes".to_owned()],
+            false_values: vec!["no".to_owned()],
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
@@ -7131,6 +7252,22 @@ mod tests {
     }
 
     #[test]
+    fn csv_missing_numeric_column_promotes_ints_to_float() {
+        let input = "a,b,c\n,NA,NaN\n1,,x\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("a").unwrap().values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]
+        );
+        assert!(frame.column("b").unwrap().values()[0].is_missing());
+        assert!(frame.column("b").unwrap().values()[1].is_missing());
+        assert_eq!(
+            frame.column("c").unwrap().values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Utf8("x".to_owned())]
+        );
+    }
+
+    #[test]
     fn csv_parse_dates_mixed_naive_and_aware_strings_preserves_object_like_values() {
         let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
         let opts = CsvReadOptions {
@@ -7142,7 +7279,7 @@ mod tests {
             frame.column("ts").unwrap().values(),
             &[
                 Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
+                Scalar::Utf8("2024-01-15T10:30:00Z".to_owned()),
             ]
         );
         assert_eq!(

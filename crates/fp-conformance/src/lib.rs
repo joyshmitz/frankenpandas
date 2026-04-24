@@ -22633,6 +22633,10 @@ mod conformance_dataframe;
 mod conformance_categorical;
 
 #[cfg(test)]
+#[path = "tests/conformance_datetime.rs"]
+mod conformance_datetime;
+
+#[cfg(test)]
 #[path = "tests/conformance_groupby.rs"]
 mod conformance_groupby;
 

@@ -16014,8 +16014,12 @@ fn build_fixture_categorical_series(
 }
 
 fn build_fixture_multiindex(spec: &FixtureMultiIndex) -> Result<fp_index::MultiIndex, String> {
-    let mut multiindex =
-        fp_index::MultiIndex::from_tuples(spec.tuples.clone()).map_err(|err| err.to_string())?;
+    let mut multiindex = if spec.tuples.is_empty() && !spec.names.is_empty() {
+        fp_index::MultiIndex::from_arrays(vec![Vec::new(); spec.names.len()])
+            .map_err(|err| err.to_string())?
+    } else {
+        fp_index::MultiIndex::from_tuples(spec.tuples.clone()).map_err(|err| err.to_string())?
+    };
     if !spec.names.is_empty() {
         multiindex = multiindex.set_names(spec.names.clone());
     }
@@ -22621,6 +22625,10 @@ mod conformance_dataframe;
 #[cfg(test)]
 #[path = "tests/conformance_groupby.rs"]
 mod conformance_groupby;
+
+#[cfg(test)]
+#[path = "tests/conformance_multiindex.rs"]
+mod conformance_multiindex;
 
 #[cfg(test)]
 mod tests {

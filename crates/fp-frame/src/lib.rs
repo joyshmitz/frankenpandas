@@ -16627,8 +16627,7 @@ impl DataFrame {
     /// Shorter keys act as prefix selection, mirroring `df.loc[(a, slice(None))]`
     /// for the leading levels.
     pub fn loc_tuple(&self, key: &[IndexLabel]) -> Result<Self, FrameError> {
-        let positions = self.get_loc(key, None)?;
-        self.take_rows_by_positions(&positions)
+        self.loc_tuple_with_columns(key, None)
     }
 
     /// Tuple-/prefix-key row selection with an optional column subset.
@@ -16637,7 +16636,10 @@ impl DataFrame {
         key: &[IndexLabel],
         column_selector: Option<&[String]>,
     ) -> Result<Self, FrameError> {
-        let positions = self.get_loc(key, None)?;
+        let row_multiindex = self.require_row_multiindex()?;
+        let (positions, remaining_index) = row_multiindex
+            .get_loc_level(key)
+            .map_err(FrameError::Index)?;
         let selected_columns = self.resolve_column_selector(column_selector)?;
         let mut columns = BTreeMap::new();
         for name in &selected_columns {
@@ -16651,13 +16653,27 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
-        let index = self.index.take(&positions);
-        let row_multiindex = self
-            .row_multiindex
-            .as_ref()
-            .map(|multiindex| Self::project_row_multiindex(multiindex, &positions))
-            .transpose()?;
-        Self::new_with_axes(index, row_multiindex, columns, selected_columns, None)
+        match remaining_index {
+            Some(fp_index::MultiIndexOrIndex::Index(index)) => {
+                Self::new_with_axes(index, None, columns, selected_columns, None)
+            }
+            Some(fp_index::MultiIndexOrIndex::Multi(row_multiindex)) => Self::new_with_axes(
+                Self::flatten_row_multiindex(&row_multiindex, "|"),
+                Some(row_multiindex),
+                columns,
+                selected_columns,
+                None,
+            ),
+            None => {
+                let index = self.index.take(&positions);
+                let row_multiindex = self
+                    .row_multiindex
+                    .as_ref()
+                    .map(|multiindex| Self::project_row_multiindex(multiindex, &positions))
+                    .transpose()?;
+                Self::new_with_axes(index, row_multiindex, columns, selected_columns, None)
+            }
+        }
     }
 
     /// Return row positions for a row-MultiIndex tuple or a single level key.
@@ -61518,29 +61534,13 @@ mod tests {
         let out = df.loc_tuple(&[IndexLabel::Utf8("east".into())]).unwrap();
         assert_eq!(
             out.index().labels(),
-            &[
-                IndexLabel::Utf8("east|A".into()),
-                IndexLabel::Utf8("east|B".into())
-            ]
+            &[IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
         );
         assert_eq!(
             out.column("sales").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20)]
         );
-        let row_multiindex = out
-            .row_multiindex()
-            .expect("prefix loc_tuple should preserve row MultiIndex metadata");
-        assert_eq!(
-            row_multiindex.get_level_values(0).unwrap().labels(),
-            &[
-                IndexLabel::Utf8("east".into()),
-                IndexLabel::Utf8("east".into())
-            ]
-        );
-        assert_eq!(
-            row_multiindex.get_level_values(1).unwrap().labels(),
-            &[IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
-        );
+        assert!(out.row_multiindex().is_none());
     }
 
     #[test]

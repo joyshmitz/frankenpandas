@@ -22660,6 +22660,10 @@ mod conformance_groupby;
 mod conformance_io;
 
 #[cfg(test)]
+#[path = "tests/conformance_merge_join_concat.rs"]
+mod conformance_merge_join_concat;
+
+#[cfg(test)]
 #[path = "tests/conformance_multiindex.rs"]
 mod conformance_multiindex;
 

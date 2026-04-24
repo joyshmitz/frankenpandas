@@ -129,6 +129,36 @@ fn conformance_index_align_union_mixed_labels_preserves_order() {
 }
 
 #[test]
+fn conformance_index_align_union_duplicate_right_positions() {
+    let fixture: PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-CONF-INDEX-ALIGN-004",
+        "case_id": "index_align_union_duplicate_right_positions",
+        "mode": "strict",
+        "operation": "index_align_union",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" }
+            ],
+            "values": []
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": []
+        }
+    }))
+    .expect("fixture");
+    check_index_fixture(fixture);
+}
+
+#[test]
 fn conformance_index_has_duplicates_empty() {
     let fixture: PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-CONF-INDEX-DUPS-001",

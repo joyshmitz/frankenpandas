@@ -687,19 +687,47 @@ def op_index_align_union(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     left_index = pd.Index(left_labels)
     right_index = pd.Index(right_labels)
-    union = left_index.union(right_index, sort=False)
+    left_groups: dict[Any, list[int]] = {}
+    right_groups: dict[Any, list[int]] = {}
+    for position, label in enumerate(left_labels):
+        left_groups.setdefault(label, []).append(position)
+    for position, label in enumerate(right_labels):
+        right_groups.setdefault(label, []).append(position)
 
+    union_labels: list[Any] = []
     left_positions: list[int | None] = []
     right_positions: list[int | None] = []
-    for label in union.tolist():
-        left_hits = [i for i, v in enumerate(left_labels) if v == label]
-        right_hits = [i for i, v in enumerate(right_labels) if v == label]
-        left_positions.append(left_hits[0] if left_hits else None)
-        right_positions.append(right_hits[0] if right_hits else None)
+
+    if left_index.has_duplicates or right_index.has_duplicates:
+        for left_pos, label in enumerate(left_labels):
+            right_hits = right_groups.get(label)
+            if right_hits:
+                for right_pos in right_hits:
+                    union_labels.append(label)
+                    left_positions.append(left_pos)
+                    right_positions.append(right_pos)
+            else:
+                union_labels.append(label)
+                left_positions.append(left_pos)
+                right_positions.append(None)
+
+        for right_pos, label in enumerate(right_labels):
+            if label not in left_groups:
+                union_labels.append(label)
+                left_positions.append(None)
+                right_positions.append(right_pos)
+    else:
+        union = left_index.union(right_index, sort=False)
+        union_labels = union.tolist()
+        for label in union_labels:
+            left_hits = left_groups.get(label, [])
+            right_hits = right_groups.get(label, [])
+            left_positions.append(left_hits[0] if left_hits else None)
+            right_positions.append(right_hits[0] if right_hits else None)
 
     return {
         "expected_alignment": {
-            "union_index": [label_to_json(v) for v in union.tolist()],
+            "union_index": [label_to_json(v) for v in union_labels],
             "left_positions": left_positions,
             "right_positions": right_positions,
         }

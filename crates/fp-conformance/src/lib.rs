@@ -3180,7 +3180,17 @@ struct OracleRequest {
     #[serde(default)]
     csv_input: Option<String>,
     #[serde(default)]
+    csv_decimal: Option<String>,
+    #[serde(default)]
+    csv_on_bad_lines: Option<String>,
+    #[serde(default)]
     csv_parse_dates: Option<Vec<String>>,
+    #[serde(default)]
+    csv_parse_date_combinations: Option<Vec<Vec<String>>>,
+    #[serde(default)]
+    csv_true_values: Option<Vec<String>>,
+    #[serde(default)]
+    csv_false_values: Option<Vec<String>>,
     #[serde(default)]
     loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
@@ -11954,7 +11964,12 @@ fn capture_live_oracle_expected(
         ignore_index: fixture.ignore_index,
         explode_column: fixture.explode_column.clone(),
         csv_input: fixture.csv_input.clone(),
+        csv_decimal: fixture.csv_decimal.clone(),
+        csv_on_bad_lines: fixture.csv_on_bad_lines.clone(),
         csv_parse_dates: fixture.csv_parse_dates.clone(),
+        csv_parse_date_combinations: fixture.csv_parse_date_combinations.clone(),
+        csv_true_values: fixture.csv_true_values.clone(),
+        csv_false_values: fixture.csv_false_values.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
         take_indices: fixture.take_indices.clone(),
@@ -22639,6 +22654,10 @@ mod conformance_datetime;
 #[cfg(test)]
 #[path = "tests/conformance_groupby.rs"]
 mod conformance_groupby;
+
+#[cfg(test)]
+#[path = "tests/conformance_io.rs"]
+mod conformance_io;
 
 #[cfg(test)]
 #[path = "tests/conformance_multiindex.rs"]

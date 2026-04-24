@@ -613,6 +613,69 @@ def op_csv_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_csv_read_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    csv_input = payload.get("csv_input")
+    if not isinstance(csv_input, str):
+        raise OracleError("csv_read_frame requires csv_input payload")
+
+    kwargs: dict[str, Any] = {}
+    decimal = payload.get("csv_decimal")
+    if decimal is not None:
+        if not isinstance(decimal, str) or len(decimal) != 1:
+            raise OracleError("csv_read_frame csv_decimal must be a single character")
+        kwargs["decimal"] = decimal
+    on_bad_lines = payload.get("csv_on_bad_lines")
+    if on_bad_lines is not None:
+        if on_bad_lines not in {"error", "warn", "skip"}:
+            raise OracleError("csv_read_frame csv_on_bad_lines must be error|warn|skip")
+        kwargs["on_bad_lines"] = on_bad_lines
+        if on_bad_lines != "error":
+            kwargs["engine"] = "python"
+    true_values = payload.get("csv_true_values")
+    if true_values is not None:
+        if not isinstance(true_values, list) or not all(
+            isinstance(value, str) for value in true_values
+        ):
+            raise OracleError("csv_read_frame csv_true_values must be a list of strings")
+        kwargs["true_values"] = true_values
+    false_values = payload.get("csv_false_values")
+    if false_values is not None:
+        if not isinstance(false_values, list) or not all(
+            isinstance(value, str) for value in false_values
+        ):
+            raise OracleError("csv_read_frame csv_false_values must be a list of strings")
+        kwargs["false_values"] = false_values
+
+    parse_dates = payload.get("csv_parse_dates")
+    parse_date_combinations = payload.get("csv_parse_date_combinations")
+    if parse_date_combinations is not None:
+        if not isinstance(parse_date_combinations, list) or not all(
+            isinstance(group, list)
+            and group
+            and all(isinstance(value, str) for value in group)
+            for group in parse_date_combinations
+        ):
+            raise OracleError(
+                "csv_read_frame csv_parse_date_combinations must be a list of string lists"
+            )
+        kwargs["parse_dates"] = {
+            "_".join(group): group for group in parse_date_combinations
+        }
+    elif parse_dates is not None:
+        if not isinstance(parse_dates, list) or not all(
+            isinstance(value, str) for value in parse_dates
+        ):
+            raise OracleError("csv_read_frame csv_parse_dates must be a list of strings")
+        kwargs["parse_dates"] = parse_dates
+
+    try:
+        frame = pd.read_csv(io.StringIO(csv_input), **kwargs)
+    except Exception as exc:
+        raise OracleError(f"csv_read_frame failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(frame)}
+
+
 def op_index_align_union(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
@@ -2559,6 +2622,18 @@ def op_dataframe_identity(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_identity requires frame payload")
     frame = dataframe_from_json(pd, frame_payload)
     return {"expected_frame": dataframe_to_json(frame)}
+
+
+def op_dataframe_to_json_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_to_json_records requires frame payload")
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.to_json(orient="records")
+    except Exception as exc:
+        raise OracleError(f"dataframe_to_json_records failed: {exc}") from exc
+    return {"expected_scalar": scalar_to_json(out)}
 
 
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4732,6 +4807,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_nan_count(pd, payload)
     if op == "csv_round_trip":
         return op_csv_round_trip(pd, payload)
+    if op in {"csv_read_frame", "csv_read_frame_default"}:
+        return op_csv_read_frame(pd, payload)
     if op == "index_align_union":
         return op_index_align_union(pd, payload)
     if op == "index_has_duplicates":
@@ -4816,6 +4893,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_extractall(pd, payload)
     if op in {"dataframe_identity", "data_frame_identity"}:
         return op_dataframe_identity(pd, payload)
+    if op in {"dataframe_to_json_records", "data_frame_to_json_records"}:
+        return op_dataframe_to_json_records(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
     if op in {"dataframe_xs", "data_frame_xs"}:

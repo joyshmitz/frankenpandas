@@ -20818,6 +20818,8 @@ impl DataFrame {
                 Scalar::Float64(v) => {
                     if v.is_nan() {
                         "NaN".to_string()
+                    } else if v.fract() == 0.0 {
+                        format!("{v:.1}")
                     } else {
                         v.to_string()
                     }
@@ -20859,7 +20861,7 @@ impl DataFrame {
             out.push_str("    </tr>\n");
         }
 
-        out.push_str("  </tbody>\n</table>\n");
+        out.push_str("  </tbody>\n</table>");
         out
     }
 

@@ -22666,6 +22666,10 @@ mod conformance_groupby;
 mod conformance_io;
 
 #[cfg(test)]
+#[path = "tests/conformance_io_formats.rs"]
+mod conformance_io_formats;
+
+#[cfg(test)]
 #[path = "tests/conformance_merge_join_concat.rs"]
 mod conformance_merge_join_concat;
 

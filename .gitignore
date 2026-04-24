@@ -60,6 +60,14 @@ ci-artifacts/
 proptest-regressions/
 test_meminfo
 
+# Workflow file backup copies (left behind by ad-hoc edits in .github/workflows/)
+*.yml.bak
+*.yaml.bak
+
+# Multi-agent swarm coordination scratch state
+.swarm/
+.swarm_marching_orders.md
+
 # Accidental shell output (stray numeric/short-name files)
 /[0-9]
 /[0-9][0-9]

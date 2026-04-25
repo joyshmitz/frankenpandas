@@ -3840,9 +3840,15 @@ fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn sql_select_all_query(table_name: &str) -> Result<String, IoError> {
+fn sql_select_all_query<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
-    Ok(format!("SELECT * FROM {}", quote_sql_ident(table_name)?))
+    Ok(format!(
+        "SELECT * FROM {}",
+        conn.quote_identifier(table_name)?
+    ))
 }
 
 fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
@@ -3854,7 +3860,11 @@ fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn sql_select_columns_query(table_name: &str, columns: &[&str]) -> Result<String, IoError> {
+fn sql_select_columns_query<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    columns: &[&str],
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
     if columns.is_empty() {
         return Err(IoError::Sql(
@@ -3867,24 +3877,35 @@ fn sql_select_columns_query(table_name: &str, columns: &[&str]) -> Result<String
 
     let projection: Vec<String> = columns
         .iter()
-        .map(|name| quote_sql_ident(name))
+        .map(|name| conn.quote_identifier(name))
         .collect::<Result<_, _>>()?;
     Ok(format!(
         "SELECT {} FROM {}",
         projection.join(", "),
-        quote_sql_ident(table_name)?
+        conn.quote_identifier(table_name)?
     ))
 }
 
-fn sql_column_definition(column_name: &str, sql_type: &str) -> Result<String, IoError> {
-    Ok(format!("{} {sql_type}", quote_sql_ident(column_name)?))
+fn sql_column_definition<C: SqlConnection>(
+    conn: &C,
+    column_name: &str,
+    sql_type: &str,
+) -> Result<String, IoError> {
+    Ok(format!(
+        "{} {sql_type}",
+        conn.quote_identifier(column_name)?
+    ))
 }
 
-fn sql_create_table_query(table_name: &str, column_defs: &[String]) -> Result<String, IoError> {
+fn sql_create_table_query<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    column_defs: &[String],
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
     Ok(format!(
         "CREATE TABLE IF NOT EXISTS {} ({})",
-        quote_sql_ident(table_name)?,
+        conn.quote_identifier(table_name)?,
         column_defs.join(", ")
     ))
 }
@@ -3897,7 +3918,7 @@ fn sql_insert_rows_query<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     let quoted_columns = column_names
         .iter()
-        .map(|name| quote_sql_ident(name))
+        .map(|name| conn.quote_identifier(name))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let placeholders = (1..=column_names.len())
@@ -3906,7 +3927,7 @@ fn sql_insert_rows_query<C: SqlConnection>(
         .join(", ");
     Ok(format!(
         "INSERT INTO {} ({quoted_columns}) VALUES ({placeholders})",
-        quote_sql_ident(table_name)?
+        conn.quote_identifier(table_name)?
     ))
 }
 
@@ -4249,7 +4270,7 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
 ///
 /// Matches `pd.read_sql_table(table_name, con)`.
 pub fn read_sql_table<C: SqlConnection>(conn: &C, table_name: &str) -> Result<DataFrame, IoError> {
-    read_sql(conn, &sql_select_all_query(table_name)?)
+    read_sql(conn, &sql_select_all_query(conn, table_name)?)
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -4261,7 +4282,7 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     table_name: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
-    read_sql_with_options(conn, &sql_select_all_query(table_name)?, options)
+    read_sql_with_options(conn, &sql_select_all_query(conn, table_name)?, options)
 }
 
 /// Read an entire SQL table with read-time options and optional index promotion.
@@ -4289,7 +4310,7 @@ pub fn read_sql_table_chunks<C: SqlConnection>(
     table_name: &str,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
-    read_sql_chunks(conn, &sql_select_all_query(table_name)?, chunk_size)
+    read_sql_chunks(conn, &sql_select_all_query(conn, table_name)?, chunk_size)
 }
 
 /// Read an entire SQL table as DataFrame chunks with read-time options.
@@ -4304,7 +4325,7 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
 ) -> Result<SqlChunkIterator, IoError> {
     read_sql_chunks_with_options(
         conn,
-        &sql_select_all_query(table_name)?,
+        &sql_select_all_query(conn, table_name)?,
         options,
         chunk_size,
     )
@@ -4352,7 +4373,7 @@ pub fn read_sql_table_columns<C: SqlConnection>(
     table_name: &str,
     columns: &[&str],
 ) -> Result<DataFrame, IoError> {
-    read_sql(conn, &sql_select_columns_query(table_name, columns)?)
+    read_sql(conn, &sql_select_columns_query(conn, table_name, columns)?)
 }
 
 /// Read a subset of columns from a SQL table with optional index promotion.
@@ -4388,7 +4409,7 @@ pub fn read_sql_table_columns_chunks<C: SqlConnection>(
 ) -> Result<SqlChunkIterator, IoError> {
     read_sql_chunks(
         conn,
-        &sql_select_columns_query(table_name, columns)?,
+        &sql_select_columns_query(conn, table_name, columns)?,
         chunk_size,
     )
 }
@@ -4480,6 +4501,7 @@ pub fn write_sql_with_options<C: SqlConnection>(
     let mut col_defs = Vec::with_capacity(sql_col_names.len());
     if let Some(ref label) = index_label {
         col_defs.push(sql_column_definition(
+            conn,
             label,
             conn.index_dtype_sql(frame.index()),
         )?);
@@ -4489,12 +4511,12 @@ pub fn write_sql_with_options<C: SqlConnection>(
             .iter()
             .map(|name| {
                 let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-                sql_column_definition(name, conn.dtype_sql(dt))
+                sql_column_definition(conn, name, conn.dtype_sql(dt))
             })
             .collect::<Result<Vec<_>, IoError>>()?,
     );
 
-    let create_sql = sql_create_table_query(table_name, &col_defs)?;
+    let create_sql = sql_create_table_query(conn, table_name, &col_defs)?;
     conn.execute_batch(&create_sql)?;
 
     let insert_sql = sql_insert_rows_query(conn, table_name, &sql_col_names)?;
@@ -7412,17 +7434,18 @@ mod tests {
 
     #[test]
     fn sql_query_builders_quote_select_and_projection_identifiers() {
+        let conn = DollarMarkerSqlConn::default();
         assert_eq!(
-            super::sql_select_all_query("portable_tbl").expect("select all query"),
+            super::sql_select_all_query(&conn, "portable_tbl").expect("select all query"),
             "SELECT * FROM \"portable_tbl\""
         );
         assert_eq!(
-            super::sql_select_columns_query("portable_tbl", &["names", "ints"])
+            super::sql_select_columns_query(&conn, "portable_tbl", &["names", "ints"])
                 .expect("projection query"),
             "SELECT \"names\", \"ints\" FROM \"portable_tbl\""
         );
 
-        let err = super::sql_select_columns_query("portable_tbl", &["bad column"])
+        let err = super::sql_select_columns_query(&conn, "portable_tbl", &["bad column"])
             .expect_err("projection identifiers stay validated");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid column name")));
     }
@@ -7431,12 +7454,15 @@ mod tests {
     fn sql_query_builders_create_and_insert_use_backend_contracts() {
         let conn = DollarMarkerSqlConn::default();
         let column_defs = vec![
-            super::sql_column_definition("row id", "TEXT").expect("index column definition"),
-            super::sql_column_definition("value\"raw", "BIGINT").expect("value column definition"),
+            super::sql_column_definition(&conn, "row id", "TEXT")
+                .expect("index column definition"),
+            super::sql_column_definition(&conn, "value\"raw", "BIGINT")
+                .expect("value column definition"),
         ];
 
         assert_eq!(
-            super::sql_create_table_query("typed_tbl", &column_defs).expect("create table query"),
+            super::sql_create_table_query(&conn, "typed_tbl", &column_defs)
+                .expect("create table query"),
             "CREATE TABLE IF NOT EXISTS \"typed_tbl\" (\"row id\" TEXT, \"value\"\"raw\" BIGINT)"
         );
 
@@ -7445,6 +7471,72 @@ mod tests {
             super::sql_insert_rows_query(&conn, "typed_tbl", &insert_columns)
                 .expect("insert row query"),
             "INSERT INTO \"typed_tbl\" (\"row id\", \"value\"\"raw\") VALUES ($1, $2)"
+        );
+    }
+
+    /// Verify that quote_identifier overrides on a custom backend ACTUALLY
+    /// flow through the helper functions (br-frankenpandas-cx2x / fd90.12).
+    /// A MySQL-style backend that returns backticks must produce backticked
+    /// identifiers in CREATE / SELECT / INSERT statements without any
+    /// further plumbing.
+    #[test]
+    fn sql_query_builders_use_backend_quote_identifier_override() {
+        #[derive(Default)]
+        struct BacktickSqlConn;
+        impl super::SqlConnection for BacktickSqlConn {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+                if ident.contains('\0') {
+                    return Err(IoError::Sql(
+                        "invalid SQL identifier: NUL byte".to_owned(),
+                    ));
+                }
+                // MySQL-style backtick quoting; embedded backticks doubled.
+                Ok(format!("`{}`", ident.replace('`', "``")))
+            }
+        }
+
+        let conn = BacktickSqlConn;
+        // SELECT / projection helpers flow through quote_identifier.
+        assert_eq!(
+            super::sql_select_all_query(&conn, "users").expect("select all"),
+            "SELECT * FROM `users`"
+        );
+        assert_eq!(
+            super::sql_select_columns_query(&conn, "users", &["id", "name"]).expect("projection"),
+            "SELECT `id`, `name` FROM `users`"
+        );
+        // CREATE / INSERT helpers flow through quote_identifier.
+        let col_defs =
+            vec![super::sql_column_definition(&conn, "id", "INTEGER").expect("col def")];
+        assert_eq!(
+            super::sql_create_table_query(&conn, "users", &col_defs).expect("create"),
+            "CREATE TABLE IF NOT EXISTS `users` (`id` INTEGER)"
+        );
+        let insert_cols = vec!["id".to_owned(), "name".to_owned()];
+        assert_eq!(
+            super::sql_insert_rows_query(&conn, "users", &insert_cols).expect("insert"),
+            "INSERT INTO `users` (`id`, `name`) VALUES (?, ?)"
         );
     }
 

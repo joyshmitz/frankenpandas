@@ -3658,6 +3658,30 @@ pub fn read_sql_query_with_options<C: SqlConnection>(
     read_sql_with_options(conn, query, options)
 }
 
+/// Read the result of a SQL query as an iterator of DataFrame chunks.
+///
+/// Matches the supported subset of `pd.read_sql_query(sql, con, chunksize=...)`.
+pub fn read_sql_query_chunks<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    read_sql_chunks(conn, query, chunk_size)
+}
+
+/// Read the result of a SQL query as chunks with read-time options.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_query(sql, con, params=[...], parse_dates=..., coerce_float=..., chunksize=...)`.
+pub fn read_sql_query_chunks_with_options<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    read_sql_chunks_with_options(conn, query, options, chunk_size)
+}
+
 /// Read a SQL query result with one column promoted to the index.
 ///
 /// Matches `pd.read_sql_query(sql, con, index_col=...)`.
@@ -6500,7 +6524,8 @@ mod tests {
 
     use super::{
         SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_chunks,
-        read_sql_chunks_with_options, read_sql_query, read_sql_query_with_index_col,
+        read_sql_chunks_with_options, read_sql_query, read_sql_query_chunks,
+        read_sql_query_chunks_with_options, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_table, read_sql_table_columns,
         read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
         write_sql_with_options,
@@ -6984,6 +7009,91 @@ mod tests {
             indexed.column("ints").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
         );
+    }
+
+    #[test]
+    fn sql_read_query_chunks_alias_batches_rows() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_chunked (id INTEGER, name TEXT);
+             INSERT INTO query_chunked (id, name) VALUES
+                (1, 'alpha'),
+                (2, 'beta'),
+                (3, 'gamma');",
+        )
+        .expect("create query_chunked table");
+
+        let chunks =
+            read_sql_query_chunks(&conn, "SELECT id, name FROM query_chunked ORDER BY id", 2)
+                .expect("query chunk iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["id", "name"]);
+        assert_eq!(
+            chunks[0].column("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            chunks[1].column("name").unwrap().values(),
+            &[Scalar::Utf8("gamma".to_owned())]
+        );
+    }
+
+    #[test]
+    fn sql_read_query_chunks_with_options_applies_params_parse_dates_and_coerce_float() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_events (ts TEXT, amount TEXT, keep INTEGER);
+             INSERT INTO query_events (ts, amount, keep) VALUES
+                ('2024-01-15', '12.50', 0),
+                ('2024-02-01 05:06:07', '$1,234.50', 1),
+                ('2024-03-03', '-3.25', 1);",
+        )
+        .expect("create query_events table");
+
+        let chunks = read_sql_query_chunks_with_options(
+            &conn,
+            "SELECT ts, amount FROM query_events WHERE keep = ? ORDER BY ts",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(1)]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+            },
+            1,
+        )
+        .expect("query chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].column("ts").unwrap().values(),
+            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+        );
+        assert_eq!(
+            chunks[0].column("amount").unwrap().values(),
+            &[Scalar::Float64(1234.5)]
+        );
+        assert_eq!(
+            chunks[1].column("ts").unwrap().values(),
+            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+        );
+        assert_eq!(
+            chunks[1].column("amount").unwrap().values(),
+            &[Scalar::Float64(-3.25)]
+        );
+    }
+
+    #[test]
+    fn sql_read_query_chunks_rejects_zero_chunksize() {
+        let conn = make_sql_test_conn();
+
+        let err = read_sql_query_chunks(&conn, "SELECT 1", 0)
+            .expect_err("zero query chunksize should be rejected");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
     #[test]

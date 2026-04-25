@@ -27473,98 +27473,425 @@ impl DataFrameGroupBy<'_> {
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
-    /// Apply a custom function to each group DataFrame.
-    ///
-    /// Matches `df.groupby(col).apply(func)` semantics.
-    ///
-    /// The closure receives a sub-DataFrame for each group and should return
-    /// a single-row DataFrame (the aggregated result for that group).
-    /// Results are concatenated vertically with the group key as the index.
-    pub fn apply<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    fn group_key_level_label(&self, row: usize, col_name: &str) -> IndexLabel {
+        match &self.df.columns[col_name].values()[row] {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v {
+                "True".to_owned()
+            } else {
+                "False".to_owned()
+            }),
+            other => IndexLabel::Utf8(format!("{other:?}")),
+        }
+    }
+
+    fn build_group_dataframe(
+        &self,
+        row_indices: &[usize],
+        include_groups: bool,
+    ) -> Result<DataFrame, FrameError> {
+        let selected_cols: Vec<&String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|col_name| include_groups || !self.by.contains(col_name))
+            .collect();
+        let group_labels: Vec<IndexLabel> = row_indices
+            .iter()
+            .map(|&i| self.df.index.labels()[i].clone())
+            .collect();
+        let mut group_cols = BTreeMap::new();
+        let mut group_col_order = Vec::with_capacity(selected_cols.len());
+
+        for col_name in selected_cols {
+            let col = &self.df.columns[col_name];
+            let group_vals: Vec<Scalar> = row_indices
+                .iter()
+                .map(|&i| col.values()[i].clone())
+                .collect();
+            group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
+            group_col_order.push(col_name.clone());
+        }
+
+        DataFrame::new_with_column_order(Index::new(group_labels), group_cols, group_col_order)
+    }
+
+    fn empty_apply_frame() -> Result<DataFrame, FrameError> {
+        DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
+    }
+
+    fn collect_apply_frames<F>(
+        &self,
+        include_groups: bool,
+        func: F,
+    ) -> Result<(Vec<usize>, Vec<DataFrame>), FrameError>
     where
         F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
     {
         let (group_order, groups) = self.build_groups();
-        let n_groups = group_order.len();
-
-        let value_cols: Vec<String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|c| !self.by.contains(c))
-            .cloned()
-            .collect();
-
-        let mut labels = Vec::with_capacity(n_groups);
-        let mut result_frames = Vec::with_capacity(n_groups);
+        let mut first_rows = Vec::with_capacity(group_order.len());
+        let mut result_frames = Vec::with_capacity(group_order.len());
 
         for gkey in &group_order {
-            let row_indices = &groups[gkey];
-            let first_row = row_indices[0];
-            labels.push(self.group_key_label(first_row));
-
-            // Build sub-DataFrame for this group
-            let group_labels: Vec<IndexLabel> = row_indices
-                .iter()
-                .map(|&i| self.df.index.labels()[i].clone())
-                .collect();
-            let mut group_cols = BTreeMap::new();
-            let mut group_col_order = Vec::new();
-
-            for col_name in &value_cols {
-                let col = &self.df.columns[col_name];
-                let group_vals: Vec<Scalar> = row_indices
-                    .iter()
-                    .map(|&i| col.values()[i].clone())
-                    .collect();
-                group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
-                group_col_order.push(col_name.clone());
-            }
-
-            let group_df = DataFrame {
-                columns: group_cols,
-                column_order: group_col_order,
-                index: Index::new(group_labels),
-                column_multiindex: None,
-                row_multiindex: None,
-            };
-
+            let row_indices = groups.get(gkey).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby apply encountered a missing internal group key".to_owned(),
+                )
+            })?;
+            let first_row = *row_indices.first().ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby apply encountered an empty internal group".to_owned(),
+                )
+            })?;
+            let group_df = self.build_group_dataframe(row_indices, include_groups)?;
+            first_rows.push(first_row);
             result_frames.push(func(&group_df)?);
         }
 
-        // Combine results: assume each result is a single row
-        if result_frames.is_empty() {
-            return Ok(DataFrame {
-                columns: BTreeMap::new(),
-                column_order: Vec::new(),
-                index: Index::new(Vec::new()),
-                column_multiindex: None,
-                row_multiindex: None,
-            });
-        }
+        Ok((first_rows, result_frames))
+    }
 
-        let out_col_order = result_frames[0].column_order.clone();
-        let mut out_cols: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
-        for name in &out_col_order {
-            out_cols.insert(name.clone(), Vec::with_capacity(n_groups));
+    fn apply_frame_column_order(result_frames: &[DataFrame]) -> Vec<String> {
+        let mut out_col_order = Vec::new();
+        for frame in result_frames {
+            for name in &frame.column_order {
+                if !out_col_order.iter().any(|existing| existing == name) {
+                    out_col_order.push(name.clone());
+                }
+            }
         }
+        out_col_order
+    }
 
-        for frame in &result_frames {
-            for name in &out_col_order {
+    fn apply_frame_columns(
+        result_frames: &[DataFrame],
+        out_col_order: &[String],
+        total_rows: usize,
+    ) -> Result<BTreeMap<String, Column>, FrameError> {
+        let mut out_cols: BTreeMap<String, Vec<Scalar>> = out_col_order
+            .iter()
+            .map(|name| (name.clone(), Vec::with_capacity(total_rows)))
+            .collect();
+
+        for frame in result_frames {
+            for name in out_col_order {
+                let target = out_cols.get_mut(name).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "groupby apply output column '{name}' was not initialized"
+                    ))
+                })?;
                 if let Some(col) = frame.columns.get(name) {
-                    for val in col.values() {
-                        out_cols.get_mut(name).unwrap().push(val.clone());
-                    }
+                    target.extend(col.values().iter().cloned());
+                } else {
+                    target.extend(vec![Scalar::Null(NullKind::NaN); frame.len()]);
                 }
             }
         }
 
-        let mut final_cols = BTreeMap::new();
-        for (name, vals) in out_cols {
-            final_cols.insert(name, Column::from_values(vals)?);
+        out_cols
+            .into_iter()
+            .map(|(name, vals)| Ok((name, Column::from_values(vals)?)))
+            .collect()
+    }
+
+    fn apply_expanded_index(
+        &self,
+        first_rows: &[usize],
+        result_frames: &[DataFrame],
+    ) -> Result<(Index, Option<fp_index::MultiIndex>), FrameError> {
+        let total_rows: usize = result_frames.iter().map(DataFrame::len).sum();
+        if total_rows == 0 {
+            return Ok((Index::new(Vec::new()), None));
         }
 
-        self.format_output(final_cols, out_col_order, labels, &group_order, &groups)
+        let mut flat_labels = Vec::with_capacity(total_rows);
+        let mut level_arrays: Vec<Vec<IndexLabel>> = (0..=self.by.len())
+            .map(|_| Vec::with_capacity(total_rows))
+            .collect();
+
+        for (group_idx, frame) in result_frames.iter().enumerate() {
+            let first_row = first_rows[group_idx];
+            let group_label = self.group_key_label(first_row);
+            let group_level_labels: Vec<IndexLabel> = self
+                .by
+                .iter()
+                .map(|col_name| self.group_key_level_label(first_row, col_name))
+                .collect();
+            for inner_label in frame.index.labels() {
+                flat_labels.push(IndexLabel::Utf8(format!("{group_label}, {inner_label}")));
+                for (level_idx, label) in group_level_labels.iter().enumerate() {
+                    level_arrays[level_idx].push(label.clone());
+                }
+                level_arrays[self.by.len()].push(inner_label.clone());
+            }
+        }
+
+        let mut names: Vec<Option<String>> =
+            self.by.iter().map(|name| Some(name.clone())).collect();
+        names.push(Some("index".to_owned()));
+
+        Ok((
+            Index::new(flat_labels),
+            Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names)),
+        ))
+    }
+
+    fn combine_apply_frames(
+        &self,
+        first_rows: &[usize],
+        result_frames: &[DataFrame],
+    ) -> Result<DataFrame, FrameError> {
+        if result_frames.is_empty() {
+            return Self::empty_apply_frame();
+        }
+
+        let total_rows: usize = result_frames.iter().map(DataFrame::len).sum();
+        let out_col_order = Self::apply_frame_column_order(result_frames);
+        let final_cols = Self::apply_frame_columns(result_frames, &out_col_order, total_rows)?;
+
+        if self.as_index {
+            let (index, row_multiindex) = self.apply_expanded_index(first_rows, result_frames)?;
+            DataFrame::new_with_axes(index, row_multiindex, final_cols, out_col_order, None)
+        } else {
+            let mut full_cols = BTreeMap::new();
+            let mut full_order = Vec::new();
+
+            for col_name in &self.by {
+                let src_col = &self.df.columns[col_name];
+                let mut key_vals = Vec::with_capacity(total_rows);
+                for (group_idx, frame) in result_frames.iter().enumerate() {
+                    let first_row = first_rows[group_idx];
+                    for _ in 0..frame.len() {
+                        key_vals.push(src_col.values()[first_row].clone());
+                    }
+                }
+                full_cols.insert(col_name.clone(), Column::from_values(key_vals)?);
+                full_order.push(col_name.clone());
+            }
+
+            for col_name in out_col_order {
+                let column = final_cols.get(&col_name).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "groupby apply output column '{col_name}' was not materialized"
+                    ))
+                })?;
+                full_cols.insert(col_name.clone(), column);
+                full_order.push(col_name);
+            }
+
+            let int_labels: Vec<IndexLabel> =
+                (0..total_rows as i64).map(IndexLabel::Int64).collect();
+            DataFrame::new_with_column_order(Index::new(int_labels), full_cols, full_order)
+        }
+    }
+
+    /// Apply a custom function to each group DataFrame.
+    ///
+    /// Matches pandas 2.x `df.groupby(col).apply(func, include_groups=False)`
+    /// for DataFrame-returning functions. Results are concatenated vertically;
+    /// multi-row group results receive group-key row MultiIndex metadata.
+    pub fn apply<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+    {
+        self.apply_with_include_groups(false, func)
+    }
+
+    /// Apply a DataFrame-returning function with explicit `include_groups`.
+    pub fn apply_with_include_groups<F>(
+        &self,
+        include_groups: bool,
+        func: F,
+    ) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+    {
+        let (first_rows, result_frames) = self.collect_apply_frames(include_groups, func)?;
+        self.combine_apply_frames(&first_rows, &result_frames)
+    }
+
+    /// Apply a scalar-returning function to each group.
+    ///
+    /// Rust's static return types expose pandas' scalar-returning
+    /// `GroupBy.apply` shape as an explicit API: one Series value per group,
+    /// indexed by the group keys.
+    pub fn apply_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Scalar, FrameError>,
+    {
+        self.apply_scalar_with_include_groups(name, false, func)
+    }
+
+    /// Apply a scalar-returning function with explicit `include_groups`.
+    pub fn apply_scalar_with_include_groups<F>(
+        &self,
+        name: &str,
+        include_groups: bool,
+        func: F,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Scalar, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(group_order.len());
+        let mut values = Vec::with_capacity(group_order.len());
+
+        for gkey in &group_order {
+            let row_indices = groups.get(gkey).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby scalar apply encountered a missing internal group key".to_owned(),
+                )
+            })?;
+            let first_row = *row_indices.first().ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby scalar apply encountered an empty internal group".to_owned(),
+                )
+            })?;
+            let group_df = self.build_group_dataframe(row_indices, include_groups)?;
+            labels.push(self.group_key_label(first_row));
+            values.push(func(&group_df)?);
+        }
+
+        Series::from_values(name, labels, values)
+    }
+
+    /// Apply a Series-returning function to each group.
+    ///
+    /// Returned Series indexes become output columns. The column union is
+    /// first-seen ordered and groups missing a Series label receive NaN, which
+    /// matches pandas' sparse DataFrame shape for uneven Series returns.
+    pub fn apply_series<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Series, FrameError>,
+    {
+        self.apply_series_with_include_groups(false, func)
+    }
+
+    /// Apply a Series-returning function with explicit `include_groups`.
+    pub fn apply_series_with_include_groups<F>(
+        &self,
+        include_groups: bool,
+        func: F,
+    ) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(group_order.len());
+        let mut result_series = Vec::with_capacity(group_order.len());
+
+        for gkey in &group_order {
+            let row_indices = groups.get(gkey).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby series apply encountered a missing internal group key".to_owned(),
+                )
+            })?;
+            let first_row = *row_indices.first().ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby series apply encountered an empty internal group".to_owned(),
+                )
+            })?;
+            let group_df = self.build_group_dataframe(row_indices, include_groups)?;
+            labels.push(self.group_key_label(first_row));
+            result_series.push(func(&group_df)?);
+        }
+
+        let mut col_order = Vec::new();
+        for series in &result_series {
+            let mut seen = BTreeSet::new();
+            for label in series.index.labels() {
+                let col_name = label.to_string();
+                if !seen.insert(col_name.clone()) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "groupby series apply returned duplicate Series label '{col_name}'"
+                    )));
+                }
+                if !col_order.iter().any(|existing| existing == &col_name) {
+                    col_order.push(col_name);
+                }
+            }
+        }
+
+        let mut result_cols = BTreeMap::new();
+        for col_name in &col_order {
+            let mut vals = Vec::with_capacity(result_series.len());
+            for series in &result_series {
+                let value = series
+                    .index
+                    .labels()
+                    .iter()
+                    .zip(series.values())
+                    .find_map(|(label, value)| {
+                        if label.to_string() == *col_name {
+                            Some(value.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN));
+                vals.push(value);
+            }
+            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+        }
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
+    /// Apply a Series-returning function and stack each returned Series row.
+    ///
+    /// This is the Rust API for pandas' `GroupBy.apply` path where returned
+    /// Series objects do not share identical labels. The result is represented
+    /// as a one-column DataFrame because `Series` does not yet carry row
+    /// MultiIndex metadata; group keys and returned Series labels are retained
+    /// on the DataFrame row MultiIndex.
+    pub fn apply_series_stacked<F>(&self, name: &str, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Series, FrameError>,
+    {
+        self.apply_series_stacked_with_include_groups(name, false, func)
+    }
+
+    /// Apply a stacked Series-returning function with explicit `include_groups`.
+    pub fn apply_series_stacked_with_include_groups<F>(
+        &self,
+        name: &str,
+        include_groups: bool,
+        func: F,
+    ) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let mut first_rows = Vec::with_capacity(group_order.len());
+        let mut result_frames = Vec::with_capacity(group_order.len());
+
+        for gkey in &group_order {
+            let row_indices = groups.get(gkey).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby stacked series apply encountered a missing internal group key"
+                        .to_owned(),
+                )
+            })?;
+            let first_row = *row_indices.first().ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "groupby stacked series apply encountered an empty internal group".to_owned(),
+                )
+            })?;
+            let group_df = self.build_group_dataframe(row_indices, include_groups)?;
+            let series = func(&group_df)?;
+            let mut columns = BTreeMap::new();
+            columns.insert(name.to_owned(), series.column.clone());
+            first_rows.push(first_row);
+            result_frames.push(DataFrame::new_with_column_order(
+                series.index.clone(),
+                columns,
+                vec![name.to_owned()],
+            )?);
+        }
+
+        self.combine_apply_frames(&first_rows, &result_frames)
     }
 
     /// Transform each group, returning a DataFrame with the same shape as the input.
@@ -41423,6 +41750,317 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(30.0)); // 10+20
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(70.0)); // 30+40
+    }
+
+    #[test]
+    fn dataframe_groupby_apply_expands_multirow_frames_with_group_index() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply(|group_df| group_df.select_columns(&["val"]))
+            .unwrap();
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result.columns["val"].values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ]
+        );
+        let row_multiindex = result.row_multiindex.as_ref().unwrap();
+        assert_eq!(row_multiindex.nlevels(), 2);
+        assert_eq!(
+            row_multiindex.names(),
+            &[Some("grp".to_owned()), Some("index".to_owned())]
+        );
+        let first_tuple = row_multiindex.get_tuple(0).unwrap();
+        assert_eq!(first_tuple[0], &IndexLabel::Utf8("a".to_owned()));
+        assert_eq!(first_tuple[1], &IndexLabel::Int64(0));
+        let last_tuple = row_multiindex.get_tuple(3).unwrap();
+        assert_eq!(last_tuple[0], &IndexLabel::Utf8("b".to_owned()));
+        assert_eq!(last_tuple[1], &IndexLabel::Int64(3));
+    }
+
+    #[test]
+    fn dataframe_groupby_apply_include_groups_controls_group_frame_columns() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let without_groups = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply(|group_df| {
+                let mut cols = BTreeMap::new();
+                cols.insert(
+                    "has_grp".to_owned(),
+                    Column::from_values(vec![Scalar::Bool(group_df.columns.contains_key("grp"))])
+                        .unwrap(),
+                );
+                DataFrame::new_with_column_order(
+                    Index::new(vec![0_i64.into()]),
+                    cols,
+                    vec!["has_grp".to_owned()],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            without_groups.columns["has_grp"].values(),
+            &[Scalar::Bool(false), Scalar::Bool(false)]
+        );
+
+        let with_groups = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply_with_include_groups(true, |group_df| {
+                let mut cols = BTreeMap::new();
+                cols.insert(
+                    "has_grp".to_owned(),
+                    Column::from_values(vec![Scalar::Bool(group_df.columns.contains_key("grp"))])
+                        .unwrap(),
+                );
+                DataFrame::new_with_column_order(
+                    Index::new(vec![0_i64.into()]),
+                    cols,
+                    vec!["has_grp".to_owned()],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            with_groups.columns["has_grp"].values(),
+            &[Scalar::Bool(true), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_apply_scalar_returns_series_indexed_by_keys() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply_scalar("total", |group_df| {
+                let total = group_df.columns["val"]
+                    .values()
+                    .iter()
+                    .filter_map(|value| value.to_f64().ok())
+                    .sum();
+                Ok(Scalar::Float64(total))
+            })
+            .unwrap();
+
+        assert_eq!(result.name(), "total");
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            result.values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(70.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_apply_series_unions_sparse_result_columns() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply_series(|group_df| {
+                let values = group_df.columns["val"].values();
+                if values[0] == Scalar::Float64(10.0) {
+                    Series::from_values(
+                        "metrics",
+                        vec![IndexLabel::Utf8("first".to_owned())],
+                        vec![values[0].clone()],
+                    )
+                } else {
+                    Series::from_values(
+                        "metrics",
+                        vec![
+                            IndexLabel::Utf8("first".to_owned()),
+                            IndexLabel::Utf8("last".to_owned()),
+                        ],
+                        vec![values[0].clone(), values[1].clone()],
+                    )
+                }
+            })
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.column_order,
+            vec!["first".to_owned(), "last".to_owned()]
+        );
+        assert_eq!(
+            result.columns["first"].values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(30.0)]
+        );
+        assert_eq!(result.columns["last"].values()[1], Scalar::Float64(40.0));
+        assert!(matches!(
+            result.columns["last"].values()[0],
+            Scalar::Null(NullKind::NaN)
+        ));
+    }
+
+    #[test]
+    fn dataframe_groupby_apply_series_stacked_preserves_variable_labels() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply_series_stacked("metrics", |group_df| {
+                let values = group_df.columns["val"].values();
+                if values[0] == Scalar::Float64(10.0) {
+                    Series::from_values(
+                        "metrics",
+                        vec![IndexLabel::Utf8("first".to_owned())],
+                        vec![values[0].clone()],
+                    )
+                } else {
+                    Series::from_values(
+                        "metrics",
+                        vec![
+                            IndexLabel::Utf8("first".to_owned()),
+                            IndexLabel::Utf8("last".to_owned()),
+                        ],
+                        vec![values[0].clone(), values[1].clone()],
+                    )
+                }
+            })
+            .unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.columns["metrics"].values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ]
+        );
+        let row_multiindex = result.row_multiindex.as_ref().unwrap();
+        assert_eq!(row_multiindex.nlevels(), 2);
+        let labels = row_multiindex
+            .get_tuple(2)
+            .expect("third stacked apply row");
+        assert_eq!(labels[0], &IndexLabel::Utf8("b".to_owned()));
+        assert_eq!(labels[1], &IndexLabel::Utf8("last".to_owned()));
     }
 
     #[test]

@@ -22682,6 +22682,10 @@ mod conformance_tseries;
 mod conformance_groupby;
 
 #[cfg(test)]
+#[path = "tests/conformance_groupby_apply.rs"]
+mod conformance_groupby_apply;
+
+#[cfg(test)]
 #[path = "tests/conformance_io.rs"]
 mod conformance_io;
 

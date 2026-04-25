@@ -69,6 +69,14 @@
 - **Tests affected:** Sparse storage/accessor conformance tests not yet enabled.
 - **Review date:** 2026-04-24
 
+### DISC-010: Rust GroupBy.apply uses explicit output-shape APIs
+- **Reference:** pandas `DataFrameGroupBy.apply` dynamically dispatches scalar, Series, and DataFrame return values from one Python callable.
+- **Our impl:** Rust's static return types expose the same shape families as explicit methods: `apply_scalar`, `apply_series`, `apply_series_stacked`, and DataFrame-returning `apply`. DataFrame-returning apply retains group-key row MultiIndex metadata; stacked Series output is represented as a one-column DataFrame until Series row MultiIndex metadata lands.
+- **Impact:** Shape semantics are available, but Rust callers choose the expected output family at compile time instead of receiving a dynamic Python object.
+- **Resolution:** INVESTIGATING - a future Python binding layer can restore one-call dynamic dispatch over these Rust shape-specific methods.
+- **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
+- **Review date:** 2026-04-25
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics

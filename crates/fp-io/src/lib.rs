@@ -3572,6 +3572,30 @@ pub trait SqlConnection {
         }
         Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
     }
+
+    /// Whether this backend exposes multi-schema namespacing.
+    ///
+    /// PostgreSQL / MySQL / MariaDB / MSSQL / Oracle: true. SQLite (one
+    /// schema per file connection — though ATTACH adds named schemas as
+    /// a special case): false. Drives the `pd.read_sql_table(.., schema=X)`
+    /// path's choice between qualifying the table reference (`schema.table`)
+    /// and a connection-level pre-SET. Per br-frankenpandas-6dk9 (fd90.13).
+    fn supports_schemas(&self) -> bool {
+        false
+    }
+
+    /// Default schema for unqualified table references, if the backend
+    /// has one.
+    ///
+    /// PostgreSQL: `'public'` (or whatever the connection's `search_path`
+    /// resolves to first). MySQL: the database name passed to the
+    /// connection URL. SQLite: `None` (single namespace). The `read_sql_table`
+    /// dispatch uses this when the user passes `schema=None` to choose
+    /// between a bare `SELECT * FROM \"table\"` and a schema-qualified form.
+    /// Default `None` keeps behavior identical to today's SQLite-only path.
+    fn default_schema(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -10190,5 +10214,92 @@ mod tests {
         .expect("read with parse_dates priority");
         let col = frame.column("ts").expect("ts");
         assert_eq!(col.dtype(), DType::Utf8);
+    }
+
+    // ── Schema probes (br-frankenpandas-6dk9 / fd90.13) ─────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_does_not_support_schemas_by_default() {
+        let conn = make_sql_test_conn();
+        assert!(!super::SqlConnection::supports_schemas(&conn));
+        assert_eq!(super::SqlConnection::default_schema(&conn), None);
+    }
+
+    #[test]
+    fn default_schema_probes_are_conservative() {
+        // A test-double with no schema overrides reports the conservative
+        // single-namespace defaults (matches SQLite + most embedded
+        // backends). Production multi-schema backends (PG, MySQL) override.
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let stub = StubSql;
+        assert!(!super::SqlConnection::supports_schemas(&stub));
+        assert_eq!(super::SqlConnection::default_schema(&stub), None);
+    }
+
+    #[test]
+    fn schema_probe_overrides_take_effect() {
+        // A multi-schema-style test backend (e.g. simulating PostgreSQL)
+        // overrides supports_schemas + default_schema. The overrides MUST
+        // win over the trait defaults.
+        struct PgLikeSqlConn;
+        impl super::SqlConnection for PgLikeSqlConn {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn default_schema(&self) -> Option<String> {
+                Some("public".to_owned())
+            }
+        }
+        let conn = PgLikeSqlConn;
+        assert!(super::SqlConnection::supports_schemas(&conn));
+        assert_eq!(
+            super::SqlConnection::default_schema(&conn).as_deref(),
+            Some("public")
+        );
     }
 }

@@ -94,7 +94,7 @@ fn dtype_memory_width(dtype: DType) -> usize {
         DType::Bool => 1,
         DType::Int64 | DType::Float64 | DType::Categorical | DType::Timedelta64 => 8,
         DType::Utf8 => std::mem::size_of::<usize>(),
-        DType::Null => 0,
+        DType::Null | DType::Sparse => 0,
     }
 }
 
@@ -647,7 +647,7 @@ fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
         DType::Float64 => "number",
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
-        DType::Null => "any",
+        DType::Null | DType::Sparse => "any",
     }
 }
 
@@ -856,6 +856,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
             _ => Scalar::Null(NullKind::NaN),
         },
         DType::Null => Scalar::Null(NullKind::Null),
+        DType::Sparse => Scalar::Null(NullKind::Null),
         DType::Timedelta64 => match val {
             Scalar::Timedelta64(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Timedelta64(*n),
@@ -15471,6 +15472,12 @@ impl DataFrame {
                             DType::Categorical => {
                                 return Err(FrameError::CompatibilityRejected(format!(
                                     "cannot parse categorical value '{raw}' in column '{}'; construct categorical series explicitly",
+                                    col_names[idx]
+                                )));
+                            }
+                            DType::Sparse => {
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "cannot parse sparse value '{raw}' in column '{}'; construct sparse series explicitly",
                                     col_names[idx]
                                 )));
                             }

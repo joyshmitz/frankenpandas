@@ -61,6 +61,14 @@
 - **Tests affected:** N/A - positioning / documentation divergence, not behavioral.
 - **Review date:** 2026-04-23
 
+### DISC-009: Sparse dtype descriptor exists before compressed sparse storage
+- **Reference:** pandas `SparseDtype` pairs an underlying value dtype with a fill value and stores only non-fill positions in `SparseArray`.
+- **Our impl:** `fp-types::SparseDType` records the dtype/fill-value contract and `DType::Sparse` marks the logical dtype. fp-columnar still stores columns densely and IO falls back to textual sparse markers until a compressed sparse column representation lands.
+- **Impact:** Code can now describe sparse dtype intent, but memory usage and `Series.sparse` accessor parity still differ from pandas.
+- **Resolution:** WILL-FIX - remaining storage/accessor work tracked by br-frankenpandas-0xcm follow-up slices.
+- **Tests affected:** Sparse storage/accessor conformance tests not yet enabled.
+- **Review date:** 2026-04-24
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics

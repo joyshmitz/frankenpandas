@@ -342,6 +342,7 @@ impl ColumnData {
                 Self::Utf8(data)
             }
             DType::Null => Self::Float64(vec![0.0; values.len()]),
+            DType::Sparse => Self::Utf8(vec![String::new(); values.len()]),
             DType::Timedelta64 => {
                 let data: Vec<i64> = values
                     .iter()

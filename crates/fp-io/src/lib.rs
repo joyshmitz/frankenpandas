@@ -1816,6 +1816,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Bool => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
+        DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
     }
 }
 
@@ -1860,7 +1861,7 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Utf8 | DType::Categorical | DType::Null => {
+        DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
             let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
             for value in column.values() {
                 match value {
@@ -3206,6 +3207,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Bool => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
+        DType::Sparse => "TEXT",
     }
 }
 
@@ -6381,7 +6383,7 @@ mod tests {
             match dtype {
                 DType::Int64 | DType::Bool | DType::Timedelta64 => "BIGINT",
                 DType::Float64 => "DOUBLE PRECISION",
-                DType::Utf8 | DType::Categorical | DType::Null => "TEXT",
+                DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => "TEXT",
             }
         }
 

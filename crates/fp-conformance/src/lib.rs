@@ -5726,6 +5726,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
         )),
         DType::Categorical => Scalar::Int64(i64::from(payload % 5) - 1),
         DType::Null => Scalar::Null(NullKind::Null),
+        DType::Sparse => Scalar::Null(NullKind::Null),
         DType::Timedelta64 => {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
         }

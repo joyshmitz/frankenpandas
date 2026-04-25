@@ -1115,6 +1115,108 @@ fn json_value_to_scalar(val: &serde_json::Value) -> Scalar {
     }
 }
 
+fn parse_json_value_allowing_pandas_nan(input: &str) -> Result<serde_json::Value, IoError> {
+    match serde_json::from_str(input) {
+        Ok(value) => Ok(value),
+        Err(original) => {
+            let normalized = normalize_bare_json_nan_tokens(input);
+            if normalized == input {
+                return Err(original.into());
+            }
+            serde_json::from_str(&normalized).map_err(IoError::from)
+        }
+    }
+}
+
+fn normalize_bare_json_nan_tokens(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while index < input.len() {
+        let rest = &input[index..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+
+        if in_string {
+            output.push(ch);
+            index += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if rest.starts_with("NaN")
+            && is_json_value_start_boundary(input, index)
+            && is_json_value_end_boundary(input, index + 3)
+        {
+            output.push_str("null");
+            index += 3;
+            continue;
+        }
+
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+
+    output
+}
+
+fn is_json_value_start_boundary(input: &str, index: usize) -> bool {
+    input[..index]
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, ':' | '[' | ','))
+}
+
+fn is_json_value_end_boundary(input: &str, index: usize) -> bool {
+    input[index..]
+        .chars()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, ',' | ']' | '}'))
+}
+
+fn column_from_json_records_values(values: Vec<Scalar>) -> Result<Column, IoError> {
+    let saw_utf8 = values.iter().any(|value| matches!(value, Scalar::Utf8(_)));
+    let saw_missing = values.iter().any(Scalar::is_missing);
+    let saw_numeric_like = values.iter().any(|value| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
+        )
+    });
+
+    if !saw_utf8 && saw_missing && (saw_numeric_like || values.iter().all(Scalar::is_missing)) {
+        let promoted = values
+            .into_iter()
+            .map(|value| match value {
+                Scalar::Int64(value) => Scalar::Float64(value as f64),
+                Scalar::Bool(value) => Scalar::Float64(if value { 1.0 } else { 0.0 }),
+                Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                other => other,
+            })
+            .collect();
+        return Column::new(DType::Float64, promoted).map_err(IoError::from);
+    }
+
+    Column::from_values(values).map_err(IoError::from)
+}
+
 fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
     match scalar {
         Scalar::Null(_) => serde_json::Value::Null,
@@ -1803,7 +1905,7 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         if trimmed.is_empty() {
             continue;
         }
-        let parsed: serde_json::Value = serde_json::from_str(trimmed)?;
+        let parsed = parse_json_value_allowing_pandas_nan(trimmed)?;
         let obj = parsed
             .as_object()
             .ok_or_else(|| IoError::JsonFormat("JSONL: each line must be a JSON object".into()))?;
@@ -1841,7 +1943,7 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
     for (name, values) in col_names.into_iter().zip(columns) {
-        out_columns.insert(name.clone(), Column::from_values(values)?);
+        out_columns.insert(name.clone(), column_from_json_records_values(values)?);
         column_order.push(name);
     }
 
@@ -2015,7 +2117,8 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
         let name = field.name().clone();
         let arr = batch.column(i);
         let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
-        let col = Column::from_values(values)?;
+        let dtype = fp_dtype_for_arrow_data_type(field.data_type());
+        let col = Column::new(dtype, values)?;
         columns.insert(name.clone(), col);
         col_order.push(name);
     }
@@ -2025,6 +2128,27 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
 
     let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
     promote_synthetic_row_multiindex_if_present(&frame)
+}
+
+fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
+    match dt {
+        ArrowDataType::Int8
+        | ArrowDataType::Int16
+        | ArrowDataType::Int32
+        | ArrowDataType::Int64
+        | ArrowDataType::UInt8
+        | ArrowDataType::UInt16
+        | ArrowDataType::UInt32
+        | ArrowDataType::UInt64 => DType::Int64,
+        ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => DType::Float64,
+        ArrowDataType::Boolean => DType::Bool,
+        ArrowDataType::Utf8
+        | ArrowDataType::LargeUtf8
+        | ArrowDataType::Date32
+        | ArrowDataType::Date64
+        | ArrowDataType::Timestamp(_, _) => DType::Utf8,
+        _ => DType::Utf8,
+    }
 }
 
 /// Convert an Arrow array + data type to a Vec of Scalars.
@@ -7751,12 +7875,12 @@ mod tests {
         assert!(frame.column("c").is_some(), "column c must exist");
         // Row 0: a=1, b=2, c=null.
         assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
-        assert_eq!(frame.column("b").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("b").unwrap().values()[0], Scalar::Float64(2.0));
         assert!(frame.column("c").unwrap().values()[0].is_missing());
         // Row 1: a=3, b=null, c=4.
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
         assert!(frame.column("b").unwrap().values()[1].is_missing());
-        assert_eq!(frame.column("c").unwrap().values()[1], Scalar::Int64(4));
+        assert_eq!(frame.column("c").unwrap().values()[1], Scalar::Float64(4.0));
     }
 
     #[test]

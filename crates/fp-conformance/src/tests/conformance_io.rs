@@ -6,6 +6,17 @@
 //! decimal/boolean parsing options, CSV write/reparse behavior, and JSON
 //! records serialization with duplicate index labels.
 
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
+use fp_columnar::Column;
+use fp_frame::DataFrame;
+use fp_index::{Index, IndexLabel};
+use fp_types::{DType, NullKind, Scalar};
+use serde_json::Value;
+
 use super::{
     CaseStatus, HarnessConfig, HarnessError, OracleMode, PacketFixture, ResolvedExpected,
     SuiteOptions, capture_live_oracle_expected,
@@ -81,6 +92,251 @@ fn csv_fixture(
     }
 
     serde_json::from_value(raw).expect("fixture")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JsonlEdgeCase<'a> {
+    case_id: &'a str,
+    input: &'a str,
+}
+
+fn pandas_read_jsonl_or_skip(
+    config: &HarnessConfig,
+    case: JsonlEdgeCase<'_>,
+) -> Result<Option<Result<Value, String>>, String> {
+    if !config.oracle_root.exists() && !config.allows_live_oracle_fallback() {
+        eprintln!(
+            "live pandas unavailable; skipping JSONL conformance test {}: legacy oracle root does not exist: {}",
+            case.case_id,
+            config.oracle_root.display()
+        );
+        return Ok(None);
+    }
+
+    let script = r#"
+import importlib
+import io
+import json
+import math
+import numbers
+import os
+import sys
+
+legacy_root = os.path.abspath(sys.argv[1])
+allow_system_fallback = sys.argv[2] == "1"
+candidate_parent = os.path.dirname(legacy_root)
+if os.path.isdir(candidate_parent):
+    sys.path.insert(0, candidate_parent)
+
+try:
+    import pandas as pd
+except Exception:
+    if not allow_system_fallback:
+        raise
+    while candidate_parent in sys.path:
+        sys.path.remove(candidate_parent)
+    sys.modules.pop("pandas", None)
+    pd = importlib.import_module("pandas")
+
+def encode_scalar(value):
+    if pd.isna(value):
+        return {"kind": "missing"}
+    if isinstance(value, bool):
+        return {"kind": "bool", "value": value}
+    if isinstance(value, numbers.Integral):
+        return {"kind": "int64", "value": int(value)}
+    if isinstance(value, numbers.Real):
+        if math.isnan(value) or math.isinf(value):
+            return {"kind": "missing"}
+        return {"kind": "float64", "value": float(value)}
+    return {"kind": "utf8", "value": str(value)}
+
+payload = sys.stdin.read()
+try:
+    frame = pd.read_json(io.StringIO(payload), orient="records", lines=True)
+except Exception as exc:
+    sys.stdout.write(json.dumps({"error": str(exc)}))
+    raise SystemExit(0)
+
+rows = []
+for row_idx in range(len(frame)):
+    rows.append([encode_scalar(frame[column].iloc[row_idx]) for column in frame.columns])
+
+sys.stdout.write(json.dumps({
+    "columns": list(frame.columns),
+    "dtypes": [str(frame[column].dtype) for column in frame.columns],
+    "rows": rows,
+}, sort_keys=True))
+"#;
+
+    let mut child = Command::new(&config.python_bin)
+        .arg("-c")
+        .arg(script)
+        .arg(&config.oracle_root)
+        .arg(if config.allows_live_oracle_fallback() {
+            "1"
+        } else {
+            "0"
+        })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn pandas JSONL oracle failed: {err}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "pandas JSONL oracle stdin unavailable".to_owned())?;
+    stdin
+        .write_all(case.input.as_bytes())
+        .map_err(|err| format!("write pandas JSONL oracle payload failed: {err}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("wait for pandas JSONL oracle failed: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pandas JSONL oracle failed for {}: {}",
+            case.case_id,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("pandas JSONL oracle emitted invalid JSON: {err}"))?;
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Ok(Some(Err(error.to_owned())));
+    }
+    Ok(Some(Ok(value)))
+}
+
+fn dtype_to_pandas_jsonl_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Bool => "bool",
+        DType::Float64 => "float64",
+        DType::Int64 => "int64",
+        DType::Utf8 | DType::Categorical | DType::Sparse | DType::Timedelta64 => "object",
+        DType::Null => "float64",
+    }
+}
+
+fn scalar_to_jsonl_cell(value: &Scalar) -> Value {
+    match value {
+        Scalar::Null(_) => serde_json::json!({"kind": "missing"}),
+        Scalar::Bool(value) => serde_json::json!({"kind": "bool", "value": value}),
+        Scalar::Int64(value) => serde_json::json!({"kind": "int64", "value": value}),
+        Scalar::Float64(value) => {
+            if value.is_finite() {
+                serde_json::json!({"kind": "float64", "value": value})
+            } else {
+                serde_json::json!({"kind": "missing"})
+            }
+        }
+        Scalar::Utf8(value) => serde_json::json!({"kind": "utf8", "value": value}),
+        Scalar::Timedelta64(value) => {
+            serde_json::json!({"kind": "utf8", "value": value.to_string()})
+        }
+    }
+}
+
+fn franken_jsonl_frame_to_oracle_json(frame: &DataFrame) -> Value {
+    let columns = frame
+        .column_names()
+        .iter()
+        .map(|name| Value::String((*name).clone()))
+        .collect::<Vec<_>>();
+    let dtypes = frame
+        .column_names()
+        .iter()
+        .map(|name| {
+            Value::String(
+                dtype_to_pandas_jsonl_name(frame.column(name).expect("column exists").dtype())
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let rows = (0..frame.index().len())
+        .map(|row_idx| {
+            Value::Array(
+                frame
+                    .column_names()
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name)
+                            .and_then(|column| column.value(row_idx))
+                            .map_or_else(
+                                || serde_json::json!({"kind": "missing"}),
+                                scalar_to_jsonl_cell,
+                            )
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "columns": columns,
+        "dtypes": dtypes,
+        "rows": rows,
+    })
+}
+
+fn assert_jsonl_read_matches_pandas(case: JsonlEdgeCase<'_>) {
+    let config = HarnessConfig::default_paths();
+    let Some(expected) = pandas_read_jsonl_or_skip(&config, case).expect("pandas JSONL oracle")
+    else {
+        return;
+    };
+
+    match expected {
+        Ok(expected_frame) => {
+            let actual = fp_io::read_jsonl_str(case.input).expect("frankenpandas JSONL read");
+            assert_eq!(
+                franken_jsonl_frame_to_oracle_json(&actual),
+                expected_frame,
+                "pandas JSONL read parity drift for {}",
+                case.case_id
+            );
+        }
+        Err(expected_error) => {
+            let actual = fp_io::read_jsonl_str(case.input);
+            assert!(
+                actual.is_err(),
+                "expected pandas-compatible JSONL error for {} containing {expected_error:?}",
+                case.case_id
+            );
+        }
+    }
+}
+
+fn nullable_int64_frame(values: Vec<Scalar>) -> DataFrame {
+    let row_count = values.len();
+    let mut columns = std::collections::BTreeMap::new();
+    columns.insert(
+        "a".to_owned(),
+        Column::new(DType::Int64, values).expect("nullable Int64 column"),
+    );
+    let labels = (0..row_count)
+        .map(|idx| IndexLabel::Int64(idx as i64))
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(Index::new(labels), columns, vec!["a".to_owned()])
+        .expect("nullable Int64 frame")
+}
+
+fn assert_nullable_int64_parquet_round_trip(values: Vec<Scalar>) {
+    let frame = nullable_int64_frame(values);
+    let encoded = fp_io::write_parquet_bytes(&frame).expect("write parquet");
+    let decoded = fp_io::read_parquet_bytes(&encoded).expect("read parquet");
+    let column = decoded.column("a").expect("decoded column");
+
+    assert_eq!(column.dtype(), DType::Int64);
+    assert_eq!(
+        column.values(),
+        frame.column("a").expect("source column").values()
+    );
 }
 
 #[test]
@@ -306,4 +562,69 @@ fn conformance_io_dataframe_to_json_records_nullable_numeric_duplicate_index() {
     }))
     .expect("fixture");
     check_io_fixture(fixture);
+}
+
+#[test]
+fn conformance_io_jsonl_read_blank_lines_and_trailing_newline() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_blank_lines_and_trailing_newline",
+        input: "{\"a\":1}\n\n{\"a\":2}\n",
+    });
+}
+
+#[test]
+fn conformance_io_jsonl_read_mixed_schema_promotes_missing_numeric_columns() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_mixed_schema_promotes_missing_numeric_columns",
+        input: "{\"a\":1,\"b\":2}\n{\"a\":3,\"c\":4}\n",
+    });
+}
+
+#[test]
+fn conformance_io_jsonl_read_nan_and_none_records() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_nan_and_none_records",
+        input: "{\"a\":1,\"b\":null}\n{\"a\":NaN,\"b\":\"x\"}\n",
+    });
+}
+
+#[test]
+fn conformance_io_jsonl_read_empty_file() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_empty_file",
+        input: "",
+    });
+}
+
+#[test]
+fn conformance_io_jsonl_read_single_record_without_trailing_newline() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_single_record_without_trailing_newline",
+        input: "{\"a\":1}",
+    });
+}
+
+#[test]
+fn conformance_io_jsonl_read_utf8_bom_errors_like_pandas() {
+    assert_jsonl_read_matches_pandas(JsonlEdgeCase {
+        case_id: "io_jsonl_read_utf8_bom_errors_like_pandas",
+        input: "\u{feff}{\"a\":1}\n",
+    });
+}
+
+#[test]
+fn conformance_io_parquet_nullable_int64_round_trip_preserves_dtype_and_nulls() {
+    assert_nullable_int64_parquet_round_trip(vec![
+        Scalar::Int64(1),
+        Scalar::Null(NullKind::Null),
+        Scalar::Int64(3),
+    ]);
+}
+
+#[test]
+fn conformance_io_parquet_all_null_int64_round_trip_preserves_dtype() {
+    assert_nullable_int64_parquet_round_trip(vec![
+        Scalar::Null(NullKind::Null),
+        Scalar::Null(NullKind::Null),
+    ]);
 }

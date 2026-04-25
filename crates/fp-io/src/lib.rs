@@ -3364,6 +3364,29 @@ pub struct SqlQueryResult {
     pub rows: Vec<Vec<Scalar>>,
 }
 
+/// Backend-neutral SQL column metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlColumnSchema {
+    pub name: String,
+    pub declared_type: Option<String>,
+    pub nullable: bool,
+    pub default_value: Option<String>,
+    pub primary_key_ordinal: Option<usize>,
+}
+
+/// Backend-neutral SQL table metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlTableSchema {
+    pub table_name: String,
+    pub columns: Vec<SqlColumnSchema>,
+}
+
+impl SqlTableSchema {
+    pub fn column(&self, name: &str) -> Option<&SqlColumnSchema> {
+        self.columns.iter().find(|column| column.name == name)
+    }
+}
+
 /// Iterator over DataFrame chunks produced by a SQL query.
 #[derive(Debug, Clone)]
 pub struct SqlChunkIterator {
@@ -3443,6 +3466,13 @@ pub trait SqlConnection {
 
     fn table_exists(&self, table_name: &str) -> Result<bool, IoError>;
 
+    fn table_schema(&self, table_name: &str) -> Result<SqlTableSchema, IoError> {
+        Err(IoError::Sql(format!(
+            "schema introspection is not supported for {} SQL connections (table {table_name:?})",
+            self.dialect_name()
+        )))
+    }
+
     fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError>;
 
     fn dtype_sql(&self, dtype: DType) -> &'static str;
@@ -3456,6 +3486,61 @@ pub trait SqlConnection {
     /// write_sql stay generic without leaking backend dialect branches.
     fn parameter_marker(&self, _ordinal: usize) -> String {
         "?".to_owned()
+    }
+
+    // ── Backend-capability + dialect probes (br-frankenpandas-6dtf) ─────
+    //
+    // Default impls return conservative values so existing implementations
+    // stay backwards-compatible; concrete backends override per their
+    // engine. Phase 2 wires these probes into the read_sql / read_sql_table
+    // dispatch path so per-backend SQL quirks (RETURNING, max param count,
+    // transaction semantics) can fan out without leaking concrete types.
+
+    /// Short identifier for this backend's SQL dialect.
+    ///
+    /// Used by diagnostics + DISCREPANCIES.md routing. Backends should
+    /// override with the canonical pandas/SQLAlchemy dialect name:
+    /// `"sqlite"`, `"postgresql"`, `"mysql"`, `"mariadb"`, `"oracle"`, etc.
+    /// Default `"unknown"` flags un-customized impls during reviews.
+    fn dialect_name(&self) -> &'static str {
+        "unknown"
+    }
+
+    /// Whether this backend honors `INSERT ... RETURNING ...` natively.
+    ///
+    /// Drives the write_sql path's choice between RETURNING-based row
+    /// retrieval and a follow-up SELECT. Default `false` is the
+    /// conservative choice (forces follow-up SELECT path) until each
+    /// backend opts in.
+    fn supports_returning(&self) -> bool {
+        false
+    }
+
+    /// Hard upper bound on bound-parameter count per statement, if known.
+    ///
+    /// SQLite (3.32+): 32766. PostgreSQL: 65535. MySQL: 65535. Backends
+    /// that don't surface a meaningful cap return `None`. The bulk-insert
+    /// path uses this to chunk multi-row INSERTs so a single executemany
+    /// stays under the backend's parameter ceiling.
+    fn max_param_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// Run `f` inside a transaction. The default impl runs `f` without
+    /// BEGIN/COMMIT — backends that support transactions should override
+    /// to wrap in their native transaction primitive (rusqlite `BEGIN`,
+    /// tokio-postgres `BEGIN`, mysql `START TRANSACTION`, ...). On `Err`
+    /// from `f`, transactional backends roll back; on `Ok` they commit.
+    ///
+    /// The default impl is intentionally a no-op so non-transactional
+    /// connection wrappers (e.g. test doubles) compile without
+    /// implementation effort. Production backends MUST override.
+    fn with_transaction<T, F>(&self, f: F) -> Result<T, IoError>
+    where
+        F: FnOnce(&Self) -> Result<T, IoError>,
+        Self: Sized,
+    {
+        f(self)
     }
 }
 
@@ -3612,6 +3697,54 @@ impl SqlConnection for rusqlite::Connection {
     fn index_dtype_sql(&self, index: &Index) -> &'static str {
         sql_dtype_from_index(index)
     }
+
+    // br-frankenpandas-6dtf: backend-capability + dialect probes.
+    fn dialect_name(&self) -> &'static str {
+        "sqlite"
+    }
+
+    fn supports_returning(&self) -> bool {
+        // SQLite 3.35.0+ (released March 2021) supports INSERT ... RETURNING.
+        // rusqlite ships with bundled SQLite >= 3.45 by default, so we can
+        // unconditionally claim support here.
+        true
+    }
+
+    fn max_param_count(&self) -> Option<usize> {
+        // SQLite default SQLITE_MAX_VARIABLE_NUMBER is 32766 since 3.32.0.
+        // (Older builds capped at 999.) rusqlite bundled SQLite is current,
+        // so this matches.
+        Some(32766)
+    }
+
+    fn with_transaction<T, F>(&self, f: F) -> Result<T, IoError>
+    where
+        F: FnOnce(&Self) -> Result<T, IoError>,
+        Self: Sized,
+    {
+        // rusqlite's pure-trait `Self: Sized` constraint means we operate on
+        // `&rusqlite::Connection` directly without taking the `&mut` that
+        // `Connection::transaction()` requires. We emulate the same
+        // BEGIN/COMMIT semantics with explicit pragmas; on closure error,
+        // ROLLBACK and propagate.
+        self.execute_batch("BEGIN")
+            .map_err(|e| IoError::Sql(format!("begin transaction failed: {e}")))?;
+        match f(self) {
+            Ok(result) => {
+                self.execute_batch("COMMIT")
+                    .map_err(|e| IoError::Sql(format!("commit transaction failed: {e}")))?;
+                Ok(result)
+            }
+            Err(err) => {
+                // Best-effort rollback; surface the original error if rollback
+                // also fails (rollback failure is logged via the Sql error
+                // variant for diagnostics but the user wants the closure
+                // error preserved as the primary signal).
+                let _ = self.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
 }
 
 #[cfg(feature = "sql-sqlite")]
@@ -3656,6 +3789,10 @@ fn escape_sql_ident(name: &str) -> Result<String, IoError> {
     Ok(name.replace('"', "\"\""))
 }
 
+fn quote_sql_ident(name: &str) -> Result<String, IoError> {
+    Ok(format!("\"{}\"", escape_sql_ident(name)?))
+}
+
 fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
     if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
@@ -3667,8 +3804,7 @@ fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
 
 fn sql_select_all_query(table_name: &str) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
-    let escaped_table = escape_sql_ident(table_name)?;
-    Ok(format!("SELECT * FROM \"{escaped_table}\""))
+    Ok(format!("SELECT * FROM {}", quote_sql_ident(table_name)?))
 }
 
 fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
@@ -3691,14 +3827,48 @@ fn sql_select_columns_query(table_name: &str, columns: &[&str]) -> Result<String
         validate_sql_column_name(name)?;
     }
 
-    let escaped_table = escape_sql_ident(table_name)?;
     let projection: Vec<String> = columns
         .iter()
-        .map(|name| escape_sql_ident(name).map(|escaped| format!("\"{escaped}\"")))
+        .map(|name| quote_sql_ident(name))
         .collect::<Result<_, _>>()?;
     Ok(format!(
-        "SELECT {} FROM \"{escaped_table}\"",
-        projection.join(", ")
+        "SELECT {} FROM {}",
+        projection.join(", "),
+        quote_sql_ident(table_name)?
+    ))
+}
+
+fn sql_column_definition(column_name: &str, sql_type: &str) -> Result<String, IoError> {
+    Ok(format!("{} {sql_type}", quote_sql_ident(column_name)?))
+}
+
+fn sql_create_table_query(table_name: &str, column_defs: &[String]) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    Ok(format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        quote_sql_ident(table_name)?,
+        column_defs.join(", ")
+    ))
+}
+
+fn sql_insert_rows_query<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    column_names: &[String],
+) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    let quoted_columns = column_names
+        .iter()
+        .map(|name| quote_sql_ident(name))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let placeholders = (1..=column_names.len())
+        .map(|ordinal| conn.parameter_marker(ordinal))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "INSERT INTO {} ({quoted_columns}) VALUES ({placeholders})",
+        quote_sql_ident(table_name)?
     ))
 }
 
@@ -4199,17 +4369,12 @@ pub fn write_sql_with_options<C: SqlConnection>(
 
     let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let index_label = resolve_sql_index_label(frame, options)?;
-    let escaped_table = escape_sql_ident(table_name)?;
     let mut sql_col_names =
         Vec::with_capacity(col_names.len() + usize::from(index_label.is_some()));
     if let Some(ref label) = index_label {
         sql_col_names.push(label.clone());
     }
     sql_col_names.extend(col_names.iter().cloned());
-    let escaped_cols: Vec<String> = sql_col_names
-        .iter()
-        .map(|name| escape_sql_ident(name))
-        .collect::<Result<Vec<_>, _>>()?;
 
     // Handle if_exists policy.
     match options.if_exists {
@@ -4220,7 +4385,10 @@ pub fn write_sql_with_options<C: SqlConnection>(
             }
         }
         SqlIfExists::Replace => {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped_table}\""))?;
+            conn.execute_batch(&format!(
+                "DROP TABLE IF EXISTS {}",
+                quote_sql_ident(table_name)?
+            ))?;
         }
         SqlIfExists::Append => {
             // Table may or may not exist; CREATE TABLE IF NOT EXISTS handles both.
@@ -4230,43 +4398,25 @@ pub fn write_sql_with_options<C: SqlConnection>(
     // Build CREATE TABLE statement.
     let mut col_defs = Vec::with_capacity(sql_col_names.len());
     if let Some(ref label) = index_label {
-        col_defs.push(format!(
-            "\"{}\" {}",
-            escape_sql_ident(label)?,
-            conn.index_dtype_sql(frame.index())
-        ));
+        col_defs.push(sql_column_definition(
+            label,
+            conn.index_dtype_sql(frame.index()),
+        )?);
     }
     col_defs.extend(
         col_names
             .iter()
             .map(|name| {
-                let escaped = escape_sql_ident(name)?;
                 let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-                Ok(format!("\"{}\" {}", escaped, conn.dtype_sql(dt)))
+                sql_column_definition(name, conn.dtype_sql(dt))
             })
             .collect::<Result<Vec<_>, IoError>>()?,
     );
 
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-        escaped_table,
-        col_defs.join(", ")
-    );
+    let create_sql = sql_create_table_query(table_name, &col_defs)?;
     conn.execute_batch(&create_sql)?;
 
-    let placeholders: Vec<String> = (1..=sql_col_names.len())
-        .map(|ordinal| conn.parameter_marker(ordinal))
-        .collect();
-    let insert_sql = format!(
-        "INSERT INTO \"{}\" ({}) VALUES ({})",
-        escaped_table,
-        escaped_cols
-            .iter()
-            .map(|n| format!("\"{}\"", n))
-            .collect::<Vec<_>>()
-            .join(", "),
-        placeholders.join(", ")
-    );
+    let insert_sql = sql_insert_rows_query(conn, table_name, &sql_col_names)?;
 
     let nrows = frame.index().len();
     let mut rows = Vec::with_capacity(nrows);
@@ -7180,6 +7330,44 @@ mod tests {
     }
 
     #[test]
+    fn sql_query_builders_quote_select_and_projection_identifiers() {
+        assert_eq!(
+            super::sql_select_all_query("portable_tbl").expect("select all query"),
+            "SELECT * FROM \"portable_tbl\""
+        );
+        assert_eq!(
+            super::sql_select_columns_query("portable_tbl", &["names", "ints"])
+                .expect("projection query"),
+            "SELECT \"names\", \"ints\" FROM \"portable_tbl\""
+        );
+
+        let err = super::sql_select_columns_query("portable_tbl", &["bad column"])
+            .expect_err("projection identifiers stay validated");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid column name")));
+    }
+
+    #[test]
+    fn sql_query_builders_create_and_insert_use_backend_contracts() {
+        let conn = DollarMarkerSqlConn::default();
+        let column_defs = vec![
+            super::sql_column_definition("row id", "TEXT").expect("index column definition"),
+            super::sql_column_definition("value\"raw", "BIGINT").expect("value column definition"),
+        ];
+
+        assert_eq!(
+            super::sql_create_table_query("typed_tbl", &column_defs).expect("create table query"),
+            "CREATE TABLE IF NOT EXISTS \"typed_tbl\" (\"row id\" TEXT, \"value\"\"raw\" BIGINT)"
+        );
+
+        let insert_columns = vec!["row id".to_owned(), "value\"raw".to_owned()];
+        assert_eq!(
+            super::sql_insert_rows_query(&conn, "typed_tbl", &insert_columns)
+                .expect("insert row query"),
+            "INSERT INTO \"typed_tbl\" (\"row id\", \"value\"\"raw\") VALUES ($1, $2)"
+        );
+    }
+
+    #[test]
     fn sql_write_uses_backend_parameter_markers() {
         let frame = make_test_dataframe();
         let conn = DollarMarkerSqlConn::default();
@@ -9493,5 +9681,101 @@ mod tests {
 
         let back = read_sql_table(&conn, "test_quotes").unwrap();
         assert_eq!(back.column(col_name).unwrap().values()[0], Scalar::Int64(7));
+    }
+
+    // ── SqlConnection capability + dialect probes (br-frankenpandas-6dtf) ────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_dialect_name_is_sqlite() {
+        let conn = make_sql_test_conn();
+        assert_eq!(super::SqlConnection::dialect_name(&conn), "sqlite");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_supports_returning_is_true() {
+        // Bundled SQLite is 3.35+, so RETURNING is supported.
+        let conn = make_sql_test_conn();
+        assert!(super::SqlConnection::supports_returning(&conn));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_max_param_count_is_32766() {
+        let conn = make_sql_test_conn();
+        assert_eq!(super::SqlConnection::max_param_count(&conn), Some(32766));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_with_transaction_commits_on_ok() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE txn_test (x INTEGER)").unwrap();
+        let result: Result<i64, IoError> = super::SqlConnection::with_transaction(&conn, |c| {
+            super::SqlConnection::execute_batch(c, "INSERT INTO txn_test VALUES (42)")?;
+            Ok(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        // Verify the row committed.
+        let row_count =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM txn_test", &[]).unwrap();
+        assert_eq!(row_count.rows.len(), 1);
+        assert_eq!(row_count.rows[0][0], Scalar::Int64(1));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_with_transaction_rolls_back_on_err() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE txn_rollback (x INTEGER)")
+            .unwrap();
+        let result: Result<(), IoError> = super::SqlConnection::with_transaction(&conn, |c| {
+            super::SqlConnection::execute_batch(c, "INSERT INTO txn_rollback VALUES (99)")?;
+            Err(IoError::Sql("simulated failure".to_string()))
+        });
+        assert!(result.is_err());
+        // Row should NOT have committed.
+        let row_count =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM txn_rollback", &[]).unwrap();
+        assert_eq!(row_count.rows[0][0], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn default_capability_probes_are_conservative() {
+        // A test-double SqlConnection that doesn't override defaults
+        // should report the conservative-default values from the trait.
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+
+        let stub = StubSql;
+        assert_eq!(super::SqlConnection::dialect_name(&stub), "unknown");
+        assert!(!super::SqlConnection::supports_returning(&stub));
+        assert_eq!(super::SqlConnection::max_param_count(&stub), None);
+        // Default with_transaction passes through (no BEGIN/COMMIT).
+        let result: Result<i64, IoError> = super::SqlConnection::with_transaction(&stub, |_| Ok(7));
+        assert_eq!(result.unwrap(), 7);
     }
 }

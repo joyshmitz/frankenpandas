@@ -1024,6 +1024,69 @@ fn compare_scalars_with_na_position(
     }
 }
 
+fn is_ordering_comparison(op: ComparisonOp) -> bool {
+    matches!(
+        op,
+        ComparisonOp::Gt | ComparisonOp::Lt | ComparisonOp::Ge | ComparisonOp::Le
+    )
+}
+
+fn categorical_categories_match(left: &CategoricalMetadata, right: &CategoricalMetadata) -> bool {
+    left.categories.len() == right.categories.len()
+        && left
+            .categories
+            .iter()
+            .zip(right.categories.iter())
+            .all(|(left, right)| left.semantic_eq(right))
+}
+
+fn categorical_code(value: &Scalar) -> Option<i64> {
+    match value {
+        Scalar::Int64(code) if *code >= 0 => Some(*code),
+        _ => None,
+    }
+}
+
+fn compare_categorical_codes(left: i64, right: i64, op: ComparisonOp) -> bool {
+    match op {
+        ComparisonOp::Gt => left > right,
+        ComparisonOp::Lt => left < right,
+        ComparisonOp::Ge => left >= right,
+        ComparisonOp::Le => left <= right,
+        ComparisonOp::Eq => left == right,
+        ComparisonOp::Ne => left != right,
+    }
+}
+
+fn compare_categorical_codes_with_na_position(
+    left: &Scalar,
+    right: &Scalar,
+    ascending: bool,
+    na_first: bool,
+) -> Ordering {
+    match (categorical_code(left), categorical_code(right)) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => {
+            if na_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (Some(_), None) => {
+            if na_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (Some(left), Some(right)) => {
+            let order = left.cmp(&right);
+            if ascending { order } else { order.reverse() }
+        }
+    }
+}
+
 impl Series {
     pub fn new(name: impl Into<String>, index: Index, column: Column) -> Result<Self, FrameError> {
         if index.len() != column.len() {
@@ -1785,7 +1848,13 @@ impl Series {
             out_values.push(self.column.values()[position].clone());
         }
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        Ok(Self {
+            name: self.name.clone(),
+            index: Index::new(out_labels),
+            column: Column::new(self.column.dtype(), out_values)?,
+            categorical: self.categorical.clone(),
+            sparse: self.sparse.clone(),
+        })
     }
 
     /// Align two Series by their indexes, returning a pair aligned to a common index.
@@ -1952,6 +2021,11 @@ impl Series {
     /// Core comparison: align indexes, reindex columns, apply comparison.
     /// Returns a Bool-typed Series.
     fn comparison_op(&self, other: &Self, op: ComparisonOp) -> Result<Self, FrameError> {
+        if is_ordering_comparison(op) && (self.categorical.is_some() || other.categorical.is_some())
+        {
+            return self.categorical_ordering_comparison_op(other, op);
+        }
+
         let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
@@ -1976,6 +2050,72 @@ impl Series {
         };
 
         Self::new(out_name, plan.union_index, column)
+    }
+
+    fn categorical_ordering_comparison_op(
+        &self,
+        other: &Self,
+        op: ComparisonOp,
+    ) -> Result<Self, FrameError> {
+        let left_meta = self.categorical.as_ref().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "ordered categorical comparison requires both operands to be categorical"
+                    .to_owned(),
+            )
+        })?;
+        let right_meta = other.categorical.as_ref().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "ordered categorical comparison requires both operands to be categorical"
+                    .to_owned(),
+            )
+        })?;
+        if !left_meta.ordered || !right_meta.ordered {
+            return Err(FrameError::CompatibilityRejected(
+                "Unordered Categoricals can only compare equality or not".to_owned(),
+            ));
+        }
+        if !categorical_categories_match(left_meta, right_meta) {
+            return Err(FrameError::CompatibilityRejected(
+                "Categoricals can only compare if categories are the same".to_owned(),
+            ));
+        }
+
+        let plan = align_union_plan(&self.index, &other.index);
+        validate_alignment_plan(&plan)?;
+
+        let left = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right = other.column.reindex_by_positions(&plan.right_positions)?;
+        let values = left
+            .values()
+            .iter()
+            .zip(right.values().iter())
+            .map(|(left, right)| {
+                let result = match (categorical_code(left), categorical_code(right)) {
+                    (Some(left), Some(right)) => compare_categorical_codes(left, right, op),
+                    _ => false,
+                };
+                Scalar::Bool(result)
+            })
+            .collect();
+
+        let op_symbol = match op {
+            ComparisonOp::Gt => ">",
+            ComparisonOp::Lt => "<",
+            ComparisonOp::Eq => "==",
+            ComparisonOp::Ne => "!=",
+            ComparisonOp::Ge => ">=",
+            ComparisonOp::Le => "<=",
+        };
+        let out_name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            format!("{}{op_symbol}{}", self.name, other.name)
+        };
+        Self::new(
+            out_name,
+            plan.union_index,
+            Column::new(DType::Bool, values)?,
+        )
     }
 
     /// Element-wise greater-than. Matches `series > other`.
@@ -2012,8 +2152,56 @@ impl Series {
     ///
     /// Matches `series > 5` (broadcast scalar comparison).
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, FrameError> {
+        if is_ordering_comparison(op)
+            && let Some(meta) = &self.categorical
+        {
+            return self.categorical_ordering_compare_scalar(meta, scalar, op);
+        }
+
         let column = self.column.compare_scalar(scalar, op)?;
         Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    fn categorical_ordering_compare_scalar(
+        &self,
+        meta: &CategoricalMetadata,
+        scalar: &Scalar,
+        op: ComparisonOp,
+    ) -> Result<Self, FrameError> {
+        if !meta.ordered {
+            return Err(FrameError::CompatibilityRejected(
+                "Unordered Categoricals can only compare equality or not".to_owned(),
+            ));
+        }
+        let Some(category_code) = meta
+            .categories
+            .iter()
+            .position(|category| category.semantic_eq(scalar))
+        else {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "invalid comparison between dtype=category and {scalar:?}"
+            )));
+        };
+        let category_code = i64::try_from(category_code).map_err(|_| {
+            FrameError::CompatibilityRejected("category position does not fit in i64".to_owned())
+        })?;
+        let values = self
+            .column
+            .values()
+            .iter()
+            .map(|value| {
+                Scalar::Bool(
+                    categorical_code(value)
+                        .map(|code| compare_categorical_codes(code, category_code, op))
+                        .unwrap_or(false),
+                )
+            })
+            .collect();
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            Column::new(DType::Bool, values)?,
+        )
     }
 
     /// Element-wise `== scalar`.
@@ -2459,14 +2647,25 @@ impl Series {
     pub fn sort_values_na(&self, ascending: bool, na_position: &str) -> Result<Self, FrameError> {
         let na_first = na_position == "first";
         let mut order = (0..self.len()).collect::<Vec<_>>();
-        order.sort_by(|&left_pos, &right_pos| {
-            compare_scalars_with_na_position(
-                &self.values()[left_pos],
-                &self.values()[right_pos],
-                ascending,
-                na_first,
-            )
-        });
+        if self.categorical.is_some() {
+            order.sort_by(|&left_pos, &right_pos| {
+                compare_categorical_codes_with_na_position(
+                    &self.values()[left_pos],
+                    &self.values()[right_pos],
+                    ascending,
+                    na_first,
+                )
+            });
+        } else {
+            order.sort_by(|&left_pos, &right_pos| {
+                compare_scalars_with_na_position(
+                    &self.values()[left_pos],
+                    &self.values()[right_pos],
+                    ascending,
+                    na_first,
+                )
+            });
+        }
         self.reorder_by_positions(&order)
     }
 
@@ -3617,6 +3816,10 @@ impl Series {
     ///
     /// Matches `pd.Series.min()`.
     pub fn min(&self) -> Result<Scalar, FrameError> {
+        if let Some(meta) = &self.categorical {
+            return self.categorical_extreme(meta, true);
+        }
+
         let mut result = f64::INFINITY;
         let mut found = false;
         for val in self.column.values() {
@@ -3639,6 +3842,10 @@ impl Series {
     ///
     /// Matches `pd.Series.max()`.
     pub fn max(&self) -> Result<Scalar, FrameError> {
+        if let Some(meta) = &self.categorical {
+            return self.categorical_extreme(meta, false);
+        }
+
         let mut result = f64::NEG_INFINITY;
         let mut found = false;
         for val in self.column.values() {
@@ -3655,6 +3862,41 @@ impl Series {
         } else {
             Scalar::Float64(f64::NAN)
         })
+    }
+
+    fn categorical_extreme(
+        &self,
+        meta: &CategoricalMetadata,
+        min: bool,
+    ) -> Result<Scalar, FrameError> {
+        if !meta.ordered {
+            let operation = if min { "min" } else { "max" };
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Categorical is not ordered for operation {operation}"
+            )));
+        }
+
+        let selected = self
+            .column
+            .values()
+            .iter()
+            .filter_map(categorical_code)
+            .filter(|code| usize::try_from(*code).is_ok_and(|idx| idx < meta.categories.len()))
+            .reduce(|left, right| {
+                if min {
+                    left.min(right)
+                } else {
+                    left.max(right)
+                }
+            });
+
+        let Some(code) = selected else {
+            return Ok(Scalar::Float64(f64::NAN));
+        };
+        let idx = usize::try_from(code).map_err(|_| {
+            FrameError::CompatibilityRejected("category position does not fit in usize".to_owned())
+        })?;
+        Ok(meta.categories[idx].clone())
     }
 
     /// Standard deviation of non-null numeric values (ddof=1, sample std).
@@ -61660,6 +61902,113 @@ mod tests {
         assert_eq!(vals.values()[0], Scalar::Int64(10));
         assert_eq!(vals.values()[1], Scalar::Int64(20));
         assert_eq!(vals.values()[2], Scalar::Int64(10));
+    }
+
+    #[test]
+    fn categorical_ordered_comparison_uses_category_order() {
+        let categories = vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("medium".into()),
+            Scalar::Utf8("high".into()),
+        ];
+        let left =
+            Series::from_categorical_codes("rating", vec![0, -1, 2], categories.clone(), true)
+                .unwrap();
+        let right =
+            Series::from_categorical_codes("rating", vec![1, 1, -1], categories, true).unwrap();
+
+        let out = left.lt(&right).unwrap();
+        assert_eq!(
+            out.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn categorical_unordered_ordering_comparison_errors() {
+        let categories = vec![Scalar::Utf8("low".into()), Scalar::Utf8("high".into())];
+        let left =
+            Series::from_categorical_codes("rating", vec![0], categories.clone(), false).unwrap();
+        let right = Series::from_categorical_codes("rating", vec![1], categories, false).unwrap();
+
+        let err = left.lt(&right).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unordered Categoricals can only compare equality or not"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn categorical_ordered_scalar_comparison_uses_category_order() {
+        let categories = vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("medium".into()),
+            Scalar::Utf8("high".into()),
+        ];
+        let s = Series::from_categorical_codes("rating", vec![0, 2, -1], categories, true).unwrap();
+
+        let out = s.lt_scalar(&Scalar::Utf8("medium".into())).unwrap();
+        assert_eq!(
+            out.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn categorical_sort_values_respects_category_order_and_preserves_dtype() {
+        let categories = vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("medium".into()),
+            Scalar::Utf8("high".into()),
+        ];
+        let s =
+            Series::from_categorical_codes("rating", vec![2, 0, -1, 1], categories, false).unwrap();
+
+        let sorted = s.sort_values(true).unwrap();
+        assert!(sorted.is_categorical());
+        assert_eq!(
+            sorted.column().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(-1),
+            ]
+        );
+        let materialized = sorted.cat().unwrap().to_values().unwrap();
+        assert_eq!(
+            materialized.values(),
+            &[
+                Scalar::Utf8("low".into()),
+                Scalar::Utf8("medium".into()),
+                Scalar::Utf8("high".into()),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+    }
+
+    #[test]
+    fn categorical_ordered_min_max_return_category_values() {
+        let categories = vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("medium".into()),
+            Scalar::Utf8("high".into()),
+        ];
+        let s =
+            Series::from_categorical_codes("rating", vec![2, 0, -1, 1], categories, true).unwrap();
+
+        assert_eq!(s.min().unwrap(), Scalar::Utf8("low".into()));
+        assert_eq!(s.max().unwrap(), Scalar::Utf8("high".into()));
+    }
+
+    #[test]
+    fn categorical_unordered_min_max_error() {
+        let categories = vec![Scalar::Utf8("low".into()), Scalar::Utf8("high".into())];
+        let s = Series::from_categorical_codes("rating", vec![0, 1], categories, false).unwrap();
+
+        assert!(s.min().unwrap_err().to_string().contains("not ordered"));
+        assert!(s.max().unwrap_err().to_string().contains("not ordered"));
     }
 
     // ── MultiIndex integration tests ──

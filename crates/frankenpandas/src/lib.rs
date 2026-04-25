@@ -93,6 +93,7 @@ pub use fp_io::{
     read_sql_query_with_options,
     read_sql_table,
     read_sql_table_chunks,
+    read_sql_table_columns_chunks,
     read_sql_with_options,
     write_csv,
     write_csv_string,

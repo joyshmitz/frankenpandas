@@ -3634,6 +3634,37 @@ fn sql_select_all_query(table_name: &str) -> Result<String, IoError> {
     Ok(format!("SELECT * FROM \"{escaped_table}\""))
 }
 
+fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
+    if column_name.is_empty() || !column_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(IoError::Sql(format!(
+            "invalid column name: '{column_name}' (must be non-empty, only alphanumeric and underscore allowed)"
+        )));
+    }
+    Ok(())
+}
+
+fn sql_select_columns_query(table_name: &str, columns: &[&str]) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    if columns.is_empty() {
+        return Err(IoError::Sql(
+            "read_sql_table_columns: columns must be non-empty".to_owned(),
+        ));
+    }
+    for name in columns {
+        validate_sql_column_name(name)?;
+    }
+
+    let escaped_table = escape_sql_ident(table_name)?;
+    let projection: Vec<String> = columns
+        .iter()
+        .map(|name| escape_sql_ident(name).map(|escaped| format!("\"{escaped}\"")))
+        .collect::<Result<_, _>>()?;
+    Ok(format!(
+        "SELECT {} FROM \"{escaped_table}\"",
+        projection.join(", ")
+    ))
+}
+
 /// Read the result of a SQL query into a DataFrame.
 ///
 /// Matches `pd.read_sql(sql, con)`.
@@ -3901,35 +3932,26 @@ pub fn read_sql_table_columns<C: SqlConnection>(
     table_name: &str,
     columns: &[&str],
 ) -> Result<DataFrame, IoError> {
-    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(IoError::Sql(format!(
-            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
-        )));
-    }
-    if columns.is_empty() {
-        return Err(IoError::Sql(
-            "read_sql_table_columns: columns must be non-empty".to_owned(),
-        ));
-    }
-    for name in columns {
-        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Err(IoError::Sql(format!(
-                "invalid column name: '{name}' (must be non-empty, only alphanumeric and underscore allowed)"
-            )));
-        }
-    }
+    read_sql(conn, &sql_select_columns_query(table_name, columns)?)
+}
 
-    let escaped_table = escape_sql_ident(table_name)?;
-    let projection: Vec<String> = columns
-        .iter()
-        .map(|c| escape_sql_ident(c).map(|q| format!("\"{q}\"")))
-        .collect::<Result<_, _>>()?;
-    let query = format!(
-        "SELECT {} FROM \"{}\"",
-        projection.join(", "),
-        escaped_table
-    );
-    read_sql(conn, &query)
+/// Read a subset of columns from a SQL table as DataFrame chunks.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table, con, columns=[...], chunksize=...)`. The named
+/// columns are emitted in the requested order and each chunk receives a fresh
+/// zero-based RangeIndex.
+pub fn read_sql_table_columns_chunks<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    columns: &[&str],
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    read_sql_chunks(
+        conn,
+        &sql_select_columns_query(table_name, columns)?,
+        chunk_size,
+    )
 }
 
 /// Write a DataFrame to a SQL table.
@@ -6546,8 +6568,8 @@ mod tests {
         read_sql_chunks_with_options, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_options, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_table, read_sql_table_chunks, read_sql_table_columns,
-        read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
-        write_sql_with_options,
+        read_sql_table_columns_chunks, read_sql_table_with_index_col, read_sql_with_index_col,
+        read_sql_with_options, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -6656,6 +6678,57 @@ mod tests {
         let conn = make_sql_test_conn();
         let err = read_sql_table_columns(&conn, "bad table", &["ints"]).unwrap_err();
         assert!(matches!(err, crate::IoError::Sql(_)));
+    }
+
+    #[test]
+    fn sql_read_table_columns_chunks_returns_requested_projection_in_order() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_chunk_tbl", SqlIfExists::Fail).expect("write");
+
+        let chunks = read_sql_table_columns_chunks(&conn, "proj_chunk_tbl", &["names", "ints"], 2)
+            .expect("projection chunk iterator")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["names", "ints"]);
+        assert_eq!(
+            chunks[0].column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("alice".to_owned()),
+                Scalar::Utf8("bob".to_owned())
+            ]
+        );
+        assert_eq!(
+            chunks[1].column("ints").unwrap().values(),
+            &[Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_columns_chunks_rejects_zero_chunksize() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_zero_chunk_tbl", SqlIfExists::Fail).expect("write");
+
+        let err = read_sql_table_columns_chunks(&conn, "proj_zero_chunk_tbl", &["names"], 0)
+            .expect_err("zero projection chunksize should be rejected");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
+    }
+
+    #[test]
+    fn sql_read_table_columns_chunks_rejects_invalid_projection_inputs() {
+        let conn = make_sql_test_conn();
+
+        let empty = read_sql_table_columns_chunks(&conn, "proj_chunk_tbl", &[], 1)
+            .expect_err("empty projection should be rejected");
+        assert!(matches!(empty, IoError::Sql(msg) if msg.contains("columns must be non-empty")));
+
+        let invalid = read_sql_table_columns_chunks(&conn, "proj_chunk_tbl", &["bad column"], 1)
+            .expect_err("invalid projection name should be rejected");
+        assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid column name")));
     }
 
     #[test]

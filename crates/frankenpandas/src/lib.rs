@@ -58,8 +58,9 @@ pub use fp_io::{
     IoError,
     // JSON
     JsonOrient,
-    SqlConnection,
     // SQL
+    SqlChunkIterator,
+    SqlConnection,
     SqlIfExists,
     SqlQueryResult,
     SqlReadOptions,
@@ -83,6 +84,8 @@ pub use fp_io::{
     read_parquet,
     read_parquet_bytes,
     read_sql,
+    read_sql_chunks,
+    read_sql_chunks_with_options,
     read_sql_query,
     read_sql_query_with_index_col,
     read_sql_query_with_options,

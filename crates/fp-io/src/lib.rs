@@ -3364,6 +3364,40 @@ pub struct SqlQueryResult {
     pub rows: Vec<Vec<Scalar>>,
 }
 
+/// Iterator over DataFrame chunks produced by a SQL query.
+#[derive(Debug, Clone)]
+pub struct SqlChunkIterator {
+    headers: Vec<String>,
+    columns: Vec<Vec<Scalar>>,
+    chunk_size: usize,
+    next_row: usize,
+}
+
+impl Iterator for SqlChunkIterator {
+    type Item = Result<DataFrame, IoError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row_count = self.columns.first().map_or(0, Vec::len);
+        if self.next_row >= row_count {
+            return None;
+        }
+
+        let start = self.next_row;
+        let end = start.saturating_add(self.chunk_size).min(row_count);
+        self.next_row = end;
+
+        let chunk_columns = self
+            .columns
+            .iter()
+            .map(|column| column[start..end].to_vec())
+            .collect();
+        Some(dataframe_from_sql_columns(
+            self.headers.clone(),
+            chunk_columns,
+        ))
+    }
+}
+
 /// Minimal SQL connection surface needed by FrankenPandas SQL IO.
 pub trait SqlConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError>;
@@ -3600,43 +3634,8 @@ pub fn read_sql_with_options<C: SqlConnection>(
     query: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
-    let SqlQueryResult {
-        columns: headers,
-        rows,
-    } = conn.query(query, options.params.as_deref().unwrap_or(&[]))?;
-    reject_duplicate_headers(&headers)?;
-    let mut columns: Vec<Vec<Scalar>> = (0..headers.len()).map(|_| Vec::new()).collect();
-
-    for row in rows {
-        for (col_idx, value) in row.into_iter().enumerate() {
-            if let Some(col_vec) = columns.get_mut(col_idx) {
-                col_vec.push(value);
-            }
-        }
-    }
-
-    if let Some(ref parse_dates) = options.parse_dates {
-        apply_parse_dates(&headers, &mut columns, parse_dates)?;
-    }
-    if options.coerce_float {
-        apply_sql_coerce_float(&mut columns);
-    }
-
-    let row_count = columns.first().map_or(0, Vec::len);
-    let mut out_columns = BTreeMap::new();
-    let mut column_order = Vec::new();
-
-    for (name, values) in headers.into_iter().zip(columns) {
-        out_columns.insert(name.clone(), Column::from_values(values)?);
-        column_order.push(name);
-    }
-
-    let index = Index::from_i64((0..row_count as i64).collect());
-    Ok(DataFrame::new_with_column_order(
-        index,
-        out_columns,
-        column_order,
-    )?)
+    let (headers, columns) = sql_query_to_columns(conn, query, options)?;
+    dataframe_from_sql_columns(headers, columns)
 }
 
 /// Read the result of a SQL query into a DataFrame.
@@ -3668,6 +3667,96 @@ pub fn read_sql_query_with_index_col<C: SqlConnection>(
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
     read_sql_with_index_col(conn, query, index_col)
+}
+
+fn sql_query_to_columns<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+) -> Result<(Vec<String>, Vec<Vec<Scalar>>), IoError> {
+    let SqlQueryResult {
+        columns: headers,
+        rows,
+    } = conn.query(query, options.params.as_deref().unwrap_or(&[]))?;
+    reject_duplicate_headers(&headers)?;
+    let mut columns: Vec<Vec<Scalar>> = (0..headers.len()).map(|_| Vec::new()).collect();
+
+    for row in rows {
+        for (col_idx, value) in row.into_iter().enumerate() {
+            if let Some(col_vec) = columns.get_mut(col_idx) {
+                col_vec.push(value);
+            }
+        }
+    }
+
+    if let Some(ref parse_dates) = options.parse_dates {
+        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+    }
+    if options.coerce_float {
+        apply_sql_coerce_float(&mut columns);
+    }
+
+    Ok((headers, columns))
+}
+
+fn dataframe_from_sql_columns(
+    headers: Vec<String>,
+    columns: Vec<Vec<Scalar>>,
+) -> Result<DataFrame, IoError> {
+    let row_count = columns.first().map_or(0, Vec::len);
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for (name, values) in headers.into_iter().zip(columns) {
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..row_count as i64).collect());
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
+}
+
+/// Read a SQL query result as an iterator of DataFrame chunks.
+///
+/// Matches the supported subset of `pd.read_sql(sql, con, chunksize=...)`.
+/// Each chunk receives a fresh zero-based RangeIndex, matching pandas'
+/// SQLite chunk iterator behavior.
+pub fn read_sql_chunks<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    read_sql_chunks_with_options(conn, query, &SqlReadOptions::default(), chunk_size)
+}
+
+/// Read a SQL query result as DataFrame chunks with read-time options.
+///
+/// `params`, `parse_dates`, and `coerce_float` are applied before chunking so
+/// chunked reads match the corresponding full-frame `read_sql_with_options`
+/// result when concatenated row-wise.
+pub fn read_sql_chunks_with_options<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    if chunk_size == 0 {
+        return Err(IoError::Sql(
+            "read_sql chunksize must be greater than zero".to_owned(),
+        ));
+    }
+
+    let (headers, columns) = sql_query_to_columns(conn, query, options)?;
+    Ok(SqlChunkIterator {
+        headers,
+        columns,
+        chunk_size,
+        next_row: 0,
+    })
 }
 
 /// Read a SQL query result with one column promoted to the index.
@@ -6410,10 +6499,11 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_query,
-        read_sql_query_with_index_col, read_sql_query_with_options, read_sql_table,
-        read_sql_table_columns, read_sql_table_with_index_col, read_sql_with_index_col,
-        read_sql_with_options, write_sql, write_sql_with_options,
+        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_chunks,
+        read_sql_chunks_with_options, read_sql_query, read_sql_query_with_index_col,
+        read_sql_query_with_options, read_sql_table, read_sql_table_columns,
+        read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
+        write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -7082,6 +7172,104 @@ mod tests {
                 Scalar::Utf8("20.0".to_owned()),
             ],
         );
+    }
+
+    #[test]
+    fn sql_read_chunks_batches_rows_and_resets_index_per_chunk() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE chunked (id INTEGER, name TEXT);
+             INSERT INTO chunked (id, name) VALUES
+                (1, 'alpha'),
+                (2, 'beta'),
+                (3, 'gamma'),
+                (4, 'delta'),
+                (5, 'epsilon');",
+        )
+        .expect("create chunked table");
+
+        let chunks = read_sql_chunks(&conn, "SELECT id, name FROM chunked ORDER BY id", 2)
+            .expect("chunk iterator")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all chunks");
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            chunks[1].index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(chunks[2].index().labels(), &[IndexLabel::Int64(0)]);
+        assert_eq!(
+            chunks[0].column("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            chunks[1].column("id").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            chunks[2].column("name").unwrap().values(),
+            &[Scalar::Utf8("epsilon".to_owned())]
+        );
+    }
+
+    #[test]
+    fn sql_read_chunks_with_options_applies_params_parse_dates_and_coerce_float() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE events (ts TEXT, amount TEXT, keep INTEGER);
+             INSERT INTO events (ts, amount, keep) VALUES
+                ('2024-01-15', '12.50', 0),
+                ('2024-02-01 05:06:07', '$1,234.50', 1),
+                ('2024-03-03', '-3.25', 1);",
+        )
+        .expect("create events table");
+
+        let chunks = read_sql_chunks_with_options(
+            &conn,
+            "SELECT ts, amount FROM events WHERE keep = ? ORDER BY ts",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(1)]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+            },
+            1,
+        )
+        .expect("chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].column("ts").unwrap().values(),
+            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+        );
+        assert_eq!(
+            chunks[0].column("amount").unwrap().values(),
+            &[Scalar::Float64(1234.5)]
+        );
+        assert_eq!(
+            chunks[1].column("ts").unwrap().values(),
+            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+        );
+        assert_eq!(
+            chunks[1].column("amount").unwrap().values(),
+            &[Scalar::Float64(-3.25)]
+        );
+    }
+
+    #[test]
+    fn sql_read_chunks_rejects_zero_chunksize() {
+        let conn = make_sql_test_conn();
+
+        let err =
+            read_sql_chunks(&conn, "SELECT 1", 0).expect_err("zero chunksize should be rejected");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
     #[test]

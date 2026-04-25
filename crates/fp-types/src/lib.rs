@@ -527,7 +527,21 @@ impl Timedelta {
         Ok(total)
     }
 
-    fn unit_to_nanos(unit: &str) -> Option<i64> {
+    /// Map a pandas-style frequency-alias string to a nanosecond-count.
+    ///
+    /// Recognizes pandas's offset alias core set plus common word forms:
+    /// W/week(s), D/day(s), H/hr/hour(s), m/T/min/minute(s), s/sec/second(s),
+    /// ms/milli/millisecond(s)/L, us/µs/micro/microsecond(s)/U, ns/nano/
+    /// nanosecond(s)/N. Empty string maps to days (matches pandas default).
+    /// Returns `None` for unrecognized aliases — callers can choose to map
+    /// that to NaT (consistent with the rest of fp-types) or surface as a
+    /// typed error.
+    ///
+    /// Per br-frankenpandas-lbsx (9p0u Phase 2.6): public surface so
+    /// downstream crates can consume the same alias map fp-types uses for
+    /// `Timedelta::from_unit` / `Timestamp::*_to_unit`.
+    #[must_use]
+    pub fn unit_to_nanos(unit: &str) -> Option<i64> {
         match unit.to_lowercase().as_str() {
             "w" | "week" | "weeks" => Some(Self::NANOS_PER_WEEK),
             "d" | "day" | "days" => Some(Self::NANOS_PER_DAY),
@@ -897,6 +911,47 @@ impl Timestamp {
         Self {
             nanos: chosen_floor.saturating_mul(unit_nanos),
             tz: self.tz.clone(),
+        }
+    }
+
+    // ── String-unit rounding (br-frankenpandas-lbsx) ────────────────────
+    //
+    // Pandas convenience: `.floor('H')` / `.ceil('1D')` / `.round('s')`.
+    // These delegate to `Timedelta::unit_to_nanos` for unit lookup, then to
+    // the nanos-based `floor_to`/`ceil_to`/`round_to`. Unknown unit strings
+    // return NaT, matching the rest of fp-types' "missing-input → missing-
+    // output" convention.
+
+    /// Round down to the nearest multiple of the named unit.
+    ///
+    /// Matches `pd.Timestamp(...).floor(unit)`. Unknown unit → NaT.
+    #[must_use]
+    pub fn floor_to_unit(&self, unit: &str) -> Self {
+        match Timedelta::unit_to_nanos(unit) {
+            Some(unit_nanos) => self.floor_to(unit_nanos),
+            None => Self::nat(),
+        }
+    }
+
+    /// Round up to the nearest multiple of the named unit.
+    ///
+    /// Matches `pd.Timestamp(...).ceil(unit)`. Unknown unit → NaT.
+    #[must_use]
+    pub fn ceil_to_unit(&self, unit: &str) -> Self {
+        match Timedelta::unit_to_nanos(unit) {
+            Some(unit_nanos) => self.ceil_to(unit_nanos),
+            None => Self::nat(),
+        }
+    }
+
+    /// Round to the nearest multiple of the named unit, banker's rounding.
+    ///
+    /// Matches `pd.Timestamp(...).round(unit)`. Unknown unit → NaT.
+    #[must_use]
+    pub fn round_to_unit(&self, unit: &str) -> Self {
+        match Timedelta::unit_to_nanos(unit) {
+            Some(unit_nanos) => self.round_to(unit_nanos),
+            None => Self::nat(),
         }
     }
 }
@@ -3286,5 +3341,89 @@ mod tests {
         assert_eq!(ts.floor_to(60).tz.as_deref(), Some("US/Eastern"));
         assert_eq!(ts.ceil_to(60).tz.as_deref(), Some("US/Eastern"));
         assert_eq!(ts.round_to(60).tz.as_deref(), Some("US/Eastern"));
+    }
+
+    // ── Timestamp string-unit rounding tests (br-frankenpandas-lbsx) ────
+
+    #[test]
+    fn timestamp_floor_to_unit_h_rounds_to_hour() {
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let twelve_thirty_four = twelve_h
+            + Timedelta::NANOS_PER_MIN * 34
+            + Timedelta::NANOS_PER_SEC * 56;
+        let ts = Timestamp::from_nanos(twelve_thirty_four);
+        assert_eq!(ts.floor_to_unit("H").nanos, twelve_h);
+        assert_eq!(ts.floor_to_unit("h").nanos, twelve_h);
+        assert_eq!(ts.floor_to_unit("hour").nanos, twelve_h);
+        assert_eq!(ts.floor_to_unit("hours").nanos, twelve_h);
+        assert_eq!(ts.floor_to_unit("hr").nanos, twelve_h);
+    }
+
+    #[test]
+    fn timestamp_ceil_to_unit_d_rounds_to_day() {
+        // 12:34:56 → ceil to 1 day → 24:00:00 (next day).
+        let h = Timedelta::NANOS_PER_HOUR;
+        let d = Timedelta::NANOS_PER_DAY;
+        let twelve_thirty_four = h * 12 + Timedelta::NANOS_PER_MIN * 34;
+        let ts = Timestamp::from_nanos(twelve_thirty_four);
+        assert_eq!(ts.ceil_to_unit("D").nanos, d);
+        assert_eq!(ts.ceil_to_unit("day").nanos, d);
+        assert_eq!(ts.ceil_to_unit("days").nanos, d);
+    }
+
+    #[test]
+    fn timestamp_round_to_unit_min_rounds_to_minute() {
+        // 12:34:31 → round to 1 minute → 12:35:00.
+        let m = Timedelta::NANOS_PER_MIN;
+        let twelve_thirty_four_thirty_one = Timedelta::NANOS_PER_HOUR * 12
+            + m * 34
+            + Timedelta::NANOS_PER_SEC * 31;
+        let ts = Timestamp::from_nanos(twelve_thirty_four_thirty_one);
+        let expected = Timedelta::NANOS_PER_HOUR * 12 + m * 35;
+        assert_eq!(ts.round_to_unit("min").nanos, expected);
+        assert_eq!(ts.round_to_unit("T").nanos, expected); // pandas pre-2.2 alias
+        assert_eq!(ts.round_to_unit("minute").nanos, expected);
+    }
+
+    #[test]
+    fn timestamp_unit_rounding_unknown_unit_returns_nat() {
+        let ts = Timestamp::from_nanos(100);
+        assert!(ts.floor_to_unit("fortnight").is_nat());
+        assert!(ts.ceil_to_unit("century").is_nat());
+        assert!(ts.round_to_unit("xyz").is_nat());
+    }
+
+    #[test]
+    fn timestamp_unit_rounding_propagates_nat() {
+        let nat = Timestamp::nat();
+        assert!(nat.floor_to_unit("H").is_nat());
+        assert!(nat.ceil_to_unit("H").is_nat());
+        assert!(nat.round_to_unit("H").is_nat());
+    }
+
+    #[test]
+    fn timestamp_unit_rounding_preserves_tz() {
+        let ts = Timestamp::from_nanos_tz(Timedelta::NANOS_PER_HOUR * 12 + 100, "US/Eastern");
+        assert_eq!(ts.floor_to_unit("H").tz.as_deref(), Some("US/Eastern"));
+        assert_eq!(ts.ceil_to_unit("H").tz.as_deref(), Some("US/Eastern"));
+        assert_eq!(ts.round_to_unit("H").tz.as_deref(), Some("US/Eastern"));
+    }
+
+    #[test]
+    fn timedelta_unit_to_nanos_is_now_public_and_matches_pandas_aliases() {
+        // Public surface check: pandas alias core set.
+        assert_eq!(Timedelta::unit_to_nanos("W"), Some(Timedelta::NANOS_PER_WEEK));
+        assert_eq!(Timedelta::unit_to_nanos("D"), Some(Timedelta::NANOS_PER_DAY));
+        assert_eq!(Timedelta::unit_to_nanos("H"), Some(Timedelta::NANOS_PER_HOUR));
+        assert_eq!(Timedelta::unit_to_nanos("min"), Some(Timedelta::NANOS_PER_MIN));
+        assert_eq!(Timedelta::unit_to_nanos("s"), Some(Timedelta::NANOS_PER_SEC));
+        assert_eq!(Timedelta::unit_to_nanos("ms"), Some(Timedelta::NANOS_PER_MILLI));
+        assert_eq!(Timedelta::unit_to_nanos("us"), Some(Timedelta::NANOS_PER_MICRO));
+        assert_eq!(Timedelta::unit_to_nanos("ns"), Some(1));
+        // Empty string → days (pandas default).
+        assert_eq!(Timedelta::unit_to_nanos(""), Some(Timedelta::NANOS_PER_DAY));
+        // Unknown alias → None.
+        assert_eq!(Timedelta::unit_to_nanos("century"), None);
     }
 }

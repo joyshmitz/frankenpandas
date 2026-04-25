@@ -4013,6 +4013,23 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     read_sql_with_options(conn, &sql_select_all_query(table_name)?, options)
 }
 
+/// Read an entire SQL table with read-time options and optional index promotion.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table_name, con, parse_dates=..., coerce_float=..., index_col=...)`.
+pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    options: &SqlReadOptions,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let frame = read_sql_table_with_options(conn, table_name, options)?;
+    let Some(col_name) = index_col else {
+        return Ok(frame);
+    };
+    promote_column_to_index(&frame, col_name)
+}
+
 /// Read an entire SQL table as an iterator of DataFrame chunks.
 ///
 /// Matches the supported subset of `pd.read_sql_table(table_name, con, chunksize=...)`.
@@ -4040,6 +4057,21 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
         options,
         chunk_size,
     )
+}
+
+/// Read an entire SQL table as chunks with read-time options and optional index promotion.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table_name, con, parse_dates=..., coerce_float=..., index_col=..., chunksize=...)`.
+pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    options: &SqlReadOptions,
+    index_col: Option<&str>,
+    chunk_size: usize,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    let inner = read_sql_table_chunks_with_options(conn, table_name, options, chunk_size)?;
+    sql_indexed_chunks(inner, index_col)
 }
 
 /// Read an entire SQL table as chunks with one column promoted to each chunk's index.
@@ -6744,10 +6776,11 @@ mod tests {
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
         read_sql_table_chunks_with_index_col, read_sql_table_chunks_with_options,
-        read_sql_table_columns, read_sql_table_columns_chunks,
-        read_sql_table_columns_chunks_with_index_col, read_sql_table_columns_with_index_col,
-        read_sql_table_with_index_col, read_sql_table_with_options, read_sql_with_index_col,
-        read_sql_with_options, write_sql, write_sql_with_options,
+        read_sql_table_chunks_with_options_and_index_col, read_sql_table_columns,
+        read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
+        read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
+        read_sql_table_with_options, read_sql_table_with_options_and_index_col,
+        read_sql_with_index_col, read_sql_with_options, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -7899,6 +7932,154 @@ mod tests {
         )
         .expect_err("invalid table name should be rejected");
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid table name")));
+    }
+
+    #[test]
+    fn sql_read_table_with_options_and_index_col_applies_options_before_indexing() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_options_index (ts TEXT, amount TEXT, label TEXT);
+             INSERT INTO table_options_index (ts, amount, label) VALUES
+                ('2024-04-01', '$10.00', 'a'),
+                ('2024-04-02 03:04:05', '20.50', 'b');",
+        )
+        .expect("create table_options_index table");
+
+        let frame = read_sql_table_with_options_and_index_col(
+            &conn,
+            "table_options_index",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+            },
+            Some("ts"),
+        )
+        .expect("read table with options and index_col");
+
+        assert_eq!(frame.index().name(), Some("ts"));
+        assert_eq!(
+            frame.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-04-01 00:00:00".to_owned()),
+                IndexLabel::Utf8("2024-04-02 03:04:05".to_owned())
+            ]
+        );
+        assert!(frame.column("ts").is_none());
+        assert_eq!(
+            frame.column("amount").unwrap().values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(20.5)]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_with_options_and_index_col_none_keeps_options_and_range_index() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_options_no_index (id INTEGER, amount TEXT);
+             INSERT INTO table_options_no_index (id, amount) VALUES
+                (1, '$1.25'),
+                (2, '$2.50');",
+        )
+        .expect("create table_options_no_index table");
+
+        let frame = read_sql_table_with_options_and_index_col(
+            &conn,
+            "table_options_no_index",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: true,
+            },
+            None,
+        )
+        .expect("read table with options and no index_col");
+
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(frame.column_names(), vec!["id", "amount"]);
+        assert_eq!(
+            frame.column("amount").unwrap().values(),
+            &[Scalar::Float64(1.25), Scalar::Float64(2.5)]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_chunks_with_options_and_index_col_promotes_each_chunk_index() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_options_index_chunked (ts TEXT, amount TEXT);
+             INSERT INTO table_options_index_chunked (ts, amount) VALUES
+                ('2024-05-01', '$10.00'),
+                ('2024-05-02', '$20.00'),
+                ('2024-05-03', '$30.50');",
+        )
+        .expect("create table_options_index_chunked table");
+
+        let chunks = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "table_options_index_chunked",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+            },
+            Some("ts"),
+            2,
+        )
+        .expect("table indexed option chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("ts"));
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[
+                IndexLabel::Utf8("2024-05-01 00:00:00".to_owned()),
+                IndexLabel::Utf8("2024-05-02 00:00:00".to_owned())
+            ]
+        );
+        assert!(chunks[0].column("ts").is_none());
+        assert_eq!(
+            chunks[0].column("amount").unwrap().values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+        );
+        assert_eq!(
+            chunks[1].index().labels(),
+            &[IndexLabel::Utf8("2024-05-03 00:00:00".to_owned())]
+        );
+        assert_eq!(
+            chunks[1].column("amount").unwrap().values(),
+            &[Scalar::Float64(30.5)]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_chunks_with_options_and_index_col_missing_column_errors() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_options_missing_index (id INTEGER, amount TEXT);
+             INSERT INTO table_options_missing_index (id, amount) VALUES (1, '$10.00');",
+        )
+        .expect("create table_options_missing_index table");
+
+        let err = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "table_options_missing_index",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: true,
+            },
+            Some("missing"),
+            1,
+        )
+        .expect_err("missing index_col should error during iterator construction");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
     }
 
     #[test]

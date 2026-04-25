@@ -3398,6 +3398,43 @@ impl Iterator for SqlChunkIterator {
     }
 }
 
+/// Iterator over SQL DataFrame chunks with optional per-chunk index promotion.
+#[derive(Debug, Clone)]
+pub struct SqlIndexedChunkIterator {
+    inner: SqlChunkIterator,
+    index_col: Option<String>,
+}
+
+impl Iterator for SqlIndexedChunkIterator {
+    type Item = Result<DataFrame, IoError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let chunk = self.inner.next()?;
+        Some(match (chunk, self.index_col.as_deref()) {
+            (Ok(frame), Some(index_col)) => promote_column_to_index(&frame, index_col),
+            (Ok(frame), None) => Ok(frame),
+            (Err(err), _) => Err(err),
+        })
+    }
+}
+
+fn sql_indexed_chunks(
+    inner: SqlChunkIterator,
+    index_col: Option<&str>,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    if let Some(col_name) = index_col
+        && !inner.headers.iter().any(|header| header == col_name)
+    {
+        return Err(IoError::Sql(format!(
+            "index_col {col_name:?} not present in result columns"
+        )));
+    }
+    Ok(SqlIndexedChunkIterator {
+        inner,
+        index_col: index_col.map(str::to_owned),
+    })
+}
+
 /// Minimal SQL connection surface needed by FrankenPandas SQL IO.
 pub trait SqlConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError>;
@@ -3715,6 +3752,19 @@ pub fn read_sql_query_chunks<C: SqlConnection>(
     read_sql_chunks(conn, query, chunk_size)
 }
 
+/// Read a SQL query result as chunks with one column promoted to each chunk's index.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_query(sql, con, index_col=..., chunksize=...)`.
+pub fn read_sql_query_chunks_with_index_col<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    index_col: Option<&str>,
+    chunk_size: usize,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    read_sql_chunks_with_index_col(conn, query, index_col, chunk_size)
+}
+
 /// Read the result of a SQL query as chunks with read-time options.
 ///
 /// Matches the supported subset of
@@ -3829,6 +3879,19 @@ pub fn read_sql_chunks_with_options<C: SqlConnection>(
     })
 }
 
+/// Read a SQL query result as DataFrame chunks with optional index promotion.
+///
+/// Matches the supported subset of `pd.read_sql(sql, con, index_col=..., chunksize=...)`.
+pub fn read_sql_chunks_with_index_col<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    index_col: Option<&str>,
+    chunk_size: usize,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    let inner = read_sql_chunks(conn, query, chunk_size)?;
+    sql_indexed_chunks(inner, index_col)
+}
+
 /// Read a SQL query result with one column promoted to the index.
 ///
 /// Matches `pd.read_sql(sql, con, index_col=...)`. When
@@ -3917,6 +3980,20 @@ pub fn read_sql_table_chunks<C: SqlConnection>(
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
     read_sql_chunks(conn, &sql_select_all_query(table_name)?, chunk_size)
+}
+
+/// Read an entire SQL table as chunks with one column promoted to each chunk's index.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table_name, con, index_col=..., chunksize=...)`.
+pub fn read_sql_table_chunks_with_index_col<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    index_col: Option<&str>,
+    chunk_size: usize,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    let inner = read_sql_table_chunks(conn, table_name, chunk_size)?;
+    sql_indexed_chunks(inner, index_col)
 }
 
 /// Read a subset of columns from a SQL table.
@@ -6565,9 +6642,11 @@ mod tests {
 
     use super::{
         SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_chunks,
-        read_sql_chunks_with_options, read_sql_query, read_sql_query_chunks,
+        read_sql_chunks_with_index_col, read_sql_chunks_with_options, read_sql_query,
+        read_sql_query_chunks, read_sql_query_chunks_with_index_col,
         read_sql_query_chunks_with_options, read_sql_query_with_index_col,
-        read_sql_query_with_options, read_sql_table, read_sql_table_chunks, read_sql_table_columns,
+        read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
+        read_sql_table_chunks_with_index_col, read_sql_table_columns,
         read_sql_table_columns_chunks, read_sql_table_with_index_col, read_sql_with_index_col,
         read_sql_with_options, write_sql, write_sql_with_options,
     };
@@ -7189,6 +7268,95 @@ mod tests {
     }
 
     #[test]
+    fn sql_read_query_chunks_with_index_col_promotes_each_chunk_index() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_index_chunked (id INTEGER, label TEXT, value INTEGER);
+             INSERT INTO query_index_chunked (id, label, value) VALUES
+                (1, 'alpha', 10),
+                (2, 'beta', 20),
+                (3, 'gamma', 30);",
+        )
+        .expect("create query_index_chunked table");
+
+        let chunks = read_sql_query_chunks_with_index_col(
+            &conn,
+            "SELECT id, label, value FROM query_index_chunked ORDER BY id",
+            Some("label"),
+            2,
+        )
+        .expect("query indexed chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("label"));
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[
+                IndexLabel::Utf8("alpha".to_owned()),
+                IndexLabel::Utf8("beta".to_owned())
+            ]
+        );
+        assert!(chunks[0].column("label").is_none());
+        assert_eq!(
+            chunks[1].index().labels(),
+            &[IndexLabel::Utf8("gamma".to_owned())]
+        );
+        assert_eq!(
+            chunks[1].column("value").unwrap().values(),
+            &[Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn sql_read_chunks_with_index_col_none_keeps_fresh_chunk_range_indexes() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_no_index_chunked (id INTEGER, label TEXT);
+             INSERT INTO query_no_index_chunked (id, label) VALUES
+                (1, 'alpha'),
+                (2, 'beta');",
+        )
+        .expect("create query_no_index_chunked table");
+
+        let chunks = read_sql_chunks_with_index_col(
+            &conn,
+            "SELECT id, label FROM query_no_index_chunked ORDER BY id",
+            None,
+            1,
+        )
+        .expect("query chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().labels(), &[IndexLabel::Int64(0)]);
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(0)]);
+        assert_eq!(chunks[1].column_names(), vec!["id", "label"]);
+    }
+
+    #[test]
+    fn sql_read_query_chunks_with_index_col_missing_column_errors() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_missing_index_chunked (id INTEGER, value INTEGER);
+             INSERT INTO query_missing_index_chunked (id, value) VALUES (1, 10);",
+        )
+        .expect("create query_missing_index_chunked table");
+
+        let err = read_sql_query_chunks_with_index_col(
+            &conn,
+            "SELECT id, value FROM query_missing_index_chunked",
+            Some("missing"),
+            1,
+        )
+        .expect_err("missing index_col should error during iterator construction");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
+    }
+
+    #[test]
     fn sql_read_table_chunks_batches_rows() {
         let conn = make_sql_test_conn();
         conn.execute_batch(
@@ -7238,6 +7406,37 @@ mod tests {
             .expect_err("invalid table name should be rejected");
 
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+    }
+
+    #[test]
+    fn sql_read_table_chunks_with_index_col_promotes_each_chunk_index() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_index_chunked (id INTEGER, name TEXT, score INTEGER);
+             INSERT INTO table_index_chunked (id, name, score) VALUES
+                (10, 'alpha', 100),
+                (20, 'beta', 200),
+                (30, 'gamma', 300);",
+        )
+        .expect("create table_index_chunked table");
+
+        let chunks =
+            read_sql_table_chunks_with_index_col(&conn, "table_index_chunked", Some("id"), 2)
+                .expect("table indexed chunk iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("id"));
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert!(chunks[0].column("id").is_none());
+        assert_eq!(
+            chunks[1].column("score").unwrap().values(),
+            &[Scalar::Int64(300)]
+        );
     }
 
     #[test]

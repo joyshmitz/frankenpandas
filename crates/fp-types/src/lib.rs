@@ -714,6 +714,146 @@ impl Timedelta {
     }
 }
 
+// ── Timestamp types (br-frankenpandas-9p0u — 4r56 Phase 2) ─────────────
+//
+// Nanosecond-precision i64 since Unix epoch + optional IANA tz name.
+// TZ-dependent arithmetic (DST transitions, tz conversion) is deferred
+// to Phase 3 which pulls chrono_tz into fp-types; Phase 2 stores the
+// tz name as opaque metadata and performs arithmetic on the absolute
+// nanos axis only.
+
+/// A nanosecond-precision point in time, Unix-epoch anchored.
+///
+/// Phase 2 scope: construction, arithmetic, equality, ordering, serde.
+/// TZ semantics (IANA tz lookup, DST-aware shift) are deferred to Phase
+/// 3 — see br-frankenpandas-4r56.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Timestamp {
+    /// Nanoseconds since Unix epoch. `i64::MIN` is NaT.
+    pub nanos: i64,
+    /// Optional IANA time-zone name (e.g. `"US/Eastern"`). `None` means
+    /// naive / UTC-anchored. Phase 2 treats this as opaque metadata;
+    /// Phase 3 wires chrono_tz interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+}
+
+impl Timestamp {
+    /// NaT sentinel, parallel to `Timedelta::NAT`.
+    pub const NAT: i64 = i64::MIN;
+
+    /// Construct a UTC-anchored (tz=None) Timestamp from nanoseconds
+    /// since Unix epoch.
+    #[must_use]
+    pub const fn from_nanos(nanos: i64) -> Self {
+        Self { nanos, tz: None }
+    }
+
+    /// Construct a Timestamp tagged with an IANA tz name.
+    ///
+    /// Phase 2 doesn't interpret the tz — it only carries the name
+    /// through arithmetic + serde. Phase 3 wires chrono_tz conversion.
+    #[must_use]
+    pub fn from_nanos_tz(nanos: i64, tz_name: impl Into<String>) -> Self {
+        Self {
+            nanos,
+            tz: Some(tz_name.into()),
+        }
+    }
+
+    /// The NaT sentinel value for a Timestamp.
+    #[must_use]
+    pub const fn nat() -> Self {
+        Self {
+            nanos: Self::NAT,
+            tz: None,
+        }
+    }
+
+    /// True iff this Timestamp is NaT.
+    #[must_use]
+    pub const fn is_nat(&self) -> bool {
+        self.nanos == Self::NAT
+    }
+
+    /// Add a Timedelta. NaT in either operand → NaT; saturates on overflow.
+    /// TZ is preserved from `self`.
+    #[must_use]
+    pub fn add_timedelta(&self, td_nanos: i64) -> Self {
+        if self.is_nat() || td_nanos == Timedelta::NAT {
+            return Self::nat();
+        }
+        Self {
+            nanos: self.nanos.saturating_add(td_nanos),
+            tz: self.tz.clone(),
+        }
+    }
+
+    /// Subtract a Timedelta. NaT propagation + saturation; TZ preserved.
+    #[must_use]
+    pub fn sub_timedelta(&self, td_nanos: i64) -> Self {
+        if self.is_nat() || td_nanos == Timedelta::NAT {
+            return Self::nat();
+        }
+        Self {
+            nanos: self.nanos.saturating_sub(td_nanos),
+            tz: self.tz.clone(),
+        }
+    }
+
+    /// Subtract another Timestamp. Returns a Timedelta (i64 nanos).
+    /// NaT in either → `Timedelta::NAT`; saturates on overflow.
+    #[must_use]
+    pub fn sub_timestamp(&self, other: &Self) -> i64 {
+        if self.is_nat() || other.is_nat() {
+            return Timedelta::NAT;
+        }
+        self.nanos.saturating_sub(other.nanos)
+    }
+
+    /// NaT-aware semantic equality: two NaT Timestamps are equal to each
+    /// other (matches pandas `pd.NaT == pd.NaT` under `equals()`, though
+    /// pandas's `==` operator returns False for NaT==NaT — we follow the
+    /// `semantic_eq` convention used elsewhere in fp-types).
+    #[must_use]
+    pub fn semantic_eq(&self, other: &Self) -> bool {
+        if self.is_nat() && other.is_nat() {
+            return true;
+        }
+        if self.is_nat() || other.is_nat() {
+            return false;
+        }
+        self.nanos == other.nanos && self.tz == other.tz
+    }
+}
+
+impl std::fmt::Display for Timestamp {
+    /// Phase 2 debug-style format; Phase 3 replaces with pandas ISO-8601
+    /// notation once chrono interpretation lands.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_nat() {
+            return f.write_str("NaT");
+        }
+        match &self.tz {
+            Some(tz) => write!(f, "Timestamp[{}, {}]", self.nanos, tz),
+            None => write!(f, "Timestamp[{}, UTC]", self.nanos),
+        }
+    }
+}
+
+impl PartialOrd for Timestamp {
+    /// Orders by nanos axis; NaT is incomparable (`None`). Tz difference
+    /// does not affect ordering — two Timestamps at the same absolute
+    /// nanos compare equal regardless of tz label (Phase 3 will revisit
+    /// whether tz affects ordering semantics).
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.is_nat() || other.is_nat() {
+            return None;
+        }
+        Some(self.nanos.cmp(&other.nanos))
+    }
+}
+
 // ── Missingness utilities ──────────────────────────────────────────────
 
 pub fn isna(values: &[Scalar]) -> Vec<bool> {
@@ -2850,5 +2990,117 @@ mod tests {
     fn timedelta_div_timedelta_nat_returns_nan() {
         assert!(Timedelta::div_timedelta(Timedelta::NAT, 100).is_nan());
         assert!(Timedelta::div_timedelta(100, Timedelta::NAT).is_nan());
+    }
+
+    // ── Timestamp tests (br-frankenpandas-9p0u — 4r56 Phase 2) ──────────
+
+    use super::Timestamp;
+
+    #[test]
+    fn timestamp_from_nanos_is_naive_utc() {
+        let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);
+        assert_eq!(ts.nanos, 1_700_000_000_000_000_000);
+        assert_eq!(ts.tz, None);
+        assert!(!ts.is_nat());
+    }
+
+    #[test]
+    fn timestamp_from_nanos_tz_carries_tz_name() {
+        let ts = Timestamp::from_nanos_tz(1_700_000_000_000_000_000, "US/Eastern");
+        assert_eq!(ts.tz.as_deref(), Some("US/Eastern"));
+    }
+
+    #[test]
+    fn timestamp_add_timedelta_shifts_nanos_and_preserves_tz() {
+        let ts = Timestamp::from_nanos_tz(0, "US/Eastern");
+        let one_day = Timedelta::NANOS_PER_DAY;
+        let shifted = ts.add_timedelta(one_day);
+        assert_eq!(shifted.nanos, one_day);
+        assert_eq!(shifted.tz.as_deref(), Some("US/Eastern"));
+    }
+
+    #[test]
+    fn timestamp_add_timedelta_saturates_on_overflow() {
+        let ts = Timestamp::from_nanos(i64::MAX - 10);
+        let shifted = ts.add_timedelta(100);
+        assert_eq!(shifted.nanos, i64::MAX);
+    }
+
+    #[test]
+    fn timestamp_add_timedelta_propagates_nat() {
+        // NaT Timestamp + anything = NaT.
+        assert!(Timestamp::nat().add_timedelta(100).is_nat());
+        // Timestamp + NaT Timedelta = NaT.
+        assert!(Timestamp::from_nanos(0).add_timedelta(Timedelta::NAT).is_nat());
+    }
+
+    #[test]
+    fn timestamp_sub_timedelta_shifts_backward() {
+        let ts = Timestamp::from_nanos(1_000);
+        let shifted = ts.sub_timedelta(Timedelta::NANOS_PER_MICRO);
+        assert_eq!(shifted.nanos, 0);
+    }
+
+    #[test]
+    fn timestamp_sub_timestamp_returns_timedelta_nanos() {
+        let t0 = Timestamp::from_nanos(0);
+        let t1 = Timestamp::from_nanos(Timedelta::NANOS_PER_HOUR);
+        assert_eq!(t1.sub_timestamp(&t0), Timedelta::NANOS_PER_HOUR);
+        assert_eq!(t0.sub_timestamp(&t1), -Timedelta::NANOS_PER_HOUR);
+    }
+
+    #[test]
+    fn timestamp_sub_timestamp_nat_propagates() {
+        let ts = Timestamp::from_nanos(1_000);
+        assert_eq!(Timestamp::nat().sub_timestamp(&ts), Timedelta::NAT);
+        assert_eq!(ts.sub_timestamp(&Timestamp::nat()), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timestamp_semantic_eq_treats_two_nat_as_equal() {
+        assert!(Timestamp::nat().semantic_eq(&Timestamp::nat()));
+        assert!(!Timestamp::nat().semantic_eq(&Timestamp::from_nanos(0)));
+        assert!(!Timestamp::from_nanos(0).semantic_eq(&Timestamp::nat()));
+    }
+
+    #[test]
+    fn timestamp_partial_cmp_orders_by_nanos_nat_is_incomparable() {
+        use std::cmp::Ordering;
+        let a = Timestamp::from_nanos(0);
+        let b = Timestamp::from_nanos(100);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+        assert_eq!(b.partial_cmp(&a), Some(Ordering::Greater));
+        assert_eq!(a.partial_cmp(&a), Some(Ordering::Equal));
+        assert_eq!(a.partial_cmp(&Timestamp::nat()), None);
+        assert_eq!(Timestamp::nat().partial_cmp(&Timestamp::nat()), None);
+    }
+
+    #[test]
+    fn timestamp_display_matches_phase2_debug_format() {
+        assert_eq!(Timestamp::from_nanos(42).to_string(), "Timestamp[42, UTC]");
+        assert_eq!(
+            Timestamp::from_nanos_tz(42, "US/Eastern").to_string(),
+            "Timestamp[42, US/Eastern]"
+        );
+        assert_eq!(Timestamp::nat().to_string(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_roundtrips_through_serde_json() {
+        let naive = Timestamp::from_nanos(1_700_000_000_000_000_000);
+        let json = serde_json::to_string(&naive).expect("serialize");
+        let back: Timestamp = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(naive, back);
+
+        let tz_aware = Timestamp::from_nanos_tz(1_700_000_000_000_000_000, "US/Eastern");
+        let json = serde_json::to_string(&tz_aware).expect("serialize");
+        let back: Timestamp = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(tz_aware, back);
+    }
+
+    #[test]
+    fn timestamp_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Timestamp>();
     }
 }

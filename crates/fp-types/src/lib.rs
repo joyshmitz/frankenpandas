@@ -615,6 +615,103 @@ impl Timedelta {
             .ok_or_else(|| TimedeltaError::InvalidFormat(unit.to_string()))?;
         Ok((value * multiplier as f64).round() as i64)
     }
+
+    // ── Arithmetic (br-frankenpandas-4r56 Phase 1) ──────────────────────
+    //
+    // NaT propagation: any arithmetic with `NAT` returns `NAT`. Matches
+    // pandas `pd.NaT + anything == NaT`, `pd.NaT - anything == NaT`, etc.
+    // Saturation: i64 overflow clamps to i64::MAX/MIN (never wraps). Matches
+    // pandas's OverflowError surface at the type-system boundary.
+
+    /// Add two Timedelta nanosecond values. NaT propagates; saturates on overflow.
+    #[must_use]
+    pub fn add(a: i64, b: i64) -> i64 {
+        if a == Self::NAT || b == Self::NAT {
+            return Self::NAT;
+        }
+        a.saturating_add(b)
+    }
+
+    /// Subtract two Timedelta nanosecond values. NaT propagates; saturates on overflow.
+    #[must_use]
+    pub fn sub(a: i64, b: i64) -> i64 {
+        if a == Self::NAT || b == Self::NAT {
+            return Self::NAT;
+        }
+        a.saturating_sub(b)
+    }
+
+    /// Negate a Timedelta value. NaT stays NaT. Saturates on overflow
+    /// (pandas: `-pd.Timedelta.min` is NaT since min == -max - 1 cannot be negated).
+    #[must_use]
+    pub fn neg(a: i64) -> i64 {
+        if a == Self::NAT {
+            return Self::NAT;
+        }
+        a.saturating_neg()
+    }
+
+    /// Absolute value of a Timedelta. NaT stays NaT. Saturates on overflow.
+    #[must_use]
+    pub fn abs(a: i64) -> i64 {
+        if a == Self::NAT {
+            return Self::NAT;
+        }
+        a.saturating_abs()
+    }
+
+    /// Multiply a Timedelta value by an integer factor. NaT propagates;
+    /// saturates on overflow.
+    ///
+    /// Matches pandas `pd.Timedelta(...) * int`.
+    #[must_use]
+    pub fn mul_scalar(a: i64, factor: i64) -> i64 {
+        if a == Self::NAT {
+            return Self::NAT;
+        }
+        a.saturating_mul(factor)
+    }
+
+    /// Floor-divide a Timedelta value by an integer divisor. NaT propagates.
+    /// Returns NaT on divide-by-zero (matches pandas, which raises, but we
+    /// surface as NaT to avoid panics at the type-system boundary).
+    ///
+    /// Matches pandas / Python `pd.Timedelta(...) // int`: floor division,
+    /// not truncation toward zero. `-100 // 3 == -34`, and `100 // -3 ==
+    /// -34`. Rust's `/` truncates toward zero and `div_euclid` keeps the
+    /// remainder non-negative — neither matches pandas when the divisor is
+    /// negative. This helper adjusts trunc-toward-zero into floor.
+    #[must_use]
+    pub fn div_scalar(a: i64, divisor: i64) -> i64 {
+        if a == Self::NAT || divisor == 0 {
+            return Self::NAT;
+        }
+        // NAT == i64::MIN so the classic `i64::MIN / -1` overflow path is
+        // already handled by the NAT check above. `(i64::MIN + 1) / -1`
+        // equals `i64::MAX` with no overflow, so we never need a
+        // saturation branch here.
+        let q = a / divisor;
+        let r = a % divisor;
+        // If remainder is non-zero and has opposite sign from divisor,
+        // Rust's trunc-toward-zero `/` is one step above the floor. Adjust
+        // down by 1 to match Python/pandas floor division.
+        if r != 0 && (r < 0) != (divisor < 0) {
+            q - 1
+        } else {
+            q
+        }
+    }
+
+    /// Divide two Timedelta values, returning the ratio as f64.
+    /// Matches pandas `pd.Timedelta(...) / pd.Timedelta(...)` → float.
+    /// NaT in either operand → NaN. Zero divisor → ±Inf (per IEEE 754).
+    #[must_use]
+    pub fn div_timedelta(a: i64, b: i64) -> f64 {
+        if a == Self::NAT || b == Self::NAT {
+            return f64::NAN;
+        }
+        (a as f64) / (b as f64)
+    }
 }
 
 // ── Missingness utilities ──────────────────────────────────────────────
@@ -2631,5 +2728,127 @@ mod tests {
         let bins = interval_range_by_step(0.0, 1.0, 0.1, IntervalClosed::Right).expect("ok");
         assert_eq!(bins.len(), 10);
         assert_eq!(bins.last().unwrap().right, 1.0);
+    }
+
+    // ── Timedelta arithmetic tests (br-frankenpandas-4r56 Phase 1) ──────
+
+    use super::Timedelta;
+
+    #[test]
+    fn timedelta_add_sums_non_nat() {
+        let one_hour = Timedelta::NANOS_PER_HOUR;
+        let one_day = Timedelta::NANOS_PER_DAY;
+        assert_eq!(Timedelta::add(one_hour, one_day), one_hour + one_day);
+    }
+
+    #[test]
+    fn timedelta_add_propagates_nat() {
+        assert_eq!(Timedelta::add(Timedelta::NAT, 100), Timedelta::NAT);
+        assert_eq!(Timedelta::add(100, Timedelta::NAT), Timedelta::NAT);
+        assert_eq!(
+            Timedelta::add(Timedelta::NAT, Timedelta::NAT),
+            Timedelta::NAT
+        );
+    }
+
+    #[test]
+    fn timedelta_add_saturates_on_overflow() {
+        assert_eq!(Timedelta::add(i64::MAX - 10, 100), i64::MAX);
+        // Note: i64::MIN is NaT; use MIN+1 to test saturation on the negative side.
+        assert_eq!(Timedelta::add(i64::MIN + 10, -100), i64::MIN);
+    }
+
+    #[test]
+    fn timedelta_sub_subtracts_non_nat() {
+        let one_hour = Timedelta::NANOS_PER_HOUR;
+        assert_eq!(Timedelta::sub(one_hour, Timedelta::NANOS_PER_MIN), one_hour - Timedelta::NANOS_PER_MIN);
+    }
+
+    #[test]
+    fn timedelta_sub_propagates_nat() {
+        assert_eq!(Timedelta::sub(Timedelta::NAT, 100), Timedelta::NAT);
+        assert_eq!(Timedelta::sub(100, Timedelta::NAT), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_neg_flips_sign_non_nat() {
+        assert_eq!(Timedelta::neg(5), -5);
+        assert_eq!(Timedelta::neg(-5), 5);
+        assert_eq!(Timedelta::neg(0), 0);
+    }
+
+    #[test]
+    fn timedelta_neg_preserves_nat() {
+        assert_eq!(Timedelta::neg(Timedelta::NAT), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_abs_returns_magnitude() {
+        assert_eq!(Timedelta::abs(-5), 5);
+        assert_eq!(Timedelta::abs(5), 5);
+        assert_eq!(Timedelta::abs(0), 0);
+        assert_eq!(Timedelta::abs(Timedelta::NAT), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_mul_scalar_scales() {
+        let three_hours = Timedelta::NANOS_PER_HOUR * 3;
+        assert_eq!(Timedelta::mul_scalar(Timedelta::NANOS_PER_HOUR, 3), three_hours);
+        assert_eq!(Timedelta::mul_scalar(100, 0), 0);
+        assert_eq!(Timedelta::mul_scalar(100, -2), -200);
+    }
+
+    #[test]
+    fn timedelta_mul_scalar_saturates() {
+        assert_eq!(Timedelta::mul_scalar(i64::MAX, 2), i64::MAX);
+        // (i64::MIN + 1) * 2 saturates to i64::MIN (magnitude too large).
+        assert_eq!(Timedelta::mul_scalar(i64::MIN + 1, 2), i64::MIN);
+    }
+
+    #[test]
+    fn timedelta_mul_scalar_propagates_nat() {
+        assert_eq!(Timedelta::mul_scalar(Timedelta::NAT, 5), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_div_scalar_floor_divides() {
+        // Floor division (matches Python / pandas): -100 // 3 == -34, not -33.
+        assert_eq!(Timedelta::div_scalar(100, 3), 33);
+        assert_eq!(Timedelta::div_scalar(-100, 3), -34);
+        assert_eq!(Timedelta::div_scalar(100, -3), -34);
+        assert_eq!(Timedelta::div_scalar(-100, -3), 33);
+    }
+
+    #[test]
+    fn timedelta_div_scalar_zero_divisor_returns_nat() {
+        assert_eq!(Timedelta::div_scalar(100, 0), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_div_scalar_min_neg_one_propagates_nat() {
+        // i64::MIN aliases NaT, so `div_scalar(i64::MIN, _)` propagates NaT
+        // — the `i64::MIN / -1` arithmetic-overflow case is subsumed.
+        assert_eq!(Timedelta::div_scalar(i64::MIN, -1), Timedelta::NAT);
+        // (i64::MIN + 1) is a real timedelta; `/ -1` does not overflow.
+        assert_eq!(Timedelta::div_scalar(i64::MIN + 1, -1), i64::MAX);
+    }
+
+    #[test]
+    fn timedelta_div_scalar_propagates_nat() {
+        assert_eq!(Timedelta::div_scalar(Timedelta::NAT, 10), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_div_timedelta_returns_float_ratio() {
+        let two_hours = Timedelta::NANOS_PER_HOUR * 2;
+        let one_hour = Timedelta::NANOS_PER_HOUR;
+        assert!((Timedelta::div_timedelta(two_hours, one_hour) - 2.0).abs() < 1e-12);
+        assert!((Timedelta::div_timedelta(one_hour, two_hours) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn timedelta_div_timedelta_nat_returns_nan() {
+        assert!(Timedelta::div_timedelta(Timedelta::NAT, 100).is_nan());
+        assert!(Timedelta::div_timedelta(100, Timedelta::NAT).is_nan());
     }
 }

@@ -6966,9 +6966,14 @@ impl Series {
     /// "row_key, col_key" (comma-separated composite keys). The first part
     /// becomes the row index, the second part becomes column names.
     pub fn unstack(&self) -> Result<DataFrame, FrameError> {
-        // Parse composite keys from index labels
+        // Per br-frankenpandas-0528d: HashSet membership tracking + parallel
+        // insertion-ordered Vec. Was O(n × k) Vec::contains per entry per
+        // key axis; now O(n) amortized. Same shape as the broader scan-and-
+        // find quadratic family.
         let mut row_keys: Vec<String> = Vec::new();
+        let mut row_seen: HashSet<String> = HashSet::new();
         let mut col_keys: Vec<String> = Vec::new();
+        let mut col_seen: HashSet<String> = HashSet::new();
         let mut entries: Vec<(String, String, Scalar)> = Vec::new();
 
         for (lbl, val) in self.index.labels().iter().zip(self.column.values()) {
@@ -6981,10 +6986,10 @@ impl Series {
             if let Some((row, col)) = key_str.split_once(", ") {
                 let row_key = row.trim().to_string();
                 let col_key = col.trim().to_string();
-                if !row_keys.contains(&row_key) {
+                if row_seen.insert(row_key.clone()) {
                     row_keys.push(row_key.clone());
                 }
-                if !col_keys.contains(&col_key) {
+                if col_seen.insert(col_key.clone()) {
                     col_keys.push(col_key.clone());
                 }
                 entries.push((row_key, col_key, val.clone()));
@@ -73489,6 +73494,58 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_unstack_basic_correctness_after_o_n_fix() {
+        // Per br-frankenpandas-0528d: regression guard for the
+        // HashSet-based dedup. Composite keys "row, col" → DataFrame.
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("r1, c1".into()),
+                IndexLabel::Utf8("r1, c2".into()),
+                IndexLabel::Utf8("r2, c1".into()),
+                IndexLabel::Utf8("r2, c2".into()),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let unstacked = s.unstack().unwrap();
+        // 2 rows × 2 cols.
+        assert_eq!(unstacked.len(), 2);
+        assert_eq!(unstacked.column_order.len(), 2);
+        // Row order preserved (r1 first, then r2).
+        assert_eq!(
+            unstacked.index().labels(),
+            &[IndexLabel::Utf8("r1".into()), IndexLabel::Utf8("r2".into())]
+        );
+    }
+
+    #[test]
+    fn series_unstack_wide_scaling_correctness() {
+        // Per br-frankenpandas-0528d: 100 rows × 50 cols composite keys,
+        // 5K total entries. Old impl: ~5K * (100 + 50) = 750K Vec::contains
+        // per axis = 1.5M total. New: ~5K hash ops + parallel Vec.
+        let n_rows = 100;
+        let n_cols = 50;
+        let mut labels: Vec<IndexLabel> = Vec::new();
+        let mut values: Vec<Scalar> = Vec::new();
+        for r in 0..n_rows {
+            for c in 0..n_cols {
+                labels.push(IndexLabel::Utf8(format!("r{r}, c{c}")));
+                values.push(Scalar::Int64((r * n_cols + c) as i64));
+            }
+        }
+        let s = Series::from_values("x", labels, values).unwrap();
+        let unstacked = s.unstack().unwrap();
+        assert_eq!(unstacked.len(), n_rows);
+        assert_eq!(unstacked.column_order.len(), n_cols);
     }
 
     #[test]

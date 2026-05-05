@@ -4330,24 +4330,22 @@ impl Series {
                 continue;
             }
 
-            if preserve_int64 {
-                if let Scalar::Int64(x) = val {
-                    let mut clamped = *x;
-                    if let Some(lo) = lower {
-                        let lo_i = lo as i64;
-                        if clamped < lo_i {
-                            clamped = lo_i;
-                        }
+            if preserve_int64 && let Scalar::Int64(x) = val {
+                let mut clamped = *x;
+                if let Some(lo) = lower {
+                    let lo_i = lo as i64;
+                    if clamped < lo_i {
+                        clamped = lo_i;
                     }
-                    if let Some(hi) = upper {
-                        let hi_i = hi as i64;
-                        if clamped > hi_i {
-                            clamped = hi_i;
-                        }
-                    }
-                    out.push(Scalar::Int64(clamped));
-                    continue;
                 }
+                if let Some(hi) = upper {
+                    let hi_i = hi as i64;
+                    if clamped > hi_i {
+                        clamped = hi_i;
+                    }
+                }
+                out.push(Scalar::Int64(clamped));
+                continue;
             }
 
             let v = val.to_f64().map_err(ColumnError::from)?;
@@ -5495,6 +5493,7 @@ impl Series {
     ///
     /// Matches `series.isin(values)`. Returns a boolean Series with the same
     /// index. Null elements produce `false` (matching pandas behavior).
+    #[expect(dead_code, reason = "kept for one-shot scalar membership callers")]
     fn scalar_isin_matches(value: &Scalar, test_values: &[Scalar]) -> bool {
         // Per br-frankenpandas-f7201: kept for callers that need a single-
         // value check; internally builds an IsinIndex (one-shot O(m)).
@@ -6159,11 +6158,18 @@ impl Series {
     ///
     /// Matches `pd.Series.sem()`. Computes `std / sqrt(n)`.
     pub fn sem(&self) -> Result<f64, FrameError> {
-        let (n, _, _, m2) = self.numeric_moments()?;
+        let (n, _, _, m2) = match self.numeric_moments() {
+            Ok(moments) => moments,
+            Err(FrameError::CompatibilityRejected(message)) => {
+                if message == "no non-null numeric values" {
+                    return Ok(f64::NAN);
+                }
+                return Err(FrameError::CompatibilityRejected(message));
+            }
+            Err(err) => return Err(err),
+        };
         if n < 2 {
-            return Err(FrameError::CompatibilityRejected(
-                "sem requires at least 2 non-null values".to_owned(),
-            ));
+            return Ok(f64::NAN);
         }
         let std = (m2 / (n - 1) as f64).sqrt();
         Ok(std / (n as f64).sqrt())
@@ -7162,10 +7168,10 @@ impl Series {
                 let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate() {
                     let key = scalar_key_allow_missing(val);
-                    if seen.contains_key(&key) {
-                        flags[i] = true;
+                    if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(key) {
+                        entry.insert(());
                     } else {
-                        seen.insert(key, ());
+                        flags[i] = true;
                     }
                 }
             }
@@ -7173,10 +7179,10 @@ impl Series {
                 let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate().rev() {
                     let key = scalar_key_allow_missing(val);
-                    if seen.contains_key(&key) {
-                        flags[i] = true;
+                    if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(key) {
+                        entry.insert(());
                     } else {
-                        seen.insert(key, ());
+                        flags[i] = true;
                     }
                 }
             }
@@ -7226,8 +7232,8 @@ impl Series {
                 let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate() {
                     let key = scalar_key_allow_missing(val);
-                    if !seen.contains_key(&key) {
-                        seen.insert(key, ());
+                    if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(key) {
+                        entry.insert(());
                         indices.push(i);
                     }
                 }
@@ -7236,8 +7242,8 @@ impl Series {
                 let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate().rev() {
                     let key = scalar_key_allow_missing(val);
-                    if !seen.contains_key(&key) {
-                        seen.insert(key, ());
+                    if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(key) {
+                        entry.insert(());
                         indices.push(i);
                     }
                 }
@@ -52960,6 +52966,25 @@ mod tests {
         let result = s.sem().unwrap();
         // std = sqrt(20/3) ≈ 2.5820, sem = std/sqrt(4) ≈ 1.2910
         assert!((result - 1.2909944).abs() < 0.001);
+    }
+
+    #[test]
+    fn series_sem_returns_nan_below_two_non_null_values() {
+        let single =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(42.0)]).unwrap();
+        assert!(single.sem().unwrap().is_nan());
+
+        let all_null = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        assert!(all_null.sem().unwrap().is_nan());
+
+        let empty =
+            Series::from_values("x", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        assert!(empty.sem().unwrap().is_nan());
     }
 
     #[test]

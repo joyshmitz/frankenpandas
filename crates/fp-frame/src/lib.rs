@@ -14477,11 +14477,16 @@ impl StringAccessor<'_> {
     /// Matches `pd.Series.str.get_dummies(sep)`. Each unique token becomes
     /// a column with 1/0 indicators.
     pub fn get_dummies(&self, sep: &str) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-87bf2: replaced two O(n²) hot loops:
+        // (1) all_tokens dedup via Vec::contains → HashSet membership +
+        //     parallel insertion-ordered Vec (same as 0d6f8/db6ec/0528d).
+        // (2) per-row token membership in output build via Vec::contains →
+        //     pre-built HashSet<String> per row gives O(1) lookups.
         let labels = self.series.index().labels().to_vec();
 
-        // Collect all unique tokens in discovery order
         let mut all_tokens: Vec<String> = Vec::new();
-        let mut row_tokens: Vec<Vec<String>> = Vec::new();
+        let mut all_tokens_seen: HashSet<String> = HashSet::new();
+        let mut row_token_sets: Vec<HashSet<String>> = Vec::new();
 
         for val in self.series.column().values() {
             match val {
@@ -14491,18 +14496,21 @@ impl StringAccessor<'_> {
                         .map(|t| t.trim().to_owned())
                         .filter(|t| !t.is_empty())
                         .collect();
+                    let mut row_set: HashSet<String> = HashSet::new();
                     for t in &tokens {
-                        if !all_tokens.contains(t) {
+                        if all_tokens_seen.insert(t.clone()) {
                             all_tokens.push(t.clone());
                         }
+                        row_set.insert(t.clone());
                     }
-                    row_tokens.push(tokens);
+                    row_token_sets.push(row_set);
                 }
                 _ => {
-                    row_tokens.push(Vec::new());
+                    row_token_sets.push(HashSet::new());
                 }
             }
         }
+        drop(all_tokens_seen);
 
         if all_tokens.is_empty() {
             return DataFrame::new(Index::new(labels), BTreeMap::new());
@@ -14511,9 +14519,9 @@ impl StringAccessor<'_> {
         let mut columns = BTreeMap::new();
         let mut col_order = Vec::new();
         for token in &all_tokens {
-            let vals: Vec<Scalar> = row_tokens
+            let vals: Vec<Scalar> = row_token_sets
                 .iter()
-                .map(|tokens| Scalar::Int64(i64::from(tokens.contains(token))))
+                .map(|set| Scalar::Int64(i64::from(set.contains(token))))
                 .collect();
             columns.insert(token.clone(), Column::from_values(vals)?);
             col_order.push(token.clone());
@@ -73494,6 +73502,66 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_str_get_dummies_basic_after_o_n_fix() {
+        // Per br-frankenpandas-87bf2: regression guard. Input ["a,b", "b,c", "a"]
+        // should produce three indicator columns [a, b, c] in first-seen order.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a,b".into()),
+                Scalar::Utf8("b,c".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let dummies = s.str().get_dummies(",").unwrap();
+        // 3 unique tokens: a, b, c (first-seen order).
+        assert_eq!(
+            dummies.column_order,
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+        // Row 0 ["a,b"]: a=1, b=1, c=0
+        assert_eq!(dummies.columns["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(dummies.columns["b"].values()[0], Scalar::Int64(1));
+        assert_eq!(dummies.columns["c"].values()[0], Scalar::Int64(0));
+        // Row 1 ["b,c"]: a=0, b=1, c=1
+        assert_eq!(dummies.columns["a"].values()[1], Scalar::Int64(0));
+        assert_eq!(dummies.columns["b"].values()[1], Scalar::Int64(1));
+        assert_eq!(dummies.columns["c"].values()[1], Scalar::Int64(1));
+        // Row 2 ["a"]: a=1, b=0, c=0
+        assert_eq!(dummies.columns["a"].values()[2], Scalar::Int64(1));
+        assert_eq!(dummies.columns["b"].values()[2], Scalar::Int64(0));
+        assert_eq!(dummies.columns["c"].values()[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn series_str_get_dummies_wide_scaling_correctness() {
+        // Per br-frankenpandas-87bf2: 1000 rows with 3 tokens each, drawn
+        // from a pool of 50 unique tokens. Old impl: ~150K + ~150K Vec
+        // contains; new: ~3K hash ops + ~50K hash lookups.
+        let n_rows = 1000;
+        let n_tokens = 50;
+        let labels: Vec<IndexLabel> = (0..n_rows as i64).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n_rows)
+            .map(|i| {
+                let t1 = i % n_tokens;
+                let t2 = (i + 1) % n_tokens;
+                let t3 = (i + 2) % n_tokens;
+                Scalar::Utf8(format!("t{t1},t{t2},t{t3}"))
+            })
+            .collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+        let dummies = s.str().get_dummies(",").unwrap();
+        assert_eq!(dummies.column_order.len(), n_tokens);
+        // Row 0 has tokens "t0,t1,t2" → t0=t1=t2=1, others=0.
+        assert_eq!(dummies.columns["t0"].values()[0], Scalar::Int64(1));
+        assert_eq!(dummies.columns["t1"].values()[0], Scalar::Int64(1));
+        assert_eq!(dummies.columns["t2"].values()[0], Scalar::Int64(1));
+        assert_eq!(dummies.columns["t3"].values()[0], Scalar::Int64(0));
     }
 
     #[test]

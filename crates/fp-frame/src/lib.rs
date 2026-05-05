@@ -6759,13 +6759,19 @@ impl Series {
     /// Matches `pd.Series.duplicated(keep='first')`.
     /// First occurrence is `false`, subsequent duplicates are `true`.
     pub fn duplicated(&self) -> Result<Self, FrameError> {
-        let mut seen = Vec::<&Scalar>::new();
+        // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup. Within a
+        // single Column values are homogeneous (Column::new), so ScalarKey
+        // equivalence matches semantic_eq. Null is its own bucket via
+        // ScalarKey::Null, matching the prior behavior of treating each
+        // Null occurrence as a hit against any prior Null.
+        let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
         let mut flags = Vec::with_capacity(self.len());
         for val in self.column.values() {
-            let is_dup = seen.iter().any(|existing| existing.semantic_eq(val));
+            let key = scalar_key_allow_missing(val);
+            let is_dup = seen.contains_key(&key);
             flags.push(Scalar::Bool(is_dup));
             if !is_dup {
-                seen.push(val);
+                seen.insert(key, ());
             }
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), flags)
@@ -6778,35 +6784,48 @@ impl Series {
     /// - `Last`: mark all but the last occurrence as True
     /// - `None`: mark all duplicated values as True
     pub fn duplicated_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup; replaces
+        // O(n²) iter().any() in First/Last branches and O(n²) explicit
+        // filter().count() per element in None branch.
         let vals = self.column.values();
         let n = vals.len();
         let mut flags = vec![false; n];
 
         match keep {
             DuplicateKeep::First => {
-                let mut seen = Vec::<&Scalar>::new();
+                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate() {
-                    if seen.iter().any(|e| e.semantic_eq(val)) {
+                    let key = scalar_key_allow_missing(val);
+                    if seen.contains_key(&key) {
                         flags[i] = true;
                     } else {
-                        seen.push(val);
+                        seen.insert(key, ());
                     }
                 }
             }
             DuplicateKeep::Last => {
-                let mut seen = Vec::<&Scalar>::new();
+                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate().rev() {
-                    if seen.iter().any(|e| e.semantic_eq(val)) {
+                    let key = scalar_key_allow_missing(val);
+                    if seen.contains_key(&key) {
                         flags[i] = true;
                     } else {
-                        seen.push(val);
+                        seen.insert(key, ());
                     }
                 }
             }
             DuplicateKeep::None => {
+                // First pass: count occurrences per key. Second pass: mark
+                // every position whose key has count > 1. Two O(n) passes
+                // vs the existing single O(n²) pass.
+                let mut counts: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+                for val in vals {
+                    let key = scalar_key_allow_missing(val);
+                    *counts.entry(key).or_insert(0) += 1;
+                }
                 for (i, val) in vals.iter().enumerate() {
-                    let count = vals.iter().filter(|v| v.semantic_eq(val)).count();
-                    if count > 1 {
+                    let key = scalar_key_allow_missing(val);
+                    if counts.get(&key).copied().unwrap_or(0) > 1 {
                         flags[i] = true;
                     }
                 }
@@ -6831,33 +6850,44 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup; same shape
+        // as duplicated_keep above.
         let vals = self.column.values();
         let mut indices = Vec::new();
 
         match keep {
             DuplicateKeep::First => {
-                let mut seen = Vec::<&Scalar>::new();
+                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate() {
-                    if !seen.iter().any(|e| e.semantic_eq(val)) {
-                        seen.push(val);
+                    let key = scalar_key_allow_missing(val);
+                    if !seen.contains_key(&key) {
+                        seen.insert(key, ());
                         indices.push(i);
                     }
                 }
             }
             DuplicateKeep::Last => {
-                let mut seen = Vec::<&Scalar>::new();
+                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
                 for (i, val) in vals.iter().enumerate().rev() {
-                    if !seen.iter().any(|e| e.semantic_eq(val)) {
-                        seen.push(val);
+                    let key = scalar_key_allow_missing(val);
+                    if !seen.contains_key(&key) {
+                        seen.insert(key, ());
                         indices.push(i);
                     }
                 }
                 indices.reverse();
             }
             DuplicateKeep::None => {
+                // First pass: count occurrences per key. Second pass: keep
+                // only positions whose key has count == 1.
+                let mut counts: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+                for val in vals {
+                    let key = scalar_key_allow_missing(val);
+                    *counts.entry(key).or_insert(0) += 1;
+                }
                 for (i, val) in vals.iter().enumerate() {
-                    let count = vals.iter().filter(|v| v.semantic_eq(val)).count();
-                    if count == 1 {
+                    let key = scalar_key_allow_missing(val);
+                    if counts.get(&key).copied().unwrap_or(0) == 1 {
                         indices.push(i);
                     }
                 }
@@ -72670,6 +72700,123 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_drop_duplicates_first_matches_unique_metamorphic() {
+        // Per br-frankenpandas-d8d9d: metamorphic property —
+        // s.drop_duplicates(First) values must equal s.unique() (both
+        // return distinct values in first-seen order). The /testing-
+        // metamorphic skill applied this property and surfaced both ops
+        // had the same O(n²) shape; now both must agree under O(n) impl.
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let dropped = s.drop_duplicates_keep(DuplicateKeep::First).unwrap();
+        let dropped_vals: Vec<Scalar> = dropped.column().values().to_vec();
+        let unique_vals = s.unique();
+
+        assert_eq!(
+            dropped_vals, unique_vals,
+            "drop_duplicates(First) values must match unique() values"
+        );
+    }
+
+    #[test]
+    fn series_duplicated_keep_none_marks_all_duplicates() {
+        // Per br-frankenpandas-d8d9d: DuplicateKeep::None marks ALL
+        // occurrences of any value that appears more than once. The
+        // O(n²) filter().count() per element is now a single counts
+        // pass + a marking pass; correctness must be preserved.
+        // Input: [1, 2, 1, 3, 2, 4]
+        // Counts: {1:2, 2:2, 3:1, 4:1}
+        // Expected flags: [true, true, true, false, true, false]
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let flags = s.duplicated_keep(DuplicateKeep::None).unwrap();
+        let bool_flags: Vec<bool> = flags
+            .column()
+            .values()
+            .iter()
+            .map(|v| matches!(v, Scalar::Bool(b) if *b))
+            .collect();
+        assert_eq!(bool_flags, vec![true, true, true, false, true, false]);
+    }
+
+    #[test]
+    fn series_drop_duplicates_keep_none_keeps_only_uniques() {
+        // Sister case: drop_duplicates(None) keeps ONLY values that
+        // appear exactly once.
+        // Input: [1, 2, 1, 3, 2, 4] → keep {3, 4} only.
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let kept = s.drop_duplicates_keep(DuplicateKeep::None).unwrap();
+        assert_eq!(
+            kept.column().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn series_duplicated_keep_last_marks_all_but_last_occurrence() {
+        // Input: [1, 2, 1, 3, 1] → only the FINAL 1 (idx 4) and 2 (idx 1)
+        // and 3 (idx 3) are kept; earlier 1s (idx 0, 2) are flagged.
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+
+        let flags = s.duplicated_keep(DuplicateKeep::Last).unwrap();
+        let bool_flags: Vec<bool> = flags
+            .column()
+            .values()
+            .iter()
+            .map(|v| matches!(v, Scalar::Bool(b) if *b))
+            .collect();
+        assert_eq!(bool_flags, vec![true, false, true, false, false]);
     }
 
     #[test]

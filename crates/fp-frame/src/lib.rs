@@ -7732,14 +7732,19 @@ impl Series {
             }
             (None, None) => Err("ewm: must specify one of span or alpha".to_owned()),
             (Some(s), None) => {
-                if !(s >= 1.0) {
+                if !matches!(
+                    s.partial_cmp(&1.0),
+                    Some(Ordering::Equal | Ordering::Greater)
+                ) {
                     Err(format!("ewm: span must satisfy: span >= 1, got {s}"))
                 } else {
                     Ok(2.0 / (s + 1.0))
                 }
             }
             (None, Some(a)) => {
-                if !(a > 0.0 && a <= 1.0) {
+                if !matches!(a.partial_cmp(&0.0), Some(Ordering::Greater))
+                    || !matches!(a.partial_cmp(&1.0), Some(Ordering::Equal | Ordering::Less))
+                {
                     Err(format!("ewm: alpha must satisfy: 0 < alpha <= 1, got {a}"))
                 } else {
                     Ok(a)
@@ -10019,7 +10024,6 @@ impl Ewm<'_> {
     /// an [`OnlineEwm`] that maintains running mean state across
     /// incremental `update(value)` calls without re-scanning the input
     /// each time. Per br-frankenpandas-mvynk.
-    #[must_use]
     pub fn online(&self) -> Result<OnlineEwm, FrameError> {
         // Per br-frankenpandas-d895b: propagate the validation error
         // when ewm() inputs were invalid.
@@ -13337,6 +13341,17 @@ impl StringAccessor<'_> {
 
     /// Pad strings to a minimum width with a fill character.
     pub fn pad(&self, width: usize, side: &str, fillchar: char) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-e6937: pandas raises ValueError on invalid
+        // side; the wildcard arm was silently returning the original
+        // string. Validate up front, before entering apply_str.
+        match side {
+            "left" | "right" | "both" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "str.pad: side must be one of 'left','right','both', got '{other}'"
+                )));
+            }
+        }
         let side_owned = side.to_string();
         self.apply_str(
             |s| {
@@ -13356,6 +13371,8 @@ impl StringAccessor<'_> {
                         let rpad: String = std::iter::repeat_n(fillchar, right).collect();
                         Scalar::Utf8(format!("{lpad}{s}{rpad}"))
                     }
+                    // Unreachable after the up-front validation above; keep
+                    // a defensive arm so the per-row closure stays total.
                     _ => Scalar::Utf8(s.to_string()),
                 }
             },
@@ -30954,16 +30971,29 @@ impl DataFrameGroupBy<'_> {
         frac: Option<f64>,
         replace: bool,
     ) -> Result<usize, FrameError> {
+        // Keep GroupBy.sample aligned with Series/DataFrame.sample: validate
+        // fractional inputs before any float-to-usize cast.
+        if let Some(fraction) = frac {
+            if !fraction.is_finite() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be finite, got {fraction}"
+                )));
+            }
+            if fraction < 0.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be >= 0, got {fraction}"
+                )));
+            }
+            if !replace && fraction > 1.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be <= 1 when replace=false, got {fraction}"
+                )));
+            }
+        }
+
         let sample_n = match (n, frac) {
             (Some(count), None) => count,
-            (None, Some(fraction)) => {
-                if fraction < 0.0 {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "sample frac must be non-negative, got {fraction}"
-                    )));
-                }
-                (group_len as f64 * fraction).round() as usize
-            }
+            (None, Some(fraction)) => (group_len as f64 * fraction).round() as usize,
             (None, None) => 1,
             (Some(_), Some(_)) => {
                 return Err(FrameError::CompatibilityRejected(
@@ -57320,6 +57350,80 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["g", "v", "w"]
+        );
+    }
+
+    fn h47vh_groupby_sample_df() -> DataFrame {
+        DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dataframe_groupby_sample_nan_frac_errors() {
+        let df = h47vh_groupby_sample_df();
+        let grouped = df.groupby(&["g"]).unwrap();
+        let err = grouped
+            .sample(None, Some(f64::NAN), false, Some(7))
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
+            if msg.contains("frac must be finite")));
+    }
+
+    #[test]
+    fn dataframe_groupby_sample_infinite_frac_errors() {
+        let df = h47vh_groupby_sample_df();
+        let grouped = df.groupby(&["g"]).unwrap();
+        let err = grouped
+            .sample(None, Some(f64::INFINITY), false, Some(7))
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
+            if msg.contains("frac must be finite")));
+    }
+
+    #[test]
+    fn dataframe_groupby_sample_frac_above_one_without_replace_errors() {
+        let df = h47vh_groupby_sample_df();
+        let grouped = df.groupby(&["g"]).unwrap();
+        let err = grouped.sample(None, Some(2.0), false, Some(7)).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
+            if msg.contains("frac must be <= 1")));
+    }
+
+    #[test]
+    fn dataframe_groupby_sample_frac_above_one_with_replace_is_valid() {
+        let df = h47vh_groupby_sample_df();
+        let grouped = df.groupby(&["g"]).unwrap();
+        let sampled = grouped.sample(None, Some(2.0), true, Some(7)).unwrap();
+        assert_eq!(sampled.len(), 8);
+        assert_eq!(
+            sampled
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["g", "v"]
         );
     }
 

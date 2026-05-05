@@ -8422,6 +8422,15 @@ impl Rolling<'_> {
                 "rolling window must be >= 1".to_owned(),
             ));
         }
+        // Per br-frankenpandas-7c962: pandas validates min_periods <= window.
+        // Without this check, the rolling agg loop silently emits all NaN
+        // because non_null.len() < min_periods is always true.
+        if self.min_periods > self.window {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rolling: min_periods {} must be <= window {}",
+                self.min_periods, self.window
+            )));
+        }
         Ok(())
     }
 
@@ -73240,6 +73249,91 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_rolling_min_periods_above_window_errors() {
+        // Per br-frankenpandas-7c962: pandas raises ValueError when
+        // min_periods > window. Was silently producing all-NaN.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let err = s.rolling(3, Some(5)).mean().unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("min_periods 5") && msg.contains("window 3")));
+    }
+
+    #[test]
+    fn series_rolling_min_periods_above_window_errors_for_all_aggs() {
+        // Validation should propagate through every Rolling aggregator.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let mp_above = s.rolling(2, Some(10));
+        assert!(matches!(mp_above.mean().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("min_periods")));
+        assert!(matches!(s.rolling(2, Some(10)).count().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("min_periods")));
+        assert!(matches!(s.rolling(2, Some(10)).sum().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("min_periods")));
+        assert!(matches!(s.rolling(2, Some(10)).std().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("min_periods")));
+    }
+
+    #[test]
+    fn series_rolling_min_periods_equal_window_is_valid() {
+        // min_periods == window is the boundary; pandas accepts it.
+        // (This is also the default when min_periods=None.)
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(2, Some(2)).mean().unwrap();
+        // First entry NaN (only one value seen); rest are window means.
+        let vals = result.column().values();
+        assert!(matches!(vals[0], Scalar::Null(_) | Scalar::Float64(_)));
+        assert!(matches!(vals[1], Scalar::Float64(v) if v == 1.5));
+        assert!(matches!(vals[2], Scalar::Float64(v) if v == 2.5));
+    }
+
+    #[test]
+    fn series_rolling_min_periods_below_window_is_valid_regression_guard() {
+        // min_periods < window is also valid (pandas accepts). Just
+        // verify the call succeeds (no Err) — exact value semantics
+        // depend on rolling-window convention.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        // window=3, min_periods=1 — should NOT error (was previously
+        // valid, must remain so).
+        let result = s.rolling(3, Some(1)).mean();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 4);
     }
 
     #[test]

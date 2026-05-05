@@ -561,7 +561,16 @@ impl<'a> IsinIndex<'a> {
                 }
                 // Cross-type: any Float64(x) with x == i as f64 also matches.
                 let as_f = *i as f64;
-                self.float_bits.contains(&as_f.to_bits())
+                if self.float_bits.contains(&as_f.to_bits()) {
+                    return true;
+                }
+                // Per br-frankenpandas-8c63b: Int64(0|1) also cross-matches
+                // Bool test values (pandas treats Bool as 0/1 for numeric
+                // comparison). Int64(2..) does NOT match any Bool.
+                if (*i == 0 || *i == 1) && self.bools.contains(&(*i != 0)) {
+                    return true;
+                }
+                false
             }
             Scalar::Float64(f) => {
                 if self.float_bits.contains(&f.to_bits()) {
@@ -576,9 +585,29 @@ impl<'a> IsinIndex<'a> {
                 {
                     return true;
                 }
+                // Per br-frankenpandas-8c63b: Float64(0.0|1.0) also matches
+                // Bool test values. Other floats do NOT match any Bool.
+                if (*f == 0.0 || *f == 1.0) && self.bools.contains(&(*f != 0.0)) {
+                    return true;
+                }
                 false
             }
-            Scalar::Bool(b) => self.bools.contains(b),
+            Scalar::Bool(b) => {
+                if self.bools.contains(b) {
+                    return true;
+                }
+                // Per br-frankenpandas-8c63b: Bool(true)/Bool(false) cross-
+                // match Int64(1)/Int64(0) and Float64(1.0)/Float64(0.0).
+                let as_int = i64::from(*b);
+                if self.ints.contains(&as_int) {
+                    return true;
+                }
+                let as_float = as_int as f64;
+                if self.float_bits.contains(&as_float.to_bits()) {
+                    return true;
+                }
+                false
+            }
             Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
             Scalar::Timedelta64(t) => self.timedeltas.contains(t),
             Scalar::Null(_) => false,
@@ -72953,11 +72982,11 @@ mod tests {
     }
 
     #[test]
-    fn series_isin_bool_does_not_cross_match_int() {
-        // Regression guard: Bool↔Int64 NON-cross-match preserved (this
-        // is the existing behavior, even though pandas itself crosses
-        // them — the divergence is documented separately and should be
-        // preserved across this perf refactor).
+    fn series_isin_bool_cross_matches_int_per_pandas() {
+        // Per br-frankenpandas-8c63b: pandas isin treats Bool as 0/1 for
+        // numeric comparison. Bool(true) matches Int64(1); Bool(false)
+        // matches Int64(0). Was previously [false, false] (preserved
+        // divergence under f7201); now matches pandas.
         let s = Series::from_values(
             "x",
             (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
@@ -72966,11 +72995,89 @@ mod tests {
         .unwrap();
         let test_values = vec![Scalar::Int64(1), Scalar::Int64(0)];
         let out = s.isin(&test_values).unwrap();
-        // Both should be false (Bool-Int cross-match not implemented in
-        // existing fp-frame; preserving that until a separate fix).
         assert_eq!(
             out.column().values(),
-            &[Scalar::Bool(false), Scalar::Bool(false)]
+            &[Scalar::Bool(true), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn series_isin_bool_cross_matches_float() {
+        // Pandas: Bool(true) matches Float64(1.0); Bool(false) matches
+        // Float64(0.0).
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let test_values = vec![Scalar::Float64(1.0), Scalar::Float64(0.0)];
+        let out = s.isin(&test_values).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn series_isin_int_zero_one_cross_matches_bool() {
+        // Reverse direction: Int64(0|1) matches Bool(false)/Bool(true).
+        // Int64(2) must NOT match any Bool.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let test_values = vec![Scalar::Bool(true), Scalar::Bool(false)];
+        let out = s.isin(&test_values).unwrap();
+        // 0 → matches false; 1 → matches true; 2 → no Bool match
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn series_isin_float_zero_one_cross_matches_bool() {
+        // Float64(0.0|1.0) matches Bool; Float64(0.5) does NOT match any Bool.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.5),
+            ],
+        )
+        .unwrap();
+        let test_values = vec![Scalar::Bool(true), Scalar::Bool(false)];
+        let out = s.isin(&test_values).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn series_isin_int_two_does_not_match_bool() {
+        // Regression guard: only Int64(0) and Int64(1) cross-match Bool.
+        // Other ints (2, -1, 100) must remain false against any Bool set.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(2), Scalar::Int64(-1), Scalar::Int64(100)],
+        )
+        .unwrap();
+        let test_values = vec![Scalar::Bool(true), Scalar::Bool(false)];
+        let out = s.isin(&test_values).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
         );
     }
 

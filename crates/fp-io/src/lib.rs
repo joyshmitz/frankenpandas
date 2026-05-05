@@ -84,7 +84,7 @@
 //! non-SQL formats are needed.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
     sync::Arc,
 };
@@ -756,15 +756,18 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
 ///
 /// - `na_filter`: If false, skip NA detection entirely for performance
 /// - `keep_default_na`: If true, use pandas default NA values
-/// - `na_values`: Additional NA values to recognize
+/// - `na_set` / `true_set` / `false_set`: Pre-built HashSets for O(1)
+///   membership lookup. Per br-frankenpandas-b67a3 (sister to br-fcf5d),
+///   these were previously `&[String]` slices scanned linearly per cell;
+///   now built once at the parent CSV reader and passed in.
 #[allow(clippy::too_many_arguments)]
 fn parse_scalar_with_options(
     field: &str,
     na_filter: bool,
     keep_default_na: bool,
-    na_values: &[String],
-    true_values: &[String],
-    false_values: &[String],
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
     decimal: u8,
     thousands: Option<u8>,
 ) -> Scalar {
@@ -773,7 +776,7 @@ fn parse_scalar_with_options(
     // Check NA values only if na_filter is enabled
     if na_filter {
         let is_default_na = keep_default_na && is_pandas_default_na(trimmed);
-        let is_custom_na = na_values.iter().any(|na| na == trimmed);
+        let is_custom_na = na_set.contains(trimmed);
         if is_default_na || is_custom_na {
             return Scalar::Null(NullKind::Null);
         }
@@ -806,10 +809,10 @@ fn parse_scalar_with_options(
         return Scalar::Float64(value);
     }
 
-    if true_values.iter().any(|value| value == trimmed) {
+    if true_set.contains(trimmed) {
         return Scalar::Bool(true);
     }
-    if false_values.iter().any(|value| value == trimmed) {
+    if false_set.contains(trimmed) {
         return Scalar::Bool(false);
     }
 
@@ -1153,16 +1156,23 @@ fn apply_parse_date_combinations_named(
     Ok(())
 }
 
-fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options: &CsvReadOptions) {
+fn append_csv_record(
+    columns: &mut [Vec<Scalar>],
+    record: &StringRecord,
+    options: &CsvReadOptions,
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
+) {
     for (idx, col) in columns.iter_mut().enumerate() {
         let field = record.get(idx).unwrap_or_default();
         col.push(parse_scalar_with_options(
             field,
             options.na_filter,
             options.keep_default_na,
-            &options.na_values,
-            &options.true_values,
-            &options.false_values,
+            na_set,
+            true_set,
+            false_set,
             options.decimal,
             options.thousands,
         ));
@@ -1222,6 +1232,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
     }
 
+    // Per br-frankenpandas-b67a3: pre-build NA / true / false sets once,
+    // then thread through the per-record loop. Was Vec::iter().any()
+    // per cell.
+    let na_set: HashSet<&str> = options.na_values.iter().map(String::as_str).collect();
+    let true_set: HashSet<&str> = options.true_values.iter().map(String::as_str).collect();
+    let false_set: HashSet<&str> = options.false_values.iter().map(String::as_str).collect();
+
     let mut row_count: i64 = 0;
     let (headers, mut columns) = if options.has_headers {
         let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
@@ -1255,7 +1272,14 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .collect();
 
         if (row_count as usize) < max_rows {
-            append_csv_record(&mut columns, &first_record, options);
+            append_csv_record(
+                &mut columns,
+                &first_record,
+                options,
+                &na_set,
+                &true_set,
+                &false_set,
+            );
             row_count += 1;
         }
 
@@ -1275,7 +1299,14 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         if should_skip_bad_csv_record(&record, columns.len(), options.on_bad_lines) {
             continue;
         }
-        append_csv_record(&mut columns, &record, options);
+        append_csv_record(
+            &mut columns,
+            &record,
+            options,
+            &na_set,
+            &true_set,
+            &false_set,
+        );
         row_count += 1;
     }
 

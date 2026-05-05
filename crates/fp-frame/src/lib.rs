@@ -6105,6 +6105,28 @@ impl Series {
         seed: Option<u64>,
     ) -> Result<Self, FrameError> {
         let total = self.len();
+        // Per br-frankenpandas-c1db4: validate frac BEFORE the f64-to-usize
+        // cast. Rust saturates negative and NaN floats to 0 when cast to
+        // usize, which silently turned invalid inputs into "sample 0
+        // values" (empty result). Pandas raises ValueError on negative
+        // frac, NaN frac, or non-finite frac.
+        if let Some(f) = frac {
+            if !f.is_finite() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be finite, got {f}"
+                )));
+            }
+            if f < 0.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be >= 0, got {f}"
+                )));
+            }
+            if !replace && f > 1.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be <= 1 when replace=false, got {f}"
+                )));
+            }
+        }
         let sample_n = match (n, frac) {
             (Some(count), None) => count,
             (None, Some(f)) => (total as f64 * f).round() as usize,
@@ -73274,6 +73296,101 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_sample_negative_frac_errors() {
+        // Per br-frankenpandas-c1db4: negative frac was silently
+        // saturating to 0 (empty result). Now errors per pandas.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let err = s.sample(None, Some(-0.5), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be >= 0")));
+    }
+
+    #[test]
+    fn series_sample_nan_frac_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let err = s.sample(None, Some(f64::NAN), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be finite")));
+    }
+
+    #[test]
+    fn series_sample_infinite_frac_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let err = s.sample(None, Some(f64::INFINITY), true, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be finite")));
+    }
+
+    #[test]
+    fn series_sample_frac_above_one_without_replace_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let err = s.sample(None, Some(2.0), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be <= 1")));
+    }
+
+    #[test]
+    fn series_sample_frac_above_one_with_replace_is_valid() {
+        // Pandas allows frac > 1 only with replace=True (oversampling).
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let result = s.sample(None, Some(2.0), true, Some(42)).unwrap();
+        assert_eq!(result.len(), 6);
+    }
+
+    #[test]
+    fn series_sample_valid_frac_regression_guard() {
+        // Regression guard: frac in [0, 1] with replace=false works.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let result = s.sample(None, Some(0.5), false, Some(42)).unwrap();
+        assert_eq!(result.len(), 2);
+        // frac=0.0 → empty result
+        let empty = s.sample(None, Some(0.0), false, Some(42)).unwrap();
+        assert_eq!(empty.len(), 0);
+        // frac=1.0 boundary → all rows
+        let all = s.sample(None, Some(1.0), false, Some(42)).unwrap();
+        assert_eq!(all.len(), 4);
     }
 
     #[test]

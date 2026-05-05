@@ -73523,8 +73523,10 @@ mod tests {
         // NA detection in CSV reader. Cells matching any na_value
         // become NaN.
         let csv = "a,b\n1,foo\nNA,bar\n3,---\n";
-        let mut opts = DataFrameCsvReadOptions::default();
-        opts.na_values = vec!["NA".to_owned(), "---".to_owned()];
+        let mut opts = DataFrameCsvReadOptions {
+            na_values: vec!["NA".to_owned(), "---".to_owned()],
+            ..DataFrameCsvReadOptions::default()
+        };
         opts.dtypes.insert("a".to_owned(), DType::Int64);
         let df = DataFrame::from_csv_with_options(csv, &opts).unwrap();
         // Column "a" row 1 should be missing (was "NA"); rest are Int64.
@@ -73562,14 +73564,16 @@ mod tests {
                 csv.push_str(&format!("{i},1,2\n"));
             }
         }
-        let mut opts = DataFrameCsvReadOptions::default();
-        opts.na_values = vec![
-            "NA".to_owned(),
-            "n/a".to_owned(),
-            "?".to_owned(),
-            "missing".to_owned(),
-            "null".to_owned(),
-        ];
+        let mut opts = DataFrameCsvReadOptions {
+            na_values: vec![
+                "NA".to_owned(),
+                "n/a".to_owned(),
+                "?".to_owned(),
+                "missing".to_owned(),
+                "null".to_owned(),
+            ],
+            ..DataFrameCsvReadOptions::default()
+        };
         opts.dtypes.insert("a".to_owned(), DType::Int64);
         let df = DataFrame::from_csv_with_options(&csv, &opts).unwrap();
         // 10 NA rows out of 100.

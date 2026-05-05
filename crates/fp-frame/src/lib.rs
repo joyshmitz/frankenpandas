@@ -28991,14 +28991,19 @@ impl DataFrame {
             return Ok(self.clone());
         }
 
-        let mut col_unique_vals: Vec<(String, Vec<String>)> = Vec::new();
+        // Per br-frankenpandas-ecc19: HashSet for per-column unique
+        // dedup; HashMap for col → uniques lookup. Was two stacked O(n²)
+        // loops (seen.contains(&s) per value, then col_unique_vals.iter()
+        // .find() per output column).
+        let mut col_unique_vals: HashMap<String, Vec<String>> = HashMap::new();
         for col_name in &target_cols {
             let col = self.columns.get(col_name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!(
                     "get_dummies: column '{col_name}' not found"
                 ))
             })?;
-            let mut seen = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
+            let mut seen_set: HashSet<String> = HashSet::new();
             for v in col.values() {
                 let s = match v {
                     Scalar::Utf8(s) => s.clone(),
@@ -29007,19 +29012,22 @@ impl DataFrame {
                     Scalar::Bool(b) => b.to_string(),
                     _ => continue,
                 };
-                if !seen.contains(&s) {
+                if seen_set.insert(s.clone()) {
                     seen.push(s);
                 }
             }
-            col_unique_vals.push((col_name.clone(), seen));
+            col_unique_vals.insert(col_name.clone(), seen);
         }
+        let target_set: HashSet<&str> = target_cols.iter().map(String::as_str).collect();
 
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
         for col_name in &self.column_order {
-            if target_cols.contains(col_name) {
-                let (_, unique_vals) = col_unique_vals.iter().find(|(n, _)| n == col_name).unwrap();
+            if target_set.contains(col_name.as_str()) {
+                let unique_vals = col_unique_vals
+                    .get(col_name)
+                    .expect("target_set membership implies col_unique_vals entry");
                 let src = &self.columns[col_name];
                 let effective_vals: &[String] = if drop_first && !unique_vals.is_empty() {
                     &unique_vals[1..]
@@ -73583,6 +73591,81 @@ mod tests {
             .filter(|v| v.is_missing())
             .count();
         assert_eq!(na_count, 10);
+    }
+
+    #[test]
+    fn dataframe_get_dummies_basic_correctness_after_o_n_fix() {
+        // Per br-frankenpandas-ecc19: DataFrame::get_dummies's two
+        // O(n²) loops replaced with HashSet/HashMap. Correctness
+        // regression guard.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "color".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("red".into()),
+                Scalar::Utf8("blue".into()),
+                Scalar::Utf8("red".into()),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..3_i64).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["color".to_owned()],
+        )
+        .unwrap();
+
+        let dummies = df.get_dummies(&["color"]).unwrap();
+        // Two indicator cols: color_red, color_blue.
+        assert!(dummies.columns.contains_key("color_red"));
+        assert!(dummies.columns.contains_key("color_blue"));
+        let red = dummies.columns["color_red"].values();
+        let blue = dummies.columns["color_blue"].values();
+        // Row 0 = "red" → red=1, blue=0.
+        assert_eq!(red[0], Scalar::Int64(1));
+        assert_eq!(blue[0], Scalar::Int64(0));
+        // Row 1 = "blue" → red=0, blue=1.
+        assert_eq!(red[1], Scalar::Int64(0));
+        assert_eq!(blue[1], Scalar::Int64(1));
+        // Row 2 = "red" → red=1, blue=0.
+        assert_eq!(red[2], Scalar::Int64(1));
+        assert_eq!(blue[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn dataframe_get_dummies_wide_scaling_correctness() {
+        // Per br-frankenpandas-ecc19: 2 target cols × 1000 rows × 50
+        // unique each. Old impl: ~50K Vec::contains (per col), ~50
+        // Vec::iter().find() (per output col). New: hash-based.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(
+                (0..1000_i64)
+                    .map(|i| Scalar::Utf8(format!("a{}", i % 50)))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        cols.insert(
+            "b".to_owned(),
+            Column::from_values(
+                (0..1000_i64)
+                    .map(|i| Scalar::Utf8(format!("b{}", i % 50)))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..1000_i64).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let dummies = df.get_dummies(&["a", "b"]).unwrap();
+        // Each target column produces 50 indicator cols → 100 total
+        // (no other input cols to preserve).
+        assert_eq!(dummies.column_order.len(), 100);
     }
 
     #[test]

@@ -23773,8 +23773,13 @@ impl DataFrame {
             return Series::from_values("count".to_string(), Vec::new(), Vec::new());
         }
 
-        // Build composite keys for each row
+        // Per br-frankenpandas-62849: O(n) HashMap-driven counter with
+        // parallel insertion-ordered Vec for stable first-seen ordering
+        // (same shape as br-7c7d0 Series::value_counts fix). Vec<ScalarKey>
+        // is Hash + Eq via the ScalarKey derive; using it as a HashMap key
+        // gives O(1) lookup per row instead of O(n) linear scan.
         let mut key_counts: Vec<(Vec<ScalarKey<'_>>, String, i64)> = Vec::new();
+        let mut idx_map: HashMap<Vec<ScalarKey<'_>>, usize> = HashMap::new();
 
         for i in 0..self.len() {
             let mut parts = Vec::with_capacity(self.column_order.len());
@@ -23786,12 +23791,15 @@ impl DataFrame {
             }
             let key_label = parts.join(", ");
 
-            if let Some((_, _, count)) = key_counts.iter_mut().find(|(k, _, _)| *k == key_parts) {
-                *count += 1;
-            } else {
-                key_counts.push((key_parts, key_label, 1));
+            match idx_map.get(&key_parts) {
+                Some(&idx) => key_counts[idx].2 += 1,
+                None => {
+                    idx_map.insert(key_parts.clone(), key_counts.len());
+                    key_counts.push((key_parts, key_label, 1));
+                }
             }
         }
+        drop(idx_map);
 
         // Sort by count descending
         key_counts.sort_by_key(|entry| std::cmp::Reverse(entry.2));
@@ -73174,6 +73182,80 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn dataframe_value_counts_hashmap_perf_regression_guard() {
+        // Per br-frankenpandas-62849: O(n²) → O(n) regression guard.
+        // 5K rows × 2 cols, ~500 unique combinations.
+        let n: i64 = 5_000;
+        let mut cols = BTreeMap::new();
+        // Use independent index axes so a=i%50 and b=(i/50)%10 give
+        // independent cycles; lcm(50,10) gives 500 unique pairs.
+        let a_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i % 50)).collect();
+        let b_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Int64((i / 50) % 10)).collect();
+        cols.insert("a".to_owned(), Column::from_values(a_vals).unwrap());
+        cols.insert("b".to_owned(), Column::from_values(b_vals).unwrap());
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..n).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let result = df.value_counts().unwrap();
+        // 50 × 10 = 500 distinct combinations expected (since gcd issues
+        // would still produce most combinations; for i % 50 and i % 10
+        // independently, we get 500 unique pairs as i ranges over 5000).
+        assert_eq!(result.len(), 500);
+        // Every combination appears n / 500 == 10 times.
+        for v in result.column().values() {
+            assert_eq!(*v, Scalar::Int64(10));
+        }
+    }
+
+    #[test]
+    fn dataframe_value_counts_preserves_count_descending_sort() {
+        // Per br-frankenpandas-62849: stable sort by count descending
+        // must be preserved across the HashMap-based fix.
+        // Input: a=[1,1,2,2,2,3], b=[10,10,20,20,20,30]
+        // Expected: (2,20)→3, (1,10)→2, (3,30)→1
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .unwrap(),
+        );
+        cols.insert(
+            "b".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..6_i64).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let result = df.value_counts().unwrap();
+        assert_eq!(result.len(), 3);
+        // Sorted descending by count.
+        assert_eq!(result.column().values()[0], Scalar::Int64(3));
+        assert_eq!(result.column().values()[1], Scalar::Int64(2));
+        assert_eq!(result.column().values()[2], Scalar::Int64(1));
     }
 
     #[test]

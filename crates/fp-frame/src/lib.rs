@@ -73469,12 +73469,7 @@ mod tests {
 
     #[test]
     fn series_sort_values_case_sensitive_na_position_rejected() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Float64(1.0)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap();
         let err = s.sort_values_na(true, "FIRST").unwrap_err();
         assert!(matches!(&err,
             FrameError::CompatibilityRejected(msg)

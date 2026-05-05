@@ -496,6 +496,96 @@ fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
     }
 }
 
+/// Per br-frankenpandas-f7201: hash-based set-membership index for
+/// Series::isin / DataFrame::isin. Built once from `test_values` in
+/// O(m); each lookup is O(1). Preserves the existing cross-type
+/// Int64↔Float64 equivalence (pandas semantics) by storing the int
+/// AND float-bit sets separately and consulting both for numeric
+/// inputs. Bool / Utf8 / Timedelta have their own sets and DON'T
+/// cross-match (matching the existing `_ => value == test_value`
+/// fallback semantics in scalar_isin_matches).
+struct IsinIndex<'a> {
+    ints: HashSet<i64>,
+    float_bits: HashSet<u64>,
+    bools: HashSet<bool>,
+    utf8s: HashSet<&'a str>,
+    timedeltas: HashSet<i64>,
+    any_missing: bool,
+}
+
+impl<'a> IsinIndex<'a> {
+    fn build(test_values: &'a [Scalar]) -> Self {
+        let mut idx = Self {
+            ints: HashSet::new(),
+            float_bits: HashSet::new(),
+            bools: HashSet::new(),
+            utf8s: HashSet::new(),
+            timedeltas: HashSet::new(),
+            any_missing: false,
+        };
+        for tv in test_values {
+            if tv.is_missing() {
+                idx.any_missing = true;
+                continue;
+            }
+            match tv {
+                Scalar::Int64(i) => {
+                    idx.ints.insert(*i);
+                }
+                Scalar::Float64(f) => {
+                    idx.float_bits.insert(f.to_bits());
+                }
+                Scalar::Bool(b) => {
+                    idx.bools.insert(*b);
+                }
+                Scalar::Utf8(s) => {
+                    idx.utf8s.insert(s.as_str());
+                }
+                Scalar::Timedelta64(t) => {
+                    idx.timedeltas.insert(*t);
+                }
+                Scalar::Null(_) => {}
+            }
+        }
+        idx
+    }
+
+    fn contains(&self, value: &Scalar) -> bool {
+        if value.is_missing() {
+            return self.any_missing;
+        }
+        match value {
+            Scalar::Int64(i) => {
+                if self.ints.contains(i) {
+                    return true;
+                }
+                // Cross-type: any Float64(x) with x == i as f64 also matches.
+                let as_f = *i as f64;
+                self.float_bits.contains(&as_f.to_bits())
+            }
+            Scalar::Float64(f) => {
+                if self.float_bits.contains(&f.to_bits()) {
+                    return true;
+                }
+                // Cross-type: integer-valued float matches an Int64 entry.
+                if f.is_finite()
+                    && f.fract() == 0.0
+                    && *f >= i64::MIN as f64
+                    && *f <= i64::MAX as f64
+                    && self.ints.contains(&(*f as i64))
+                {
+                    return true;
+                }
+                false
+            }
+            Scalar::Bool(b) => self.bools.contains(b),
+            Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
+            Scalar::Timedelta64(t) => self.timedeltas.contains(t),
+            Scalar::Null(_) => false,
+        }
+    }
+}
+
 /// Per br-frankenpandas-5110c: build a hash-based fast-path for
 /// mapping-driven Series operations (map/replace). Returns Some(hashmap)
 /// when every key in `mapping` is non-Float64 (where ScalarKey hashing
@@ -5216,29 +5306,23 @@ impl Series {
     /// Matches `series.isin(values)`. Returns a boolean Series with the same
     /// index. Null elements produce `false` (matching pandas behavior).
     fn scalar_isin_matches(value: &Scalar, test_values: &[Scalar]) -> bool {
-        if value.is_missing() {
-            return test_values.iter().any(Scalar::is_missing);
-        }
-
-        test_values.iter().any(|test_value| {
-            if test_value.is_missing() {
-                return false;
-            }
-
-            match (value, test_value) {
-                (Scalar::Int64(left), Scalar::Float64(right)) => (*left as f64) == *right,
-                (Scalar::Float64(left), Scalar::Int64(right)) => *left == (*right as f64),
-                _ => value == test_value,
-            }
-        })
+        // Per br-frankenpandas-f7201: kept for callers that need a single-
+        // value check; internally builds an IsinIndex (one-shot O(m)).
+        // Hot loops should call IsinIndex::build once and reuse — see
+        // Series::isin and DataFrame::isin below.
+        let idx = IsinIndex::build(test_values);
+        idx.contains(value)
     }
 
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-f7201: O(n + m) — build the membership
+        // index ONCE, then do O(1) lookup per element.
+        let idx = IsinIndex::build(test_values);
         let values: Vec<Scalar> = self
             .column
             .values()
             .iter()
-            .map(|value| Scalar::Bool(Self::scalar_isin_matches(value, test_values)))
+            .map(|value| Scalar::Bool(idx.contains(value)))
             .collect();
 
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), values)
@@ -29597,13 +29681,17 @@ impl DataFrame {
     ///
     /// Matches `df.isin(values)`.
     pub fn isin(&self, values: &[Scalar]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-f7201: build the membership index ONCE and
+        // reuse across all columns. Was N_cols × O(n × m); now
+        // N_cols × O(n + m) with one shared index build.
+        let idx = IsinIndex::build(values);
         let mut new_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
             let bools: Vec<Scalar> = col
                 .values()
                 .iter()
-                .map(|value| Scalar::Bool(Series::scalar_isin_matches(value, values)))
+                .map(|value| Scalar::Bool(idx.contains(value)))
                 .collect();
             new_cols.insert(name.clone(), Column::from_values(bools)?);
         }
@@ -29619,13 +29707,16 @@ impl DataFrame {
         &self,
         per_column: &BTreeMap<String, Vec<Scalar>>,
     ) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-f7201: build a per-column IsinIndex once
+        // outside the value loop.
         let mut new_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
             let bools: Vec<Scalar> = if let Some(allowed) = per_column.get(name) {
+                let idx = IsinIndex::build(allowed);
                 col.values()
                     .iter()
-                    .map(|value| Scalar::Bool(Series::scalar_isin_matches(value, allowed)))
+                    .map(|value| Scalar::Bool(idx.contains(value)))
                     .collect()
             } else {
                 vec![Scalar::Bool(false); col.len()]
@@ -72759,6 +72850,128 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_isin_uses_hash_fast_path() {
+        // Per br-frankenpandas-f7201: O(n + m) regression guard. 1000-entry
+        // test set on 5000-element series; old impl would do 5×10⁶ comparisons,
+        // new ~5K + 1K (one HashSet build).
+        let test_values: Vec<Scalar> = (0..1000_i64).map(Scalar::Int64).collect();
+        let labels: Vec<IndexLabel> = (0..5000_i64).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..5000_i64).map(Scalar::Int64).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let out = s.isin(&test_values).unwrap();
+        // Values 0..1000 should be in; 1000..5000 should be out.
+        for (i, v) in out.column().values().iter().enumerate() {
+            let expected = i < 1000;
+            assert_eq!(*v, Scalar::Bool(expected), "row {i}");
+        }
+    }
+
+    #[test]
+    fn series_isin_cross_type_int_in_float_test_values() {
+        // Per br-frankenpandas-f7201: pandas isin matches Int64(1) against
+        // a Float64(1.0) test value. The IsinIndex consults float_bits with
+        // the int's f64 representation when missing from the int set.
+        let test_values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+        ];
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let out = s.isin(&test_values).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_isin_cross_type_float_in_int_test_values() {
+        // Reverse direction: Float64(1.0) in [Int64(1), Int64(2)] → true.
+        // Float64(1.5) → false (not integer-valued).
+        let test_values = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let out = s.isin(&test_values).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn series_isin_missing_input_matches_only_when_test_has_missing() {
+        // is_missing input → returns true iff any test_value is missing.
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(5), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+
+        // Test set with no missing → null input gives false.
+        let no_null = vec![Scalar::Int64(1), Scalar::Int64(5)];
+        let out_no_null = s.isin(&no_null).unwrap();
+        assert_eq!(
+            out_no_null.column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        // Test set with NaN → null input gives true.
+        let with_null = vec![Scalar::Int64(99), Scalar::Float64(f64::NAN)];
+        let out_with_null = s.isin(&with_null).unwrap();
+        assert_eq!(
+            out_with_null.column().values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn series_isin_bool_does_not_cross_match_int() {
+        // Regression guard: Bool↔Int64 NON-cross-match preserved (this
+        // is the existing behavior, even though pandas itself crosses
+        // them — the divergence is documented separately and should be
+        // preserved across this perf refactor).
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let test_values = vec![Scalar::Int64(1), Scalar::Int64(0)];
+        let out = s.isin(&test_values).unwrap();
+        // Both should be false (Bool-Int cross-match not implemented in
+        // existing fp-frame; preserving that until a separate fix).
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Bool(false), Scalar::Bool(false)]
+        );
     }
 
     #[test]

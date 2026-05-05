@@ -7813,13 +7813,43 @@ impl Series {
         let mut null_positions = Vec::new();
         let mut sortable = Vec::new();
 
-        for (i, v) in vals.iter().enumerate() {
-            if v.is_missing() {
-                null_positions.push(i);
-            } else if let Ok(f) = v.to_f64() {
-                sortable.push((i, f));
-            } else {
-                null_positions.push(i);
+        // Per br-frankenpandas-ff284: pandas ranks Utf8 lexicographically.
+        // The original to_f64-based path silently treated all Utf8 as null
+        // (returning all-NaN by default na_option='keep'). For Utf8, build
+        // a string→sorted-rank-key map so equal strings get equal f64
+        // keys (preserving tie semantics in rank_numeric_positions) and
+        // sort order matches lex order.
+        if matches!(self.column().dtype(), DType::Utf8) {
+            let mut unique_strs: Vec<&str> = vals
+                .iter()
+                .filter_map(|v| match v {
+                    Scalar::Utf8(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            unique_strs.sort();
+            unique_strs.dedup();
+            let key_of = |s: &str| -> f64 {
+                unique_strs.binary_search(&s).expect("string must be in deduped set") as f64
+            };
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_missing() {
+                    null_positions.push(i);
+                } else if let Scalar::Utf8(s) = v {
+                    sortable.push((i, key_of(s.as_str())));
+                } else {
+                    null_positions.push(i);
+                }
+            }
+        } else {
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_missing() {
+                    null_positions.push(i);
+                } else if let Ok(f) = v.to_f64() {
+                    sortable.push((i, f));
+                } else {
+                    null_positions.push(i);
+                }
             }
         }
 
@@ -73062,6 +73092,146 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_rank_utf8_lexicographic() {
+        // Per br-frankenpandas-ff284: rank on Utf8 lexicographically.
+        // Was previously returning all-NaN (silent: to_f64 fails →
+        // null_positions). Now: ['c','a','b'] → [3.0, 1.0, 2.0].
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+
+        let ranks = s.rank("average", true, "keep").unwrap();
+        assert_eq!(
+            ranks.column().values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_rank_utf8_with_ties_average_method() {
+        // method='average': tied values get the average of their positions.
+        // Input: ['b', 'a', 'b', 'c'] → sorted distinct ['a', 'b', 'c'].
+        // Sorted positions: a=1, b=2, b=3, c=4. Ties on b at positions
+        // 2 and 3 → average rank 2.5.
+        // Expected ranks for input order ['b','a','b','c']: [2.5, 1.0, 2.5, 4.0].
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let ranks = s.rank("average", true, "keep").unwrap();
+        assert_eq!(
+            ranks.column().values(),
+            &[
+                Scalar::Float64(2.5),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(4.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_rank_utf8_dense_method() {
+        // method='dense': tied values get the same rank, no gaps.
+        // Input: ['b','a','b','c'] → dense ranks: a=1, b=2, c=3.
+        // Expected for input order: [2, 1, 2, 3].
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let ranks = s.rank("dense", true, "keep").unwrap();
+        assert_eq!(
+            ranks.column().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_rank_utf8_with_null_keep_option() {
+        // Null values stay NaN under na_option='keep'.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let ranks = s.rank("average", true, "keep").unwrap();
+        // Position 1 should be NaN; others ranked among 3 strings:
+        // a=1, b=2, c=3 → input ['c', NaN, 'a', 'b'] gets [3, NaN, 1, 2].
+        let vals = ranks.column().values();
+        assert!(matches!(vals[0], Scalar::Float64(v) if v == 3.0));
+        assert!(matches!(vals[1], Scalar::Null(_) | Scalar::Float64(_)));
+        // Null-NaN handling: rank_numeric_positions emits Null for NaN
+        // input under 'keep'.
+        if let Scalar::Float64(v) = vals[1] {
+            assert!(v.is_nan());
+        }
+        assert!(matches!(vals[2], Scalar::Float64(v) if v == 1.0));
+        assert!(matches!(vals[3], Scalar::Float64(v) if v == 2.0));
+    }
+
+    #[test]
+    fn series_rank_int64_regression_guard() {
+        // Numeric path must remain unchanged.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let ranks = s.rank("average", true, "keep").unwrap();
+        assert_eq!(
+            ranks.column().values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ]
+        );
     }
 
     #[test]

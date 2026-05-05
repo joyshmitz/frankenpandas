@@ -7699,14 +7699,34 @@ impl Series {
     /// - span: Specify decay in terms of span. `alpha = 2 / (span + 1)`.
     /// - alpha: Specify smoothing factor directly, 0 < alpha <= 1.
     pub fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> Ewm<'_> {
-        let a = if let Some(s) = span {
-            2.0 / (s + 1.0)
-        } else {
-            alpha.unwrap_or(2.0 / 11.0)
+        // Per br-frankenpandas-d895b: pandas validates that exactly one of
+        // {span, alpha} is given, plus span >= 1 and 0 < alpha <= 1. The
+        // previous silent fallback alpha = 2.0/11.0 papered over user
+        // error. Validate eagerly here and store the result in the Ewm
+        // struct; methods propagate via `?`.
+        let validated_alpha: Result<f64, String> = match (span, alpha) {
+            (Some(_), Some(_)) => {
+                Err("ewm: pass exactly one of span or alpha, not both".to_owned())
+            }
+            (None, None) => Err("ewm: must specify one of span or alpha".to_owned()),
+            (Some(s), None) => {
+                if !(s >= 1.0) {
+                    Err(format!("ewm: span must satisfy: span >= 1, got {s}"))
+                } else {
+                    Ok(2.0 / (s + 1.0))
+                }
+            }
+            (None, Some(a)) => {
+                if !(a > 0.0 && a <= 1.0) {
+                    Err(format!("ewm: alpha must satisfy: 0 < alpha <= 1, got {a}"))
+                } else {
+                    Ok(a)
+                }
+            }
         };
         Ewm {
             series: self,
-            alpha: a,
+            alpha: validated_alpha,
         }
     }
 
@@ -9593,7 +9613,13 @@ impl Expanding<'_> {
 /// `y_t = alpha * x_t + (1 - alpha) * y_{t-1}`
 pub struct Ewm<'a> {
     series: &'a Series,
-    alpha: f64,
+    // Per br-frankenpandas-d895b: stores either the validated alpha or
+    // the validation error message. Validation is deferred to method
+    // invocation so the `let ewm = s.ewm(...)` factory doesn't itself
+    // need to return Result. Stored as Result<f64, String> (not
+    // FrameError) because FrameError doesn't impl Clone, and methods
+    // need to consult the validation result repeatedly.
+    alpha: Result<f64, String>,
 }
 
 impl Ewm<'_> {
@@ -9603,7 +9629,10 @@ impl Ewm<'_> {
     pub fn mean(&self) -> Result<Series, FrameError> {
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
-        let alpha = self.alpha;
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
         let one_minus_alpha = 1.0 - alpha;
 
         let mut ewm_old = f64::NAN;
@@ -9640,7 +9669,11 @@ impl Ewm<'_> {
     pub fn sum(&self) -> Result<Series, FrameError> {
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
-        let one_minus_alpha = 1.0 - self.alpha;
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        let one_minus_alpha = 1.0 - alpha;
 
         let mut ewm_sum = 0.0_f64;
         let mut nobs = 0_usize;
@@ -9685,7 +9718,10 @@ impl Ewm<'_> {
         let b_vals = other.column().values();
         let mut out = Vec::with_capacity(a_vals.len());
 
-        let alpha = self.alpha;
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
         let mut mean_x = 0.0_f64;
         let mut mean_y = 0.0_f64;
         let mut cov_xy = 0.0_f64;
@@ -9751,7 +9787,10 @@ impl Ewm<'_> {
         let b_vals = other.column().values();
         let mut out = Vec::with_capacity(a_vals.len());
 
-        let alpha = self.alpha;
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
         let one_minus_alpha = 1.0 - alpha;
         let mut mean_x = 0.0_f64;
         let mut mean_y = 0.0_f64;
@@ -9845,7 +9884,10 @@ impl Ewm<'_> {
     pub fn var(&self) -> Result<Series, FrameError> {
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
-        let alpha = self.alpha;
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
         let one_minus_alpha = 1.0 - alpha;
 
         let mut ewm_mean = f64::NAN;
@@ -9947,12 +9989,18 @@ impl Ewm<'_> {
     /// incremental `update(value)` calls without re-scanning the input
     /// each time. Per br-frankenpandas-mvynk.
     #[must_use]
-    pub fn online(&self) -> OnlineEwm {
-        OnlineEwm {
-            alpha: self.alpha,
+    pub fn online(&self) -> Result<OnlineEwm, FrameError> {
+        // Per br-frankenpandas-d895b: propagate the validation error
+        // when ewm() inputs were invalid.
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        Ok(OnlineEwm {
+            alpha,
             ewm: f64::NAN,
             nobs: 0,
-        }
+        })
     }
 
     /// Frozenset-style label set of columns excluded from this window.
@@ -72077,7 +72125,7 @@ mod tests {
     fn ewm_online_streams_match_eager_mean() {
         let s = mvynk_series();
         let eager = s.ewm(None, Some(0.5)).mean().unwrap();
-        let mut online = s.ewm(None, Some(0.5)).online();
+        let mut online = s.ewm(None, Some(0.5)).online().unwrap();
         let mut produced = Vec::new();
         for v in s.column().values() {
             let f = match v {
@@ -72112,7 +72160,7 @@ mod tests {
 
     #[test]
     fn ewm_online_skips_nan_inputs() {
-        let mut online = mvynk_series().ewm(None, Some(0.5)).online();
+        let mut online = mvynk_series().ewm(None, Some(0.5)).online().unwrap();
         // First non-NaN seeds the mean.
         assert_eq!(online.update(10.0).unwrap(), 10.0);
         // NaN doesn't advance.
@@ -72128,7 +72176,7 @@ mod tests {
 
     #[test]
     fn ewm_online_returns_none_before_first_observation() {
-        let mut online = mvynk_series().ewm(None, Some(0.5)).online();
+        let mut online = mvynk_series().ewm(None, Some(0.5)).online().unwrap();
         assert!(online.update(f64::NAN).is_none());
         assert!(online.current().is_none());
         assert_eq!(online.nobs(), 0);
@@ -73192,6 +73240,103 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_ewm_no_args_errors() {
+        // Per br-frankenpandas-d895b: pandas ValueError when neither span
+        // nor alpha is given.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let err = s.ewm(None, None).mean().unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("must specify one of span or alpha")));
+    }
+
+    #[test]
+    fn series_ewm_both_args_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let err = s.ewm(Some(3.0), Some(0.5)).mean().unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("not both")));
+    }
+
+    #[test]
+    fn series_ewm_span_below_one_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let err = s.ewm(Some(0.5), None).mean().unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("span >= 1")));
+        let err_zero = s.ewm(Some(0.0), None).mean().unwrap_err();
+        assert!(matches!(&err_zero,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("span >= 1")));
+    }
+
+    #[test]
+    fn series_ewm_alpha_out_of_range_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        // alpha must satisfy: 0 < alpha <= 1
+        let err_zero = s.ewm(None, Some(0.0)).mean().unwrap_err();
+        assert!(matches!(&err_zero,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("alpha")));
+        let err_neg = s.ewm(None, Some(-0.5)).mean().unwrap_err();
+        assert!(matches!(&err_neg,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("alpha")));
+        let err_above = s.ewm(None, Some(1.5)).mean().unwrap_err();
+        assert!(matches!(&err_above,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_ewm_alpha_at_one_is_valid_regression_guard() {
+        // alpha = 1.0 is the max valid value (matches pandas).
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        // Should not error.
+        let result = s.ewm(None, Some(1.0)).mean().unwrap();
+        // alpha=1 → output equals input (no smoothing).
+        let vals = result.column().values();
+        assert!(matches!(vals[0], Scalar::Float64(v) if v == 1.0));
+        assert!(matches!(vals[1], Scalar::Float64(v) if v == 2.0));
+        assert!(matches!(vals[2], Scalar::Float64(v) if v == 3.0));
     }
 
     #[test]

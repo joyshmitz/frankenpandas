@@ -26669,6 +26669,11 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.nunique(dropna=...)`.
     pub fn nunique_with_dropna(&self, dropna: bool) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-6ce89: per-column HashMap-based dedup
+        // (O(n) per column). Each column is homogeneous in dtype
+        // (Column::new validation), so ScalarKey equivalence matches
+        // grouped_scalar_eq for in-column pairs. The cross-dtype helper
+        // distinct_values is still used by DataFrame::nunique_axis1.
         let labels: Vec<IndexLabel> = self
             .column_order
             .iter()
@@ -26679,7 +26684,21 @@ impl DataFrame {
             .iter()
             .map(|n| {
                 let col = &self.columns[n];
-                Scalar::Int64(distinct_values(col.values(), dropna).len() as i64)
+                let mut seen: HashMap<ScalarKey<'_>, ()> = HashMap::new();
+                let mut missing_seen = false;
+                for v in col.values() {
+                    if v.is_missing() {
+                        if dropna {
+                            continue;
+                        }
+                        missing_seen = true;
+                        continue;
+                    }
+                    if let Some(key) = scalar_key_skip_missing(v) {
+                        seen.insert(key, ());
+                    }
+                }
+                Scalar::Int64((seen.len() + usize::from(missing_seen)) as i64)
             })
             .collect();
         Series::from_values("nunique".to_string(), labels, values)
@@ -73155,6 +73174,72 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn dataframe_nunique_uses_o_n_hashmap_per_column() {
+        // Per br-frankenpandas-6ce89: regression guard for the O(n²) →
+        // O(n) per-column fix. 5K rows × 3 cols, each column dtype
+        // homogeneous, ~500 unique values each. Old impl: ~12.5M
+        // comparisons per col × 3 = 37.5M. New: ~15K hash ops.
+        let n: i64 = 5_000;
+        let mut cols = BTreeMap::new();
+        let int_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i % 500)).collect();
+        let float_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64((i % 500) as f64)).collect();
+        let utf8_vals: Vec<Scalar> = (0..n)
+            .map(|i| Scalar::Utf8(format!("v{}", i % 500)))
+            .collect();
+        cols.insert("ints".to_owned(), Column::from_values(int_vals).unwrap());
+        cols.insert(
+            "floats".to_owned(),
+            Column::from_values(float_vals).unwrap(),
+        );
+        cols.insert(
+            "strings".to_owned(),
+            Column::from_values(utf8_vals).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..n).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["ints".to_owned(), "floats".to_owned(), "strings".to_owned()],
+        )
+        .unwrap();
+        let result = df.nunique().unwrap();
+        // Each column has 500 unique values.
+        assert_eq!(result.len(), 3);
+        for v in result.column().values() {
+            assert_eq!(*v, Scalar::Int64(500));
+        }
+    }
+
+    #[test]
+    fn dataframe_nunique_with_nulls_dropna_false() {
+        // dropna=false: null values count as one bucket per column.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "x".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new((0..5_i64).map(IndexLabel::Int64).collect()),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .unwrap();
+        let result = df.nunique_with_dropna(false).unwrap();
+        // Distinct: {1, 2, Null} = 3 buckets.
+        assert_eq!(result.column().values()[0], Scalar::Int64(3));
+
+        let result_dropna = df.nunique_with_dropna(true).unwrap();
+        // Distinct non-null: {1, 2} = 2.
+        assert_eq!(result_dropna.column().values()[0], Scalar::Int64(2));
     }
 
     #[test]

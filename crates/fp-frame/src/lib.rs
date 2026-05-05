@@ -5140,6 +5140,19 @@ impl Series {
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
         }
+        // Per br-frankenpandas-4e050: pandas cumsum on Utf8 concatenates
+        // strings cumulatively. Sister to cummin/cummax Utf8 fix in c4898.
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+            let mut acc = String::new();
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Utf8(s) = value {
+                    acc.push_str(s);
+                    out.push(Scalar::Utf8(acc.clone()));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
 
         let mut acc = 0.0_f64;
         let mut out = Vec::with_capacity(self.len());
@@ -73094,6 +73107,87 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_cumsum_utf8_concatenates_strings() {
+        // Per br-frankenpandas-4e050: pandas cumsum on Utf8 concatenates
+        // cumulatively. Was previously erroring on to_f64.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cumsum().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("ab".into()),
+                Scalar::Utf8("abc".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_cumsum_utf8_handles_empty_strings() {
+        // Empty string concatenation: ['', 'b', 'c'] → ['', 'b', 'bc'].
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cumsum().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("bc".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_cumsum_utf8_single_element() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("hello".into())])
+            .unwrap();
+        let out = s.cumsum().unwrap();
+        assert_eq!(out.column().values(), &[Scalar::Utf8("hello".into())]);
+    }
+
+    #[test]
+    fn series_cumsum_utf8_realistic_words() {
+        // Pandas-canonical example with multi-char strings.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Utf8(" ".into()),
+                Scalar::Utf8("world".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cumsum().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("hello".into()),
+                Scalar::Utf8("hello ".into()),
+                Scalar::Utf8("hello world".into()),
+            ]
+        );
     }
 
     #[test]

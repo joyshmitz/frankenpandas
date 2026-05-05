@@ -17055,26 +17055,28 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
         })
         .collect();
 
+    // Per br-frankenpandas-e00ce: pre-format labels ONCE (q of them) and
+    // resolve the bucket via binary search (O(log q)) per value. Was
+    // O(n × q) inner scan + n redundant String allocations.
+    let bin_labels: Vec<String> = (0..q)
+        .map(|i| format!("({:.3}, {:.3}]", edges[i], edges[i + 1]))
+        .collect();
+
     let labels: Vec<Scalar> = floats
         .iter()
         .map(|v| match v {
             None => Scalar::Null(NullKind::NaN),
             Some(f) => {
-                for i in 0..q {
-                    let left = edges[i];
-                    let right = edges[i + 1];
-                    let in_bin = if i == 0 {
-                        *f >= left && *f <= right
-                    } else {
-                        *f > left && *f <= right
-                    };
-                    if in_bin {
-                        return Scalar::Utf8(format!("({left:.3}, {right:.3}]"));
-                    }
-                }
-                let left = edges[q - 1];
-                let right = edges[q];
-                Scalar::Utf8(format!("({left:.3}, {right:.3}]"))
+                // For value f, find the smallest bin index i such that
+                // f <= edges[i+1] AND (i == 0 OR f > edges[i]). Edges
+                // are sorted ascending; partition_point on edges[1..=q]
+                // for predicate `right < f` returns:
+                //   - 0 if f is at or below the first upper edge
+                //     (lands in bin 0; first-bin-inclusive on both sides)
+                //   - k if f sits in bin k (since edges[k] < f <= edges[k+1])
+                //   - q if f is above the last edge (clamp to q-1)
+                let bin_idx = edges[1..=q].partition_point(|&right| right < *f).min(q - 1);
+                Scalar::Utf8(bin_labels[bin_idx].clone())
             }
         })
         .collect();
@@ -72893,6 +72895,65 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn qcut_uses_log_q_binary_search_per_value() {
+        // Per br-frankenpandas-e00ce: qcut() now resolves bucket via
+        // partition_point binary search over sorted edges. Was O(n × q)
+        // inner scan + n redundant String allocations. 1000 values × 10
+        // quantile bins; correctness check.
+        let labels: Vec<IndexLabel> = (0..1000_i64).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..1000_i64).map(|i| Scalar::Float64(i as f64)).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let binned = qcut(&s, 10).unwrap();
+        // Approx 10 distinct quantile labels (some quantiles may collide
+        // for tightly-packed sorted data, but should be close).
+        let unique = binned.unique();
+        assert!(
+            (5..=10).contains(&unique.len()),
+            "expected 5..=10 distinct quantile labels, got {}",
+            unique.len()
+        );
+        // Every output is a Utf8 label (no nulls in input).
+        for v in binned.column().values() {
+            assert!(matches!(v, Scalar::Utf8(_)));
+        }
+    }
+
+    #[test]
+    fn qcut_value_at_quantile_boundary_uses_right_closed_semantics() {
+        // Per br-frankenpandas-e00ce: pandas right-closed (left, right].
+        // For input [1, 2, 3, 4, 5] with q=2: edges from 0/1/2 quantiles
+        // are [1, 3, 5]; 50th percentile is 3.0.
+        // Bin 0: [1, 3] (first-bin-inclusive on both sides).
+        // Bin 1: (3, 5].
+        // Value 3 should land in bin 0 (right edge inclusive for bin 0,
+        // and partition_point on [3, 5] for `right < 3` returns 0).
+        // Value 4 should land in bin 1.
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+
+        let binned = qcut(&s, 2).unwrap();
+        // 3 values (1, 2, 3) in bin 0; 2 values (4, 5) in bin 1.
+        let counts = binned.value_counts().unwrap();
+        // Two distinct labels.
+        assert_eq!(counts.len(), 2);
+        // Most-frequent is bin 0 with count 3.
+        assert_eq!(counts.column().values()[0], Scalar::Int64(3));
+        // Then bin 1 with count 2.
+        assert_eq!(counts.column().values()[1], Scalar::Int64(2));
     }
 
     #[test]

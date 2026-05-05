@@ -3887,17 +3887,23 @@ impl Series {
     /// Matches `pd.Series.is_monotonic_increasing`.
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        // Per br-frankenpandas-526a2: previously used to_f64() which fails
+        // on Utf8/Bool, returning false even for sorted strings. Sibling
+        // is_monotonic_decreasing already uses semantic_le/semantic_ge
+        // which work on all Scalar variants — adopt the same all-dtype
+        // logic here for consistency. Missing values still bail out as
+        // false (matching is_monotonic_decreasing's behavior).
         let vals = self.column.values();
         if vals.len() <= 1 {
             return true;
         }
         for pair in vals.windows(2) {
-            if pair[0].is_missing() || pair[1].is_missing() {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.is_missing() || b.is_missing() {
                 return false;
             }
-            match (pair[0].to_f64(), pair[1].to_f64()) {
-                (Ok(a), Ok(b)) if a <= b => {}
-                _ => return false,
+            if !a.semantic_le(b) {
+                return false;
             }
         }
         true
@@ -72902,6 +72908,104 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_is_monotonic_increasing_works_on_utf8() {
+        // Per br-frankenpandas-526a2: previously returned false for sorted
+        // Utf8 because to_f64 failed on strings. Now uses semantic_le.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert!(s.is_monotonic_increasing());
+    }
+
+    #[test]
+    fn series_is_monotonic_increasing_works_on_bool() {
+        // Bool ordering: false < true (per derived Ord). [false, true]
+        // should be increasing.
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert!(s.is_monotonic_increasing());
+
+        // [true, false] is NOT increasing.
+        let s2 = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert!(!s2.is_monotonic_increasing());
+    }
+
+    #[test]
+    fn series_is_monotonic_increasing_int64_regression_guard() {
+        // Regression guard: numeric path (was already correct) must
+        // remain green after the semantic_le refactor.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        // Non-strict: equal adjacent values still count as monotonic.
+        assert!(s.is_monotonic_increasing());
+
+        let s_unsorted = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert!(!s_unsorted.is_monotonic_increasing());
+    }
+
+    #[test]
+    fn series_is_monotonic_increasing_unsorted_utf8_returns_false() {
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        assert!(!s.is_monotonic_increasing());
+    }
+
+    #[test]
+    fn series_is_monotonic_increasing_with_missing_returns_false() {
+        // Sister behavior to is_monotonic_decreasing: any missing value
+        // makes the result false (matches the existing _decreasing impl).
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        assert!(!s.is_monotonic_increasing());
     }
 
     #[test]

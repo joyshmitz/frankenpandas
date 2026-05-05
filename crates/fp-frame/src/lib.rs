@@ -4427,6 +4427,29 @@ impl Series {
                 out.push(val.clone());
                 continue;
             }
+            // Per br-frankenpandas-98b6e: clip Utf8 lexicographically when
+            // both input and bound are Utf8. Sister to min/max/cummin/cummax
+            // Utf8 fixes (83c2a/c4898). Falls through to the numeric path
+            // for non-Utf8 input.
+            if let Scalar::Utf8(s) = val {
+                let mut clipped: &str = s.as_str();
+                if let Some(lo) = lower.as_ref()
+                    && i < lo.len()
+                    && let Scalar::Utf8(lo_s) = &lo.column.values()[i]
+                    && clipped < lo_s.as_str()
+                {
+                    clipped = lo_s.as_str();
+                }
+                if let Some(hi) = upper.as_ref()
+                    && i < hi.len()
+                    && let Scalar::Utf8(hi_s) = &hi.column.values()[i]
+                    && clipped > hi_s.as_str()
+                {
+                    clipped = hi_s.as_str();
+                }
+                out.push(Scalar::Utf8(clipped.to_string()));
+                continue;
+            }
             let Ok(v) = val.to_f64() else {
                 out.push(val.clone());
                 continue;
@@ -73459,6 +73482,165 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_clip_with_series_utf8_lower_clips_lexicographically() {
+        // Per br-frankenpandas-98b6e: clip_with_series on Utf8 was a
+        // silent no-op; now clips strings lexicographically.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("banana".into()),
+            ],
+        )
+        .unwrap();
+        let lower = Series::from_values(
+            "b",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.clip_with_series(Some(&lower), None).unwrap();
+        // "cat" stays (>= "b"); "apple" clips to "b"; "banana" stays.
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("banana".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_utf8_upper_clips_lexicographically() {
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("zebra".into()),
+                Scalar::Utf8("banana".into()),
+            ],
+        )
+        .unwrap();
+        let upper = Series::from_values(
+            "m",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("m".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.clip_with_series(None, Some(&upper)).unwrap();
+        // "apple" stays (<= "m"); "zebra" clips to "m"; "banana" stays.
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("banana".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_utf8_both_bounds_clips() {
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("zebra".into()),
+                Scalar::Utf8("dog".into()),
+            ],
+        )
+        .unwrap();
+        let lower = Series::from_values(
+            "b",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let upper = Series::from_values(
+            "m",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("m".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.clip_with_series(Some(&lower), Some(&upper)).unwrap();
+        // "apple" clips to "b" (lower); "zebra" clips to "m" (upper);
+        // "dog" stays (b <= dog <= m).
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("m".into()),
+                Scalar::Utf8("dog".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_numeric_regression_guard() {
+        // Regression guard: numeric path unchanged.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let lower = Series::from_values(
+            "b",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let upper = Series::from_values(
+            "m",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
+        let out = s.clip_with_series(Some(&lower), Some(&upper)).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(5.0),
+            ]
+        );
     }
 
     #[test]

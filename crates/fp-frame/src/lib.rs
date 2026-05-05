@@ -497,6 +497,14 @@ fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
 }
 
 fn distinct_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
+    // NB: this helper supports CROSS-DTYPE comparison (used by
+    // DataFrame::nunique_axis_with_dropna with row-wise values pulled
+    // from multiple columns of different dtypes), so it relies on
+    // grouped_scalar_eq's pandas-style numeric equivalence
+    // (Bool(true) ≡ Int64(1) ≡ Float64(1.0)). ScalarKey-based hashing
+    // can NOT replace this because ScalarKey distinguishes Bool/Int/Float
+    // by variant. Single-Series callers should use a HashMap inline
+    // (see Series::nunique_with_dropna, br-frankenpandas-15f51).
     let mut distinct = Vec::new();
     for value in values {
         if dropna && value.is_missing() {
@@ -3804,7 +3812,13 @@ impl Series {
     /// distinct category.
     #[must_use]
     pub fn unique(&self) -> Vec<Scalar> {
-        let mut seen = Vec::<Scalar>::new();
+        // Per br-frankenpandas-15f51: O(n) HashMap-driven dedup. Sister fix
+        // to value_counts (br-frankenpandas-7c7d0). ScalarKey-based set is
+        // a drop-in for the linear-scan iter().any(semantic_eq) — within
+        // a single Column the values are homogeneous so ScalarKey
+        // equivalence matches semantic_eq for in-column pairs.
+        let mut seen: Vec<Scalar> = Vec::new();
+        let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
         let mut missing_seen = false;
         for value in self.column.values() {
             if value.is_missing() {
@@ -3814,7 +3828,10 @@ impl Series {
                 }
                 continue;
             }
-            if !seen.iter().any(|existing| existing.semantic_eq(value)) {
+            let Some(key) = scalar_key_skip_missing(value) else {
+                continue;
+            };
+            if seen_keys.insert(key, ()).is_none() {
                 seen.push(value.clone());
             }
         }
@@ -3834,7 +3851,26 @@ impl Series {
     /// Matches `pd.Series.nunique(dropna=...)`.
     #[must_use]
     pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
-        distinct_values(self.column.values(), dropna).len()
+        // Per br-frankenpandas-15f51: O(n) HashMap-driven dedup. Within a
+        // single Column values are homogeneous (Column::new validation), so
+        // ScalarKey equivalence matches grouped_scalar_eq for in-column
+        // pairs. The cross-dtype case (DataFrame::nunique_axis_with_dropna)
+        // still uses the linear-scan distinct_values helper.
+        let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
+        let mut missing_seen = false;
+        for value in self.column.values() {
+            if value.is_missing() {
+                if dropna {
+                    continue;
+                }
+                missing_seen = true;
+                continue;
+            }
+            if let Some(key) = scalar_key_skip_missing(value) {
+                seen_keys.insert(key, ());
+            }
+        }
+        seen_keys.len() + usize::from(missing_seen)
     }
 
     /// Map values using a dict-like mapping. Unmapped values become NaN.
@@ -72634,6 +72670,96 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_unique_handles_many_unique_values_fast() {
+        // Per br-frankenpandas-15f51: O(n²) → O(n) regression guard.
+        // 5K distinct Int64 values; old impl would do ~12.5M comparisons.
+        let n: i64 = 5_000;
+        let labels: Vec<IndexLabel> = (0..n).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n).map(Scalar::Int64).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let unique = s.unique();
+        assert_eq!(unique.len() as i64, n);
+        // First-occurrence ordering preserved (sequential 0..n).
+        for (i, v) in unique.iter().enumerate() {
+            assert_eq!(*v, Scalar::Int64(i as i64));
+        }
+    }
+
+    #[test]
+    fn series_unique_preserves_first_seen_order_after_o_n_fix() {
+        // Critical contract: unique() returns values in first-seen order.
+        // Input: [3, 1, 2, 1, 3, 4]; expected: [3, 1, 2, 4].
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let unique = s.unique();
+        assert_eq!(
+            unique,
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_unique_collapses_nan_into_one_bucket() {
+        // NaN/Null are emitted as a single bucket via the missing_seen
+        // sentinel — same as the prior implementation.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let unique = s.unique();
+        // Expected: [1.0, <one missing bucket>] — NaN and Null collapse.
+        assert_eq!(unique.len(), 2);
+        assert_eq!(unique[0], Scalar::Float64(1.0));
+        assert!(unique[1].is_missing());
+    }
+
+    #[test]
+    fn series_nunique_matches_unique_len() {
+        // Consistency: nunique() (with dropna=true) should equal
+        // unique().iter().filter(|v| !v.is_missing()).count().
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(7),
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(7),
+            ],
+        )
+        .unwrap();
+        // Distinct non-null: {7, 3} → 2.
+        assert_eq!(s.nunique(), 2);
+        // With dropna=false, count includes the null bucket: 3.
+        assert_eq!(s.nunique_with_dropna(false), 3);
     }
 
     #[test]

@@ -5184,6 +5184,25 @@ impl Series {
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
         }
+        // Per br-frankenpandas-c4898: pandas supports cummin on Utf8
+        // (lexicographic). Was previously falling through to to_f64
+        // which errors. Match pandas.
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+            let mut acc: Option<&str> = None;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Utf8(s) = value {
+                    let s_ref = s.as_str();
+                    acc = Some(match acc {
+                        None => s_ref,
+                        Some(a) if a < s_ref => a,
+                        _ => s_ref,
+                    });
+                    out.push(Scalar::Utf8(acc.unwrap().to_string()));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
 
         let mut acc = f64::INFINITY;
         let mut out = Vec::with_capacity(self.len());
@@ -5224,6 +5243,24 @@ impl Series {
                 if let Scalar::Bool(v) = value {
                     acc |= *v;
                     out.push(Scalar::Bool(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+        // Per br-frankenpandas-c4898: pandas supports cummax on Utf8
+        // (lexicographic). Match pandas.
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+            let mut acc: Option<&str> = None;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Utf8(s) = value {
+                    let s_ref = s.as_str();
+                    acc = Some(match acc {
+                        None => s_ref,
+                        Some(a) if a > s_ref => a,
+                        _ => s_ref,
+                    });
+                    out.push(Scalar::Utf8(acc.unwrap().to_string()));
                 }
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
@@ -72955,6 +72992,104 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_cummax_utf8_lexicographic() {
+        // Per br-frankenpandas-c4898: pandas cummax on Utf8 series.
+        // Input: ['b', 'a', 'c'] → ['b', 'b', 'c'] (running max
+        // lexicographically).
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cummax().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_cummin_utf8_lexicographic() {
+        // Input: ['b', 'a', 'c'] → ['b', 'a', 'a'] (running min).
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cummin().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_cummax_utf8_already_sorted_is_noop() {
+        // Sorted input: cummax is identity.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cummax().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_cummin_utf8_descending_is_noop() {
+        // Descending input: cummin is identity.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let out = s.cummin().unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ]
+        );
     }
 
     #[test]

@@ -14768,11 +14768,25 @@ pub struct DatetimeAccessor<'a> {
 }
 
 impl DatetimeAccessor<'_> {
+    /// Per br-frankenpandas-d14250: pandas raises AttributeError when `.dt` is
+    /// called on a non-datetimelike Series. fp-frame stores datetimes as Utf8
+    /// (ISO 8601 strings), so we accept Utf8 and Null (all-missing) and reject
+    /// other dtypes. Previously a silent catch-all returned all-NaN.
+    fn validate_datetime_dtype(&self) -> Result<(), FrameError> {
+        match self.series.dtype() {
+            DType::Utf8 | DType::Null => Ok(()),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "Can only use .dt accessor with datetimelike values, got {other:?}"
+            ))),
+        }
+    }
+
     /// Helper: apply a datetime extraction function to each value.
     fn extract_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
+        self.validate_datetime_dtype()?;
         let vals = self.series.column().values();
         let out: Vec<Scalar> = vals
             .iter()
@@ -14790,6 +14804,7 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(&str) -> Result<Scalar, FrameError>,
     {
+        self.validate_datetime_dtype()?;
         let vals = self.series.column().values();
         let out: Vec<Scalar> = vals
             .iter()
@@ -15773,6 +15788,8 @@ impl DatetimeAccessor<'_> {
         tz: Option<&str>,
         options: TzLocalizeOptions,
     ) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-d14250: gate on dtype.
+        self.validate_datetime_dtype()?;
         match tz {
             Some(tz) => {
                 let tz_spec = parse_tz_spec(tz)?;
@@ -76960,5 +76977,97 @@ mod test_str_find_char_position_02ae2b {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test_dt_dtype_gate_d14250 {
+    use super::*;
+
+    fn idx(n: usize) -> Vec<IndexLabel> {
+        (0..n).map(|i| IndexLabel::Int64(i as i64)).collect()
+    }
+
+    #[test]
+    fn dt_year_on_float64_series_errors() {
+        let s = Series::from_values(
+            "x",
+            idx(2),
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let err = s.dt().year().expect_err("expected error on Float64");
+        match err {
+            FrameError::CompatibilityRejected(m) => {
+                assert!(
+                    m.contains("Can only use .dt accessor with datetimelike values"),
+                    "wrong message: {m}"
+                );
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dt_month_on_int64_series_errors() {
+        let s = Series::from_values("x", idx(2), vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
+        assert!(s.dt().month().is_err());
+    }
+
+    #[test]
+    fn dt_day_on_bool_series_errors() {
+        let s = Series::from_values(
+            "x",
+            idx(2),
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert!(s.dt().day().is_err());
+    }
+
+    #[test]
+    fn dt_year_on_utf8_series_works() {
+        let s = Series::from_values(
+            "x",
+            idx(2),
+            vec![
+                Scalar::Utf8("2024-01-15".to_string()),
+                Scalar::Utf8("2025-06-30".to_string()),
+            ],
+        )
+        .unwrap();
+        let out = s.dt().year().unwrap();
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(2024));
+        assert_eq!(out.values().get(1).unwrap(), &Scalar::Int64(2025));
+    }
+
+    #[test]
+    fn dt_year_on_all_null_series_works() {
+        // All-Null is valid (extracts NaN for each). Only typed-non-Utf8 should error.
+        let s = Series::from_values(
+            "x",
+            idx(2),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let out = s.dt().year().unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn dt_strftime_on_int64_errors() {
+        // strftime uses extract_component — also gated.
+        let s = Series::from_values("x", idx(1), vec![Scalar::Int64(2024)]).unwrap();
+        assert!(s.dt().strftime("%Y").is_err());
+    }
+
+    #[test]
+    fn dt_tz_localize_on_float64_errors() {
+        // tz_localize_with_options has its own gate (doesn't use extract_component).
+        let s = Series::from_values("x", idx(1), vec![Scalar::Float64(1.0)]).unwrap();
+        assert!(s.dt().tz_localize(Some("UTC")).is_err());
     }
 }

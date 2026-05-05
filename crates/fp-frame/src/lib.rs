@@ -29428,10 +29428,13 @@ impl DataFrame {
     /// Matches `pd.DataFrame.append(other)` (deprecated but common).
     /// Uses outer join on columns, filling missing with NaN.
     pub fn append(&self, other: &Self) -> Result<Self, FrameError> {
-        // Union of column names, preserving order (self first, then new from other)
+        // Per br-frankenpandas-db6ec: union via HashSet membership; was
+        // O(M × N) Vec::contains scan inside the loop. Insertion-ordered
+        // Vec preserves the (self first, then new from other) ordering.
         let mut all_cols: Vec<String> = self.column_order.clone();
+        let mut seen: HashSet<&str> = self.column_order.iter().map(String::as_str).collect();
         for name in &other.column_order {
-            if !all_cols.contains(name) {
+            if seen.insert(name.as_str()) {
                 all_cols.push(name.clone());
             }
         }
@@ -73482,6 +73485,141 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn dataframe_append_disjoint_columns_unions_in_self_first_order() {
+        // Per br-frankenpandas-db6ec: regression guard for the union
+        // ordering after the HashSet-based fix.
+        let mut a_cols = BTreeMap::new();
+        a_cols.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1)]).unwrap(),
+        );
+        a_cols.insert(
+            "y".to_owned(),
+            Column::from_values(vec![Scalar::Int64(2)]).unwrap(),
+        );
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            a_cols,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+
+        let mut b_cols = BTreeMap::new();
+        b_cols.insert(
+            "z".to_owned(),
+            Column::from_values(vec![Scalar::Int64(3)]).unwrap(),
+        );
+        b_cols.insert(
+            "w".to_owned(),
+            Column::from_values(vec![Scalar::Int64(4)]).unwrap(),
+        );
+        let b = DataFrame::new_with_column_order(
+            Index::new(vec![1_i64.into()]),
+            b_cols,
+            vec!["z".to_owned(), "w".to_owned()],
+        )
+        .unwrap();
+
+        let appended = a.append(&b).unwrap();
+        // Self columns first, then new from other in their original order.
+        assert_eq!(
+            appended.column_order,
+            vec![
+                "x".to_owned(),
+                "y".to_owned(),
+                "z".to_owned(),
+                "w".to_owned(),
+            ]
+        );
+        assert_eq!(appended.len(), 2);
+    }
+
+    #[test]
+    fn dataframe_append_overlapping_columns_dedupes() {
+        // Same columns + one new: union should NOT duplicate.
+        let mut a_cols = BTreeMap::new();
+        a_cols.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1)]).unwrap(),
+        );
+        a_cols.insert(
+            "y".to_owned(),
+            Column::from_values(vec![Scalar::Int64(2)]).unwrap(),
+        );
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            a_cols,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+
+        let mut b_cols = BTreeMap::new();
+        b_cols.insert(
+            "y".to_owned(),
+            Column::from_values(vec![Scalar::Int64(20)]).unwrap(),
+        );
+        b_cols.insert(
+            "z".to_owned(),
+            Column::from_values(vec![Scalar::Int64(30)]).unwrap(),
+        );
+        let b = DataFrame::new_with_column_order(
+            Index::new(vec![1_i64.into()]),
+            b_cols,
+            vec!["y".to_owned(), "z".to_owned()],
+        )
+        .unwrap();
+
+        let appended = a.append(&b).unwrap();
+        // Expected union: [x, y, z] — y NOT duplicated.
+        assert_eq!(
+            appended.column_order,
+            vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]
+        );
+    }
+
+    #[test]
+    fn dataframe_append_wide_scaling_correctness() {
+        // Per br-frankenpandas-db6ec: 50 cols × 50 rows + 50 new cols.
+        // Old impl: 50 * 50 = 2500 string compares per append. New: 100
+        // hash ops. Asserts correctness; perf scaling implied by size.
+        let n_cols = 50;
+        let mut a_cols = BTreeMap::new();
+        let mut a_order = Vec::new();
+        for i in 0..n_cols {
+            let name = format!("a{i}");
+            a_cols.insert(
+                name.clone(),
+                Column::from_values(vec![Scalar::Int64(i as i64)]).unwrap(),
+            );
+            a_order.push(name);
+        }
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            a_cols,
+            a_order.clone(),
+        )
+        .unwrap();
+
+        let mut b_cols = BTreeMap::new();
+        let mut b_order = Vec::new();
+        for i in 0..n_cols {
+            let name = format!("b{i}");
+            b_cols.insert(
+                name.clone(),
+                Column::from_values(vec![Scalar::Int64(i as i64)]).unwrap(),
+            );
+            b_order.push(name);
+        }
+        let b = DataFrame::new_with_column_order(Index::new(vec![1_i64.into()]), b_cols, b_order)
+            .unwrap();
+
+        let appended = a.append(&b).unwrap();
+        // 50 + 50 = 100 unique cols; preserved self-first order.
+        assert_eq!(appended.column_order.len(), n_cols * 2);
+        assert_eq!(&appended.column_order[..n_cols], &a_order[..]);
     }
 
     #[test]

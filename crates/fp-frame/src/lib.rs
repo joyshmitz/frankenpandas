@@ -5644,32 +5644,28 @@ impl Series {
     ///
     /// Matches `series.nlargest(n)`. Missing values are excluded.
     pub fn nlargest(&self, n: usize) -> Result<Self, FrameError> {
-        let mut indexed: Vec<(usize, f64)> = self
+        // Per br-frankenpandas-9978d: use Scalar::semantic_cmp instead of
+        // to_f64-based extraction. The old impl silently filtered out
+        // Utf8 values via to_f64.ok().map(...). semantic_cmp works on
+        // all comparable Scalar variants (Int64, Float64, Bool, Utf8,
+        // Timedelta64) and preserves Int64↔Float64 cross-numeric ordering.
+        let mut indexed: Vec<(usize, &Scalar)> = self
             .column
             .values()
             .iter()
             .enumerate()
-            .filter_map(|(i, val)| {
-                if val.is_missing() {
-                    None
-                } else {
-                    val.to_f64().ok().map(|v| (i, v))
-                }
-            })
+            .filter(|(_, val)| !val.is_missing())
             .collect();
 
-        // Sort descending by value, stable by position for ties
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        // Sort descending, stable by position for ties.
+        indexed.sort_by(|a, b| b.1.semantic_cmp(a.1));
         indexed.truncate(n);
 
         let labels: Vec<IndexLabel> = indexed
             .iter()
             .map(|(i, _)| self.index.labels()[*i].clone())
             .collect();
-        let values: Vec<Scalar> = indexed
-            .iter()
-            .map(|(i, _)| self.column.values()[*i].clone())
-            .collect();
+        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
         Self::from_values(self.name.clone(), labels, values)
     }
@@ -5678,32 +5674,26 @@ impl Series {
     ///
     /// Matches `series.nsmallest(n)`. Missing values are excluded.
     pub fn nsmallest(&self, n: usize) -> Result<Self, FrameError> {
-        let mut indexed: Vec<(usize, f64)> = self
+        // Per br-frankenpandas-9978d: see nlargest above. Sister fix to
+        // 7db78 (idxmin/idxmax Utf8). semantic_cmp generalizes the
+        // ordering across all dtypes.
+        let mut indexed: Vec<(usize, &Scalar)> = self
             .column
             .values()
             .iter()
             .enumerate()
-            .filter_map(|(i, val)| {
-                if val.is_missing() {
-                    None
-                } else {
-                    val.to_f64().ok().map(|v| (i, v))
-                }
-            })
+            .filter(|(_, val)| !val.is_missing())
             .collect();
 
-        // Sort ascending by value, stable by position for ties
-        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        // Sort ascending, stable by position for ties.
+        indexed.sort_by(|a, b| a.1.semantic_cmp(b.1));
         indexed.truncate(n);
 
         let labels: Vec<IndexLabel> = indexed
             .iter()
             .map(|(i, _)| self.index.labels()[*i].clone())
             .collect();
-        let values: Vec<Scalar> = indexed
-            .iter()
-            .map(|(i, _)| self.column.values()[*i].clone())
-            .collect();
+        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
         Self::from_values(self.name.clone(), labels, values)
     }
@@ -5748,24 +5738,21 @@ impl Series {
             }
         };
 
-        let mut indexed: Vec<(usize, f64)> = self
+        // Per br-frankenpandas-9978d: use Scalar::semantic_cmp instead of
+        // to_f64 silent-filter; supports Utf8 (and other comparable
+        // dtypes) without dropping values.
+        let mut indexed: Vec<(usize, &Scalar)> = self
             .column
             .values()
             .iter()
             .enumerate()
-            .filter_map(|(i, val)| {
-                if val.is_missing() {
-                    None
-                } else {
-                    val.to_f64().ok().map(|v| (i, v))
-                }
-            })
+            .filter(|(_, val)| !val.is_missing())
             .collect();
 
         if ascending {
-            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            indexed.sort_by(|a, b| a.1.semantic_cmp(b.1));
         } else {
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            indexed.sort_by(|a, b| b.1.semantic_cmp(a.1));
         }
 
         match keep {
@@ -5773,9 +5760,9 @@ impl Series {
                 // Reverse position order for ties
                 indexed.sort_by(|a, b| {
                     let cmp = if ascending {
-                        a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
+                        a.1.semantic_cmp(b.1)
                     } else {
-                        b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+                        b.1.semantic_cmp(a.1)
                     };
                     if cmp == Ordering::Equal {
                         b.0.cmp(&a.0) // last occurrence first
@@ -5790,12 +5777,12 @@ impl Series {
                 if n == 0 {
                     indexed.clear();
                 } else if indexed.len() > n {
-                    let threshold = indexed[n - 1].1;
+                    let threshold = indexed[n - 1].1.clone();
                     indexed.retain(|&(_, v)| {
                         if ascending {
-                            v <= threshold
+                            v.semantic_cmp(&threshold) != Ordering::Greater
                         } else {
-                            v >= threshold
+                            v.semantic_cmp(&threshold) != Ordering::Less
                         }
                     });
                 }
@@ -5810,10 +5797,7 @@ impl Series {
             .iter()
             .map(|(i, _)| self.index.labels()[*i].clone())
             .collect();
-        let values: Vec<Scalar> = indexed
-            .iter()
-            .map(|(i, _)| self.column.values()[*i].clone())
-            .collect();
+        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
         Self::from_values(self.name.clone(), labels, values)
     }
@@ -73078,6 +73062,106 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_nlargest_nsmallest_utf8_lexicographic() {
+        // Per br-frankenpandas-9978d: pandas nlargest/nsmallest on Utf8.
+        // Was previously silently filtering out all Utf8 values via
+        // to_f64.ok().map() — returning empty Series.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("banana".into()),
+            ],
+        )
+        .unwrap();
+
+        let smallest_2 = s.nsmallest(2).unwrap();
+        // Lex-smallest: "apple", "banana"
+        assert_eq!(
+            smallest_2.column().values(),
+            &[Scalar::Utf8("apple".into()), Scalar::Utf8("banana".into()),]
+        );
+
+        let largest_2 = s.nlargest(2).unwrap();
+        // Lex-largest: "cat", "banana"
+        assert_eq!(
+            largest_2.column().values(),
+            &[Scalar::Utf8("cat".into()), Scalar::Utf8("banana".into()),]
+        );
+    }
+
+    #[test]
+    fn series_nlargest_utf8_skips_nulls() {
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("banana".into()),
+            ],
+        )
+        .unwrap();
+        let n3 = s.nlargest(3).unwrap();
+        assert_eq!(n3.len(), 3);
+        // Lex-largest descending: cat, banana, apple
+        assert_eq!(
+            n3.column().values(),
+            &[
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("banana".into()),
+                Scalar::Utf8("apple".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_nlargest_int64_regression_guard() {
+        // Numeric path must remain unchanged (was already correct).
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let n2 = s.nlargest(2).unwrap();
+        assert_eq!(n2.column().values(), &[Scalar::Int64(5), Scalar::Int64(4)]);
+    }
+
+    #[test]
+    fn series_nsmallest_keep_all_utf8() {
+        // Per br-frankenpandas-9978d: 'all' keep also works on Utf8.
+        // Input: ['c','a','b','a'] with n=1, keep='all' should return
+        // both 'a' values (tied for smallest).
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.nsmallest_keep(1, "all").unwrap();
+        // Two 'a' values tied for smallest with keep='all'.
+        assert_eq!(result.len(), 2);
+        for v in result.column().values() {
+            assert_eq!(*v, Scalar::Utf8("a".into()));
+        }
     }
 
     #[test]

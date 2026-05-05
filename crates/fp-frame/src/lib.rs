@@ -505,7 +505,9 @@ fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
 /// Float64-vs-Float64 pairs (1e-14 relative). NaN/Null mapping keys
 /// collapse to ScalarKey::Null(NaN), matching semantic_eq's null
 /// equivalence; that case is hashable and stays on the fast path.
-fn try_build_mapping_index(mapping: &[(Scalar, Scalar)]) -> Option<HashMap<ScalarKey<'_>, &Scalar>> {
+fn try_build_mapping_index(
+    mapping: &[(Scalar, Scalar)],
+) -> Option<HashMap<ScalarKey<'_>, &Scalar>> {
     if mapping
         .iter()
         .any(|(k, _)| matches!(k, Scalar::Float64(v) if !v.is_nan()))
@@ -72823,8 +72825,7 @@ mod tests {
         // equal (relative tolerance 1e-14). With the linear-scan
         // fallback, both should map to the same target.
         let close_to_one = 1.0_f64 + 1e-16;
-        let mapping: Vec<(Scalar, Scalar)> =
-            vec![(Scalar::Float64(1.0), Scalar::Int64(999))];
+        let mapping: Vec<(Scalar, Scalar)> = vec![(Scalar::Float64(1.0), Scalar::Int64(999))];
         let s = Series::from_values(
             "x",
             (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),

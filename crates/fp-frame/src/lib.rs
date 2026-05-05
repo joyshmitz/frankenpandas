@@ -10090,6 +10090,19 @@ pub struct Resample<'a> {
 }
 
 impl Resample<'_> {
+    /// Per br-frankenpandas-7bc60: validate freq is one of the
+    /// supported pandas-style frequency strings. Was silently falling
+    /// back to daily bucketing for any unknown input — pandas raises
+    /// ValueError instead.
+    fn validate(&self) -> Result<(), FrameError> {
+        match self.freq.as_str() {
+            "Y" | "A" | "M" | "D" => Ok(()),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "resample: invalid frequency '{other}'; supported: Y, A, M, D"
+            ))),
+        }
+    }
+
     /// Extract a time bucket key from an index label.
     fn bucket_key(label: &IndexLabel, freq: &str) -> Option<String> {
         let s = match label {
@@ -10144,6 +10157,8 @@ impl Resample<'_> {
     where
         F: Fn(&[Scalar]) -> Scalar,
     {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (order, groups) = self.build_groups();
         let vals = self.series.column().values();
 
@@ -10224,6 +10239,8 @@ impl Resample<'_> {
     where
         F: Fn(&[Scalar]) -> Result<Scalar, FrameError>,
     {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (order, groups) = self.build_groups();
         let vals = self.series.column().values();
 
@@ -10297,6 +10314,8 @@ impl Resample<'_> {
     ///
     /// Matches `series.resample(freq).agg([...])`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (order, _) = self.build_groups();
         let labels: Vec<IndexLabel> = order.into_iter().map(IndexLabel::Utf8).collect();
         let mut result_cols = BTreeMap::new();
@@ -10378,6 +10397,8 @@ impl Resample<'_> {
 
     /// Return the source rows for one resample bucket.
     pub fn get_group(&self, name: &str) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (_order, groups) = self.build_groups();
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
@@ -10461,6 +10482,8 @@ impl Resample<'_> {
 
     /// Open-high-low-close per resample bucket.
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (order, groups) = self.build_groups();
         let vals = self.series.values();
         let mut labels = Vec::with_capacity(order.len());
@@ -10520,6 +10543,8 @@ impl Resample<'_> {
 
     /// Broadcast a named bucket reduction back to the original Series shape.
     pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-7bc60.
+        self.validate()?;
         let (order, groups) = self.build_groups();
         let vals = self.series.values();
         let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
@@ -73249,6 +73274,68 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_resample_invalid_freq_errors() {
+        // Per br-frankenpandas-7bc60: pandas raises ValueError on unknown
+        // freq strings. Was silently falling back to daily bucketing.
+        let s = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("2024-01-01".into())],
+            vec![Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        let err = s.resample("INVALID").mean().unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("invalid frequency 'INVALID'")));
+    }
+
+    #[test]
+    fn series_resample_invalid_freq_errors_for_all_aggs() {
+        // Validation should propagate through every Resample aggregator
+        // that returns Result.
+        let s = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("2024-01-01".into())],
+            vec![Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        // Multi-letter freq codes that pandas supports (W, H, etc.)
+        // are NOT supported in fp-frame yet — they're invalid.
+        assert!(matches!(s.resample("W").sum().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
+        assert!(matches!(s.resample("W").count().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
+        assert!(matches!(s.resample("W").min().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
+        assert!(matches!(s.resample("W").ohlc().unwrap_err(),
+            FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
+    }
+
+    #[test]
+    fn series_resample_supported_freqs_are_valid() {
+        // Regression guard: the four supported freq codes (Y, A, M, D)
+        // must remain valid.
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("2024-01-01".into()),
+                IndexLabel::Utf8("2024-02-01".into()),
+                IndexLabel::Utf8("2024-03-01".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        assert!(s.resample("Y").mean().is_ok());
+        assert!(s.resample("A").mean().is_ok());
+        assert!(s.resample("M").mean().is_ok());
+        assert!(s.resample("D").mean().is_ok());
     }
 
     #[test]

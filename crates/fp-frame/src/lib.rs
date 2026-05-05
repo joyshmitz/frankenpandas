@@ -3570,10 +3570,14 @@ impl Series {
     /// Matches `pd.Series.drop(labels)`. Returns a new Series excluding
     /// the specified index labels.
     pub fn drop(&self, labels: &[IndexLabel]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-0d6f8: HashSet<&IndexLabel> for O(1)
+        // membership; was O(n × |labels|) Vec::contains. IndexLabel
+        // derives Hash + Eq.
+        let drop_set: HashSet<&IndexLabel> = labels.iter().collect();
         let mut new_labels = Vec::new();
         let mut new_values = Vec::new();
         for (i, lbl) in self.index.labels().iter().enumerate() {
-            if !labels.contains(lbl) {
+            if !drop_set.contains(lbl) {
                 new_labels.push(lbl.clone());
                 new_values.push(self.column.values()[i].clone());
             }
@@ -73485,6 +73489,93 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_drop_removes_matching_labels() {
+        // Per br-frankenpandas-0d6f8: O(n × |labels|) → O(n + |labels|)
+        // via HashSet. Correctness regression guard.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let dropped = s.drop(&[20_i64.into(), 40_i64.into()]).unwrap();
+        // Labels [20, 40] removed → [10, 30] with values [1, 3].
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(30)]
+        );
+        assert_eq!(
+            dropped.column().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn series_drop_with_no_matching_labels_is_noop() {
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        // Drop label that isn't in the index — no-op.
+        let dropped = s.drop(&[99_i64.into()]).unwrap();
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn series_drop_preserves_first_occurrence_order() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("d".into()),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let dropped = s
+            .drop(&[IndexLabel::Utf8("b".into()), IndexLabel::Utf8("d".into())])
+            .unwrap();
+        // Remaining labels in original order: ["a", "c"]
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("c".into())]
+        );
+    }
+
+    #[test]
+    fn series_drop_wide_scaling_correctness() {
+        // 5K labels, 500 dropped — old impl: 2.5M comparisons; new: 5K
+        // hash ops + 500 build. Asserts correctness, perf scaling implied.
+        let n: i64 = 5_000;
+        let labels: Vec<IndexLabel> = (0..n).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n).map(Scalar::Int64).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+        // Drop labels 0..500 (every 10th).
+        let drop_labels: Vec<IndexLabel> = (0..n).step_by(10).map(IndexLabel::Int64).collect();
+        let dropped = s.drop(&drop_labels).unwrap();
+        // Expected len: 5000 - 500 = 4500.
+        assert_eq!(dropped.len(), 4500);
     }
 
     #[test]

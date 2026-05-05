@@ -3244,6 +3244,16 @@ impl Series {
     ///
     /// Matches `s.sort_values(ascending=..., na_position='first'|'last')`.
     pub fn sort_values_na(&self, ascending: bool, na_position: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-2ca7d: pandas raises on invalid na_position;
+        // was silently treating any non-"first" value as "last".
+        match na_position {
+            "first" | "last" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sort_values: na_position must be 'first' or 'last', got '{other}'"
+                )));
+            }
+        }
         let na_first = na_position == "first";
         let mut order = (0..self.len()).collect::<Vec<_>>();
         if self.categorical.is_some() {
@@ -20367,6 +20377,15 @@ impl DataFrame {
         let sort_column = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column '{column}' not found"))
         })?;
+        // Per br-frankenpandas-2ca7d.
+        match na_position {
+            "first" | "last" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sort_values: na_position must be 'first' or 'last', got '{other}'"
+                )));
+            }
+        }
 
         let na_first = na_position == "first";
         let mut order = (0..self.len()).collect::<Vec<_>>();
@@ -20412,6 +20431,15 @@ impl DataFrame {
             .enumerate()
             .map(|(i, _)| ascending.get(i).copied().unwrap_or(true))
             .collect();
+        // Per br-frankenpandas-2ca7d.
+        match na_position {
+            "first" | "last" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sort_values: na_position must be 'first' or 'last', got '{other}'"
+                )));
+            }
+        }
 
         let na_first = na_position == "first";
 
@@ -73421,6 +73449,84 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_sort_values_invalid_na_position_errors() {
+        // Per br-frankenpandas-2ca7d: pandas raises on invalid na_position.
+        // Was silently treating any non-"first" string as "last".
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let err = s.sort_values_na(true, "wat").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("na_position must be") && msg.contains("'wat'")));
+    }
+
+    #[test]
+    fn series_sort_values_case_sensitive_na_position_rejected() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        let err = s.sort_values_na(true, "FIRST").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("na_position must be")));
+        let err_empty = s.sort_values_na(true, "").unwrap_err();
+        assert!(matches!(&err_empty,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("na_position must be")));
+    }
+
+    #[test]
+    fn series_sort_values_valid_na_position_regression_guard() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let last = s.sort_values_na(true, "last").unwrap();
+        // Ascending with NaN last: [1.0, 2.0, NaN]
+        assert!(matches!(last.column().values()[0], Scalar::Float64(v) if v == 1.0));
+        assert!(matches!(last.column().values()[1], Scalar::Float64(v) if v == 2.0));
+        assert!(last.column().values()[2].is_missing());
+
+        let first = s.sort_values_na(true, "first").unwrap();
+        // Ascending with NaN first: [NaN, 1.0, 2.0]
+        assert!(first.column().values()[0].is_missing());
+        assert!(matches!(first.column().values()[1], Scalar::Float64(v) if v == 1.0));
+        assert!(matches!(first.column().values()[2], Scalar::Float64(v) if v == 2.0));
+    }
+
+    #[test]
+    fn dataframe_sort_values_invalid_na_position_errors() {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.sort_values_na("a", true, "wat").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("na_position must be")));
     }
 
     #[test]

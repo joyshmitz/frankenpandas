@@ -73021,8 +73021,9 @@ mod tests {
     // The existing dataframe_info_basic test uses substring assertions
     // (`info.contains("2 rows")` etc.) which miss column-alignment,
     // row-ordering, and whitespace regressions. These golden tests
-    // freeze the EXACT output for a known input so any format change
-    // surfaces immediately. Per skill rotation /testing-golden-artifacts.
+    // freeze the EXACT output for known inputs so any format change
+    // surfaces immediately. Per br-frankenpandas-8e4d2b, keep these as
+    // checked-in artifacts rather than inline string snapshots.
 
     #[test]
     fn dataframe_info_golden_two_row_one_float_column() {
@@ -73036,9 +73037,10 @@ mod tests {
         ])
         .unwrap();
 
-        // Frozen golden — any format change fails this assertion.
-        let expected = "DataFrame: 2 rows x 1 columns\nIndex: 2 entries\n\nColumn               Non-Null   Dtype     \n------               --------   -----     \na                    2          Float64\n\nMemory usage: 32 bytes";
-        assert_eq!(df.info(), expected);
+        assert_text_golden(
+            "dataframe_info_two_row_one_float_column.txt",
+            &df.info(),
+        );
     }
 
     #[test]
@@ -73050,10 +73052,7 @@ mod tests {
         )
         .unwrap();
 
-        // Frozen golden — exact format from Series::info().
-        let expected =
-            "Series: vals\nLength: 3\nNon-Null Count: 3\nDtype: Int64\nMemory Usage: 48 bytes";
-        assert_eq!(s.info(), expected);
+        assert_text_golden("series_info_three_int_values.txt", &s.info());
     }
 
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────

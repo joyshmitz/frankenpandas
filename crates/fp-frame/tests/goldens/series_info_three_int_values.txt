@@ -1,0 +1,5 @@
+Series: vals
+Length: 3
+Non-Null Count: 3
+Dtype: Int64
+Memory Usage: 48 bytes

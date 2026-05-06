@@ -2222,6 +2222,8 @@ impl Series {
     ///
     /// Matches `td1 / td2` in pandas (returns float).
     pub fn td_ratio(&self, other: &Self) -> Result<Self, FrameError> {
+        self.validate_timedelta_dtype("td_ratio")?;
+        other.validate_timedelta_dtype("td_ratio")?;
         let mut out = Vec::with_capacity(self.len());
         for (a, b) in self.values().iter().zip(other.values().iter()) {
             let result = match (a, b) {
@@ -2267,6 +2269,7 @@ impl Series {
     ///
     /// Matches `-td` in pandas.
     pub fn td_neg(&self) -> Result<Self, FrameError> {
+        self.validate_timedelta_dtype("td_neg")?;
         let mut out = Vec::with_capacity(self.len());
         for v in self.values() {
             let result = match v {
@@ -2288,6 +2291,7 @@ impl Series {
     ///
     /// Matches `td.abs()` or `abs(td)` in pandas.
     pub fn td_abs(&self) -> Result<Self, FrameError> {
+        self.validate_timedelta_dtype("td_abs")?;
         let mut out = Vec::with_capacity(self.len());
         for v in self.values() {
             let result = match v {
@@ -2309,10 +2313,23 @@ impl Series {
         )
     }
 
+    /// Per br-frankenpandas-46658d: gate the td_* family on Timedelta64 dtype
+    /// (or all-Null) so silent type-mismatch fallbacks no longer mask bugs.
+    fn validate_timedelta_dtype(&self, op_name: &str) -> Result<(), FrameError> {
+        match self.dtype() {
+            DType::Timedelta64 | DType::Null => Ok(()),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "{op_name}: requires Timedelta64 Series, got {other:?}"
+            ))),
+        }
+    }
+
     fn td_binary_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
     where
         F: Fn(i64, i64) -> i64,
     {
+        self.validate_timedelta_dtype(name)?;
+        other.validate_timedelta_dtype(name)?;
         let mut out = Vec::with_capacity(self.len());
         for (a, b) in self.values().iter().zip(other.values().iter()) {
             let result = match (a, b) {
@@ -2338,6 +2355,7 @@ impl Series {
     where
         F: Fn(i64, f64) -> i64,
     {
+        self.validate_timedelta_dtype("td_scalar_op")?;
         let mut out = Vec::with_capacity(self.len());
         for v in self.values() {
             let result = match v {
@@ -2391,6 +2409,8 @@ impl Series {
     where
         F: Fn(i64, i64) -> bool,
     {
+        self.validate_timedelta_dtype(name)?;
+        other.validate_timedelta_dtype(name)?;
         let mut out = Vec::with_capacity(self.len());
         for (a, b) in self.values().iter().zip(other.values().iter()) {
             let result = match (a, b) {
@@ -77489,5 +77509,132 @@ mod test_factorize_with_options_ca5bc2 {
         let (_codes, uniques) = s.factorize_with_options(true, false).unwrap();
         // 3 uniques: 'a', 'b', null (in some sorted order).
         assert_eq!(uniques.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod test_td_dtype_gate_46658d {
+    use super::*;
+
+    fn idx(n: usize) -> Vec<IndexLabel> {
+        (0..n).map(|i| IndexLabel::Int64(i as i64)).collect()
+    }
+
+    fn td_series(name: &str, ns: &[i64]) -> Series {
+        let vals: Vec<Scalar> = ns.iter().map(|&v| Scalar::Timedelta64(v)).collect();
+        Series::from_values(name, idx(ns.len()), vals).unwrap()
+    }
+
+    fn float_series(name: &str, fs: &[f64]) -> Series {
+        let vals: Vec<Scalar> = fs.iter().map(|&v| Scalar::Float64(v)).collect();
+        Series::from_values(name, idx(fs.len()), vals).unwrap()
+    }
+
+    fn int_series(name: &str, ns: &[i64]) -> Series {
+        let vals: Vec<Scalar> = ns.iter().map(|&v| Scalar::Int64(v)).collect();
+        Series::from_values(name, idx(ns.len()), vals).unwrap()
+    }
+
+    fn assert_compat_err(r: Result<Series, FrameError>, fragment: &str) {
+        match r {
+            Err(FrameError::CompatibilityRejected(m)) => {
+                assert!(m.contains(fragment), "expected fragment {fragment:?} in {m}");
+            }
+            Err(other) => panic!("expected CompatibilityRejected, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn td_add_on_float64_lhs_errors() {
+        let lhs = float_series("a", &[1.0, 2.0]);
+        let rhs = td_series("b", &[1, 2]);
+        assert_compat_err(lhs.td_add(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_add_on_float64_rhs_errors() {
+        let lhs = td_series("a", &[1, 2]);
+        let rhs = float_series("b", &[1.0, 2.0]);
+        assert_compat_err(lhs.td_add(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_sub_on_int64_errors() {
+        let lhs = td_series("a", &[100, 200]);
+        let rhs = int_series("b", &[1, 2]);
+        assert_compat_err(lhs.td_sub(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_gt_on_float64_errors() {
+        let lhs = float_series("a", &[1.0, 2.0]);
+        let rhs = float_series("b", &[1.0, 1.0]);
+        assert_compat_err(lhs.td_gt(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_eq_on_int64_errors() {
+        let lhs = td_series("a", &[1, 2]);
+        let rhs = int_series("b", &[1, 2]);
+        assert_compat_err(lhs.td_eq(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_ratio_on_float64_errors() {
+        let lhs = float_series("a", &[1.0]);
+        let rhs = float_series("b", &[2.0]);
+        assert_compat_err(lhs.td_ratio(&rhs), "Timedelta64");
+    }
+
+    #[test]
+    fn td_neg_on_float64_errors() {
+        let s = float_series("a", &[1.0]);
+        assert_compat_err(s.td_neg(), "Timedelta64");
+    }
+
+    #[test]
+    fn td_abs_on_int64_errors() {
+        let s = int_series("a", &[1, 2]);
+        assert_compat_err(s.td_abs(), "Timedelta64");
+    }
+
+    #[test]
+    fn td_mul_scalar_on_float64_errors() {
+        let s = float_series("a", &[1.0]);
+        assert_compat_err(s.td_mul_scalar(2.0), "Timedelta64");
+    }
+
+    #[test]
+    fn td_add_on_proper_timedelta_works() {
+        let lhs = td_series("a", &[100, 200, 300]);
+        let rhs = td_series("b", &[1, 2, 3]);
+        let out = lhs.td_add(&rhs).unwrap();
+        assert_eq!(out.values()[0], Scalar::Timedelta64(101));
+        assert_eq!(out.values()[1], Scalar::Timedelta64(202));
+        assert_eq!(out.values()[2], Scalar::Timedelta64(303));
+    }
+
+    #[test]
+    fn td_neg_on_proper_timedelta_works() {
+        let s = td_series("a", &[100, -200]);
+        let out = s.td_neg().unwrap();
+        assert_eq!(out.values()[0], Scalar::Timedelta64(-100));
+        assert_eq!(out.values()[1], Scalar::Timedelta64(200));
+    }
+
+    #[test]
+    fn td_add_on_all_null_works() {
+        // All-Null is acceptable (all positions are missing) — same convention
+        // as DatetimeAccessor::validate_datetime_dtype.
+        let lhs = Series::from_values(
+            "a",
+            idx(2),
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let rhs = td_series("b", &[1, 2]);
+        let out = lhs.td_add(&rhs).unwrap();
+        assert_eq!(out.len(), 2);
     }
 }

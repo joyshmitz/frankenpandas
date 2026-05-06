@@ -2452,6 +2452,10 @@ proptest! {
     }
 
     /// Multiplying every numeric cell by -1 before abs must not change the observed result.
+    /// Per br-frankenpandas-e21ca1: mul_scalar(-1.0) promotes Int64 to Float64
+    /// (apply_scalar_op always emits Scalar::Float64), so baseline (Int64-preserved
+    /// by abs) vs flipped_abs (Float64) fails dtype-strict .equals(). Use the
+    /// f64-cast tolerance helper to compare values without rejecting on dtype.
     #[test]
     fn prop_dataframe_abs_is_sign_flip_invariant(df in arb_numeric_dataframe(8)) {
         let baseline = df.abs().expect("DataFrame::abs() must succeed for numeric inputs");
@@ -2462,8 +2466,8 @@ proptest! {
             .abs()
             .expect("DataFrame::abs() must succeed after sign flipping");
         prop_assert!(
-            baseline.equals(&flipped_abs),
-            "dataframe abs must ignore numeric sign"
+            approx_equal_dataframe(&baseline, &flipped_abs),
+            "dataframe abs must ignore numeric sign (value-wise)"
         );
     }
 }

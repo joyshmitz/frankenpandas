@@ -1606,3 +1606,5 @@
 {"id":"br-frankenpandas-ca5bc2","title":"[porting-to-rust] Series::factorize missing sort+use_na_sentinel options","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-05T20:40:00Z"}
 {"id":"br-frankenpandas-ca5bc2","status":"closed","closed_at":"2026-05-05T20:45:00Z"}
 {"id":"br-frankenpandas-1a07c0","title":"[testing-golden-artifacts] DataFrame::to_markdown no golden coverage","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-05T20:50:00Z"}
+{"id":"br-frankenpandas-1a07c0","status":"closed","closed_at":"2026-05-05T20:55:00Z"}
+{"id":"br-frankenpandas-e21ca1","title":"[modes-of-reasoning] prop_dataframe_abs_is_sign_flip_invariant fails on Int64 due to mul_scalar dtype promotion","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T01:00:00Z"}

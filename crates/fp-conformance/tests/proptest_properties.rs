@@ -10230,3 +10230,112 @@ proptest! {
     // shift(0) identity by prop_series_shift_zero_is_identity (line 9518).
     // The tests above add the missing inner-overlap byte-equality coverage.
 }
+
+// ---------------------------------------------------------------------------
+// Property: Series::quantile_with_interpolation cross-mode ordering invariant
+// (br-frankenpandas-d9af0a)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// For any non-empty numeric Series and q in [0,1]:
+    ///   lower <= linear <= higher
+    ///   lower <= nearest <= higher
+    ///   lower <= midpoint <= higher
+    ///   midpoint == (lower + higher) / 2 (within tolerance)
+    #[test]
+    fn prop_quantile_interpolation_modes_are_ordered(
+        s in arb_unique_numeric_series("quantile", 12),
+        q_pct in 0u32..=100u32,
+    ) {
+        let q = q_pct as f64 / 100.0;
+        // Skip cases where every value is missing (quantile would be NaN, no
+        // ordering to check).
+        if s.values().iter().all(Scalar::is_missing) {
+            return Ok(());
+        }
+        let modes = ["lower", "linear", "higher", "nearest", "midpoint"];
+        let results: Vec<f64> = modes
+            .iter()
+            .map(|m| match s.quantile_with_interpolation(q, m).unwrap() {
+                Scalar::Float64(v) => v,
+                other => panic!("expected Float64, got {:?}", other),
+            })
+            .collect();
+        let lo = results[0];
+        let lin = results[1];
+        let hi = results[2];
+        let near = results[3];
+        let mid = results[4];
+
+        // All non-NaN.
+        prop_assert!(lo.is_finite(), "lower NaN: {results:?}");
+        prop_assert!(hi.is_finite(), "higher NaN: {results:?}");
+        prop_assert!(lin.is_finite());
+        prop_assert!(near.is_finite());
+        prop_assert!(mid.is_finite());
+
+        // Bracketing.
+        prop_assert!(
+            lo <= hi,
+            "lower must be <= higher (q={q}): lo={lo}, hi={hi}"
+        );
+        prop_assert!(lo <= lin && lin <= hi, "linear out of bracket: lo={lo}, lin={lin}, hi={hi}");
+        prop_assert!(lo <= near && near <= hi, "nearest out of bracket: lo={lo}, near={near}, hi={hi}");
+        prop_assert!(lo <= mid && mid <= hi, "midpoint out of bracket: lo={lo}, mid={mid}, hi={hi}");
+
+        // Midpoint equals average of lower and higher.
+        let expected_mid = 0.5 * (lo + hi);
+        let tol = (lo.abs().max(hi.abs()).max(1.0)) * 1e-9;
+        prop_assert!(
+            (mid - expected_mid).abs() <= tol,
+            "midpoint {} != avg(lower={}, higher={}) = {} (tol={})",
+            mid, lo, hi, expected_mid, tol
+        );
+    }
+
+    /// q=0 returns the min, q=1 returns the max — for every interpolation mode.
+    #[test]
+    fn prop_quantile_q0_q1_match_min_max_across_modes(
+        s in arb_unique_numeric_series("quantile_minmax", 12),
+    ) {
+        if s.values().iter().all(Scalar::is_missing) {
+            return Ok(());
+        }
+        let nonmissing: Vec<f64> = s
+            .values()
+            .iter()
+            .filter_map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
+            .collect();
+        if nonmissing.is_empty() {
+            return Ok(());
+        }
+        let expected_min = nonmissing
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let expected_max = nonmissing
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        for mode in &["linear", "lower", "higher", "nearest", "midpoint"] {
+            let q0 = match s.quantile_with_interpolation(0.0, mode).unwrap() {
+                Scalar::Float64(v) => v,
+                _ => panic!("non-Float64 quantile result"),
+            };
+            let q1 = match s.quantile_with_interpolation(1.0, mode).unwrap() {
+                Scalar::Float64(v) => v,
+                _ => panic!("non-Float64 quantile result"),
+            };
+            prop_assert!(
+                (q0 - expected_min).abs() < 1e-9,
+                "mode={} q=0 expected min {} got {}", mode, expected_min, q0
+            );
+            prop_assert!(
+                (q1 - expected_max).abs() < 1e-9,
+                "mode={} q=1 expected max {} got {}", mode, expected_max, q1
+            );
+        }
+    }
+}

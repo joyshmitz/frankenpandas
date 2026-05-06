@@ -17,7 +17,7 @@ use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{NullKind, Scalar, Timedelta};
+use fp_types::{DType, NullKind, Scalar, Timedelta};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -1342,7 +1342,15 @@ fn expected_scaled_cumprod_series(input: &Series, factor: f64) -> Series {
 }
 
 fn expected_scaled_cumprod_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
-    let baseline = df
+    // Per br-frankenpandas-84e338: cast to Float64 before cumprod so the
+    // baseline shares the same f64 arithmetic regime as scaled_input.cumprod()
+    // (which always promotes to Float64 because mul_scalar promotes). On the
+    // unmodified Int64 path, fp-frame's cumprod uses wrapping_mul, which
+    // diverges from f64 once the cumulative product exceeds i64::MAX.
+    let promoted = df
+        .astype(DType::Float64)
+        .expect("astype to Float64 must succeed for numeric inputs");
+    let baseline = promoted
         .cumprod()
         .expect("DataFrame::cumprod() must succeed while scaling expected output");
     let column_order = baseline
@@ -1376,7 +1384,14 @@ fn expected_scaled_cumprod_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
 }
 
 fn expected_scaled_cumprod_axis1_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
-    let baseline = df
+    // Per br-frankenpandas-84e338: cast to Float64 before cumprod_axis1 so
+    // the baseline shares the same f64 arithmetic regime as the scaled-input
+    // path (Int64 wrapping vs Float64 precision-loss otherwise diverge near
+    // i64::MAX).
+    let promoted = df
+        .astype(DType::Float64)
+        .expect("astype to Float64 must succeed for numeric inputs");
+    let baseline = promoted
         .cumprod_axis1()
         .expect("DataFrame::cumprod_axis1() must succeed while scaling expected output");
     let column_order = baseline

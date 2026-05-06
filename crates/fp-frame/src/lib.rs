@@ -8228,8 +8228,7 @@ impl Series {
 
     /// Compute the sample covariance with another Series.
     pub fn cov_with(&self, other: &Self) -> Result<f64, FrameError> {
-        let (cov, _, _, _) = self.cov_components(other)?;
-        Ok(cov)
+        self.cov_with_options(other, None, 1)
     }
 
     /// Pandas spelling alias for [`Self::cov_with`].
@@ -8237,6 +8236,59 @@ impl Series {
     /// Matches `pd.Series.cov(other)`.
     pub fn cov(&self, other: &Self) -> Result<f64, FrameError> {
         self.cov_with(other)
+    }
+
+    /// Compute covariance with explicit min_periods + ddof, matching
+    /// `pd.Series.cov(other, min_periods=, ddof=)`.
+    ///
+    /// Per br-frankenpandas-9ac700:
+    /// - `min_periods`: minimum count of valid (both non-null) pairs;
+    ///   below this, returns NaN.
+    /// - `ddof`: delta degrees of freedom; divisor is `count - ddof`.
+    ///   Defaults map: `ddof=0` population, `ddof=1` sample (pandas default).
+    pub fn cov_with_options(
+        &self,
+        other: &Self,
+        min_periods: Option<usize>,
+        ddof: usize,
+    ) -> Result<f64, FrameError> {
+        let (sum_x, sum_y, sum_xy, count) = self.cov_pair_sums(other)?;
+        let min = min_periods.unwrap_or(0).max(ddof + 1);
+        if count < min {
+            return Ok(f64::NAN);
+        }
+        let n = count as f64;
+        let mean_x = sum_x / n;
+        let mean_y = sum_y / n;
+        let divisor = n - ddof as f64;
+        if divisor <= 0.0 {
+            return Ok(f64::NAN);
+        }
+        Ok((sum_xy - n * mean_x * mean_y) / divisor)
+    }
+
+    /// Internal: walk paired non-null values once and accumulate the
+    /// (sum_x, sum_y, sum_xy, count) used by both cov + corr.
+    fn cov_pair_sums(&self, other: &Self) -> Result<(f64, f64, f64, usize), FrameError> {
+        let a_vals = self.column().values();
+        let b_vals = other.column().values();
+        let len = a_vals.len().min(b_vals.len());
+        let mut sum_x = 0.0_f64;
+        let mut sum_y = 0.0_f64;
+        let mut sum_xy = 0.0_f64;
+        let mut count = 0_usize;
+        for i in 0..len {
+            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
+                && !x.is_nan()
+                && !y.is_nan()
+            {
+                sum_x += x;
+                sum_y += y;
+                sum_xy += x * y;
+                count += 1;
+            }
+        }
+        Ok((sum_x, sum_y, sum_xy, count))
     }
 
     /// Internal: compute covariance, var_x, var_y, count between two Series.
@@ -78393,5 +78445,103 @@ mod test_mode_values_b5e850 {
             "got {:?}",
             modes[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod test_cov_with_options_9ac700 {
+    use super::*;
+
+    fn fs(name: &str, vs: &[f64]) -> Series {
+        let labels: Vec<IndexLabel> =
+            (0..vs.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Float64(v)).collect();
+        Series::from_values(name, labels, vals).unwrap()
+    }
+
+    #[test]
+    fn cov_default_matches_ddof_one() {
+        // [1,2,3,4] vs [1,2,3,4]: mean=2.5; deviations square to 5.0, /3 = 1.6666...
+        let a = fs("a", &[1.0, 2.0, 3.0, 4.0]);
+        let b = fs("b", &[1.0, 2.0, 3.0, 4.0]);
+        let bare = a.cov(&b).unwrap();
+        let opt = a.cov_with_options(&b, None, 1).unwrap();
+        assert!((bare - opt).abs() < 1e-12);
+        assert!((bare - 5.0 / 3.0).abs() < 1e-9, "got {bare}");
+    }
+
+    #[test]
+    fn cov_ddof_zero_population_uses_n_divisor() {
+        // [1,2,3,4]: pop_var = 5/4 = 1.25 (not 5/3 ≈ 1.667)
+        let a = fs("a", &[1.0, 2.0, 3.0, 4.0]);
+        let result = a.cov_with_options(&a, None, 0).unwrap();
+        assert!((result - 1.25).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn cov_min_periods_below_count_returns_nan() {
+        // 4 valid pairs, min_periods=10 -> NaN
+        let a = fs("a", &[1.0, 2.0, 3.0, 4.0]);
+        let result = a.cov_with_options(&a, Some(10), 1).unwrap();
+        assert!(result.is_nan());
+    }
+
+    #[test]
+    fn cov_min_periods_at_or_below_count_returns_finite() {
+        let a = fs("a", &[1.0, 2.0, 3.0, 4.0]);
+        let result = a.cov_with_options(&a, Some(4), 1).unwrap();
+        assert!(result.is_finite());
+        assert!((result - 5.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cov_with_nulls_drops_pair() {
+        // a: [1, NaN, 3, 4], b: [1, 2, 3, 4]
+        // Effective pairs: (1,1), (3,3), (4,4) -> count=3
+        // mean_x = mean_y = 8/3; sum_xy = 1+9+16 = 26; n=3
+        // cov_ddof1 = (26 - 3 * (8/3) * (8/3)) / 2 = (26 - 64/3) / 2 = (78/3-64/3)/2 = 14/3/2 = 7/3
+        let a = Series::from_values(
+            "a",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let b = fs("b", &[1.0, 2.0, 3.0, 4.0]);
+        let result = a.cov_with_options(&b, None, 1).unwrap();
+        assert!((result - 7.0 / 3.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn cov_ddof_too_large_returns_nan() {
+        // count=2, ddof=5 -> divisor = -3 -> NaN per the safety guard.
+        let a = fs("a", &[1.0, 2.0]);
+        let result = a.cov_with_options(&a, None, 5).unwrap();
+        assert!(result.is_nan(), "got {result}");
+    }
+
+    #[test]
+    fn cov_min_periods_subsumes_ddof_threshold() {
+        // count=4, ddof=1, min_periods=2 -> uses 4 pairs (count >= 2 and > ddof).
+        let a = fs("a", &[1.0, 2.0, 3.0, 4.0]);
+        let result = a.cov_with_options(&a, Some(2), 1).unwrap();
+        assert!((result - 5.0 / 3.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn cov_count_equals_ddof_returns_nan() {
+        // count=2, ddof=2 -> divisor=0 -> NaN.
+        let a = fs("a", &[1.0, 2.0]);
+        let result = a.cov_with_options(&a, None, 2).unwrap();
+        assert!(result.is_nan());
     }
 }

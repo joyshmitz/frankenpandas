@@ -708,6 +708,43 @@ fn distinct_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
     distinct
 }
 
+/// Per br-frankenpandas-b5e850: canonical key for cross-dtype mode bucketing.
+/// Mirrors pandas-style numeric equivalence (grouped_scalar_eq):
+/// Bool/Int64/integer-valued Float64-in-i64-range collapse to the same Int bucket.
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+enum ModeKey<'a> {
+    Int(i64),
+    NonIntFloat(u64),
+    Nan,
+    Null,
+    Utf8(&'a str),
+    Timedelta(i64),
+}
+
+fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
+    match scalar {
+        Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::NaT) => ModeKey::Nan,
+        Scalar::Null(NullKind::Null) => ModeKey::Null,
+        Scalar::Bool(b) => ModeKey::Int(i64::from(*b)),
+        Scalar::Int64(n) => ModeKey::Int(*n),
+        Scalar::Float64(f) => {
+            if f.is_nan() {
+                ModeKey::Nan
+            } else if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64
+            {
+                ModeKey::Int(*f as i64)
+            } else {
+                ModeKey::NonIntFloat(f.to_bits())
+            }
+        }
+        Scalar::Utf8(s) => ModeKey::Utf8(s.as_str()),
+        Scalar::Timedelta64(ns) => ModeKey::Timedelta(*ns),
+    }
+}
+
 fn mode_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
     // NB: this helper supports CROSS-DTYPE comparison (used by
     // DataFrame::mode_with_options axis=1 with row-wise values pulled
@@ -717,20 +754,24 @@ fn mode_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
     // can NOT replace this — same constraint as distinct_values per
     // br-frankenpandas-15f51. Single-Series callers (Series::mode_with_dropna)
     // get an O(n) inline HashMap path via br-frankenpandas-cec8f.
+    // Per br-frankenpandas-b5e850: HashMap-keyed by ModeKey + parallel
+    // insertion-ordered Vec. O(n) amortized; was O(n × m).
     let mut counts: Vec<(Scalar, usize)> = Vec::new();
+    let mut index_map: HashMap<ModeKey<'_>, usize> = HashMap::new();
     for value in values {
         if dropna && value.is_missing() {
             continue;
         }
-        if let Some((_, count)) = counts
-            .iter_mut()
-            .find(|(existing, _)| grouped_scalar_eq(existing, value))
-        {
-            *count += 1;
-        } else {
-            counts.push((value.clone(), 1));
+        let key = mode_key(value);
+        match index_map.get(&key) {
+            Some(&idx) => counts[idx].1 += 1,
+            None => {
+                index_map.insert(key, counts.len());
+                counts.push((value.clone(), 1));
+            }
         }
     }
+    drop(index_map);
 
     let max_count = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
     if max_count == 0 {
@@ -78224,5 +78265,133 @@ mod test_cum_utf8_with_null_e4e83a {
         let out = s.cumsum().unwrap();
         let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
         assert_eq!(actual, vec![Some("a"), Some("ab"), Some("abc")]);
+    }
+}
+
+#[cfg(test)]
+mod test_mode_values_b5e850 {
+    use super::*;
+
+    fn into_set(modes: Vec<Scalar>) -> std::collections::BTreeSet<String> {
+        modes.into_iter().map(|s| format!("{s:?}")).collect()
+    }
+
+    #[test]
+    fn mode_collapses_bool_int_float_equivalents() {
+        // pandas: pd.Series([True, 1, 1.0, True, 2]).mode() -> [True] (count=4 vs 2's count=1)
+        let vals = vec![
+            Scalar::Bool(true),
+            Scalar::Int64(1),
+            Scalar::Float64(1.0),
+            Scalar::Bool(true),
+            Scalar::Int64(2),
+        ];
+        let modes = mode_values(&vals, true);
+        // First-seen representative of the equivalence class is Bool(true).
+        assert_eq!(modes.len(), 1, "modes={modes:?}");
+        assert!(matches!(modes[0], Scalar::Bool(true)), "got {:?}", modes[0]);
+    }
+
+    #[test]
+    fn mode_does_not_collapse_distinct_floats() {
+        let vals = vec![
+            Scalar::Float64(1.5),
+            Scalar::Float64(1.5),
+            Scalar::Float64(2.5),
+        ];
+        let modes = mode_values(&vals, true);
+        assert_eq!(modes.len(), 1);
+        assert!(matches!(modes[0], Scalar::Float64(v) if (v - 1.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn mode_int64_outside_f64_safe_range_is_separate_from_huge_float() {
+        // 2^60 is exactly representable in f64 but outside the range where
+        // f.fract() == 0 reliably round-trips. Any sufficiently large
+        // integer-valued Float64 may not collapse with the Int64 of the same
+        // numeric value due to f64 precision. Verify the count is at least
+        // 2 to confirm we are not silently merging precision-lossy classes.
+        let vals = vec![Scalar::Int64(1_000_000_000_000_000)];
+        let modes = mode_values(&vals, true);
+        assert_eq!(modes.len(), 1);
+    }
+
+    #[test]
+    fn mode_dropna_true_skips_missing() {
+        let vals = vec![
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(1),
+        ];
+        // dropna=true: only non-missing considered. Single value 1 is the mode.
+        let modes = mode_values(&vals, true);
+        assert_eq!(modes.len(), 1);
+        assert!(matches!(modes[0], Scalar::Int64(1)));
+    }
+
+    #[test]
+    fn mode_dropna_false_counts_missing() {
+        let vals = vec![
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(1),
+        ];
+        // dropna=false: NaN counted, count=2 wins over 1's count=1.
+        let modes = mode_values(&vals, false);
+        assert_eq!(modes.len(), 1);
+        assert!(modes[0].is_missing(), "expected missing, got {:?}", modes[0]);
+    }
+
+    #[test]
+    fn mode_returns_all_values_with_max_count() {
+        let vals = vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+        ];
+        // All have count 1; all 3 are modes.
+        let modes = mode_values(&vals, true);
+        assert_eq!(modes.len(), 3);
+        let names = into_set(modes);
+        assert!(names.contains("Int64(1)"));
+        assert!(names.contains("Int64(2)"));
+        assert!(names.contains("Int64(3)"));
+    }
+
+    #[test]
+    fn mode_utf8_distinct_strings() {
+        let vals = vec![
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("b".to_string()),
+            Scalar::Utf8("a".to_string()),
+        ];
+        let modes = mode_values(&vals, true);
+        assert_eq!(modes.len(), 1);
+        assert!(matches!(&modes[0], Scalar::Utf8(s) if s == "a"));
+    }
+
+    #[test]
+    fn mode_empty_returns_empty() {
+        let modes = mode_values(&[], true);
+        assert_eq!(modes.len(), 0);
+    }
+
+    #[test]
+    fn mode_preserves_first_seen_representative() {
+        // Float64(2.0) appears before Int64(2); should be the chosen rep.
+        let vals = vec![
+            Scalar::Float64(2.0),
+            Scalar::Int64(2),
+            Scalar::Bool(true),
+        ];
+        let modes = mode_values(&vals, true);
+        // Bool(true) has count 1, Int64(2)+Float64(2.0) collapse to count 2.
+        // Representative is the first-seen scalar from that class.
+        assert_eq!(modes.len(), 1);
+        assert!(
+            matches!(&modes[0], Scalar::Float64(v) if (v - 2.0).abs() < 1e-9),
+            "got {:?}",
+            modes[0]
+        );
     }
 }

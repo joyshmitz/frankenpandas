@@ -12271,22 +12271,38 @@ impl SeriesGroupBy<'_> {
 
     /// Original index label of the minimum value in each group.
     pub fn idxmin(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-e9aba4: sister to br-7db78 Series fix. On Utf8
+        // series the to_f64 path silently drops every value; do lex comparison
+        // instead.
+        let is_utf8 = matches!(self.series.column.dtype(), DType::Utf8);
         self.agg_scalar(self.series.name(), |indices| {
             let mut best_idx: Option<usize> = None;
-            let mut best_val = f64::INFINITY;
-            for &idx in indices {
-                let value = &self.series.column.values()[idx];
-                if value.is_missing() {
-                    continue;
+            if is_utf8 {
+                let mut best: Option<&str> = None;
+                for &idx in indices {
+                    if let Scalar::Utf8(s) = &self.series.column.values()[idx] {
+                        let s_ref = s.as_str();
+                        if best_idx.is_none() || s_ref < best.unwrap() {
+                            best = Some(s_ref);
+                            best_idx = Some(idx);
+                        }
+                    }
                 }
-                // Per br-frankenpandas-5c98a: initialize on first non-missing
-                // value to handle all-INFINITY group. First-occurrence tie-
-                // breaking is preserved (subsequent equal values fail v < best_val).
-                if let Ok(v) = value.to_f64()
-                    && (best_idx.is_none() || v < best_val)
-                {
-                    best_val = v;
-                    best_idx = Some(idx);
+            } else {
+                let mut best_val = f64::INFINITY;
+                for &idx in indices {
+                    let value = &self.series.column.values()[idx];
+                    if value.is_missing() {
+                        continue;
+                    }
+                    // Per br-frankenpandas-5c98a: initialize on first non-missing
+                    // value to handle all-INFINITY group.
+                    if let Ok(v) = value.to_f64()
+                        && (best_idx.is_none() || v < best_val)
+                    {
+                        best_val = v;
+                        best_idx = Some(idx);
+                    }
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
@@ -12297,20 +12313,34 @@ impl SeriesGroupBy<'_> {
 
     /// Original index label of the maximum value in each group.
     pub fn idxmax(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-e9aba4: Utf8 lex path mirrors idxmin above.
+        let is_utf8 = matches!(self.series.column.dtype(), DType::Utf8);
         self.agg_scalar(self.series.name(), |indices| {
             let mut best_idx: Option<usize> = None;
-            let mut best_val = f64::NEG_INFINITY;
-            for &idx in indices {
-                let value = &self.series.column.values()[idx];
-                if value.is_missing() {
-                    continue;
+            if is_utf8 {
+                let mut best: Option<&str> = None;
+                for &idx in indices {
+                    if let Scalar::Utf8(s) = &self.series.column.values()[idx] {
+                        let s_ref = s.as_str();
+                        if best_idx.is_none() || s_ref > best.unwrap() {
+                            best = Some(s_ref);
+                            best_idx = Some(idx);
+                        }
+                    }
                 }
-                // Per br-frankenpandas-5c98a: see idxmin above.
-                if let Ok(v) = value.to_f64()
-                    && (best_idx.is_none() || v > best_val)
-                {
-                    best_val = v;
-                    best_idx = Some(idx);
+            } else {
+                let mut best_val = f64::NEG_INFINITY;
+                for &idx in indices {
+                    let value = &self.series.column.values()[idx];
+                    if value.is_missing() {
+                        continue;
+                    }
+                    if let Ok(v) = value.to_f64()
+                        && (best_idx.is_none() || v > best_val)
+                    {
+                        best_val = v;
+                        best_idx = Some(idx);
+                    }
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
@@ -78594,5 +78624,113 @@ mod test_cov_with_options_9ac700 {
         let a = fs("a", &[1.0, 2.0]);
         let result = a.cov_with_options(&a, None, 2).unwrap();
         assert!(result.is_nan());
+    }
+}
+
+#[cfg(test)]
+mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
+    use super::*;
+
+    fn make_series(name: &str, vals: &[&str]) -> Series {
+        let labels: Vec<IndexLabel> =
+            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let scalars: Vec<Scalar> = vals
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
+        Series::from_values(name, labels, scalars).unwrap()
+    }
+
+    fn make_int_series(name: &str, vals: &[i64]) -> Series {
+        let labels: Vec<IndexLabel> =
+            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Int64(v)).collect();
+        Series::from_values(name, labels, scalars).unwrap()
+    }
+
+    #[test]
+    fn groupby_idxmin_utf8_returns_lex_min_label() {
+        let series = make_series("v", &["banana", "apple", "cherry", "ant"]);
+        let groups = make_int_series("g", &[0, 0, 1, 1]);
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let result = gb.idxmin().expect("idxmin ok");
+        // group 0: ["banana"@0, "apple"@1] -> min "apple" at original index 1
+        // group 1: ["cherry"@2, "ant"@3]  -> min "ant" at original index 3
+        let labels: Vec<&Scalar> = result.values().iter().collect();
+        // Result is per-group; the group axis is 0 then 1.
+        // Each value is the original index label as Utf8.
+        match labels[0] {
+            Scalar::Utf8(s) => assert_eq!(s, "1", "group 0 min idx, got {labels:?}"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+        match labels[1] {
+            Scalar::Utf8(s) => assert_eq!(s, "3", "group 1 min idx, got {labels:?}"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn groupby_idxmax_utf8_returns_lex_max_label() {
+        let series = make_series("v", &["banana", "apple", "cherry", "ant"]);
+        let groups = make_int_series("g", &[0, 0, 1, 1]);
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let result = gb.idxmax().expect("idxmax ok");
+        let labels: Vec<&Scalar> = result.values().iter().collect();
+        // group 0: ["banana", "apple"] -> max "banana" at idx 0
+        // group 1: ["cherry", "ant"]   -> max "cherry" at idx 2
+        match labels[0] {
+            Scalar::Utf8(s) => assert_eq!(s, "0"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+        match labels[1] {
+            Scalar::Utf8(s) => assert_eq!(s, "2"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn groupby_idxmin_int64_still_works() {
+        // No-regression on the numeric path.
+        let series = make_int_series("v", &[10, 5, 30, 20]);
+        let groups = make_int_series("g", &[0, 0, 1, 1]);
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let result = gb.idxmin().expect("idxmin ok");
+        // group 0: [10, 5] -> min 5 at idx 1
+        // group 1: [30, 20] -> min 20 at idx 3
+        let labels: Vec<&Scalar> = result.values().iter().collect();
+        match labels[0] {
+            Scalar::Utf8(s) => assert_eq!(s, "1"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+        match labels[1] {
+            Scalar::Utf8(s) => assert_eq!(s, "3"),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn groupby_idxmin_utf8_skips_null_in_group() {
+        // Mixed Utf8 + Null group; expect the lex-min Utf8 to win.
+        let series = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("zebra".to_string()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("ant".to_string()),
+            ],
+        )
+        .unwrap();
+        let groups = make_int_series("g", &[0, 0, 0]);
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let result = gb.idxmin().expect("idxmin ok");
+        match &result.values()[0] {
+            Scalar::Utf8(s) => assert_eq!(s, "2", "expected idx of \"ant\""),
+            other => panic!("expected Utf8, got {other:?}"),
+        }
     }
 }

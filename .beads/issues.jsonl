@@ -1630,3 +1630,5 @@
 {"id":"br-frankenpandas-84e338","title":"[modes-of-reasoning] cumprod proptest flaky on Int64 wrap vs Float64 precision","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:10:00Z"}
 {"id":"br-frankenpandas-84e338","status":"closed","closed_at":"2026-05-06T04:15:00Z"}
 {"id":"br-frankenpandas-bc6fa4","title":"[deadlock-finder] recover_once unbounded loop under buggy RecoveryPolicy","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:20:00Z"}
+{"id":"br-frankenpandas-bc6fa4","status":"closed","closed_at":"2026-05-06T04:25:00Z"}
+{"id":"br-frankenpandas-e9aba4","title":"[mock-code-finder] GroupBy::idxmin/idxmax silently drops Utf8 values","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:30:00Z"}

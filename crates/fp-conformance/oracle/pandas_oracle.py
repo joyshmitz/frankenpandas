@@ -3274,6 +3274,41 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_str_find(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-04aaef: live-oracle coverage for the char-position
+    # fix in br-frankenpandas-02ae2b. pandas Series.str.find returns CHAR-based
+    # positions; this op lets the harness compare fp-frame's output against
+    # pandas directly on multi-byte UTF-8 inputs.
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_find requires left payload")
+    sub = payload.get("str_sub")
+    if not isinstance(sub, str):
+        raise OracleError("series_str_find str_sub must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_find")
+    try:
+        out = series.str.find(sub)
+    except Exception as exc:
+        raise OracleError(f"series_str_find failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_rfind(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-04aaef. Mirror of op_series_str_find for rfind.
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_rfind requires left payload")
+    sub = payload.get("str_sub")
+    if not isinstance(sub, str):
+        raise OracleError("series_str_rfind str_sub must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_rfind")
+    try:
+        out = series.str.rfind(sub)
+    except Exception as exc:
+        raise OracleError(f"series_str_rfind failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_str_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5648,6 +5683,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_get_dummies(pd, payload)
     if op in {"series_str_get_dummies", "series_str_get_dummies_default"}:
         return op_series_str_get_dummies(pd, payload)
+    if op in {"series_str_find", "series_str_find_default"}:
+        return op_series_str_find(pd, payload)
+    if op in {"series_str_rfind", "series_str_rfind_default"}:
+        return op_series_str_rfind(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

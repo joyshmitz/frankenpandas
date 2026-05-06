@@ -40245,3 +40245,95 @@ fn live_oracle_dataframe_query_inequality() {
     .expect("query");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_find_char_position_matches_pandas() {
+    // Per br-frankenpandas-04aaef + br-frankenpandas-02ae2b:
+    // pandas Series.str.find returns CHAR-based positions. Use multi-byte UTF-8
+    // inputs so a byte-position regression would diverge from pandas output.
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STR-FIND-CHAR",
+        "case_id": "series_str_find_char_position",
+        "mode": "strict",
+        "operation": "series_str_find",
+        "oracle_source": "live_legacy_pandas",
+        "str_sub": "lo",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "héllo" },
+                { "kind": "utf8", "value": "hello" },
+                { "kind": "utf8", "value": "café_lo" },
+                { "kind": "utf8", "value": "no match" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str.find char-position test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Series(expected) = expected else {
+        panic!("expected series payload");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.str().find("lo").expect("str find");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_rfind_char_position_matches_pandas() {
+    // Per br-frankenpandas-04aaef. rfind sister to str_find_char_position test.
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STR-RFIND-CHAR",
+        "case_id": "series_str_rfind_char_position",
+        "mode": "strict",
+        "operation": "series_str_rfind",
+        "oracle_source": "live_legacy_pandas",
+        "str_sub": "lo",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "héllo héllo" },
+                { "kind": "utf8", "value": "hello hello" },
+                { "kind": "utf8", "value": "café_lo café_lo" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str.rfind char-position test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Series(expected) = expected else {
+        panic!("expected series payload");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.str().rfind("lo").expect("str rfind");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}

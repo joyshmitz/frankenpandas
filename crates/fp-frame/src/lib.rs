@@ -428,6 +428,47 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
     })
 }
 
+/// Per br-frankenpandas-a56003: pandas Series.quantile interpolation modes.
+#[derive(Clone, Copy)]
+enum QuantileInterpolation {
+    Linear,
+    Lower,
+    Higher,
+    Nearest,
+    Midpoint,
+}
+
+/// Compute the q-th quantile of a pre-sorted slice using the given interpolation.
+fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpolation) -> f64 {
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let pos = q * (sorted.len() - 1) as f64;
+    let lower = pos.floor() as usize;
+    let upper = pos.ceil() as usize;
+    if lower == upper {
+        return sorted[lower];
+    }
+    let frac = pos - lower as f64;
+    match mode {
+        QuantileInterpolation::Linear => sorted[lower] * (1.0 - frac) + sorted[upper] * frac,
+        QuantileInterpolation::Lower => sorted[lower],
+        QuantileInterpolation::Higher => sorted[upper],
+        QuantileInterpolation::Nearest => {
+            // Pandas mirrors numpy.percentile: ties go to the lower neighbor
+            // (frac == 0.5 picks lower). Use frac < 0.5 to match.
+            if frac < 0.5 {
+                sorted[lower]
+            } else if frac > 0.5 {
+                sorted[upper]
+            } else {
+                sorted[lower]
+            }
+        }
+        QuantileInterpolation::Midpoint => 0.5 * (sorted[lower] + sorted[upper]),
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 enum ScalarKey<'a> {
     Null(NullKind),
@@ -4272,11 +4313,35 @@ impl Series {
     ///
     /// Matches `pd.Series.quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Scalar, FrameError> {
+        self.quantile_with_interpolation(q, "linear")
+    }
+
+    /// Compute the q-th quantile with explicit interpolation mode.
+    ///
+    /// Per br-frankenpandas-a56003: matches `pd.Series.quantile(q, interpolation)`.
+    /// Modes: "linear" (default), "lower", "higher", "nearest", "midpoint".
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<Scalar, FrameError> {
         if !(0.0..=1.0).contains(&q) {
             return Err(FrameError::CompatibilityRejected(format!(
                 "quantile must be between 0 and 1, got {q}"
             )));
         }
+        let mode = match interpolation {
+            "linear" => QuantileInterpolation::Linear,
+            "lower" => QuantileInterpolation::Lower,
+            "higher" => QuantileInterpolation::Higher,
+            "nearest" => QuantileInterpolation::Nearest,
+            "midpoint" => QuantileInterpolation::Midpoint,
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "quantile: interpolation must be one of 'linear', 'lower', 'higher', 'nearest', 'midpoint', got {other:?}"
+                )));
+            }
+        };
         let mut nums: Vec<f64> = Vec::new();
         for val in self.column.values() {
             if !val.is_missing() {
@@ -4287,22 +4352,11 @@ impl Series {
             return Ok(Scalar::Float64(f64::NAN));
         }
         nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(Scalar::Float64(Self::percentile_linear_series(&nums, q)))
+        Ok(Scalar::Float64(percentile_with_interpolation(&nums, q, mode)))
     }
 
     fn percentile_linear_series(sorted: &[f64], q: f64) -> f64 {
-        if sorted.len() == 1 {
-            return sorted[0];
-        }
-        let pos = q * (sorted.len() - 1) as f64;
-        let lower = pos.floor() as usize;
-        let upper = pos.ceil() as usize;
-        if lower == upper {
-            sorted[lower]
-        } else {
-            let frac = pos - lower as f64;
-            sorted[lower] * (1.0 - frac) + sorted[upper] * frac
-        }
+        percentile_with_interpolation(sorted, q, QuantileInterpolation::Linear)
     }
 
     /// Cast values to a target dtype.
@@ -77737,5 +77791,160 @@ mod test_between_inclusive_mode_fd57ef {
         .unwrap();
         let out = s.between(&Scalar::Int64(0), &Scalar::Int64(5), "both").unwrap();
         assert_eq!(bools(&out), vec![true, false, true]);
+    }
+}
+
+#[cfg(test)]
+mod test_quantile_interpolation_a56003 {
+    use super::*;
+
+    fn s(vs: &[f64]) -> Series {
+        let labels: Vec<IndexLabel> = (0..vs.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
+        let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Float64(v)).collect();
+        Series::from_values("x", labels, vals).unwrap()
+    }
+
+    fn unwrap_f(s: &Scalar) -> f64 {
+        match s {
+            Scalar::Float64(v) => *v,
+            other => panic!("expected Float64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn quantile_default_is_linear() {
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile(0.5).unwrap());
+        assert!((result - 2.5).abs() < 1e-9, "expected 2.5, got {result}");
+    }
+
+    #[test]
+    fn quantile_linear_q05_on_4_elements() {
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "linear").unwrap());
+        assert!((result - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quantile_lower_q05_on_4_elements() {
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "lower").unwrap());
+        assert!((result - 2.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_higher_q05_on_4_elements() {
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "higher").unwrap());
+        assert!((result - 3.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_nearest_tie_goes_to_lower() {
+        // pos = 0.5 * 3 = 1.5, frac == 0.5: tie -> lower neighbor (2.0).
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "nearest").unwrap());
+        assert!((result - 2.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_nearest_no_tie_picks_closer() {
+        // q=0.25 -> pos=0.75, frac=0.75 > 0.5 -> upper (2.0).
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.25, "nearest").unwrap());
+        assert!((result - 2.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_midpoint_q05_on_4_elements() {
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "midpoint").unwrap());
+        assert!((result - 2.5).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_midpoint_q025_on_4_elements() {
+        // pos=0.75, lower=0(1), upper=1(2), midpoint = 1.5 (regardless of frac).
+        let series = s(&[1.0, 2.0, 3.0, 4.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.25, "midpoint").unwrap());
+        assert!((result - 1.5).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_q0_returns_min() {
+        let series = s(&[3.0, 1.0, 2.0, 4.0]);
+        for mode in &["linear", "lower", "higher", "nearest", "midpoint"] {
+            let result = unwrap_f(&series.quantile_with_interpolation(0.0, mode).unwrap());
+            assert!(
+                (result - 1.0).abs() < 1e-9,
+                "mode={mode} expected 1.0 got {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn quantile_q1_returns_max() {
+        let series = s(&[3.0, 1.0, 2.0, 4.0]);
+        for mode in &["linear", "lower", "higher", "nearest", "midpoint"] {
+            let result = unwrap_f(&series.quantile_with_interpolation(1.0, mode).unwrap());
+            assert!(
+                (result - 4.0).abs() < 1e-9,
+                "mode={mode} expected 4.0 got {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn quantile_invalid_interpolation_errors() {
+        let series = s(&[1.0, 2.0]);
+        let err = series
+            .quantile_with_interpolation(0.5, "midwit")
+            .expect_err("invalid mode");
+        match err {
+            FrameError::CompatibilityRejected(m) => {
+                assert!(m.contains("midwit"), "msg: {m}");
+                assert!(m.contains("interpolation must be one of"), "msg: {m}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantile_invalid_q_errors() {
+        let series = s(&[1.0, 2.0]);
+        assert!(series.quantile_with_interpolation(-0.1, "linear").is_err());
+        assert!(series.quantile_with_interpolation(1.5, "linear").is_err());
+    }
+
+    #[test]
+    fn quantile_empty_series_returns_nan() {
+        let series = s(&[]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "lower").unwrap());
+        assert!(result.is_nan(), "got {result}");
+    }
+
+    #[test]
+    fn quantile_skips_missing_values() {
+        let series = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        // Effective values: [1, 2]. q=0.5 linear -> 1.5.
+        let result = unwrap_f(&series.quantile_with_interpolation(0.5, "linear").unwrap());
+        assert!((result - 1.5).abs() < 1e-9, "got {result}");
     }
 }

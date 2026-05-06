@@ -19769,6 +19769,15 @@ impl DataFrame {
     ///
     /// Matches `df[["a", "c"]]` column selection in pandas.
     pub fn select_columns(&self, names: &[&str]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-76e1fd: build the name->position map once so
+        // the per-name lookup is O(1). Was O(|column_order|) iter().position
+        // per name → O(|names| × |column_order|) total.
+        let position_index: std::collections::HashMap<&str, usize> = self
+            .column_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i))
+            .collect();
         let mut columns = BTreeMap::new();
         let mut selected_positions = Vec::with_capacity(names.len());
         for &name in names {
@@ -19776,9 +19785,8 @@ impl DataFrame {
                 Some(col) => {
                     columns.insert(name.to_owned(), col.clone());
                     selected_positions.push(
-                        self.column_order
-                            .iter()
-                            .position(|entry| entry == name)
+                        *position_index
+                            .get(name)
                             .expect("selected column must exist in observable order"),
                     );
                 }
@@ -78732,5 +78740,88 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
             Scalar::Utf8(s) => assert_eq!(s, "2", "expected idx of \"ant\""),
             other => panic!("expected Utf8, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test_select_columns_perf_76e1fd {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn col_int(vals: &[i64]) -> Column {
+        Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect()).unwrap()
+    }
+
+    fn make_df(names: &[&str]) -> DataFrame {
+        let mut map = BTreeMap::new();
+        for n in names {
+            map.insert((*n).to_string(), col_int(&[0]));
+        }
+        let order: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+        DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0)]),
+            map,
+            order,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn select_columns_preserves_requested_order() {
+        // Original order: a, b, c, d. Select c, a — output column_order
+        // should be [c, a] (the names argument order).
+        let df = make_df(&["a", "b", "c", "d"]);
+        let result = df.select_columns(&["c", "a"]).unwrap();
+        let names: Vec<&str> = result.column_names().iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["c", "a"]);
+    }
+
+    #[test]
+    fn select_columns_missing_errors() {
+        let df = make_df(&["a", "b"]);
+        let err = df.select_columns(&["a", "missing"]).expect_err("must error");
+        match err {
+            FrameError::CompatibilityRejected(m) => {
+                assert!(m.contains("'missing' not found"), "msg: {m}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_columns_empty_names_returns_empty_frame() {
+        let df = make_df(&["a", "b"]);
+        let result = df.select_columns(&[]).unwrap();
+        assert_eq!(result.column_names().len(), 0);
+    }
+
+    #[test]
+    fn select_columns_scale_2000_columns_selects_500_quickly() {
+        // O(M × K) impl on K=2000, M=500 would do 1M scans + 500 BTreeMap
+        // lookups. O(M + K) is ~2.5k ops.
+        let names: Vec<String> = (0..2000).map(|i| format!("c{i}")).collect();
+        let mut map = BTreeMap::new();
+        for n in &names {
+            map.insert(n.clone(), col_int(&[0]));
+        }
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0)]),
+            map,
+            names.clone(),
+        )
+        .unwrap();
+        // Select every 4th column.
+        let selected_owned: Vec<String> = names.iter().step_by(4).cloned().collect();
+        let selected_refs: Vec<&str> = selected_owned.iter().map(|s| s.as_str()).collect();
+        let start = std::time::Instant::now();
+        let result = df.select_columns(&selected_refs).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(result.column_names().len(), 500);
+        // Sanity: O(N+K) should comfortably finish within 500ms even on slow CI.
+        assert!(
+            elapsed.as_millis() < 500,
+            "select_columns on 2000-col DF took {}ms",
+            elapsed.as_millis()
+        );
     }
 }

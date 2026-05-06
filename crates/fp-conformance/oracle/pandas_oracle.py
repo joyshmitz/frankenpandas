@@ -3274,6 +3274,44 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def _str_unary_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[str, Any]:
+    # Per br-frankenpandas-637c19: thin shared dispatcher for unary str.* ops
+    # that take no parameters (lower, upper, strip, len, capitalize, title).
+    left = payload.get("left")
+    if left is None:
+        raise OracleError(f"{op_name} requires left payload")
+    series = fixture_series_from_payload(pd, left, op_name)
+    try:
+        out = getattr(series.str, method)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_lower(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_lower", "lower")
+
+
+def op_series_str_upper(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_upper", "upper")
+
+
+def op_series_str_strip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_strip", "strip")
+
+
+def op_series_str_len(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_len", "len")
+
+
+def op_series_str_capitalize(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_capitalize", "capitalize")
+
+
+def op_series_str_title(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_title", "title")
+
+
 def op_series_str_zfill(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # Per br-frankenpandas-cfdaf3: live-oracle coverage for fp-frame's
     # Series.str.zfill, which preserves leading +/- signs while zero-padding.
@@ -5706,6 +5744,18 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_rfind(pd, payload)
     if op in {"series_str_zfill", "series_str_zfill_default"}:
         return op_series_str_zfill(pd, payload)
+    if op in {"series_str_lower", "series_str_lower_default"}:
+        return op_series_str_lower(pd, payload)
+    if op in {"series_str_upper", "series_str_upper_default"}:
+        return op_series_str_upper(pd, payload)
+    if op in {"series_str_strip", "series_str_strip_default"}:
+        return op_series_str_strip(pd, payload)
+    if op in {"series_str_len", "series_str_len_default"}:
+        return op_series_str_len(pd, payload)
+    if op in {"series_str_capitalize", "series_str_capitalize_default"}:
+        return op_series_str_capitalize(pd, payload)
+    if op in {"series_str_title", "series_str_title_default"}:
+        return op_series_str_title(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

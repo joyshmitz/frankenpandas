@@ -1634,3 +1634,5 @@
 {"id":"br-frankenpandas-138481","title":"[testing-metamorphic] No proptest for cumsum/diff round-trip","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T03:10:00Z"}
 {"id":"br-frankenpandas-138481","status":"closed","closed_at":"2026-05-06T03:15:00Z"}
 {"id":"br-frankenpandas-b5e850","title":"[profiling] mode_values O(n²) -> O(n) via ModeKey","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T03:20:00Z"}
+{"id":"br-frankenpandas-b5e850","status":"closed","closed_at":"2026-05-06T03:25:00Z"}
+{"id":"br-frankenpandas-637c19","title":"[testing-conformance-harnesses] 6 str-op oracle handlers missing - 10+ live tests parked","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T03:30:00Z"}

@@ -4413,10 +4413,6 @@ impl Series {
         )))
     }
 
-    fn percentile_linear_series(sorted: &[f64], q: f64) -> f64 {
-        percentile_with_interpolation(sorted, q, QuantileInterpolation::Linear)
-    }
-
     /// Cast values to a target dtype.
     ///
     /// Matches `series.astype(dtype)` for scalar dtypes.
@@ -6290,6 +6286,7 @@ impl Series {
     ///   remapped accordingly.
     /// - `use_na_sentinel=false`: missing values become a regular unique
     ///   bucket with their own code instead of `-1`.
+    ///
     /// Delegates to fp-columnar's Column::factorize_with_options (br-9433f).
     pub fn factorize_with_options(
         &self,
@@ -77719,7 +77716,7 @@ mod test_factorize_with_options_ca5bc2 {
         let (codes, uniques) = s.factorize_with_options(false, false).unwrap();
         let cs = codes_vec(&codes);
         // No code is -1; null gets its own bucket. Both nulls share it.
-        assert!(!cs.iter().any(|&c| c == -1), "codes were {:?}", cs);
+        assert!(!cs.contains(&-1), "codes were {:?}", cs);
         assert_eq!(cs[0], cs[2]); // both 'a'
         assert_eq!(cs[1], cs[3]); // both null
         assert_ne!(cs[0], cs[1]); // 'a' bucket != null bucket
@@ -78170,7 +78167,7 @@ mod test_format_pandas_csv_float_41edff {
     #[test]
     fn fractional_floats_use_default_repr() {
         assert_eq!(format_pandas_csv_float(2.5), "2.5");
-        assert_eq!(format_pandas_csv_float(3.14), "3.14");
+        assert_eq!(format_pandas_csv_float(3.125), "3.125");
         assert_eq!(format_pandas_csv_float(-0.5), "-0.5");
     }
 

@@ -10339,3 +10339,59 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: Series::cumsum / diff round-trip
+// (br-frankenpandas-138481)
+// ---------------------------------------------------------------------------
+
+fn arb_bounded_float_series(name: &'static str, max_len: usize) -> impl Strategy<Value = Series> {
+    (2usize..=max_len).prop_flat_map(move |len| {
+        prop::collection::vec(-1e6_f64..=1e6_f64, len).prop_filter_map(
+            "series construction must succeed",
+            move |vals| {
+                let labels: Vec<IndexLabel> =
+                    (0..len).map(|i| IndexLabel::Int64(i as i64)).collect();
+                let scalars: Vec<Scalar> = vals.into_iter().map(Scalar::Float64).collect();
+                Series::from_values(name.to_owned(), labels, scalars).ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// For any null-free Float64 series s: cumsum(s).diff(1)[i] equals s[i] for i>=1.
+    /// Position 0 is NaN (diff has no predecessor).
+    #[test]
+    fn prop_series_cumsum_diff_is_round_trip(
+        s in arb_bounded_float_series("rt", 12),
+    ) {
+        let cumsum = s.cumsum().expect("cumsum must succeed");
+        let diffed = cumsum.diff(1).expect("diff must succeed");
+        prop_assert_eq!(diffed.len(), s.len());
+        // Position 0 must be NaN (no predecessor).
+        prop_assert!(
+            diffed.values()[0].is_missing(),
+            "expected NaN at diff(0), got {:?}", diffed.values()[0]
+        );
+        // Inner positions reconstruct s within numerical tolerance.
+        for i in 1..s.len() {
+            let lhs = match &diffed.values()[i] {
+                Scalar::Float64(v) => *v,
+                other => panic!("expected Float64 at diff position {i}, got {other:?}"),
+            };
+            let rhs = match &s.values()[i] {
+                Scalar::Float64(v) => *v,
+                other => panic!("expected Float64 at s position {i}, got {other:?}"),
+            };
+            // Tolerance scales with cumsum magnitude (f64 precision).
+            let tol = lhs.abs().max(rhs.abs()).max(1.0) * 1e-9;
+            prop_assert!(
+                (lhs - rhs).abs() <= tol,
+                "round-trip mismatch at i={i}: diff(cumsum(s))[{i}]={lhs}, s[{i}]={rhs}, tol={tol}"
+            );
+        }
+    }
+}

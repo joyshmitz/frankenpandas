@@ -18379,26 +18379,37 @@ impl DataFrame {
             return Ok(columns.keys().cloned().collect());
         }
 
-        let mut normalized = Vec::with_capacity(columns.len());
-        for name in column_order {
-            if !columns.contains_key(&name) {
+        // Per br-frankenpandas-de4175: was O(n²) via Vec::iter().position +
+        // Vec::remove + Vec::iter().any. Now O(n+k) using last-occurrence
+        // map and a HashSet for the missing-column union.
+        // Match pandas-style selector normalization: if a selector is repeated,
+        // keep the last occurrence.
+        use std::collections::{HashMap, HashSet};
+        let mut last_idx: HashMap<&str, usize> = HashMap::with_capacity(column_order.len());
+        for (i, name) in column_order.iter().enumerate() {
+            last_idx.insert(name.as_str(), i);
+        }
+
+        let mut normalized: Vec<String> = Vec::with_capacity(columns.len());
+        for (i, name) in column_order.iter().enumerate() {
+            if !columns.contains_key(name) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column '{name}' not found in data"
                 )));
             }
-            // Match pandas-style selector normalization: if a selector is repeated,
-            // keep the last occurrence.
-            if let Some(existing_idx) = normalized.iter().position(|entry| entry == &name) {
-                normalized.remove(existing_idx);
-            }
-            normalized.push(name);
-        }
-
-        for name in columns.keys() {
-            if !normalized.iter().any(|entry| entry == name) {
+            if last_idx[name.as_str()] == i {
                 normalized.push(name.clone());
             }
         }
+
+        let normalized_set: HashSet<&str> = normalized.iter().map(String::as_str).collect();
+        let to_append: Vec<String> = columns
+            .keys()
+            .filter(|name| !normalized_set.contains(name.as_str()))
+            .cloned()
+            .collect();
+        drop(normalized_set);
+        normalized.extend(to_append);
 
         Ok(normalized)
     }
@@ -77066,5 +77077,135 @@ mod test_dt_dtype_gate_d14250 {
         // tz_localize_with_options has its own gate (doesn't use extract_component).
         let s = Series::from_values("x", idx(1), vec![Scalar::Float64(1.0)]).unwrap();
         assert!(s.dt().tz_localize(Some("UTC")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_normalize_column_order_de4175 {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn col_int(vals: &[i64]) -> Column {
+        Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect()).expect("col_int")
+    }
+
+    fn names_str(df: &DataFrame) -> Vec<&str> {
+        df.column_names().iter().map(|s| s.as_str()).collect()
+    }
+
+    fn make_df(cols: &[(&str, &[i64])], order: Vec<String>) -> Result<DataFrame, FrameError> {
+        let mut map = BTreeMap::new();
+        for (name, vals) in cols {
+            map.insert((*name).to_string(), col_int(vals));
+        }
+        DataFrame::new_with_column_order(
+            Index::new((0..cols[0].1.len() as i64).map(IndexLabel::Int64).collect()),
+            map,
+            order,
+        )
+    }
+
+    #[test]
+    fn duplicate_in_column_order_keeps_last_occurrence() {
+        // Selector "a" repeated: result should reflect the LAST position.
+        // Order: [a, b, a, c] with cols {a,b,c} -> normalized [b, a, c].
+        let df = make_df(
+            &[("a", &[1]), ("b", &[2]), ("c", &[3])],
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+                "c".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(names_str(&df), vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn missing_columns_appended_after_explicit_order() {
+        // column_order references only "a"; "b" and "c" must be appended.
+        // Order semantics: appended in BTreeMap key order (alphabetical).
+        let df = make_df(
+            &[("a", &[1]), ("b", &[2]), ("c", &[3])],
+            vec!["a".to_string()],
+        )
+        .unwrap();
+        assert_eq!(names_str(&df), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn duplicate_plus_missing_columns() {
+        // Order: [b, a, b], cols {a,b,c}. Dedup-last → [a, b]. Append c.
+        let df = make_df(
+            &[("a", &[1]), ("b", &[2]), ("c", &[3])],
+            vec!["b".to_string(), "a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(names_str(&df), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn missing_column_in_order_errors() {
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), col_int(&[1]));
+        let result = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0)]),
+            map,
+            vec!["a".to_string(), "missing".to_string()],
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FrameError::CompatibilityRejected(m) => {
+                assert!(m.contains("'missing' not found"), "msg: {m}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_column_order_uses_btreemap_order() {
+        let df = make_df(&[("z", &[1]), ("a", &[2]), ("m", &[3])], vec![]).unwrap();
+        // BTreeMap is sorted alphabetically.
+        assert_eq!(names_str(&df), vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn scale_one_thousand_columns_with_duplicates_completes_quickly() {
+        // O(n²) impl on n=1000 with 50% duplicates would do ~500k vec scans
+        // plus 500 Vec::remove shifts. O(n+k) impl is < 10k ops.
+        // Build cols {c0..c999}, order = [c0,c1,...,c999, c0,c1,...,c499].
+        let mut cols: Vec<(&str, &[i64])> = Vec::new();
+        let names: Vec<String> = (0..1000).map(|i| format!("c{i}")).collect();
+        let vals: Vec<i64> = vec![0; 1];
+        for n in &names {
+            cols.push((n.as_str(), vals.as_slice()));
+        }
+        let mut order: Vec<String> = names.clone();
+        order.extend(names[..500].iter().cloned());
+
+        let mut map = BTreeMap::new();
+        for n in &names {
+            map.insert(n.clone(), col_int(&[0]));
+        }
+        let start = std::time::Instant::now();
+        let df =
+            DataFrame::new_with_column_order(Index::new(vec![IndexLabel::Int64(0)]), map, order)
+                .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(df.column_names().len(), 1000);
+        // First 500 cols are duplicated and re-emitted later, so the dedup-last
+        // result starts with c500..c999 followed by c0..c499.
+        assert_eq!(df.column_names()[0], "c500");
+        assert_eq!(df.column_names()[499], "c999");
+        assert_eq!(df.column_names()[500], "c0");
+        assert_eq!(df.column_names()[999], "c499");
+        // Sanity: O(n+k) should finish in well under 100ms even on slow CI.
+        assert!(
+            elapsed.as_millis() < 500,
+            "normalize_column_order on 1500-entry order took {}ms",
+            elapsed.as_millis()
+        );
     }
 }

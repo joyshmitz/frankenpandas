@@ -50165,6 +50165,52 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_json_records_mixed_dtypes_golden() {
+        // Per br-frankenpandas-188039: lock in to_json("records") byte output
+        // covering scalar_to_json_value rules: Null -> null, Bool -> true/false,
+        // Int64 -> integer literal, Float64 (whole + fractional) -> number,
+        // Float64 NaN -> null, Utf8 escape (newline + double-quote).
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "i",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(300)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "f",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(2.5),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "s",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("plain".to_string()),
+                    Scalar::Utf8("with \"quote\" and\nnewline".to_string()),
+                    Scalar::Utf8("".to_string()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let output = df.to_json("records").expect("to_json");
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_json_records_mixed.txt", normalized);
+    }
+
+    #[test]
     fn dataframe_to_csv_options_quoting_and_na_rep_golden() {
         // Per br-frankenpandas-464b83: lock in to_csv_options byte output
         // covering csv_escape (sep, ", newline triggers + double-quote escape),

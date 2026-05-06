@@ -5596,11 +5596,27 @@ impl Series {
         right: &Scalar,
         inclusive: &str,
     ) -> Result<Self, FrameError> {
-        if !matches!(inclusive, "both" | "neither" | "left" | "right") {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "between: inclusive must be one of 'both', 'neither', 'left', or 'right', got {inclusive:?}"
-            )));
+        // Per br-frankenpandas-fd57ef: resolve the inclusive mode to an
+        // enum once before the loop so the per-element dispatch is an
+        // integer jump-table rather than a string match.
+        #[derive(Clone, Copy)]
+        enum InclusiveMode {
+            Both,
+            Neither,
+            Left,
+            Right,
         }
+        let mode = match inclusive {
+            "both" => InclusiveMode::Both,
+            "neither" => InclusiveMode::Neither,
+            "left" => InclusiveMode::Left,
+            "right" => InclusiveMode::Right,
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "between: inclusive must be one of 'both', 'neither', 'left', or 'right', got {other:?}"
+                )));
+            }
+        };
 
         let values: Vec<Scalar> = self
             .column
@@ -5612,12 +5628,11 @@ impl Series {
                 }
                 let left_cmp = compare_non_missing_scalars_for_between(val, left)?;
                 let right_cmp = compare_non_missing_scalars_for_between(val, right)?;
-                let result = match inclusive {
-                    "both" => !left_cmp.is_lt() && !right_cmp.is_gt(),
-                    "neither" => left_cmp.is_gt() && right_cmp.is_lt(),
-                    "left" => !left_cmp.is_lt() && right_cmp.is_lt(),
-                    "right" => left_cmp.is_gt() && !right_cmp.is_gt(),
-                    _ => unreachable!("inclusive validated above"),
+                let result = match mode {
+                    InclusiveMode::Both => !left_cmp.is_lt() && !right_cmp.is_gt(),
+                    InclusiveMode::Neither => left_cmp.is_gt() && right_cmp.is_lt(),
+                    InclusiveMode::Left => !left_cmp.is_lt() && right_cmp.is_lt(),
+                    InclusiveMode::Right => left_cmp.is_gt() && !right_cmp.is_gt(),
                 };
                 Ok(Scalar::Bool(result))
             })
@@ -77636,5 +77651,91 @@ mod test_td_dtype_gate_46658d {
         let rhs = td_series("b", &[1, 2]);
         let out = lhs.td_add(&rhs).unwrap();
         assert_eq!(out.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod test_between_inclusive_mode_fd57ef {
+    use super::*;
+
+    fn idx(n: usize) -> Vec<IndexLabel> {
+        (0..n).map(|i| IndexLabel::Int64(i as i64)).collect()
+    }
+
+    fn s_int(name: &str, vs: &[i64]) -> Series {
+        let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Int64(v)).collect();
+        Series::from_values(name, idx(vs.len()), vals).unwrap()
+    }
+
+    fn bools(s: &Series) -> Vec<bool> {
+        s.values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Bool(b) => *b,
+                _ => panic!("expected Bool"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn between_both_inclusive() {
+        // [1,2,3,4,5] between 2 and 4 inclusive both -> [F, T, T, T, F]
+        let s = s_int("x", &[1, 2, 3, 4, 5]);
+        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "both").unwrap();
+        assert_eq!(bools(&out), vec![false, true, true, true, false]);
+    }
+
+    #[test]
+    fn between_neither_inclusive() {
+        let s = s_int("x", &[1, 2, 3, 4, 5]);
+        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "neither").unwrap();
+        assert_eq!(bools(&out), vec![false, false, true, false, false]);
+    }
+
+    #[test]
+    fn between_left_inclusive() {
+        // [1..=5] between 2..4 left-inclusive -> [F, T, T, F, F]
+        let s = s_int("x", &[1, 2, 3, 4, 5]);
+        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "left").unwrap();
+        assert_eq!(bools(&out), vec![false, true, true, false, false]);
+    }
+
+    #[test]
+    fn between_right_inclusive() {
+        // [1..=5] between 2..4 right-inclusive -> [F, F, T, T, F]
+        let s = s_int("x", &[1, 2, 3, 4, 5]);
+        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "right").unwrap();
+        assert_eq!(bools(&out), vec![false, false, true, true, false]);
+    }
+
+    #[test]
+    fn between_invalid_inclusive_errors() {
+        let s = s_int("x", &[1, 2, 3]);
+        let err = s
+            .between(&Scalar::Int64(1), &Scalar::Int64(2), "halfopen")
+            .expect_err("invalid mode");
+        match err {
+            FrameError::CompatibilityRejected(m) => {
+                assert!(m.contains("halfopen"), "msg: {m}");
+                assert!(m.contains("inclusive must be one of"), "msg: {m}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn between_with_missing_returns_false() {
+        let s = Series::from_values(
+            "x",
+            idx(3),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        let out = s.between(&Scalar::Int64(0), &Scalar::Int64(5), "both").unwrap();
+        assert_eq!(bools(&out), vec![true, false, true]);
     }
 }

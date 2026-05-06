@@ -1616,3 +1616,5 @@
 {"id":"br-frankenpandas-46658d","title":"[mock-code-finder] td_* silently returns NAT/false for non-Timedelta operands","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T01:30:00Z"}
 {"id":"br-frankenpandas-46658d","status":"closed","closed_at":"2026-05-06T01:35:00Z"}
 {"id":"br-frankenpandas-cfdaf3","title":"[testing-conformance-harnesses] Live pandas oracle missing op_series_str_zfill","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T01:40:00Z"}
+{"id":"br-frankenpandas-cfdaf3","status":"closed","closed_at":"2026-05-06T01:45:00Z"}
+{"id":"br-frankenpandas-fd57ef","title":"[profiling] Series::between dispatches inclusive string match per element","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T01:50:00Z"}

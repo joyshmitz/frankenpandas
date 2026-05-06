@@ -10013,3 +10013,137 @@ proptest! {
         prop_assert_eq!(parsed.index().labels(), df.index().labels());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: Series::str.find / rfind char-position invariant
+// (br-frankenpandas-c23144 — locks in fix from br-frankenpandas-02ae2b)
+// ---------------------------------------------------------------------------
+
+/// Non-empty multi-byte UTF-8 string. Sources span ASCII, Latin-1, Greek, CJK,
+/// and emoji so 1-, 2-, 3-, 4-byte UTF-8 are well-represented. Bounded length
+/// to keep the proptest fast.
+fn arb_multibyte_string(max_chars: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            proptest::char::range('a', 'z'),
+            proptest::char::range('A', 'Z'),
+            proptest::char::range('\u{00C0}', '\u{00FF}'),
+            proptest::char::range('\u{0391}', '\u{03A9}'),
+            proptest::char::range('\u{4E00}', '\u{4E5F}'),
+            proptest::char::range('\u{1F600}', '\u{1F60F}'),
+        ],
+        1..=max_chars,
+    )
+    .prop_filter("no controls", |chars: &Vec<char>| {
+        chars.iter().all(|c| !c.is_control())
+    })
+    .prop_map(|chars| chars.iter().collect::<String>())
+}
+
+/// Build a single-element Series from a string for str.find/rfind testing.
+fn single_str_series(s: &str) -> Series {
+    Series::from_values(
+        "x",
+        vec![IndexLabel::Int64(0)],
+        vec![Scalar::Utf8(s.to_owned())],
+    )
+    .expect("series build")
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Invariant: if str.find(sub) on s returns char-position p (>= 0), then
+    /// the chars at [p, p + sub.chars().count()) of s equal sub character-wise.
+    /// Catches any regression that returns byte-position instead of char-position.
+    #[test]
+    fn prop_series_str_find_returns_char_position(
+        haystack in arb_multibyte_string(20),
+        sub_len in 1usize..=4,
+    ) {
+        let h_chars: Vec<char> = haystack.chars().collect();
+        if h_chars.len() < sub_len {
+            return Ok(());
+        }
+        // Pick a sub that we know exists at some char offset.
+        let start = 0;
+        let sub: String = h_chars.iter().skip(start).take(sub_len).collect();
+
+        let series = single_str_series(&haystack);
+        let result = series.str().find(&sub).expect("find ok");
+        let pos = match result.values().get(0).expect("len 1") {
+            Scalar::Int64(v) => *v,
+            other => panic!("expected Int64, got {:?}", other),
+        };
+        prop_assert!(pos >= 0, "expected sub to be found in haystack");
+        let p = pos as usize;
+        // Reconstruct chars[p..p+sub_chars] and compare to sub.
+        let sub_chars: Vec<char> = sub.chars().collect();
+        prop_assert!(
+            p + sub_chars.len() <= h_chars.len(),
+            "char-position out of range: p={}, sub_len={}, haystack chars={}",
+            p,
+            sub_chars.len(),
+            h_chars.len()
+        );
+        for (i, &expected) in sub_chars.iter().enumerate() {
+            prop_assert_eq!(
+                h_chars[p + i],
+                expected,
+                "mismatch at char-pos {} (i={}): haystack={:?}, sub={:?}, p={}",
+                p + i,
+                i,
+                haystack,
+                sub,
+                p
+            );
+        }
+    }
+
+    /// Same invariant for rfind.
+    #[test]
+    fn prop_series_str_rfind_returns_char_position(
+        haystack in arb_multibyte_string(20),
+        sub_len in 1usize..=4,
+    ) {
+        let h_chars: Vec<char> = haystack.chars().collect();
+        if h_chars.len() < sub_len {
+            return Ok(());
+        }
+        // Pick a sub that exists in the haystack (use last sub_len chars).
+        let start = h_chars.len() - sub_len;
+        let sub: String = h_chars.iter().skip(start).take(sub_len).collect();
+
+        let series = single_str_series(&haystack);
+        let result = series.str().rfind(&sub).expect("rfind ok");
+        let pos = match result.values().get(0).expect("len 1") {
+            Scalar::Int64(v) => *v,
+            other => panic!("expected Int64, got {:?}", other),
+        };
+        prop_assert!(pos >= 0, "expected sub to be found in haystack");
+        let p = pos as usize;
+        let sub_chars: Vec<char> = sub.chars().collect();
+        prop_assert!(p + sub_chars.len() <= h_chars.len());
+        for (i, &expected) in sub_chars.iter().enumerate() {
+            prop_assert_eq!(h_chars[p + i], expected);
+        }
+    }
+
+    /// Invariant: find on a sub that doesn't exist returns -1.
+    #[test]
+    fn prop_series_str_find_not_found_returns_neg_one(
+        haystack in arb_multibyte_string(20),
+    ) {
+        // Use a sub that cannot appear: a 4-byte sequence that's filtered out
+        // of our generator (BMP private-use area).
+        let sub = "\u{E000}\u{E001}";
+        let series = single_str_series(&haystack);
+        let result = series.str().find(sub).expect("find ok");
+        let pos = match result.values().get(0).expect("len 1") {
+            Scalar::Int64(v) => *v,
+            other => panic!("expected Int64, got {:?}", other),
+        };
+        prop_assert_eq!(pos, -1);
+    }
+}
+

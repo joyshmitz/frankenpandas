@@ -10502,3 +10502,139 @@ proptest! {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: GroupBy::idxmin/idxmax round-trip invariant
+// (br-frankenpandas-66085a — locks in br-frankenpandas-e9aba4 Utf8 fix)
+// ---------------------------------------------------------------------------
+
+fn arb_utf8_series_with_groups(
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Series)> {
+    (3usize..=max_len).prop_flat_map(move |len| {
+        (
+            prop::collection::vec(
+                proptest::char::range('a', 'g').prop_map(|c| c.to_string()),
+                len,
+            ),
+            prop::collection::vec(0i64..3i64, len),
+        )
+            .prop_filter_map("series construction", move |(strs, gs)| {
+                let labels: Vec<IndexLabel> =
+                    (0..len).map(|i| IndexLabel::Int64(i as i64)).collect();
+                let scalars: Vec<Scalar> = strs.into_iter().map(Scalar::Utf8).collect();
+                let group_scalars: Vec<Scalar> = gs.into_iter().map(Scalar::Int64).collect();
+                let s = Series::from_values("v".to_string(), labels.clone(), scalars).ok()?;
+                let g = Series::from_values("g".to_string(), labels, group_scalars).ok()?;
+                Some((s, g))
+            })
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(150))]
+
+    /// idxmin returned index points at the group's lex-min Utf8 value.
+    #[test]
+    fn prop_groupby_idxmin_utf8_points_at_lex_min(
+        (series, groups) in arb_utf8_series_with_groups(12),
+    ) {
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let idxmin_result = gb.idxmin().expect("idxmin ok");
+        // Re-derive group -> [(orig_idx, value)] mapping.
+        let mut by_group: std::collections::HashMap<i64, Vec<(usize, &str)>> =
+            std::collections::HashMap::new();
+        for (i, (g_val, s_val)) in groups.values().iter().zip(series.values().iter()).enumerate() {
+            let g_key = match g_val {
+                Scalar::Int64(v) => *v,
+                _ => continue,
+            };
+            if let Scalar::Utf8(s) = s_val {
+                by_group.entry(g_key).or_default().push((i, s.as_str()));
+            }
+        }
+        // For each output cell, decode the original-index label string and
+        // verify the value at that index is the group's lex-min.
+        for (group_label, idx_label) in idxmin_result
+            .index()
+            .labels()
+            .iter()
+            .zip(idxmin_result.values().iter())
+        {
+            let g_key = match group_label {
+                IndexLabel::Int64(v) => *v,
+                _ => continue,
+            };
+            let returned_idx_str = match idx_label {
+                Scalar::Utf8(s) => s.clone(),
+                _ => continue,
+            };
+            let returned_idx: usize = returned_idx_str.parse().expect("idx parse");
+            let group_members = by_group.get(&g_key).expect("group must exist");
+            let expected_min = group_members
+                .iter()
+                .map(|(_, v)| *v)
+                .min()
+                .expect("non-empty group");
+            let returned_val = group_members
+                .iter()
+                .find(|(i, _)| *i == returned_idx)
+                .map(|(_, v)| *v)
+                .expect("returned idx must be in group");
+            prop_assert_eq!(
+                returned_val,
+                expected_min,
+                "group {}: idxmin returned idx {} -> {}, but lex-min is {}",
+                g_key, returned_idx, returned_val, expected_min
+            );
+        }
+    }
+
+    /// idxmax returned index points at the group's lex-max Utf8 value.
+    #[test]
+    fn prop_groupby_idxmax_utf8_points_at_lex_max(
+        (series, groups) in arb_utf8_series_with_groups(12),
+    ) {
+        let gb = series.groupby(&groups).expect("groupby ok");
+        let idxmax_result = gb.idxmax().expect("idxmax ok");
+        let mut by_group: std::collections::HashMap<i64, Vec<(usize, &str)>> =
+            std::collections::HashMap::new();
+        for (i, (g_val, s_val)) in groups.values().iter().zip(series.values().iter()).enumerate() {
+            let g_key = match g_val {
+                Scalar::Int64(v) => *v,
+                _ => continue,
+            };
+            if let Scalar::Utf8(s) = s_val {
+                by_group.entry(g_key).or_default().push((i, s.as_str()));
+            }
+        }
+        for (group_label, idx_label) in idxmax_result
+            .index()
+            .labels()
+            .iter()
+            .zip(idxmax_result.values().iter())
+        {
+            let g_key = match group_label {
+                IndexLabel::Int64(v) => *v,
+                _ => continue,
+            };
+            let returned_idx_str = match idx_label {
+                Scalar::Utf8(s) => s.clone(),
+                _ => continue,
+            };
+            let returned_idx: usize = returned_idx_str.parse().expect("idx parse");
+            let group_members = by_group.get(&g_key).expect("group must exist");
+            let expected_max = group_members
+                .iter()
+                .map(|(_, v)| *v)
+                .max()
+                .expect("non-empty group");
+            let returned_val = group_members
+                .iter()
+                .find(|(i, _)| *i == returned_idx)
+                .map(|(_, v)| *v)
+                .expect("returned idx must be in group");
+            prop_assert_eq!(returned_val, expected_max);
+        }
+    }
+}

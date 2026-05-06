@@ -1632,3 +1632,5 @@
 {"id":"br-frankenpandas-bc6fa4","title":"[deadlock-finder] recover_once unbounded loop under buggy RecoveryPolicy","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:20:00Z"}
 {"id":"br-frankenpandas-bc6fa4","status":"closed","closed_at":"2026-05-06T04:25:00Z"}
 {"id":"br-frankenpandas-e9aba4","title":"[mock-code-finder] GroupBy::idxmin/idxmax silently drops Utf8 values","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:30:00Z"}
+{"id":"br-frankenpandas-e9aba4","status":"closed","closed_at":"2026-05-06T04:35:00Z"}
+{"id":"br-frankenpandas-66085a","title":"[testing-metamorphic] No proptest for GroupBy::idxmin/idxmax round-trip invariant","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T04:40:00Z"}

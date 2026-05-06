@@ -50028,6 +50028,65 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_options_quoting_and_na_rep_golden() {
+        // Per br-frankenpandas-464b83: lock in to_csv_options byte output
+        // covering csv_escape (sep, ", newline triggers + double-quote escape),
+        // na_rep substitution for Nulls, bool True/False rendering, and the
+        // columns subset parameter. Detects silent regressions in any of these.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "name",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("plain".to_string()),
+                    Scalar::Utf8("has, comma".to_string()),
+                    Scalar::Utf8("has \"quote\" and\nnewline".to_string()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "amount",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(2.5),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "active",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+            // Subset-excluded column to prove `columns` parameter prunes correctly.
+            Series::from_values(
+                "secret",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(100),
+                    Scalar::Int64(200),
+                    Scalar::Int64(300),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let cols = ["name", "amount", "active"];
+        let output = df.to_csv_options(',', true, "NA", Some(&cols)).unwrap();
+        // assert_text_golden strips one trailing `\n` from the expected file
+        // (editor-added). to_csv_options emits a terminating newline; trim it
+        // for byte-equal comparison so both sides agree on the trailing-newline
+        // convention.
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden(
+            "dataframe_to_csv_options_quoting_and_na_rep.txt",
+            normalized,
+        );
+    }
+
+    #[test]
     fn dataframe_to_markdown_mixed_dtypes_golden() {
         // Per br-frankenpandas-1a07c0: lock in to_markdown byte output for
         // a representative DataFrame covering Int64, Float64 (whole + non-

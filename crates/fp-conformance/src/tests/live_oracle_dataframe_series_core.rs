@@ -30434,6 +30434,137 @@ fn live_oracle_dataframe_abs_with_negatives() {
 }
 
 #[test]
+fn live_oracle_dataframe_binary_aliases_match_pandas() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let methods = [
+        "add",
+        "sub",
+        "subtract",
+        "mul",
+        "multiply",
+        "div",
+        "divide",
+        "truediv",
+        "floordiv",
+        "mod",
+        "pow",
+        "radd",
+        "rsub",
+        "rmul",
+        "rdiv",
+        "rtruediv",
+        "rfloordiv",
+        "rmod",
+        "rpow",
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+    ];
+
+    for method in methods {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-LIVE-DF-BINARY-ALIASES",
+            "case_id": format!("dataframe_binary_alias_{method}"),
+            "mode": "strict",
+            "operation": "dataframe_binary_alias",
+            "oracle_source": "live_legacy_pandas",
+            "dataframe_binary_method": method,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 6.0 },
+                        { "kind": "float64", "value": 7.0 }
+                    ]
+                }
+            },
+            "frame_other": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 5.0 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "float64", "value": 6.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping df binary aliases: {message}");
+            return;
+        }
+        let expected = expected_result.expect("live oracle expected");
+        assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+        let other = super::build_dataframe(fixture.frame_other.as_ref().expect("frame_other"))
+            .expect("frame_other");
+        let actual = match method {
+            "add" => frame.add(&other),
+            "sub" => frame.sub(&other),
+            "subtract" => frame.subtract(&other),
+            "mul" => frame.mul(&other),
+            "multiply" => frame.multiply(&other),
+            "div" => frame.div(&other),
+            "divide" => frame.divide(&other),
+            "truediv" => frame.truediv(&other),
+            "floordiv" => frame.floordiv(&other),
+            "mod" => frame.r#mod(&other),
+            "pow" => frame.pow(&other),
+            "radd" => frame.radd(&other),
+            "rsub" => frame.rsub(&other),
+            "rmul" => frame.rmul(&other),
+            "rdiv" => frame.rdiv(&other),
+            "rtruediv" => frame.rtruediv(&other),
+            "rfloordiv" => frame.rfloordiv(&other),
+            "rmod" => frame.rmod(&other),
+            "rpow" => frame.rpow(&other),
+            "eq" => frame.eq(&other),
+            "ne" => frame.ne(&other),
+            "gt" => frame.gt(&other),
+            "ge" => frame.ge(&other),
+            "lt" => frame.lt(&other),
+            "le" => frame.le(&other),
+            _ => unreachable!("covered dataframe binary alias method"),
+        }
+        .expect(method);
+        super::compare_dataframe_expected(&actual, &expected).expect(method);
+    }
+}
+
+#[test]
 fn live_oracle_dataframe_abs_with_nulls() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = false;

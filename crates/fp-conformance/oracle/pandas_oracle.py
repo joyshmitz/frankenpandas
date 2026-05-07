@@ -3096,6 +3096,56 @@ def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_binary_alias(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    other_payload = payload.get("frame_other")
+    if frame_payload is None:
+        raise OracleError("dataframe_binary_alias requires frame payload")
+    if other_payload is None:
+        raise OracleError("dataframe_binary_alias requires frame_other payload")
+
+    method = required_string_payload(
+        payload, "dataframe_binary_method", "dataframe_binary_alias"
+    )
+    allowed = {
+        "add",
+        "sub",
+        "subtract",
+        "mul",
+        "multiply",
+        "div",
+        "divide",
+        "truediv",
+        "floordiv",
+        "mod",
+        "pow",
+        "radd",
+        "rsub",
+        "rmul",
+        "rdiv",
+        "rtruediv",
+        "rfloordiv",
+        "rmod",
+        "rpow",
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+    }
+    if method not in allowed:
+        raise OracleError(f"unsupported dataframe_binary_alias method {method!r}")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    other = dataframe_from_json(pd, other_payload)
+    try:
+        out = getattr(frame, method)(other)
+    except Exception as exc:
+        raise OracleError(f"dataframe_binary_alias {method} failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_pivot(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -6181,6 +6231,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_memory_usage(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
+    if op in {"dataframe_binary_alias", "data_frame_binary_alias"}:
+        return op_dataframe_binary_alias(pd, payload)
     if op in {"dataframe_diff", "data_frame_diff"}:
         return op_dataframe_diff(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

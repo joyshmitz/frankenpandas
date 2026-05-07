@@ -497,6 +497,8 @@ pub enum FixtureOperation {
     DataFrameMemoryUsage,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
+    #[serde(rename = "dataframe_binary_alias", alias = "data_frame_binary_alias")]
+    DataFrameBinaryAlias,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -1352,6 +1354,7 @@ impl FixtureOperation {
             Self::DataFrameValueCounts => "dataframe_value_counts",
             Self::DataFrameMemoryUsage => "dataframe_memory_usage",
             Self::DataFrameRound => "dataframe_round",
+            Self::DataFrameBinaryAlias => "dataframe_binary_alias",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1863,6 +1866,8 @@ pub struct PacketFixture {
     pub clip_upper_series: Option<FixtureSeries>,
     #[serde(default)]
     pub round_decimals: Option<i32>,
+    #[serde(default)]
+    pub dataframe_binary_method: Option<String>,
     #[serde(default)]
     pub nlargest_n: Option<usize>,
     #[serde(default)]
@@ -2412,7 +2417,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameQuantile
         | FixtureOperation::DataFrameValueCounts
         | FixtureOperation::DataFrameMemoryUsage
-        | FixtureOperation::DataFrameRound => &["CC-005"],
+        | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameBinaryAlias => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesToNumeric
@@ -3280,6 +3286,8 @@ struct OracleRequest {
     pub clip_upper_series: Option<FixtureSeries>,
     #[serde(default)]
     pub round_decimals: Option<i32>,
+    #[serde(default)]
+    pub dataframe_binary_method: Option<String>,
     #[serde(default)]
     pub rank_method: Option<String>,
     #[serde(default)]
@@ -10169,7 +10177,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
-        | FixtureOperation::DataFrameRound => {
+        | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameBinaryAlias => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -10201,6 +10210,9 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameRound => {
                     let decimals = fixture.round_decimals.unwrap_or(0);
                     frame.round(decimals).map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameBinaryAlias => {
+                    execute_dataframe_binary_alias_fixture_operation(fixture)
                 }
                 _ => unreachable!(),
             };
@@ -12278,6 +12290,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameBinaryAlias
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -12505,6 +12518,7 @@ fn capture_live_oracle_expected(
         clip_lower_series: fixture.clip_lower_series.clone(),
         clip_upper_series: fixture.clip_upper_series.clone(),
         round_decimals: fixture.round_decimals,
+        dataframe_binary_method: fixture.dataframe_binary_method.clone(),
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
         rank_axis: fixture.rank_axis,
@@ -12956,6 +12970,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameBinaryAlias
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -14776,6 +14791,53 @@ fn execute_dataframe_corr_fixture(
     .map_err(|err| err.to_string())
 }
 
+fn execute_dataframe_binary_alias_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let other = build_dataframe(require_frame_other(fixture)?)
+        .map_err(|err| format!("frame_other build failed: {err}"))?;
+    let method = fixture
+        .dataframe_binary_method
+        .as_deref()
+        .ok_or_else(|| "dataframe_binary_method required for dataframe_binary_alias".to_owned())?;
+
+    match method {
+        "add" => frame.add(&other),
+        "sub" => frame.sub(&other),
+        "subtract" => frame.subtract(&other),
+        "mul" => frame.mul(&other),
+        "multiply" => frame.multiply(&other),
+        "div" => frame.div(&other),
+        "divide" => frame.divide(&other),
+        "truediv" => frame.truediv(&other),
+        "floordiv" => frame.floordiv(&other),
+        "mod" => frame.r#mod(&other),
+        "pow" => frame.pow(&other),
+        "radd" => frame.radd(&other),
+        "rsub" => frame.rsub(&other),
+        "rmul" => frame.rmul(&other),
+        "rdiv" => frame.rdiv(&other),
+        "rtruediv" => frame.rtruediv(&other),
+        "rfloordiv" => frame.rfloordiv(&other),
+        "rmod" => frame.rmod(&other),
+        "rpow" => frame.rpow(&other),
+        "eq" => frame.eq(&other),
+        "ne" => frame.ne(&other),
+        "gt" => frame.gt(&other),
+        "ge" => frame.ge(&other),
+        "lt" => frame.lt(&other),
+        "le" => frame.le(&other),
+        other => {
+            return Err(format!(
+                "unsupported dataframe_binary_alias method: {other}"
+            ));
+        }
+    }
+    .map_err(|err| err.to_string())
+}
+
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
         FixtureOperation::SeriesPartitionDf => {
@@ -15174,6 +15236,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let decimals = fixture.round_decimals.unwrap_or(0);
             frame.round(decimals).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameBinaryAlias => {
+            execute_dataframe_binary_alias_fixture_operation(fixture)
         }
         FixtureOperation::DataFrameRank => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -21353,6 +21418,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameBinaryAlias
         | FixtureOperation::DataFrameCompare
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivot

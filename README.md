@@ -1486,7 +1486,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
 | SQL IO has one built-in backend | `read_sql` / `write_sql` are generic over `SqlConnection`, and `rusqlite::Connection` implements it behind the default `sql-sqlite` feature. The trait surface is feature-complete (introspection via `SqlInspector` + `reflect_table` / `reflect_all_tables`, `SqlReadOptions` / `SqlWriteOptions` matching pandas keyword args including `chunksize`, `coerce_float`, `dtype`, `parse_dates`, `index_col`, `columns`, `schema`, `method`). Concrete PostgreSQL/MySQL/MS SQL/Oracle adapters are not yet bound — placeholder feature flags `sql-postgresql` / `sql-mysql` exist on fp-io for the future Phase 2 backend integrations. | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend while native adapters land |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
-| No plotting | Requires graphics library | Export to pandas/matplotlib for visualization |
+| Plotting backend deferred | `DataFrame.plot` / `hist` / `boxplot`, `Series.plot` / `hist`, and GroupBy plotting hooks exist and return a typed compatibility error while the plotters/charming backend is pending | Use Feather/Parquet/CSV export with pandas/matplotlib for visualization until native rendering lands |
 
 ## FAQ
 
@@ -1666,7 +1666,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
 | High | Native Datetime DType | Design phase; would replace Utf8 ISO 8601 string representation |
 | Medium | Parallel execution (rayon) | Not started; architecture supports it (columns are independent) |
-| Medium | DataFrame.plot() via plotters crate | Not started; would enable terminal/SVG chart output |
+| Medium | Native plotting via plotters/charming | Public plotting hooks are present and explicitly deferred; backend implementation would enable PNG/SVG/chart output |
 | Medium | Lazy evaluation / query planning | Not started; would enable optimization across chained operations |
 | Low | HDF5 IO | Needs system library (libhdf5) |
 | Low | Clipboard IO | Needs system clipboard access |

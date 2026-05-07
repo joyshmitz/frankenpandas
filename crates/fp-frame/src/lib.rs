@@ -78772,8 +78772,9 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
     use super::*;
 
     fn make_series(name: &str, vals: &[&str]) -> Series {
-        let labels: Vec<IndexLabel> =
-            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
         let scalars: Vec<Scalar> = vals
             .iter()
             .map(|s| Scalar::Utf8((*s).to_string()))
@@ -78782,8 +78783,9 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
     }
 
     fn make_int_series(name: &str, vals: &[i64]) -> Series {
-        let labels: Vec<IndexLabel> =
-            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
         let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Int64(v)).collect();
         Series::from_values(name, labels, scalars).unwrap()
     }
@@ -78877,8 +78879,9 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
 
 #[cfg(test)]
 mod test_select_columns_perf_76e1fd {
-    use super::*;
     use std::collections::BTreeMap;
+
+    use super::*;
 
     fn col_int(vals: &[i64]) -> Column {
         Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect()).unwrap()
@@ -78890,12 +78893,8 @@ mod test_select_columns_perf_76e1fd {
             map.insert((*n).to_string(), col_int(&[0]));
         }
         let order: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
-        DataFrame::new_with_column_order(
-            Index::new(vec![IndexLabel::Int64(0)]),
-            map,
-            order,
-        )
-        .unwrap()
+        DataFrame::new_with_column_order(Index::new(vec![IndexLabel::Int64(0)]), map, order)
+            .unwrap()
     }
 
     #[test]
@@ -78911,7 +78910,9 @@ mod test_select_columns_perf_76e1fd {
     #[test]
     fn select_columns_missing_errors() {
         let df = make_df(&["a", "b"]);
-        let err = df.select_columns(&["a", "missing"]).expect_err("must error");
+        let err = df
+            .select_columns(&["a", "missing"])
+            .expect_err("must error");
         match err {
             FrameError::CompatibilityRejected(m) => {
                 assert!(m.contains("'missing' not found"), "msg: {m}");

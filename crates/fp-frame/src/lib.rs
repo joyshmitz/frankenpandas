@@ -1782,6 +1782,78 @@ impl Series {
         self.clone()
     }
 
+    /// Swap the last two tuple-style index levels.
+    ///
+    /// Matches `pd.Series.swaplevel()` for the tuple-label MultiIndex
+    /// representation currently used by FrankenPandas. Non-tuple labels are
+    /// returned unchanged, matching the existing DataFrame fallback shape.
+    #[must_use]
+    pub fn swaplevel(&self) -> Self {
+        self.reorder_levels(&[1, 0])
+            .unwrap_or_else(|_| self.clone())
+    }
+
+    /// Reorder tuple-style index levels.
+    ///
+    /// Matches `pd.Series.reorder_levels(order)` for labels formatted like
+    /// `(level0, level1, ...)`. Single-level Series accept `[0]` as identity.
+    pub fn reorder_levels(&self, order: &[usize]) -> Result<Self, FrameError> {
+        if order == [0] {
+            return Ok(self.clone());
+        }
+
+        let mut labels = Vec::with_capacity(self.len());
+        for label in self.index.labels() {
+            let IndexLabel::Utf8(text) = label else {
+                return Err(FrameError::CompatibilityRejected(
+                    "reorder_levels: Series index is not tuple-style MultiIndex labels".to_owned(),
+                ));
+            };
+            let Some(inner) = text
+                .trim()
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+            else {
+                return Err(FrameError::CompatibilityRejected(
+                    "reorder_levels: Series index is not tuple-style MultiIndex labels".to_owned(),
+                ));
+            };
+
+            let parts: Vec<&str> = inner.split(", ").collect();
+            if parts.len() != order.len() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "reorder_levels: order length {} does not match index level count {}",
+                    order.len(),
+                    parts.len()
+                )));
+            }
+            let mut seen = vec![false; parts.len()];
+            for &level in order {
+                if level >= parts.len() || seen[level] {
+                    return Err(FrameError::CompatibilityRejected(
+                        "reorder_levels: order must be a permutation of index levels".to_owned(),
+                    ));
+                }
+                seen[level] = true;
+            }
+
+            let reordered = order
+                .iter()
+                .map(|&level| parts[level])
+                .collect::<Vec<_>>()
+                .join(", ");
+            labels.push(IndexLabel::Utf8(format!("({reordered})")));
+        }
+
+        Ok(Self {
+            name: self.name.clone(),
+            index: Index::new(labels),
+            column: self.column.clone(),
+            categorical: self.categorical.clone(),
+            sparse: self.sparse.clone(),
+        })
+    }
+
     /// Return the dtype of this Series.
     ///
     /// Matches `pd.Series.dtype`.
@@ -5576,6 +5648,14 @@ impl Series {
         )
     }
 
+    /// Pandas-named alias for [`Self::where_cond`].
+    ///
+    /// Matches `pd.Series.where(cond, other)`. Raw identifier syntax keeps
+    /// the pandas spelling available despite Rust's `where` keyword.
+    pub fn r#where(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        self.where_cond(cond, other)
+    }
+
     /// Keep values where `cond` is True, replacing False positions with
     /// corresponding values from `other` Series.
     ///
@@ -5614,6 +5694,11 @@ impl Series {
             plan.union_index.labels().to_vec(),
             values,
         )
+    }
+
+    /// Pandas-named Series replacement alias for [`Self::where_cond_series`].
+    pub fn where_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        self.where_cond_series(cond, other)
     }
 
     /// Replace values where `cond` is True with corresponding values from
@@ -8515,6 +8600,25 @@ impl Series {
             series: self,
             dtype,
         })
+    }
+
+    /// Access list-array methods on this Series.
+    ///
+    /// Matches the pandas `Series.list` namespace shape. FrankenPandas does
+    /// not have a first-class Arrow ListDtype yet, so operations exposed by
+    /// this accessor report that the dtype backend is pending.
+    #[must_use]
+    pub fn list(&self) -> ListAccessor<'_> {
+        ListAccessor { series: self }
+    }
+
+    /// Access struct-array methods on this Series.
+    ///
+    /// Matches the pandas `Series.struct` namespace shape. Rust callers use
+    /// raw identifier syntax: `series.r#struct()`.
+    #[must_use]
+    pub fn r#struct(&self) -> StructAccessor<'_> {
+        StructAccessor { series: self }
     }
 
     /// Returns `true` if this Series has categorical metadata.
@@ -13186,6 +13290,69 @@ impl SparseAccessor<'_> {
             categorical: None,
             sparse: None,
         }
+    }
+}
+
+// ── ListAccessor / StructAccessor ───────────────────────────────────────
+
+/// Accessor for Arrow-list operations on a Series.
+///
+/// Created by `Series::list()`. FrankenPandas exposes the namespace so callers
+/// get a stable API endpoint while the first-class list dtype is still pending.
+pub struct ListAccessor<'a> {
+    series: &'a Series,
+}
+
+impl ListAccessor<'_> {
+    /// Return the owning Series name for diagnostics.
+    #[must_use]
+    pub fn series_name(&self) -> &str {
+        self.series.name()
+    }
+
+    /// Whether this build has a native Arrow ListDtype backend.
+    #[must_use]
+    pub const fn is_supported(&self) -> bool {
+        false
+    }
+
+    /// Typed explanation for fail-closed list operations.
+    #[must_use]
+    pub fn unsupported_reason(&self) -> String {
+        format!(
+            "Series.list: Arrow ListDtype backend is not implemented for Series '{}'",
+            self.series.name()
+        )
+    }
+}
+
+/// Accessor for Arrow-struct operations on a Series.
+///
+/// Created by `Series::struct()`. Rust callers use `series.r#struct()`.
+pub struct StructAccessor<'a> {
+    series: &'a Series,
+}
+
+impl StructAccessor<'_> {
+    /// Return the owning Series name for diagnostics.
+    #[must_use]
+    pub fn series_name(&self) -> &str {
+        self.series.name()
+    }
+
+    /// Whether this build has a native Arrow StructDtype backend.
+    #[must_use]
+    pub const fn is_supported(&self) -> bool {
+        false
+    }
+
+    /// Typed explanation for fail-closed struct operations.
+    #[must_use]
+    pub fn unsupported_reason(&self) -> String {
+        format!(
+            "Series.struct: Arrow StructDtype backend is not implemented for Series '{}'",
+            self.series.name()
+        )
     }
 }
 
@@ -57245,6 +57412,7 @@ mod tests {
         assert_eq!(s.T(), s);
         assert_eq!(s.view(), s);
         assert_eq!(s.swapaxes(), s);
+        assert_eq!(s.reorder_levels(&[0]).unwrap(), s);
         assert_eq!(s.array(), vec![Scalar::Int64(10), Scalar::Int64(20)]);
         assert_eq!(s.ravel(), s.array());
         assert_eq!(s.tolist(), s.to_list());
@@ -57270,6 +57438,86 @@ mod tests {
         let inferred = strings.infer_objects().unwrap();
         assert_eq!(inferred.dtypes(), DType::Int64);
         assert_eq!(inferred.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+
+        let list = s.list();
+        assert_eq!(list.series_name(), "x");
+        assert!(!list.is_supported());
+        assert!(list.unsupported_reason().contains("Arrow ListDtype"));
+
+        let struct_accessor = s.r#struct();
+        assert_eq!(struct_accessor.series_name(), "x");
+        assert!(!struct_accessor.is_supported());
+        assert!(
+            struct_accessor
+                .unsupported_reason()
+                .contains("Arrow StructDtype")
+        );
+    }
+
+    #[test]
+    fn series_r6uci_where_and_multiindex_restructure_aliases() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.r#where(&cond, Some(&Scalar::Int64(-1))).unwrap(),
+            s.where_cond(&cond, Some(&Scalar::Int64(-1))).unwrap()
+        );
+        assert_eq!(
+            s.where_series(&cond, &other).unwrap(),
+            s.where_cond_series(&cond, &other).unwrap()
+        );
+
+        let tuple_indexed = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("(outer, a)".into()),
+                IndexLabel::Utf8("(outer, b)".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let swapped = tuple_indexed.swaplevel();
+        assert_eq!(
+            swapped.index().labels(),
+            &[
+                IndexLabel::Utf8("(a, outer)".into()),
+                IndexLabel::Utf8("(b, outer)".into()),
+            ]
+        );
+        assert_eq!(tuple_indexed.reorder_levels(&[1, 0]).unwrap(), swapped);
+        let err = s.reorder_levels(&[1, 0]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("tuple-style MultiIndex"))
+        );
     }
 
     #[test]

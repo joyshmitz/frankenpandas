@@ -1116,6 +1116,35 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.apply_fn(|vals: &[Scalar]| {
         Ok(vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)))
     })?;
+    // frankenpandas-k0ytm: lock in the full pandas Resampler parity surface
+    // on the public README example path.
+    let _ = monthly.agg(&["sum", "size", "nunique"])?;
+    let _ = monthly.aggregate(&["mean", "sem"])?;
+    assert_eq!(monthly.keys().len(), 2);
+    assert_eq!(
+        monthly.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        Some(&vec![0, 1])
+    );
+    assert_eq!(monthly.groups(), monthly.indices());
+    assert_eq!(monthly.grouper(), "M");
+    assert_eq!(monthly.level(), "M");
+    assert_eq!(monthly.ngroups(), 2);
+    assert_eq!(monthly.ndim(), 1);
+    assert!(monthly.exclusions().is_empty());
+    assert_eq!(monthly.get_group("2024-01")?.len(), 2);
+    let _ = monthly.asfreq()?;
+    let _ = monthly.ffill(None)?;
+    let _ = monthly.bfill(None)?;
+    let _ = monthly.fillna(&Scalar::Float64(0.0))?;
+    let _ = monthly.interpolate()?;
+    let _ = monthly.nearest()?;
+    let _ = monthly.quantile(0.5)?;
+    let _ = monthly.sem()?;
+    let _ = monthly.size()?;
+    let _ = monthly.nunique()?;
+    let _ = monthly.ohlc()?;
+    let _ = monthly.transform("sum")?;
+    let _ = monthly.pipe(|r| r.size())?;
 
     // ── DataFrame versions.
     let df = read_csv_str("a,b\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n9,90\n10,100")?;
@@ -1208,6 +1237,32 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     // fd90.285: agg + prod (rest of DataFrameResample's 9-method surface).
     let _ = drs.agg(&["sum", "mean"])?;
     let _ = drs.prod()?;
+    let _ = drs.aggregate(&["sem", "size", "nunique"])?;
+    assert_eq!(drs.keys().len(), 2);
+    assert_eq!(
+        drs.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        Some(&vec![0, 1])
+    );
+    assert_eq!(drs.groups(), drs.indices());
+    assert_eq!(drs.grouper(), "M");
+    assert_eq!(drs.level(), "M");
+    assert_eq!(drs.ngroups(), 2);
+    assert_eq!(drs.ndim(), 2);
+    assert!(drs.exclusions().is_empty());
+    assert_eq!(drs.get_group("2024-01")?.len(), 2);
+    let _ = drs.asfreq()?;
+    let _ = drs.ffill(None)?;
+    let _ = drs.bfill(None)?;
+    let _ = drs.fillna(&Scalar::Float64(0.0))?;
+    let _ = drs.interpolate()?;
+    let _ = drs.nearest()?;
+    let _ = drs.quantile(0.5)?;
+    let _ = drs.sem()?;
+    let _ = drs.size()?;
+    let _ = drs.nunique()?;
+    let _ = drs.ohlc()?;
+    let _ = drs.transform("sum")?;
+    let _ = drs.pipe(|r| r.size())?;
     Ok(())
 }
 

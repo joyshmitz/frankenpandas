@@ -39,3 +39,10 @@ redirect
 
 # bv (beads viewer) lock file
 .bv.lock
+
+# Per-host beads DB snapshots from agent recovery flows
+# (e.g. beads.db.bak-cc1-20260503T041757Z, beads.db-shm.bak-tlcr3,
+# issues.jsonl.bak-tlcr3). The earlier *.db / *.db-shm / *.db-wal
+# patterns above only match those exact suffixes, so the .bak-*
+# variants slip through and recur untracked across rounds.
+*.bak-*

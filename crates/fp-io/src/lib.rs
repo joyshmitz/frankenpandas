@@ -7568,8 +7568,9 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, IoError, LatexWriteOptions, MarkdownWriteOptions, read_csv_str,
-        read_csv_with_index_cols, write_csv_string, write_csv_string_with_options,
+        CsvWriteOptions, ExcelReadOptions, IoError, LatexWriteOptions, MarkdownWriteOptions,
+        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes,
+        read_parquet_bytes, write_csv_string, write_csv_string_with_options, write_jsonl_string,
         write_latex_string, write_latex_string_with_options, write_markdown_string,
         write_markdown_string_with_options,
     };
@@ -9171,6 +9172,67 @@ mod tests {
         std::fs::remove_file(&excel_path).ok();
         std::fs::remove_file(&feather_path).ok();
         std::fs::remove_file(&parquet_path).ok();
+    }
+
+    #[test]
+    fn dataframe_io_ext_rjs51_in_memory_methods_match_free_functions() {
+        use super::DataFrameIoExt;
+
+        let frame = make_test_dataframe();
+        let csv_options = CsvWriteOptions {
+            delimiter: b';',
+            na_rep: "<NA>".to_owned(),
+            header: true,
+            include_index: true,
+            index_label: Some("row".to_owned()),
+        };
+        assert_eq!(
+            frame
+                .to_csv_string_with_options(&csv_options)
+                .expect("csv options through extension"),
+            write_csv_string_with_options(&frame, &csv_options).expect("csv options free fn")
+        );
+        assert_eq!(
+            frame
+                .to_json_string(JsonOrient::Split)
+                .expect("json split through extension"),
+            write_json_string(&frame, JsonOrient::Split).expect("json split free fn")
+        );
+        assert_eq!(
+            frame.to_jsonl_string().expect("jsonl through extension"),
+            write_jsonl_string(&frame).expect("jsonl free fn")
+        );
+
+        let parquet = frame
+            .to_parquet_bytes()
+            .expect("parquet bytes through extension");
+        assert_eq!(
+            read_parquet_bytes(&parquet)
+                .expect("parquet roundtrip")
+                .index()
+                .len(),
+            frame.index().len()
+        );
+        let feather = frame
+            .to_feather_bytes()
+            .expect("feather bytes through extension");
+        assert_eq!(
+            read_feather_bytes(&feather)
+                .expect("feather roundtrip")
+                .index()
+                .len(),
+            frame.index().len()
+        );
+        let excel = frame
+            .to_excel_bytes()
+            .expect("excel bytes through extension");
+        assert_eq!(
+            read_excel_bytes(&excel, &ExcelReadOptions::default())
+                .expect("excel roundtrip")
+                .index()
+                .len(),
+            frame.index().len()
+        );
     }
 
     fn make_row_multiindex_test_dataframe() -> DataFrame {
@@ -13101,9 +13163,26 @@ mod tests {
         // Use the extension trait method.
         use super::DataFrameIoExt;
         frame.to_sql(&conn, "ext_test", SqlIfExists::Fail).unwrap();
+        frame
+            .to_sql_with_options(
+                &conn,
+                "ext_test_options",
+                &SqlWriteOptions {
+                    if_exists: SqlIfExists::Fail,
+                    index: false,
+                    index_label: None,
+                    schema: None,
+                    dtype: None,
+                    method: SqlInsertMethod::Single,
+                    chunksize: None,
+                },
+            )
+            .unwrap();
 
         let frame2 = read_sql_table(&conn, "ext_test").unwrap();
         assert_eq!(frame2.index().len(), 3);
+        let frame3 = read_sql_table(&conn, "ext_test_options").unwrap();
+        assert_eq!(frame3.index().len(), 3);
     }
 
     // ── Arrow IPC / Feather tests ────────────────────────────────────

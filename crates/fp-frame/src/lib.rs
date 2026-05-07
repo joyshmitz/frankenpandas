@@ -11459,6 +11459,59 @@ impl DataFrameEwm<'_> {
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
         self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).sum())
     }
+
+    /// Aggregate each numeric column with multiple EWM functions.
+    ///
+    /// Matches `df.ewm(span=...).agg(['mean', 'sum'])`. Output columns are
+    /// named `{column}_{function}`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let ewm = series.ewm(self.span, self.alpha).agg(funcs)?;
+            for func in funcs {
+                let out_name = format!("{col_name}_{func}");
+                result_cols.insert(out_name.clone(), ewm.columns()[*func].clone());
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Frozenset-style label set excluded from this EWM window.
+    ///
+    /// DataFrame EWM currently processes all numeric columns and excludes no
+    /// labels.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. DataFrame EWM is 2D.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        2
+    }
 }
 
 /// Time-based resampling view over a DataFrame's numeric columns.

@@ -1015,6 +1015,12 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = r.skew()?;
     let _ = r.kurt()?;
     let _ = r.agg(&["sum", "mean"])?;
+    // frankenpandas-073ty: lock in pandas window aliases/accessors.
+    let _ = r.aggregate(&["sem"])?;
+    let _ = r.sem()?;
+    let _ = r.rank("average", true, "keep")?;
+    assert!(r.exclusions().is_empty());
+    assert_eq!(r.ndim(), 1);
     // Rolling.corr / cov against another series — same length.
     let other_series = Series::from_values(
         "other",
@@ -1040,6 +1046,12 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = e.quantile(0.5)?;
     let _ = e.kurt()?;
     let _ = e.skew()?;
+    let _ = e.agg(&["sum", "sem"])?;
+    let _ = e.aggregate(&["mean"])?;
+    let _ = e.sem()?;
+    let _ = e.rank("average", true, "keep")?;
+    assert!(e.exclusions().is_empty());
+    assert_eq!(e.ndim(), 1);
     // Build a 100-element companion for corr/cov (matches `series` length).
     let exp_other = Series::from_values(
         "exp_other",
@@ -1059,6 +1071,15 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = ew.sum()?;
     let _ = ew.corr(&exp_other)?;
     let _ = ew.cov(&exp_other)?;
+    let _ = ew.agg(&["mean", "sum"])?;
+    let _ = ew.aggregate(&["std", "var"])?;
+    assert!(ew.exclusions().is_empty());
+    assert_eq!(ew.ndim(), 1);
+    let mut online = ew.online()?;
+    assert_eq!(online.current(), None);
+    assert_eq!(online.update(10.0), Some(10.0));
+    assert!(online.update(12.0).is_some());
+    assert_eq!(online.nobs(), 2);
 
     // ── Series Resample — needs datetime-indexed Series.
     let date_labels: Vec<IndexLabel> = vec![
@@ -1111,6 +1132,12 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     // fd90.284: rest of DataFrameRolling (corr/cov are pairwise across columns).
     let _ = dr.corr()?;
     let _ = dr.cov()?;
+    let _ = dr.agg(&["sum", "sem"])?;
+    let _ = dr.aggregate(&["mean"])?;
+    let _ = dr.sem()?;
+    let _ = dr.rank("average", true, "keep")?;
+    assert!(dr.exclusions().is_empty());
+    assert_eq!(dr.ndim(), 2);
     // corr_with / cov_with — against another Series.
     let dr_other = Series::from_values(
         "dr_other",
@@ -1136,6 +1163,12 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = de.kurt()?;
     let _ = de.skew()?;
     let _ = de.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>())?;
+    let _ = de.agg(&["sum", "sem"])?;
+    let _ = de.aggregate(&["mean"])?;
+    let _ = de.sem()?;
+    let _ = de.rank("average", true, "keep")?;
+    assert!(de.exclusions().is_empty());
+    assert_eq!(de.ndim(), 2);
 
     let dew = df.ewm(Some(5.0), None);
     let _ = dew.mean()?;
@@ -1143,6 +1176,10 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = dew.var()?;
     // fd90.284: DataFrameEwm.sum.
     let _ = dew.sum()?;
+    let _ = dew.agg(&["mean", "sum"])?;
+    let _ = dew.aggregate(&["std", "var"])?;
+    assert!(dew.exclusions().is_empty());
+    assert_eq!(dew.ndim(), 2);
 
     // ── DataFrame Resample — needs datetime-string row index.
     let dt_df = DataFrame::from_dict_with_index(

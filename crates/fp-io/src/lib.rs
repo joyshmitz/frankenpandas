@@ -21216,4 +21216,30 @@ mod tests {
         let r_col = frame.column("r").expect("column r must exist");
         assert_eq!(r_col.dtype(), crate::DType::Float64);
     }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_all_null_typed_table_preserves_column_dtypes_0qo9c() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE all_null_typed_0qo9c (i INTEGER, t TEXT, r REAL);
+             INSERT INTO all_null_typed_0qo9c (i, t, r) VALUES (NULL, NULL, NULL);",
+        )
+        .expect("create and insert");
+
+        let frame = read_sql(&conn, "SELECT * FROM all_null_typed_0qo9c")
+            .expect("read all-null typed table");
+        assert_eq!(frame.index().len(), 1);
+
+        let i_col = frame.column("i").expect("column i must exist");
+        assert_eq!(i_col.dtype(), crate::DType::Int64);
+        assert!(i_col.values()[0].is_missing());
+        let t_col = frame.column("t").expect("column t must exist");
+        assert_eq!(t_col.dtype(), crate::DType::Utf8);
+        assert!(t_col.values()[0].is_missing());
+        let r_col = frame.column("r").expect("column r must exist");
+        assert_eq!(r_col.dtype(), crate::DType::Float64);
+        assert!(r_col.values()[0].is_missing());
+    }
 }

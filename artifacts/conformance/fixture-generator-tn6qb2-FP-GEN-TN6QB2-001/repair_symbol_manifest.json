@@ -1,0 +1,18 @@
+{
+  "packet_id": "FP-GEN-TN6QB2-001",
+  "case_id": "series_add_generated_alignment_strict_tn6qb2",
+  "artifact_id": "FP-GEN-TN6QB2-001/fixture_bundle",
+  "source_packets": 6,
+  "repair_packets": 8,
+  "repair_packets_per_block": 8,
+  "repair_symbol_hashes": [
+    "360330fae65bcb4a2730f074e35d8cac10a1cb22735b2ac8a9f1e9dbf4497436",
+    "ae76d442d4478dda164141eb238036036cdcfefceaf740c1501e281f47c066bf",
+    "a612acf760f0e578238747c921e5e4cbf2f41b5bf2f2529effc3ecf531c0c898",
+    "09ab6dc69c3b6e9f12abeb9998054d44217c4ba69604aa7fe0fb2ef17aeb9545",
+    "7afc1d8c3fe1a84d94c2bc7b5d5c87f07304904adbd8e8ce7b0a763a032bbbbd",
+    "a441e1582ae962d3d271059f95582b7272bf0769d358c33ccd91c4f1fd505928",
+    "6814f1651c7006d238923ac88d9001f599ce988c362dd5737e605b36c1891b3a",
+    "d90f3294469b3931235f1bcff40bad0c42eda705147d51ecadb9fb9c668e37c0"
+  ]
+}

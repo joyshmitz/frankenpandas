@@ -1749,6 +1749,12 @@ pub struct FixtureProvenance {
     pub pandas_version: String,
     pub oracle_script_sha256: String,
     pub generated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_matrix: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intentional_divergence_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3070,6 +3076,39 @@ pub struct WrittenPacketArtifacts {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureGenerationRequest {
+    pub method_family: String,
+    pub packet_id: String,
+    pub case_id: String,
+    pub output_fixture_path: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub generation_command: String,
+    #[serde(default)]
+    pub input_matrix: Vec<String>,
+    #[serde(default)]
+    pub intentional_divergence_notes: Vec<String>,
+    #[serde(default = "default_repair_packets_per_block")]
+    pub repair_packets_per_block: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedFixtureBundle {
+    pub packet_id: String,
+    pub case_id: String,
+    pub method_family: String,
+    pub fixture_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub repair_symbol_manifest_path: PathBuf,
+    pub raptorq_sidecar_path: PathBuf,
+    pub integrity_scrub_path: PathBuf,
+    pub decode_proof_path: PathBuf,
+}
+
+const fn default_repair_packets_per_block() -> u32 {
+    8
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PacketDriftHistoryEntry {
     pub ts_unix_ms: u64,
     pub packet_id: String,
@@ -4036,6 +4075,317 @@ pub fn write_packet_artifacts(
         gate_result_path,
         mismatch_corpus_path,
     })
+}
+
+pub fn generate_fixture_pilot_bundle(
+    config: &HarnessConfig,
+    request: &FixtureGenerationRequest,
+) -> Result<GeneratedFixtureBundle, HarnessError> {
+    let mut fixture =
+        fixture_generation_template(&request.method_family, &request.packet_id, &request.case_id)?;
+    let template_matrix = fixture_generation_input_matrix(&request.method_family)?;
+    let input_matrix = if request.input_matrix.is_empty() {
+        template_matrix
+    } else {
+        request.input_matrix.clone()
+    };
+
+    let response = capture_live_oracle_response_for_generation(config, &fixture)?;
+    apply_oracle_response_to_generated_fixture(
+        &mut fixture,
+        response,
+        &request.generation_command,
+        &input_matrix,
+        &request.intentional_divergence_notes,
+    )?;
+
+    if let Some(parent) = request.output_fixture_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &request.output_fixture_path,
+        serde_json::to_string_pretty(&fixture)?,
+    )?;
+
+    fs::create_dir_all(&request.artifact_dir)?;
+    let fixture_bytes = fs::read(&request.output_fixture_path)?;
+    let fixture_hash = hash_bytes(&fixture_bytes);
+    let artifact_id = format!("{}/fixture_bundle", request.packet_id);
+    let mut sidecar = generate_raptorq_sidecar(
+        &artifact_id,
+        "fixture_packet",
+        &fixture_bytes,
+        request.repair_packets_per_block,
+    )?;
+    let decode_proof = run_raptorq_decode_recovery_drill(&sidecar, &fixture_bytes)?;
+    sidecar
+        .envelope
+        .push_decode_proof_capped(decode_proof.clone());
+    sidecar.envelope.scrub = ScrubStatus {
+        last_ok_unix_ms: sidecar.scrub_report.verified_at_unix_ms,
+        status: if sidecar.scrub_report.source_hash_verified {
+            "ok".to_owned()
+        } else {
+            "failed".to_owned()
+        },
+    };
+
+    let manifest_path = request
+        .artifact_dir
+        .join("fixture_generation_manifest.json");
+    let repair_symbol_manifest_path = request.artifact_dir.join("repair_symbol_manifest.json");
+    let raptorq_sidecar_path = request.artifact_dir.join("fixture_bundle.raptorq.json");
+    let integrity_scrub_path = request.artifact_dir.join("integrity_scrub_report.json");
+    let decode_proof_path = request
+        .artifact_dir
+        .join("fixture_bundle.decode_proof.json");
+
+    let manifest = serde_json::json!({
+        "packet_id": request.packet_id.clone(),
+        "case_id": request.case_id.clone(),
+        "method_family": request.method_family.clone(),
+        "fixture_path": relative_to_repo(config, &request.output_fixture_path),
+        "fixture_sha256": format!("sha256:{fixture_hash}"),
+        "generation_command": request.generation_command.clone(),
+        "input_matrix": input_matrix.clone(),
+        "intentional_divergence_notes": request.intentional_divergence_notes.clone(),
+        "fixture_provenance": fixture.fixture_provenance.clone(),
+    });
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+    let repair_symbol_hashes = sidecar
+        .packet_records
+        .iter()
+        .filter(|record| !record.is_source)
+        .map(|record| record.symbol_hash.clone())
+        .collect::<Vec<_>>();
+    let repair_manifest = serde_json::json!({
+        "packet_id": request.packet_id.clone(),
+        "case_id": request.case_id.clone(),
+        "artifact_id": sidecar.envelope.artifact_id.clone(),
+        "source_packets": sidecar.source_packets,
+        "repair_packets": sidecar.repair_packets,
+        "repair_packets_per_block": sidecar.repair_packets_per_block,
+        "repair_symbol_hashes": repair_symbol_hashes,
+    });
+    fs::write(
+        &repair_symbol_manifest_path,
+        serde_json::to_string_pretty(&repair_manifest)?,
+    )?;
+    fs::write(
+        &raptorq_sidecar_path,
+        serde_json::to_string_pretty(&sidecar)?,
+    )?;
+    fs::write(
+        &integrity_scrub_path,
+        serde_json::to_string_pretty(&sidecar.scrub_report)?,
+    )?;
+    let decode_artifact = DecodeProofArtifact {
+        packet_id: request.packet_id.clone(),
+        decode_proofs: vec![decode_proof],
+        status: DecodeProofStatus::Recovered,
+    };
+    fs::write(
+        &decode_proof_path,
+        serde_json::to_string_pretty(&decode_artifact)?,
+    )?;
+
+    Ok(GeneratedFixtureBundle {
+        packet_id: request.packet_id.clone(),
+        case_id: request.case_id.clone(),
+        method_family: request.method_family.clone(),
+        fixture_path: request.output_fixture_path.clone(),
+        manifest_path,
+        repair_symbol_manifest_path,
+        raptorq_sidecar_path,
+        integrity_scrub_path,
+        decode_proof_path,
+    })
+}
+
+fn fixture_generation_template(
+    method_family: &str,
+    packet_id: &str,
+    case_id: &str,
+) -> Result<PacketFixture, HarnessError> {
+    match method_family {
+        "series_add" | "series-add" | "series_add_basic" | "series-add-basic" => {
+            serde_json::from_value(serde_json::json!({
+                "packet_id": packet_id,
+                "case_id": case_id,
+                "mode": "strict",
+                "operation": "series_add",
+                "left": {
+                    "name": "left",
+                    "index": [
+                        { "kind": "int64", "value": 0 },
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 }
+                    ],
+                    "values": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 }
+                    ]
+                },
+                "right": {
+                    "name": "right",
+                    "index": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "values": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 },
+                        { "kind": "float64", "value": 30.0 }
+                    ]
+                }
+            }))
+            .map_err(HarnessError::from)
+        }
+        other => Err(HarnessError::FixtureFormat(format!(
+            "unsupported fixture generation method family: {other}"
+        ))),
+    }
+}
+
+fn fixture_generation_input_matrix(method_family: &str) -> Result<Vec<String>, HarnessError> {
+    match method_family {
+        "series_add" | "series-add" | "series_add_basic" | "series-add-basic" => Ok(vec![
+            "operation=series_add".to_owned(),
+            "mode=strict".to_owned(),
+            "left.index=[0,1,2]".to_owned(),
+            "right.index=[1,2,3]".to_owned(),
+            "overlap=[1,2], left_only=[0], right_only=[3]".to_owned(),
+            "values=float64 arithmetic with pandas alignment".to_owned(),
+        ]),
+        other => Err(HarnessError::FixtureFormat(format!(
+            "unsupported fixture generation method family: {other}"
+        ))),
+    }
+}
+
+fn apply_oracle_response_to_generated_fixture(
+    fixture: &mut PacketFixture,
+    mut response: OracleResponse,
+    generation_command: &str,
+    input_matrix: &[String],
+    intentional_divergence_notes: &[String],
+) -> Result<(), HarnessError> {
+    if let Some(error) = response.error {
+        return Err(HarnessError::OracleUnavailable(error));
+    }
+
+    fixture.expected_series = response.expected_series.take();
+    fixture.expected_join = response.expected_join.take();
+    fixture.expected_frame = response.expected_frame.take();
+    fixture.expected_alignment = response.expected_alignment.take();
+    fixture.expected_bool = response.expected_bool.take();
+    fixture.expected_positions = response.expected_positions.take();
+    fixture.expected_scalar = response.expected_scalar.take();
+    fixture.expected_dtype = response.expected_dtype.take();
+    fixture.expected_error_contains = None;
+    fixture.oracle_source = Some(FixtureOracleSource::Fixture);
+
+    let has_expected = fixture.expected_series.is_some()
+        || fixture.expected_join.is_some()
+        || fixture.expected_frame.is_some()
+        || fixture.expected_alignment.is_some()
+        || fixture.expected_bool.is_some()
+        || fixture.expected_positions.is_some()
+        || fixture.expected_scalar.is_some()
+        || fixture.expected_dtype.is_some();
+    if !has_expected {
+        return Err(HarnessError::FixtureFormat(format!(
+            "oracle response for case {} did not contain an expected value",
+            fixture.case_id
+        )));
+    }
+
+    let mut provenance = response.fixture_provenance.ok_or_else(|| {
+        HarnessError::FixtureFormat("oracle response omitted fixture_provenance".to_owned())
+    })?;
+    provenance.generation_command = Some(generation_command.to_owned());
+    provenance.input_matrix = input_matrix.to_vec();
+    provenance.intentional_divergence_notes = intentional_divergence_notes.to_vec();
+    fixture.fixture_provenance = Some(provenance);
+
+    Ok(())
+}
+
+fn capture_live_oracle_response_for_generation(
+    config: &HarnessConfig,
+    fixture: &PacketFixture,
+) -> Result<OracleResponse, HarnessError> {
+    fn oracle_unavailable(config: &HarnessConfig, message: String) -> HarnessError {
+        if config.require_live_oracle {
+            HarnessError::LiveOracleRequired(message)
+        } else {
+            HarnessError::OracleUnavailable(message)
+        }
+    }
+
+    let allow_system_pandas_fallback = config.allows_live_oracle_fallback();
+
+    if !config.oracle_root.exists() && !allow_system_pandas_fallback {
+        return Err(oracle_unavailable(
+            config,
+            format!(
+                "legacy oracle root does not exist: {}",
+                config.oracle_root.display()
+            ),
+        ));
+    }
+    let script = config.oracle_script_path();
+    if !script.exists() {
+        return Err(oracle_unavailable(
+            config,
+            format!("oracle script does not exist: {}", script.display()),
+        ));
+    }
+
+    let input = serde_json::to_vec(fixture)?;
+    let mut child = Command::new(&config.python_bin)
+        .arg(&script)
+        .arg("--legacy-root")
+        .arg(&config.oracle_root)
+        .arg("--strict-legacy")
+        .args(allow_system_pandas_fallback.then_some("--allow-system-pandas-fallback"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdin_handle = child.stdin.take();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        use std::io::Write;
+        if let Some(mut stdin) = stdin_handle {
+            stdin.write_all(&input)?;
+        }
+        Ok(())
+    });
+    let output = child.wait_with_output()?;
+    stdin_writer
+        .join()
+        .map_err(|_| std::io::Error::other("oracle stdin writer thread panicked"))??;
+
+    if !output.status.success() {
+        if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
+            && let Some(error) = response.error
+        {
+            return Err(oracle_unavailable(config, error));
+        }
+
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(HarnessError::OracleCommandFailed {
+            status: code,
+            stderr: format!("{stderr}\nstdout={stdout}"),
+        });
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(HarnessError::from)
 }
 
 pub fn evaluate_parity_gate(
@@ -26546,6 +26896,84 @@ mod tests {
         .expect("legacy packet fixture should deserialize");
 
         assert!(fixture.fixture_provenance.is_none());
+    }
+
+    #[test]
+    fn fixture_generation_template_enriches_expected_series_tn6qb2() -> Result<(), String> {
+        let mut fixture = super::fixture_generation_template(
+            "series_add",
+            "FP-GEN-TN6QB2-001",
+            "series_add_generated_alignment_strict_tn6qb2",
+        )
+        .map_err(|err| format!("template should build: {err}"))?;
+        let response: super::OracleResponse = serde_json::from_value(serde_json::json!({
+            "expected_series": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "values": [
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 12.0 },
+                    { "kind": "float64", "value": 23.0 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            },
+            "fixture_provenance": {
+                "pandas_version": "2.2.3",
+                "oracle_script_sha256": "abc123",
+                "generated_at": "2026-05-08T12:00:00Z"
+            }
+        }))
+        .map_err(|err| format!("oracle response should deserialize: {err}"))?;
+        let input_matrix = vec!["operation=series_add".to_owned()];
+        let divergence_notes = vec!["none".to_owned()];
+
+        super::apply_oracle_response_to_generated_fixture(
+            &mut fixture,
+            response,
+            "fp-conformance-cli --generate-fixture-pilot series_add",
+            &input_matrix,
+            &divergence_notes,
+        )
+        .map_err(|err| format!("oracle response should enrich fixture: {err}"))?;
+
+        let provenance = fixture
+            .fixture_provenance
+            .as_ref()
+            .ok_or_else(|| "missing fixture provenance".to_owned())?;
+        assert_eq!(
+            fixture.oracle_source,
+            Some(super::FixtureOracleSource::Fixture)
+        );
+        assert!(fixture.expected_series.is_some());
+        assert_eq!(
+            provenance.generation_command.as_deref(),
+            Some("fp-conformance-cli --generate-fixture-pilot series_add")
+        );
+        assert_eq!(provenance.input_matrix, input_matrix);
+        assert_eq!(provenance.intentional_divergence_notes, divergence_notes);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_fixture_pilot_series_add_packet_passes_tn6qb2() -> Result<(), String> {
+        let report = super::run_differential_by_id(
+            &super::HarnessConfig::default_paths(),
+            "FP-GEN-TN6QB2-001",
+            super::OracleMode::FixtureExpected,
+        )
+        .map_err(|err| format!("generated packet should run: {err}"))?;
+
+        assert_eq!(report.report.fixture_count, 1);
+        assert_eq!(
+            report.report.failed, 0,
+            "generated fixture should match fixture expectations: {:?}",
+            report.differential_results
+        );
+        Ok(())
     }
 
     #[test]

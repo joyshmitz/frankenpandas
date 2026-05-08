@@ -1,0 +1,12 @@
+{
+  "packet_id": "FP-GEN-TN6QB2-001",
+  "decode_proofs": [
+    {
+      "ts_unix_ms": 1778243376380,
+      "reason": "raptorq decode drill dropped 1 source packets and recovered payload",
+      "recovered_blocks": 1,
+      "proof_hash": "sha256:4b80f6b4c081d52ee28609251a6e9fbef3cb38b4cd04d2f28b95b9094baeb805"
+    }
+  ],
+  "status": "recovered"
+}

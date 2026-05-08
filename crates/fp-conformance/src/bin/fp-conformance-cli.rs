@@ -1,16 +1,19 @@
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
+
 use fp_conformance::{
-    E2eConfig, HarnessConfig, NoopHooks, OracleMode, SuiteOptions, append_phase2c_drift_history,
-    build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
-    enforce_packet_gates, run_differential_by_id, run_e2e_suite,
-    run_fault_injection_validation_by_id, run_packets_grouped, write_case_evidence_jsonl,
-    write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-    write_differential_validation_log, write_fault_injection_validation_report,
-    write_grouped_artifacts,
+    E2eConfig, FixtureGenerationRequest, HarnessConfig, NoopHooks, OracleMode, SuiteOptions,
+    append_phase2c_drift_history, build_compat_closure_e2e_scenario_report,
+    build_compat_closure_final_evidence_pack, enforce_packet_gates, generate_fixture_pilot_bundle,
+    run_differential_by_id, run_e2e_suite, run_fault_injection_validation_by_id,
+    run_packets_grouped, write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
+    write_compat_closure_final_evidence_pack, write_differential_validation_log,
+    write_fault_injection_validation_report, write_grouped_artifacts,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let raw_args = std::env::args().collect::<Vec<_>>();
     let mut packet_filter: Option<String> = None;
     let mut oracle_mode = OracleMode::FixtureExpected;
     let mut python_bin: Option<String> = None;
@@ -24,8 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut write_final_evidence_pack = false;
     let mut print_mismatches = false;
     let mut emit_evidence = false;
+    let mut generate_fixture_pilot: Option<String> = None;
+    let mut generated_packet_id: Option<String> = None;
+    let mut generated_case_id: Option<String> = None;
+    let mut generated_fixture_path: Option<PathBuf> = None;
+    let mut generator_artifact_dir: Option<PathBuf> = None;
+    let mut input_matrix = Vec::new();
+    let mut intentional_divergence_notes = Vec::new();
+    let mut repair_packets_per_block = 8_u32;
 
-    let mut args = std::env::args().skip(1).peekable();
+    let mut args = raw_args.iter().skip(1).cloned().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--packet-id" => {
@@ -76,6 +87,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--emit-evidence" => {
                 emit_evidence = true;
             }
+            "--generate-fixture-pilot" => {
+                let value = args
+                    .next()
+                    .ok_or("--generate-fixture-pilot requires a method family")?;
+                generate_fixture_pilot = Some(value);
+            }
+            "--generated-packet-id" => {
+                let value = args
+                    .next()
+                    .ok_or("--generated-packet-id requires a value")?;
+                generated_packet_id = Some(value);
+            }
+            "--generated-case-id" => {
+                let value = args.next().ok_or("--generated-case-id requires a value")?;
+                generated_case_id = Some(value);
+            }
+            "--generated-fixture-path" => {
+                let value = args
+                    .next()
+                    .ok_or("--generated-fixture-path requires a path")?;
+                generated_fixture_path = Some(PathBuf::from(value));
+            }
+            "--generator-artifact-dir" => {
+                let value = args
+                    .next()
+                    .ok_or("--generator-artifact-dir requires a path")?;
+                generator_artifact_dir = Some(PathBuf::from(value));
+            }
+            "--input-matrix" => {
+                let value = args.next().ok_or("--input-matrix requires a value")?;
+                input_matrix.push(value);
+            }
+            "--intentional-divergence-note" => {
+                let value = args
+                    .next()
+                    .ok_or("--intentional-divergence-note requires a value")?;
+                intentional_divergence_notes.push(value);
+            }
+            "--repair-packets-per-block" => {
+                let value = args
+                    .next()
+                    .ok_or("--repair-packets-per-block requires an integer")?;
+                repair_packets_per_block = value.parse()?;
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -91,6 +146,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(python_bin) = python_bin {
         config.python_bin = python_bin;
     }
+
+    if let Some(method_family) = generate_fixture_pilot {
+        let packet_id = generated_packet_id.unwrap_or_else(|| "FP-GEN-TN6QB2-001".to_owned());
+        let case_id = generated_case_id
+            .unwrap_or_else(|| "series_add_generated_alignment_strict_tn6qb2".to_owned());
+        let fixture_path = generated_fixture_path.unwrap_or_else(|| {
+            config
+                .packet_fixture_root()
+                .join(format!("fp_generated_tn6qb2_{case_id}.json"))
+        });
+        let artifact_dir = generator_artifact_dir.unwrap_or_else(|| {
+            config
+                .repo_root
+                .join("artifacts/conformance")
+                .join(format!("fixture-generator-tn6qb2-{packet_id}"))
+        });
+        let request = FixtureGenerationRequest {
+            method_family,
+            packet_id,
+            case_id,
+            output_fixture_path: fixture_path,
+            artifact_dir,
+            generation_command: raw_args.join(" "),
+            input_matrix,
+            intentional_divergence_notes,
+            repair_packets_per_block,
+        };
+        let bundle = generate_fixture_pilot_bundle(&config, &request)?;
+        println!(
+            "generated packet={} case={} fixture={} manifest={} repair_symbols={} sidecar={} scrub={} decode_proof={}",
+            bundle.packet_id,
+            bundle.case_id,
+            bundle.fixture_path.display(),
+            bundle.manifest_path.display(),
+            bundle.repair_symbol_manifest_path.display(),
+            bundle.raptorq_sidecar_path.display(),
+            bundle.integrity_scrub_path.display(),
+            bundle.decode_proof_path.display()
+        );
+        return Ok(());
+    }
+
     let options = SuiteOptions {
         packet_filter,
         oracle_mode,
@@ -257,6 +354,14 @@ fn print_help() {
          \t--emit-evidence    Emit per-case machine-readable failure ledgers under artifacts/conformance/<packet>/<case>.jsonl\n\
          \t--write-e2e-scenarios Emit compat-closure E2E scenario matrix + replay bundle report\n\
          \t--write-final-evidence-pack Emit final compatibility evidence pack + migration + attestation bundle\n\
+         \t--generate-fixture-pilot <family> Capture a deterministic pilot fixture with live pandas oracle output\n\
+         \t--generated-packet-id <id> Packet id for --generate-fixture-pilot (default FP-GEN-TN6QB2-001)\n\
+         \t--generated-case-id <id> Case id for --generate-fixture-pilot\n\
+         \t--generated-fixture-path <path> Output fixture JSON path for --generate-fixture-pilot\n\
+         \t--generator-artifact-dir <path> Output generator proof artifact directory\n\
+         \t--input-matrix <entry> Extra input-matrix provenance entry; repeatable\n\
+         \t--intentional-divergence-note <note> Divergence provenance note; repeatable\n\
+         \t--repair-packets-per-block <n> RaptorQ repair packets per block for generated fixture bundle\n\
          \t--require-green      Fail with non-zero exit when any packet parity/gate check fails\n\
          \t--allow-system-pandas-fallback  Allow non-legacy pandas import when live oracle is enabled\n\
          \t-h, --help           Show this help"

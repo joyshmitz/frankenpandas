@@ -1,0 +1,309 @@
+{
+  "packet_id": "FP-GEN-TN6QB2-001",
+  "case_id": "series_add_generated_alignment_strict_tn6qb2",
+  "mode": "strict",
+  "operation": "series_add",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "d00be3e5e8aa1a0e2910001e974161268e2d79b82d6af6783d0b24b2a00b97ae",
+    "generated_at": "2026-05-08T12:29:36Z",
+    "generation_command": "/data/tmp/frankenpandas-whiteotter-tn6qb2-build/debug/fp-conformance-cli --allow-system-pandas-fallback --generate-fixture-pilot series_add --generated-packet-id FP-GEN-TN6QB2-001 --generated-case-id series_add_generated_alignment_strict_tn6qb2 --generated-fixture-path crates/fp-conformance/fixtures/packets/fp_generated_tn6qb2_series_add_generated_alignment_strict_tn6qb2.json --generator-artifact-dir artifacts/conformance/fixture-generator-tn6qb2-FP-GEN-TN6QB2-001 --intentional-divergence-note none",
+    "input_matrix": [
+      "operation=series_add",
+      "mode=strict",
+      "left.index=[0,1,2]",
+      "right.index=[1,2,3]",
+      "overlap=[1,2], left_only=[0], right_only=[3]",
+      "values=float64 arithmetic with pandas alignment"
+    ],
+    "intentional_divergence_notes": [
+      "none"
+    ]
+  },
+  "oracle_source": "fixture",
+  "requirement_level": null,
+  "left": {
+    "name": "left",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "values": [
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 2.0
+      },
+      {
+        "kind": "float64",
+        "value": 3.0
+      }
+    ]
+  },
+  "right": {
+    "name": "right",
+    "index": [
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
+    ],
+    "values": [
+      {
+        "kind": "float64",
+        "value": 10.0
+      },
+      {
+        "kind": "float64",
+        "value": 20.0
+      },
+      {
+        "kind": "float64",
+        "value": 30.0
+      }
+    ]
+  },
+  "groupby_keys": null,
+  "groupby_columns": null,
+  "groupby_observed": null,
+  "groupby_agg_multi": null,
+  "frame": null,
+  "expr": null,
+  "locals": null,
+  "frame_right": null,
+  "frame_other": null,
+  "dict_columns": null,
+  "column_order": null,
+  "constructor_dtype": null,
+  "constructor_copy": null,
+  "records": null,
+  "matrix_rows": null,
+  "index": null,
+  "join_type": null,
+  "merge_on": null,
+  "merge_on_keys": null,
+  "left_on_keys": null,
+  "right_on_keys": null,
+  "left_index": null,
+  "right_index": null,
+  "merge_indicator": null,
+  "merge_indicator_name": null,
+  "merge_validate": null,
+  "merge_suffixes": null,
+  "merge_sort": null,
+  "compare_result_names": null,
+  "expected_series": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
+    ],
+    "values": [
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "float64",
+        "value": 12.0
+      },
+      {
+        "kind": "float64",
+        "value": 23.0
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      }
+    ]
+  },
+  "expected_join": null,
+  "expected_frame": null,
+  "expected_error_contains": null,
+  "expected_alignment": null,
+  "expected_bool": null,
+  "expected_positions": null,
+  "expected_scalar": null,
+  "expected_dtype": null,
+  "datetime_unit": null,
+  "datetime_origin": null,
+  "datetime_utc": null,
+  "fill_value": null,
+  "clip_lower": null,
+  "clip_upper": null,
+  "clip_lower_series": null,
+  "clip_upper_series": null,
+  "round_decimals": null,
+  "dataframe_binary_method": null,
+  "nlargest_n": null,
+  "between_left": null,
+  "between_right": null,
+  "between_inclusive": null,
+  "head_n": null,
+  "tail_n": null,
+  "diff_periods": null,
+  "shift_periods": null,
+  "shift_axis": null,
+  "pct_change_periods": null,
+  "pct_change_axis": null,
+  "mode_dropna": null,
+  "idxmin_skipna": null,
+  "idxmax_skipna": null,
+  "argmin_skipna": null,
+  "argmax_skipna": null,
+  "searchsorted_value": null,
+  "searchsorted_side": null,
+  "autocorr_lag": null,
+  "diff_axis": null,
+  "rank_method": null,
+  "rank_na_option": null,
+  "rank_axis": null,
+  "rank_pct": null,
+  "corr_method": null,
+  "corr_min_periods": null,
+  "corr_numeric_only": null,
+  "sort_column": null,
+  "sort_ascending": null,
+  "value_counts_normalize": null,
+  "memory_usage_index": null,
+  "memory_usage_deep": null,
+  "concat_axis": null,
+  "concat_join": null,
+  "direction": null,
+  "allow_exact_matches": null,
+  "tolerance": null,
+  "by": null,
+  "merge_fill_method": null,
+  "set_index_column": null,
+  "set_index_drop": null,
+  "set_index_verify_integrity": null,
+  "reset_index_drop": null,
+  "insert_loc": null,
+  "insert_column": null,
+  "insert_values": null,
+  "assignments": null,
+  "rename_columns": null,
+  "reindex_labels": null,
+  "reindex_columns": null,
+  "drop_columns": null,
+  "subset": null,
+  "keep": null,
+  "ignore_index": null,
+  "explode_column": null,
+  "csv_input": null,
+  "csv_decimal": null,
+  "csv_on_bad_lines": null,
+  "csv_parse_dates": null,
+  "csv_parse_date_combinations": null,
+  "csv_true_values": null,
+  "csv_false_values": null,
+  "json_input": null,
+  "json_orient": null,
+  "jsonl_input": null,
+  "parquet_input_base64": null,
+  "feather_input_base64": null,
+  "excel_input_base64": null,
+  "ipc_stream_input_base64": null,
+  "loc_labels": null,
+  "iloc_positions": null,
+  "take_indices": null,
+  "repeat_n": null,
+  "repeat_counts": null,
+  "group_name": null,
+  "xs_key": null,
+  "xs_level": null,
+  "cut_bins": null,
+  "qcut_quantiles": null,
+  "take_axis": null,
+  "asof_label": null,
+  "time_value": null,
+  "start_time": null,
+  "end_time": null,
+  "string_sep": null,
+  "regex_pattern": null,
+  "replace_value": null,
+  "str_width": null,
+  "str_fillchar": null,
+  "str_pad_side": null,
+  "str_sub": null,
+  "str_slice_start": null,
+  "str_slice_end": null,
+  "str_get_index": null,
+  "str_repeat_n": null,
+  "str_wrap_width": null,
+  "str_wrap_drop_whitespace": null,
+  "str_normalize_form": null,
+  "str_prefix": null,
+  "str_suffix": null,
+  "str_split_pat": null,
+  "str_split_n": null,
+  "str_join_from": null,
+  "str_join_sep": null,
+  "str_translate_from": null,
+  "str_translate_to": null,
+  "str_expandtabs_size": null,
+  "str_findall_sep": null,
+  "str_patterns": null,
+  "melt_id_vars": null,
+  "melt_value_vars": null,
+  "melt_var_name": null,
+  "melt_value_name": null,
+  "pivot_values": null,
+  "pivot_index": null,
+  "pivot_columns": null,
+  "pivot_aggfunc": null,
+  "pivot_margins": null,
+  "pivot_margins_name": null,
+  "dummy_columns": null,
+  "crosstab_normalize": null,
+  "replace_to_find": null,
+  "replace_to_value": null,
+  "na_action_ignore": null,
+  "categorical_categories": null,
+  "categorical_ordered": null,
+  "window_size": null,
+  "min_periods": null,
+  "window_center": null,
+  "ewm_span": null,
+  "ewm_alpha": null,
+  "resample_freq": null,
+  "quantile_value": null,
+  "dt_freq": null,
+  "dt_strftime_format": null,
+  "dt_how": null,
+  "dt_warn": null
+}

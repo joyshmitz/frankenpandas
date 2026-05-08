@@ -1,0 +1,624 @@
+{
+  "as_of": "2026-05-08T10:38:41Z",
+  "findings": {
+    "dependency_cycles": [],
+    "duplicate_cross_listed_epics": [
+      {
+        "ids": [
+          "frankenpandas-1q5v6",
+          "frankenpandas-d89fe"
+        ],
+        "kind": "explicit_cross_list",
+        "source": "frankenpandas-1q5v6",
+        "statuses": {
+          "frankenpandas-1q5v6": "open",
+          "frankenpandas-d89fe": "open"
+        },
+        "titles": {
+          "frankenpandas-1q5v6": "[reality-check] expand MultiIndex coverage",
+          "frankenpandas-d89fe": "[reality-check] complete pandas.MultiIndex parity \u2014 96/118 methods missing (CRITICAL)"
+        }
+      },
+      {
+        "ids": [
+          "frankenpandas-a31qh",
+          "frankenpandas-b8fwu"
+        ],
+        "kind": "explicit_cross_list",
+        "source": "frankenpandas-b8fwu",
+        "statuses": {
+          "frankenpandas-a31qh": "closed",
+          "frankenpandas-b8fwu": "closed"
+        },
+        "titles": {
+          "frankenpandas-a31qh": "[reality-check] add pandas.Index 53 missing methods \u2014 astype/factorize/get_level_values/sort/str/union/to_frame/etc.",
+          "frankenpandas-b8fwu": "[reality-check] expand Index coverage"
+        }
+      },
+      {
+        "ids": [
+          "frankenpandas-cxq4t",
+          "frankenpandas-k0ytm"
+        ],
+        "kind": "explicit_cross_list",
+        "source": "frankenpandas-k0ytm",
+        "statuses": {
+          "frankenpandas-cxq4t": "closed",
+          "frankenpandas-k0ytm": "closed"
+        },
+        "titles": {
+          "frankenpandas-cxq4t": "[reality-check] add pandas.Resampler 24 missing methods \u2014 agg/asfreq/bfill/ffill/fillna/interpolate/quantile/transform/etc.",
+          "frankenpandas-k0ytm": "[reality-check] expand Resampler coverage"
+        }
+      },
+      {
+        "ids": [
+          "frankenpandas-k2l3y",
+          "frankenpandas-t8hz0"
+        ],
+        "kind": "explicit_cross_list",
+        "source": "frankenpandas-k2l3y",
+        "statuses": {
+          "frankenpandas-k2l3y": "open",
+          "frankenpandas-t8hz0": "closed"
+        },
+        "titles": {
+          "frankenpandas-k2l3y": "[reality-check] expand Index variants coverage (DatetimeIndex/TimedeltaIndex/PeriodIndex/RangeIndex/CategoricalIndex)",
+          "frankenpandas-t8hz0": "[reality-check] add 5 pandas Index variant types \u2014 DatetimeIndex/TimedeltaIndex/PeriodIndex/RangeIndex/CategoricalIndex (CRITICAL, ~624 methods)"
+        }
+      }
+    ],
+    "missing_parent_progress_notes": [
+      {
+        "closed_children_after_parent_update": [
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T10:38:41.502800316Z",
+            "id": "br-frankenpandas-tn6qb.5",
+            "priority": 1,
+            "status": "closed",
+            "title": "[idea-wizard] bead hygiene and umbrella progress reconciler",
+            "updated_at": "2026-05-08T10:38:41.503091377Z"
+          }
+        ],
+        "latest_child_closed_at": "2026-05-08T10:38:41Z",
+        "parent": {
+          "closed_at": null,
+          "id": "br-frankenpandas-tn6qb",
+          "priority": 1,
+          "status": "open",
+          "title": "[idea-wizard] build parity acceleration control plane",
+          "updated_at": "2026-05-08T05:10:40.023284977Z"
+        },
+        "parent_updated_at": "2026-05-08T05:10:40.023284977Z"
+      },
+      {
+        "closed_children_after_parent_update": [
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T05:06:38.952171669Z",
+            "id": "frankenpandas-d89fe.1",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex get_indexer/get_indexer_for parity",
+            "updated_at": "2026-05-08T05:06:38.952418667Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T07:06:45.410603918Z",
+            "id": "frankenpandas-d89fe.10",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex get_locs parity",
+            "updated_at": "2026-05-08T07:06:45.410912161Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T07:18:33.079647110Z",
+            "id": "frankenpandas-d89fe.11",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex truncate parity",
+            "updated_at": "2026-05-08T07:18:33.079894208Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T05:22:21.469464541Z",
+            "id": "frankenpandas-d89fe.2",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex get_slice_bound and slice_indexer parity",
+            "updated_at": "2026-05-08T05:22:21.469810155Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T05:27:22.928467269Z",
+            "id": "frankenpandas-d89fe.3",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex groupby and join parity",
+            "updated_at": "2026-05-08T05:27:22.928857157Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T05:37:15.323684954Z",
+            "id": "frankenpandas-d89fe.4",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex reindex parity",
+            "updated_at": "2026-05-08T05:37:15.323932353Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T06:04:07.456791849Z",
+            "id": "frankenpandas-d89fe.5",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex rename parity",
+            "updated_at": "2026-05-08T06:04:07.457040941Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T06:21:20.909416681Z",
+            "id": "frankenpandas-d89fe.6",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex searchsorted parity",
+            "updated_at": "2026-05-08T06:21:20.909684929Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T06:30:41.532273877Z",
+            "id": "frankenpandas-d89fe.7",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex all/any reduction error parity",
+            "updated_at": "2026-05-08T06:30:41.532690886Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T06:39:02.106365057Z",
+            "id": "frankenpandas-d89fe.8",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex isna/notna unsupported error parity",
+            "updated_at": "2026-05-08T06:39:02.106615952Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T06:51:56.246079977Z",
+            "id": "frankenpandas-d89fe.9",
+            "priority": 1,
+            "status": "closed",
+            "title": "MultiIndex shift unsupported error parity",
+            "updated_at": "2026-05-08T06:51:56.246431242Z"
+          }
+        ],
+        "latest_child_closed_at": "2026-05-08T07:18:33Z",
+        "parent": {
+          "closed_at": null,
+          "id": "frankenpandas-d89fe",
+          "priority": 1,
+          "status": "open",
+          "title": "[reality-check] complete pandas.MultiIndex parity \u2014 96/118 methods missing (CRITICAL)",
+          "updated_at": "2026-05-03T03:45:10.472857063Z"
+        },
+        "parent_updated_at": "2026-05-03T03:45:10.472857063Z"
+      },
+      {
+        "closed_children_after_parent_update": [
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T04:46:03.023399541Z",
+            "id": "frankenpandas-nt65g.1",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy transform/filter/pipe parity slice",
+            "updated_at": "2026-05-08T04:46:03.023685303Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T09:50:53.641209176Z",
+            "id": "frankenpandas-nt65g.10",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy monotonic missing-value parity",
+            "updated_at": "2026-05-08T09:50:53.641461475Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T10:15:29.778593230Z",
+            "id": "frankenpandas-nt65g.11",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy first/last missing-value parity",
+            "updated_at": "2026-05-08T10:15:29.778840769Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T10:29:18.365928322Z",
+            "id": "frankenpandas-nt65g.12",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy Utf8 min/max parity",
+            "updated_at": "2026-05-08T10:29:18.366184257Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T07:49:15.035779988Z",
+            "id": "frankenpandas-nt65g.2",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy take parity",
+            "updated_at": "2026-05-08T07:49:15.036042536Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T08:04:53.908410896Z",
+            "id": "frankenpandas-nt65g.3",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy sample parity",
+            "updated_at": "2026-05-08T08:04:53.908666279Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T08:21:04.779373444Z",
+            "id": "frankenpandas-nt65g.4",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy quantile sem skew parity",
+            "updated_at": "2026-05-08T08:21:04.779728286Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T08:36:03.806204651Z",
+            "id": "frankenpandas-nt65g.5",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy ffill bfill fillna parity",
+            "updated_at": "2026-05-08T08:36:03.806443764Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T08:50:40.714839894Z",
+            "id": "frankenpandas-nt65g.6",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy nlargest nsmallest parity",
+            "updated_at": "2026-05-08T08:50:40.715088956Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T09:04:46.807231943Z",
+            "id": "frankenpandas-nt65g.7",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy value_counts aggregate alias parity",
+            "updated_at": "2026-05-08T09:04:46.807479381Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T09:21:01.491375710Z",
+            "id": "frankenpandas-nt65g.8",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy unique parity",
+            "updated_at": "2026-05-08T09:21:01.491649461Z"
+          },
+          {
+            "child_id_mentioned_in_parent_text": false,
+            "closed_at": "2026-05-08T09:34:20.526825455Z",
+            "id": "frankenpandas-nt65g.9",
+            "priority": 1,
+            "status": "closed",
+            "title": "SeriesGroupBy ohlc parity",
+            "updated_at": "2026-05-08T09:34:20.527133209Z"
+          }
+        ],
+        "latest_child_closed_at": "2026-05-08T10:29:18Z",
+        "parent": {
+          "closed_at": null,
+          "id": "frankenpandas-nt65g",
+          "priority": 1,
+          "status": "open",
+          "title": "[reality-check] expand SeriesGroupBy coverage",
+          "updated_at": "2026-05-03T03:54:41.002447208Z"
+        },
+        "parent_updated_at": "2026-05-03T03:54:41.002447208Z"
+      }
+    ],
+    "parent_child_integrity": [],
+    "stale_in_progress": [],
+    "umbrella_progress_contradictions": [
+      {
+        "closed_child_count": 11,
+        "listed_missing_methods_with_closed_children": [
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.7"
+            ],
+            "method": "all"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.7"
+            ],
+            "method": "any"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.1"
+            ],
+            "method": "get_indexer"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.1"
+            ],
+            "method": "get_indexer_for"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.10"
+            ],
+            "method": "get_locs"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.2"
+            ],
+            "method": "get_slice_bound"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.3"
+            ],
+            "method": "groupby"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.8"
+            ],
+            "method": "isna"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.3"
+            ],
+            "method": "join"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.8"
+            ],
+            "method": "notna"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.4"
+            ],
+            "method": "reindex"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.5"
+            ],
+            "method": "rename"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.6"
+            ],
+            "method": "searchsorted"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.9"
+            ],
+            "method": "shift"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.2"
+            ],
+            "method": "slice_indexer"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-d89fe.11"
+            ],
+            "method": "truncate"
+          }
+        ],
+        "parent": {
+          "closed_at": null,
+          "id": "frankenpandas-d89fe",
+          "priority": 1,
+          "status": "open",
+          "title": "[reality-check] complete pandas.MultiIndex parity \u2014 96/118 methods missing (CRITICAL)",
+          "updated_at": "2026-05-03T03:45:10.472857063Z"
+        },
+        "progress_counts": {
+          "reported_implemented": null,
+          "reported_missing": null,
+          "reported_percent": null,
+          "reported_total": null
+        },
+        "reported_missing_minus_closed_child_methods": null
+      },
+      {
+        "closed_child_count": 12,
+        "listed_missing_methods_with_closed_children": [
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.7"
+            ],
+            "method": "aggregate"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.5"
+            ],
+            "method": "bfill"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.5"
+            ],
+            "method": "ffill"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.5"
+            ],
+            "method": "fillna"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.1"
+            ],
+            "method": "filter"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.6"
+            ],
+            "method": "nlargest"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.6"
+            ],
+            "method": "nsmallest"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.9"
+            ],
+            "method": "ohlc"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.1"
+            ],
+            "method": "pipe"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.4"
+            ],
+            "method": "quantile"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.3"
+            ],
+            "method": "sample"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.4"
+            ],
+            "method": "sem"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.4"
+            ],
+            "method": "skew"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.2"
+            ],
+            "method": "take"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.1"
+            ],
+            "method": "transform"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.8"
+            ],
+            "method": "unique"
+          },
+          {
+            "closed_children": [
+              "frankenpandas-nt65g.7"
+            ],
+            "method": "value_counts"
+          }
+        ],
+        "parent": {
+          "closed_at": null,
+          "id": "frankenpandas-nt65g",
+          "priority": 1,
+          "status": "open",
+          "title": "[reality-check] expand SeriesGroupBy coverage",
+          "updated_at": "2026-05-03T03:54:41.002447208Z"
+        },
+        "progress_counts": {
+          "reported_implemented": 14,
+          "reported_missing": 55,
+          "reported_percent": 20,
+          "reported_total": 69
+        },
+        "reported_missing_minus_closed_child_methods": 38
+      }
+    ]
+  },
+  "generated_by": "scripts/validate_bead_hygiene.py",
+  "issues_path": ".beads/issues.jsonl",
+  "proposed_updates": [
+    {
+      "exact_append_text": "\n\n### Tracker hygiene progress note\n\nGenerated by `scripts/validate_bead_hygiene.py` at 2026-05-08T10:38:41Z.\n\nClosed child beads landed after this umbrella was last updated:\n- `br-frankenpandas-tn6qb.5`: [idea-wizard] bead hygiene and umbrella progress reconciler\n\nApply this only as an append-only progress note or use it to make a reviewed parent\ndescription update; do not overwrite unrelated tracker edits.",
+      "parent_id": "br-frankenpandas-tn6qb",
+      "parent_title": "[idea-wizard] build parity acceleration control plane",
+      "workflow": "append_only_progress_note"
+    },
+    {
+      "exact_append_text": "\n\n### Tracker hygiene progress note\n\nGenerated by `scripts/validate_bead_hygiene.py` at 2026-05-08T10:38:41Z.\n\nClosed child beads now cover methods still listed as missing:\n- `all`: closed child bead(s) frankenpandas-d89fe.7\n- `any`: closed child bead(s) frankenpandas-d89fe.7\n- `get_indexer`: closed child bead(s) frankenpandas-d89fe.1\n- `get_indexer_for`: closed child bead(s) frankenpandas-d89fe.1\n- `get_locs`: closed child bead(s) frankenpandas-d89fe.10\n- `get_slice_bound`: closed child bead(s) frankenpandas-d89fe.2\n- `groupby`: closed child bead(s) frankenpandas-d89fe.3\n- `isna`: closed child bead(s) frankenpandas-d89fe.8\n- `join`: closed child bead(s) frankenpandas-d89fe.3\n- `notna`: closed child bead(s) frankenpandas-d89fe.8\n- `reindex`: closed child bead(s) frankenpandas-d89fe.4\n- `rename`: closed child bead(s) frankenpandas-d89fe.5\n- `searchsorted`: closed child bead(s) frankenpandas-d89fe.6\n- `shift`: closed child bead(s) frankenpandas-d89fe.9\n- `slice_indexer`: closed child bead(s) frankenpandas-d89fe.2\n- `truncate`: closed child bead(s) frankenpandas-d89fe.11\n\nClosed child beads landed after this umbrella was last updated:\n- `frankenpandas-d89fe.1`: MultiIndex get_indexer/get_indexer_for parity\n- `frankenpandas-d89fe.10`: MultiIndex get_locs parity\n- `frankenpandas-d89fe.11`: MultiIndex truncate parity\n- `frankenpandas-d89fe.2`: MultiIndex get_slice_bound and slice_indexer parity\n- `frankenpandas-d89fe.3`: MultiIndex groupby and join parity\n- `frankenpandas-d89fe.4`: MultiIndex reindex parity\n- `frankenpandas-d89fe.5`: MultiIndex rename parity\n- `frankenpandas-d89fe.6`: MultiIndex searchsorted parity\n- `frankenpandas-d89fe.7`: MultiIndex all/any reduction error parity\n- `frankenpandas-d89fe.8`: MultiIndex isna/notna unsupported error parity\n- `frankenpandas-d89fe.9`: MultiIndex shift unsupported error parity\n\nApply this only as an append-only progress note or use it to make a reviewed parent\ndescription update; do not overwrite unrelated tracker edits.",
+      "parent_id": "frankenpandas-d89fe",
+      "parent_title": "[reality-check] complete pandas.MultiIndex parity \u2014 96/118 methods missing (CRITICAL)",
+      "workflow": "append_only_progress_note"
+    },
+    {
+      "exact_append_text": "\n\n### Tracker hygiene progress note\n\nGenerated by `scripts/validate_bead_hygiene.py` at 2026-05-08T10:38:41Z.\n\nClosed child beads now cover methods still listed as missing:\n- `aggregate`: closed child bead(s) frankenpandas-nt65g.7\n- `bfill`: closed child bead(s) frankenpandas-nt65g.5\n- `ffill`: closed child bead(s) frankenpandas-nt65g.5\n- `fillna`: closed child bead(s) frankenpandas-nt65g.5\n- `filter`: closed child bead(s) frankenpandas-nt65g.1\n- `nlargest`: closed child bead(s) frankenpandas-nt65g.6\n- `nsmallest`: closed child bead(s) frankenpandas-nt65g.6\n- `ohlc`: closed child bead(s) frankenpandas-nt65g.9\n- `pipe`: closed child bead(s) frankenpandas-nt65g.1\n- `quantile`: closed child bead(s) frankenpandas-nt65g.4\n- `sample`: closed child bead(s) frankenpandas-nt65g.3\n- `sem`: closed child bead(s) frankenpandas-nt65g.4\n- `skew`: closed child bead(s) frankenpandas-nt65g.4\n- `take`: closed child bead(s) frankenpandas-nt65g.2\n- `transform`: closed child bead(s) frankenpandas-nt65g.1\n- `unique`: closed child bead(s) frankenpandas-nt65g.8\n- `value_counts`: closed child bead(s) frankenpandas-nt65g.7\n\nClosed child beads landed after this umbrella was last updated:\n- `frankenpandas-nt65g.1`: SeriesGroupBy transform/filter/pipe parity slice\n- `frankenpandas-nt65g.10`: SeriesGroupBy monotonic missing-value parity\n- `frankenpandas-nt65g.11`: SeriesGroupBy first/last missing-value parity\n- `frankenpandas-nt65g.12`: SeriesGroupBy Utf8 min/max parity\n- `frankenpandas-nt65g.2`: SeriesGroupBy take parity\n- `frankenpandas-nt65g.3`: SeriesGroupBy sample parity\n- `frankenpandas-nt65g.4`: SeriesGroupBy quantile sem skew parity\n- `frankenpandas-nt65g.5`: SeriesGroupBy ffill bfill fillna parity\n- `frankenpandas-nt65g.6`: SeriesGroupBy nlargest nsmallest parity\n- `frankenpandas-nt65g.7`: SeriesGroupBy value_counts aggregate alias parity\n- `frankenpandas-nt65g.8`: SeriesGroupBy unique parity\n- `frankenpandas-nt65g.9`: SeriesGroupBy ohlc parity\n\nRecount prompt: review the reported gap of 55 missing methods; the closed-child floor is now at most 38 before any new coverage discovered outside child close reasons.\n\nApply this only as an append-only progress note or use it to make a reviewed parent\ndescription update; do not overwrite unrelated tracker edits.",
+      "parent_id": "frankenpandas-nt65g",
+      "parent_title": "[reality-check] expand SeriesGroupBy coverage",
+      "workflow": "append_only_progress_note"
+    }
+  ],
+  "stale_in_progress_threshold_hours": 24.0,
+  "summary": {
+    "dependency_edge_count": 115,
+    "finding_counts": {
+      "dependency_cycles": 0,
+      "duplicate_cross_listed_epics": 4,
+      "missing_parent_progress_notes": 3,
+      "parent_child_integrity": 0,
+      "proposed_updates": 3,
+      "stale_in_progress": 0,
+      "umbrella_progress_contradictions": 2
+    },
+    "issue_count": 1665,
+    "parent_child_parent_count": 6,
+    "status_counts": {
+      "closed": 1652,
+      "open": 13
+    },
+    "type_counts": {
+      "bug": 302,
+      "docs": 30,
+      "epic": 3,
+      "feature": 93,
+      "refactor": 3,
+      "task": 818,
+      "test": 416
+    }
+  }
+}

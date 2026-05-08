@@ -12487,6 +12487,66 @@ impl SeriesGroupBy<'_> {
         Series::from_values(self.series.name(), out_labels, out_values)
     }
 
+    /// Open-high-low-close per group.
+    pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
+        let (order, order_keys, groups) = self.build_groups();
+        let values = self.series.column.values();
+        let mut opens = Vec::with_capacity(order_keys.len());
+        let mut highs = Vec::with_capacity(order_keys.len());
+        let mut lows = Vec::with_capacity(order_keys.len());
+        let mut closes = Vec::with_capacity(order_keys.len());
+
+        for key in &order_keys {
+            let group_values: Vec<f64> = groups[key]
+                .iter()
+                .filter_map(|&idx| {
+                    let value = &values[idx];
+                    if value.is_missing() {
+                        None
+                    } else {
+                        value.to_f64().ok()
+                    }
+                })
+                .collect();
+
+            if group_values.is_empty() {
+                opens.push(Scalar::Float64(f64::NAN));
+                highs.push(Scalar::Float64(f64::NAN));
+                lows.push(Scalar::Float64(f64::NAN));
+                closes.push(Scalar::Float64(f64::NAN));
+            } else {
+                opens.push(Scalar::Float64(group_values[0]));
+                highs.push(Scalar::Float64(
+                    group_values
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max),
+                ));
+                lows.push(Scalar::Float64(
+                    group_values.iter().copied().fold(f64::INFINITY, f64::min),
+                ));
+                closes.push(Scalar::Float64(group_values[group_values.len() - 1]));
+            }
+        }
+
+        let mut columns = BTreeMap::new();
+        columns.insert("open".to_owned(), Column::from_values(opens)?);
+        columns.insert("high".to_owned(), Column::from_values(highs)?);
+        columns.insert("low".to_owned(), Column::from_values(lows)?);
+        columns.insert("close".to_owned(), Column::from_values(closes)?);
+
+        DataFrame::new_with_column_order(
+            Index::new(order),
+            columns,
+            vec![
+                "open".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "close".to_owned(),
+            ],
+        )
+    }
+
     /// Quantile of each group using linear interpolation.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
         if !q.is_finite() || !(0.0..=1.0).contains(&q) {
@@ -67120,6 +67180,83 @@ mod tests {
                 Scalar::Utf8("w".into()),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_ohlc_nt65g9() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "price",
+            (0_i64..8).map(Into::into).collect(),
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(15.0),
+                Scalar::Float64(8.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..8).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )?;
+
+        let ohlc = values.groupby(&groups)?.ohlc()?;
+        assert_eq!(ohlc.column_names(), vec!["open", "high", "low", "close"]);
+        assert_eq!(
+            ohlc.index().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ]
+        );
+        assert_eq!(ohlc.columns()["open"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(ohlc.columns()["high"].values()[0], Scalar::Float64(15.0));
+        assert_eq!(ohlc.columns()["low"].values()[0], Scalar::Float64(8.0));
+        assert_eq!(ohlc.columns()["close"].values()[0], Scalar::Float64(8.0));
+        assert!(
+            ohlc.columns()["open"].values()[1]
+                .to_f64()
+                .expect("open should be numeric NaN")
+                .is_nan()
+        );
+        assert!(
+            ohlc.columns()["high"].values()[1]
+                .to_f64()
+                .expect("high should be numeric NaN")
+                .is_nan()
+        );
+        assert!(
+            ohlc.columns()["low"].values()[1]
+                .to_f64()
+                .expect("low should be numeric NaN")
+                .is_nan()
+        );
+        assert!(
+            ohlc.columns()["close"].values()[1]
+                .to_f64()
+                .expect("close should be numeric NaN")
+                .is_nan()
+        );
+        assert_eq!(ohlc.columns()["open"].values()[2], Scalar::Float64(3.0));
+        assert_eq!(ohlc.columns()["high"].values()[2], Scalar::Float64(3.0));
+        assert_eq!(ohlc.columns()["low"].values()[2], Scalar::Float64(1.0));
+        assert_eq!(ohlc.columns()["close"].values()[2], Scalar::Float64(1.0));
 
         Ok(())
     }

@@ -209,6 +209,50 @@ pub struct DecisionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexIdentity {
+    pub role: String,
+    pub len: usize,
+    pub has_duplicates: bool,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticWitnessRecord {
+    pub ts_unix_ms: u64,
+    pub operation: String,
+    pub materialization_reason: String,
+    pub alignment_mode: String,
+    pub input_index_identity: Vec<SemanticIndexIdentity>,
+    pub output_index_identity: SemanticIndexIdentity,
+    pub null_nan_policy: String,
+    pub output_ordering_contract: String,
+}
+
+impl SemanticWitnessRecord {
+    #[must_use]
+    pub fn new(
+        operation: impl Into<String>,
+        materialization_reason: impl Into<String>,
+        alignment_mode: impl Into<String>,
+        input_index_identity: Vec<SemanticIndexIdentity>,
+        output_index_identity: SemanticIndexIdentity,
+        null_nan_policy: impl Into<String>,
+        output_ordering_contract: impl Into<String>,
+    ) -> Self {
+        Self {
+            ts_unix_ms: now_unix_ms().unwrap_or_default(),
+            operation: operation.into(),
+            materialization_reason: materialization_reason.into(),
+            alignment_mode: alignment_mode.into(),
+            input_index_identity,
+            output_index_identity,
+            null_nan_policy: null_nan_policy.into(),
+            output_ordering_contract: output_ordering_contract.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GalaxyBrainCard {
     pub title: String,
     pub equation: String,
@@ -245,6 +289,8 @@ pub fn decision_to_card(record: &DecisionRecord) -> GalaxyBrainCard {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceLedger {
     records: Vec<DecisionRecord>,
+    #[serde(default)]
+    semantic_witnesses: Vec<SemanticWitnessRecord>,
 }
 
 impl EvidenceLedger {
@@ -252,6 +298,7 @@ impl EvidenceLedger {
     pub fn new() -> Self {
         Self {
             records: Vec::new(),
+            semantic_witnesses: Vec::new(),
         }
     }
 
@@ -259,9 +306,18 @@ impl EvidenceLedger {
         self.records.push(record);
     }
 
+    pub fn push_semantic_witness(&mut self, record: SemanticWitnessRecord) {
+        self.semantic_witnesses.push(record);
+    }
+
     #[must_use]
     pub fn records(&self) -> &[DecisionRecord] {
         &self.records
+    }
+
+    #[must_use]
+    pub fn semantic_witnesses(&self) -> &[SemanticWitnessRecord] {
+        &self.semantic_witnesses
     }
 }
 
@@ -517,6 +573,11 @@ impl RaptorQEnvelope {
     }
 }
 
+#[must_use]
+pub fn semantic_fingerprint_bytes(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -724,7 +785,7 @@ mod tests {
 
     use super::{
         ConformalGuard, DecisionAction, EvidenceLedger, RaptorQEnvelope, RuntimeMode,
-        RuntimePolicy, decision_to_card,
+        RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord, decision_to_card,
     };
 
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
@@ -777,6 +838,52 @@ mod tests {
                 "structured log missing field: {field}"
             );
         }
+    }
+
+    #[test]
+    fn evidence_ledger_records_semantic_witnesses_tn6qb3() {
+        let mut ledger = EvidenceLedger::new();
+        let witness = SemanticWitnessRecord::new(
+            "series.add",
+            "series_binary_arithmetic_materialization",
+            "outer",
+            vec![
+                SemanticIndexIdentity {
+                    role: "left".to_owned(),
+                    len: 2,
+                    has_duplicates: false,
+                    fingerprint: super::semantic_fingerprint_bytes(b"left"),
+                },
+                SemanticIndexIdentity {
+                    role: "right".to_owned(),
+                    len: 2,
+                    has_duplicates: false,
+                    fingerprint: super::semantic_fingerprint_bytes(b"right"),
+                },
+            ],
+            SemanticIndexIdentity {
+                role: "output".to_owned(),
+                len: 3,
+                has_duplicates: false,
+                fingerprint: super::semantic_fingerprint_bytes(b"output"),
+            },
+            "missing aligned operands materialize as NaN/null before arithmetic",
+            "outer union preserves left order then right-only labels",
+        );
+
+        ledger.push_semantic_witness(witness);
+
+        let witnesses = ledger.semantic_witnesses();
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(witnesses[0].operation, "series.add");
+        assert_eq!(witnesses[0].alignment_mode, "outer");
+        assert_eq!(witnesses[0].output_index_identity.len, 3);
+        assert_eq!(witnesses[0].input_index_identity[0].role, "left");
+        assert!(
+            witnesses[0].input_index_identity[0]
+                .fingerprint
+                .starts_with("sha256:")
+        );
     }
 
     fn decide_join_admission_baseline(

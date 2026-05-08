@@ -96,7 +96,9 @@ use fp_index::{
     AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
     format_datetime_ns, validate_alignment_plan,
 };
-use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
+use fp_runtime::{
+    DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
+};
 use fp_types::{DType, NullKind, Scalar, SparseDType, Timedelta, cast_scalar_owned, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1348,6 +1350,61 @@ fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
     }
 }
 
+fn align_mode_name(mode: AlignMode) -> &'static str {
+    match mode {
+        AlignMode::Inner => "inner",
+        AlignMode::Left => "left",
+        AlignMode::Right => "right",
+        AlignMode::Outer => "outer",
+    }
+}
+
+fn arithmetic_op_name(op: ArithmeticOp) -> &'static str {
+    match op {
+        ArithmeticOp::Add => "add",
+        ArithmeticOp::Sub => "sub",
+        ArithmeticOp::Mul => "mul",
+        ArithmeticOp::Div => "div",
+        ArithmeticOp::Mod => "mod",
+        ArithmeticOp::Pow => "pow",
+        ArithmeticOp::FloorDiv => "floordiv",
+    }
+}
+
+fn semantic_index_identity(role: &str, index: &Index) -> SemanticIndexIdentity {
+    let fingerprint_payload = serde_json::to_vec(index.labels())
+        .unwrap_or_else(|_| format!("{:?}", index.labels()).into_bytes());
+    SemanticIndexIdentity {
+        role: role.to_owned(),
+        len: index.len(),
+        has_duplicates: index.has_duplicates(),
+        fingerprint: fp_runtime::semantic_fingerprint_bytes(&fingerprint_payload),
+    }
+}
+
+fn record_alignment_semantic_witness(
+    ledger: &mut EvidenceLedger,
+    operation: &str,
+    alignment_mode: AlignMode,
+    left_index: &Index,
+    right_index: &Index,
+    output_index: &Index,
+    materialization_reason: &str,
+) {
+    ledger.push_semantic_witness(SemanticWitnessRecord::new(
+        operation,
+        materialization_reason,
+        align_mode_name(alignment_mode),
+        vec![
+            semantic_index_identity("left", left_index),
+            semantic_index_identity("right", right_index),
+        ],
+        semantic_index_identity("output", output_index),
+        "missing aligned operands materialize as column nulls/NaNs before arithmetic; existing column kernels preserve pandas-observable null/NaN propagation",
+        "exact indexes preserve input order; unique outer alignment emits sorted labels; duplicate-aware outer alignment preserves left encounter order then right-only labels",
+    ));
+}
+
 fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
     debug_assert!(!left.has_duplicates());
     debug_assert!(!right.has_duplicates());
@@ -1913,6 +1970,16 @@ impl Series {
             validate_alignment_plan(&plan)?;
             (plan.union_index, plan.left_positions, plan.right_positions)
         };
+
+        record_alignment_semantic_witness(
+            ledger,
+            &format!("series.{}", arithmetic_op_name(op)),
+            AlignMode::Outer,
+            &self.index,
+            &other.index,
+            &union_index,
+            "series_binary_arithmetic_materialization",
+        );
 
         let left = self.column.reindex_by_positions(&left_positions)?;
         let right = other.column.reindex_by_positions(&right_positions)?;
@@ -35671,6 +35738,56 @@ mod tests {
                 Scalar::Int64(34)
             ]
         );
+    }
+
+    #[test]
+    fn series_add_emits_alignment_semantic_witness_tn6qb3() {
+        let left = Series::from_values(
+            "left",
+            vec![1_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(30)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec![2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(4)],
+        )
+        .expect("right");
+        let mut ledger = EvidenceLedger::new();
+
+        let out = left
+            .add_with_policy(&right, &RuntimePolicy::hardened(Some(100)), &mut ledger)
+            .expect("add should pass");
+
+        assert_eq!(
+            out.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        let witnesses = ledger.semantic_witnesses();
+        assert_eq!(witnesses.len(), 1);
+        let witness = &witnesses[0];
+        assert_eq!(witness.operation, "series.add");
+        assert_eq!(
+            witness.materialization_reason,
+            "series_binary_arithmetic_materialization"
+        );
+        assert_eq!(witness.alignment_mode, "outer");
+        assert_eq!(witness.input_index_identity.len(), 2);
+        assert_eq!(witness.input_index_identity[0].role, "left");
+        assert_eq!(witness.input_index_identity[0].len, 2);
+        assert!(!witness.input_index_identity[0].has_duplicates);
+        assert_eq!(witness.input_index_identity[1].role, "right");
+        assert_eq!(witness.output_index_identity.role, "output");
+        assert_eq!(witness.output_index_identity.len, 3);
+        assert!(
+            witness
+                .input_index_identity
+                .iter()
+                .all(|identity| identity.fingerprint.starts_with("sha256:"))
+        );
+        assert!(witness.null_nan_policy.contains("nulls/NaNs"));
+        assert!(witness.output_ordering_contract.contains("unique outer"));
     }
 
     #[test]

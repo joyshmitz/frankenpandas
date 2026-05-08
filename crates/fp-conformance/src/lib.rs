@@ -26589,6 +26589,116 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_pivot_duplicate_keys_expected_error_contains_tn6qb7() -> Result<(), String> {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-ERR-CATALOG-001",
+            "case_id": "dataframe_pivot_duplicate_keys_expected_error_contains_tn6qb7",
+            "mode": "strict",
+            "operation": "dataframe_pivot",
+            "pivot_values": ["val"],
+            "pivot_index": "row",
+            "pivot_columns": "col",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "columns": {
+                    "row": [
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "A" }
+                    ],
+                    "col": [
+                        { "kind": "utf8", "value": "x" },
+                        { "kind": "utf8", "value": "x" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 }
+                    ]
+                },
+                "column_order": ["row", "col", "val"]
+            },
+            "expected_error_contains": "duplicate entries"
+        }))
+        .map_err(|err| format!("dataframe_pivot duplicate fixture should deserialize: {err}"))?;
+
+        let report = super::run_differential_fixture(
+            &super::HarnessConfig::default_paths(),
+            &fixture,
+            &super::SuiteOptions::default(),
+        )
+        .map_err(|err| {
+            format!("dataframe_pivot duplicate expected-error fixture should run: {err}")
+        })?;
+
+        assert_eq!(report.status, super::CaseStatus::Pass, "{report:?}");
+        assert!(
+            report.drift_records.is_empty(),
+            "unexpected drift records: {:?}",
+            report.drift_records
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn dataframe_pivot_missing_value_column_expected_error_contains_tn6qb7() -> Result<(), String> {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-ERR-CATALOG-002",
+            "case_id": "dataframe_pivot_missing_value_column_expected_error_contains_tn6qb7",
+            "mode": "strict",
+            "operation": "dataframe_pivot",
+            "pivot_values": ["missing"],
+            "pivot_index": "row",
+            "pivot_columns": "col",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "columns": {
+                    "row": [
+                        { "kind": "utf8", "value": "A" },
+                        { "kind": "utf8", "value": "B" }
+                    ],
+                    "col": [
+                        { "kind": "utf8", "value": "x" },
+                        { "kind": "utf8", "value": "y" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 }
+                    ]
+                },
+                "column_order": ["row", "col", "val"]
+            },
+            "expected_error_contains": "column 'missing' not found"
+        }))
+        .map_err(|err| {
+            format!("dataframe_pivot missing column fixture should deserialize: {err}")
+        })?;
+
+        let report = super::run_differential_fixture(
+            &super::HarnessConfig::default_paths(),
+            &fixture,
+            &super::SuiteOptions::default(),
+        )
+        .map_err(|err| {
+            format!("dataframe_pivot missing-column expected-error fixture should run: {err}")
+        })?;
+
+        assert_eq!(report.status, super::CaseStatus::Pass, "{report:?}");
+        assert!(
+            report.drift_records.is_empty(),
+            "unexpected drift records: {:?}",
+            report.drift_records
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn oracle_response_deserializes_with_fixture_provenance() {
         let response: super::OracleResponse = serde_json::from_value(serde_json::json!({
             "expected_series": null,

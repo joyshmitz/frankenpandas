@@ -2,8 +2,8 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! nine supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, and LaTeX.
+//! ten supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
+//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, and HTML.
 //!
 //! ## Format readers / writers
 //!
@@ -18,8 +18,8 @@
 //! - **SQL**: [`read_sql`], [`read_sql_table`], [`write_sql`],
 //!   [`write_sql_with_options`], plus the chunked variants
 //!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
-//! - **Markdown / LaTeX**: [`write_markdown_string`],
-//!   [`write_latex_string`].
+//! - **Markdown / LaTeX / HTML**: [`write_markdown_string`],
+//!   [`write_latex_string`], [`write_html_string`].
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -336,6 +336,10 @@ pub fn write_latex_string(frame: &DataFrame) -> Result<String, IoError> {
     write_latex_string_with_options(frame, &LatexWriteOptions::default())
 }
 
+pub fn write_html_string(frame: &DataFrame) -> Result<String, IoError> {
+    write_html_string_with_options(frame, &HtmlWriteOptions::default())
+}
+
 /// Options controlling CSV serialization.
 ///
 /// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
@@ -413,6 +417,23 @@ impl Default for LatexWriteOptions {
             na_rep: "NaN".to_owned(),
             index_label: None,
             escape: false,
+        }
+    }
+}
+
+/// Options controlling HTML table serialization.
+///
+/// Covers the pure string subset of pandas `DataFrame.to_html`.
+#[derive(Debug, Clone)]
+pub struct HtmlWriteOptions {
+    /// If true, include the index as the first column. Default: true.
+    pub include_index: bool,
+}
+
+impl Default for HtmlWriteOptions {
+    fn default() -> Self {
+        Self {
+            include_index: true,
         }
     }
 }
@@ -589,6 +610,22 @@ pub fn write_latex_string_with_options(
 
     out.push_str("\\bottomrule\n\\end{tabular}\n");
     Ok(out)
+}
+
+/// Serialize a DataFrame to an HTML table string.
+pub fn write_html_string_with_options(
+    frame: &DataFrame,
+    options: &HtmlWriteOptions,
+) -> Result<String, IoError> {
+    if options.include_index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let nested_options = HtmlWriteOptions {
+            include_index: false,
+        };
+        return write_html_string_with_options(&materialized, &nested_options);
+    }
+
+    Ok(frame.to_html(options.include_index))
 }
 
 fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> String {
@@ -1468,6 +1505,22 @@ pub fn read_csv_with_index_cols_path(
 
 pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     let content = write_csv_string(frame)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+// ── File-based HTML ────────────────────────────────────────────────────
+
+pub fn write_html(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_html_with_options(frame, path, &HtmlWriteOptions::default())
+}
+
+pub fn write_html_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &HtmlWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_html_string_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -7379,6 +7432,26 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_latex()` with no buffer.
     fn to_latex_string(&self) -> Result<String, IoError>;
 
+    /// Serialize this DataFrame to an HTML table string.
+    ///
+    /// Matches `pd.DataFrame.to_html()` with no buffer.
+    fn to_html_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this DataFrame to an HTML table string with explicit options.
+    fn to_html_string_with_options(&self, options: &HtmlWriteOptions) -> Result<String, IoError>;
+
+    /// Write this DataFrame to an HTML file.
+    ///
+    /// Matches `pd.DataFrame.to_html(path)`.
+    fn to_html_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an HTML file with explicit options.
+    fn to_html_file_with_options(
+        &self,
+        path: &Path,
+        options: &HtmlWriteOptions,
+    ) -> Result<(), IoError>;
+
     /// Write this DataFrame to a JSON file.
     ///
     /// Matches `pd.DataFrame.to_json(path)`.
@@ -7483,6 +7556,26 @@ impl DataFrameIoExt for DataFrame {
         write_latex_string(self)
     }
 
+    fn to_html_string(&self) -> Result<String, IoError> {
+        write_html_string(self)
+    }
+
+    fn to_html_string_with_options(&self, options: &HtmlWriteOptions) -> Result<String, IoError> {
+        write_html_string_with_options(self, options)
+    }
+
+    fn to_html_file(&self, path: &Path) -> Result<(), IoError> {
+        write_html(self, path)
+    }
+
+    fn to_html_file_with_options(
+        &self,
+        path: &Path,
+        options: &HtmlWriteOptions,
+    ) -> Result<(), IoError> {
+        write_html_with_options(self, path, options)
+    }
+
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
         write_json(self, path, orient)
     }
@@ -7568,9 +7661,10 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, IoError, LatexWriteOptions, MarkdownWriteOptions,
-        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes,
-        read_parquet_bytes, write_csv_string, write_csv_string_with_options, write_jsonl_string,
+        CsvWriteOptions, ExcelReadOptions, HtmlWriteOptions, IoError, LatexWriteOptions,
+        MarkdownWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
+        read_feather_bytes, read_parquet_bytes, write_csv_string, write_csv_string_with_options,
+        write_html, write_html_string, write_html_string_with_options, write_jsonl_string,
         write_latex_string, write_latex_string_with_options, write_markdown_string,
         write_markdown_string_with_options,
     };
@@ -7705,6 +7799,72 @@ mod tests {
                 "\\bottomrule\n",
                 "\\end{tabular}\n",
             )
+        );
+    }
+
+    #[test]
+    fn html_table_writer_defaults_to_index_and_reuses_dataframe_formatter() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_html_string(&frame).expect("html");
+
+        assert_eq!(out, frame.to_html(true));
+        assert!(out.contains("<th>r&amp;1</th>"));
+        assert!(out.contains("<td>A|B</td>"));
+        assert!(out.contains("<td>NaN</td>"));
+    }
+
+    #[test]
+    fn html_table_writer_options_can_omit_index() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_html_string_with_options(
+            &frame,
+            &HtmlWriteOptions {
+                include_index: false,
+            },
+        )
+        .expect("html");
+
+        assert_eq!(out, frame.to_html(false));
+        assert!(!out.contains("<th>r&amp;1</th>"));
+        assert!(out.contains("<td>A|B</td>"));
+    }
+
+    #[test]
+    fn html_table_writer_file_output_matches_string_output() {
+        use super::DataFrameIoExt;
+
+        let frame = make_table_format_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_html_writer_{}_{}.html",
+            std::process::id(),
+            line!()
+        ));
+
+        write_html(&frame, &path).expect("write html");
+        let file_out = std::fs::read_to_string(&path).expect("read html");
+
+        assert_eq!(file_out, write_html_string(&frame).expect("html string"));
+        assert_eq!(
+            frame.to_html_string().expect("trait html string"),
+            write_html_string(&frame).expect("free html string")
+        );
+
+        let no_index_path = std::env::temp_dir().join(format!(
+            "fp_io_html_writer_no_index_{}_{}.html",
+            std::process::id(),
+            line!()
+        ));
+        let no_index_options = HtmlWriteOptions {
+            include_index: false,
+        };
+        frame
+            .to_html_file_with_options(&no_index_path, &no_index_options)
+            .expect("trait html file");
+        assert_eq!(
+            std::fs::read_to_string(&no_index_path).expect("read trait html"),
+            write_html_string_with_options(&frame, &no_index_options).expect("free html options")
         );
     }
 
@@ -9137,7 +9297,6 @@ mod tests {
             frame.to_latex_string().expect("latex string"),
             write_latex_string(&frame).expect("free latex")
         );
-
         let dir = std::env::temp_dir();
         let stem = format!("fp_io_dataframe_io_ext_{}", std::process::id());
         let excel_path = dir.join(format!("{stem}.xlsx"));
@@ -9201,6 +9360,15 @@ mod tests {
         assert_eq!(
             frame.to_jsonl_string().expect("jsonl through extension"),
             write_jsonl_string(&frame).expect("jsonl free fn")
+        );
+        let html_options = HtmlWriteOptions {
+            include_index: false,
+        };
+        assert_eq!(
+            frame
+                .to_html_string_with_options(&html_options)
+                .expect("html options through extension"),
+            write_html_string_with_options(&frame, &html_options).expect("html options free fn")
         );
 
         let parquet = frame

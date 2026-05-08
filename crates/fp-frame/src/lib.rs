@@ -12369,6 +12369,64 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    fn pairwise_group_stat<F>(
+        &self,
+        other: &Series,
+        name: &str,
+        stat: F,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series, &Series) -> Result<f64, FrameError>,
+    {
+        if self.series.len() < other.len() || other.len() < self.series.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+
+        let (order, order_keys, groups) = self.build_groups();
+        let source_labels = self.series.index().labels();
+        let source_values = self.series.values();
+        let other_values = other.values();
+        let mut values = Vec::with_capacity(order_keys.len());
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy pairwise state".to_owned(),
+                )
+            })?;
+            let mut group_labels = Vec::with_capacity(row_indices.len());
+            let mut left_values = Vec::with_capacity(row_indices.len());
+            let mut right_values = Vec::with_capacity(row_indices.len());
+
+            for &idx in row_indices {
+                group_labels.push(source_labels.get(idx).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy pairwise source index out of bounds".to_owned(),
+                    )
+                })?);
+                left_values.push(source_values.get(idx).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy pairwise source value out of bounds".to_owned(),
+                    )
+                })?);
+                right_values.push(other_values.get(idx).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy pairwise other value out of bounds".to_owned(),
+                    )
+                })?);
+            }
+
+            let left = Series::from_values(self.series.name(), group_labels.clone(), left_values)?;
+            let right = Series::from_values(other.name(), group_labels, right_values)?;
+            values.push(Scalar::Float64(stat(&left, &right)?));
+        }
+
+        Series::from_values(name, order, values)
+    }
+
     /// Group labels in first-seen order.
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
@@ -13429,6 +13487,16 @@ impl SeriesGroupBy<'_> {
                 "max".to_owned(),
             ],
         )
+    }
+
+    /// Pairwise Pearson correlation with another Series per group.
+    pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
+        self.pairwise_group_stat(other, self.series.name(), |left, right| left.corr(right))
+    }
+
+    /// Pairwise sample covariance with another Series per group.
+    pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
+        self.pairwise_group_stat(other, self.series.name(), |left, right| left.cov(right))
     }
 
     /// Broadcast a named per-group reduction back to the original Series shape.
@@ -69340,6 +69408,97 @@ mod tests {
             desc.columns["max"].values(),
             &[Scalar::Float64(30.0), Scalar::Float64(10.0)]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_pairwise_corr_cov_904tg() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(99.0),
+            ],
+        )?;
+        let other = Series::from_values(
+            "y",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+            ],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(9.0),
+                Scalar::Float64(15.0),
+                Scalar::Float64(1.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "store",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+            ],
+            vec![
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("solo".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&groups)?;
+
+        let cov = grouped.cov(&other)?;
+        assert_eq!(
+            cov.index().labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("west".into()),
+                IndexLabel::Utf8("solo".into()),
+            ]
+        );
+        assert!(matches!(
+            cov.values(),
+            [Scalar::Float64(east), Scalar::Float64(west), Scalar::Float64(solo)]
+                if (*east - 114.5).abs() < 1e-12
+                    && (*west - 20.0).abs() < 1e-12
+                    && solo.is_nan()
+        ));
+
+        let corr = grouped.corr(&other)?;
+        let expected_east = 114.5 / (7.0 * 271.0_f64.sqrt());
+        assert!(matches!(
+            corr.values(),
+            [Scalar::Float64(east), Scalar::Float64(west), Scalar::Float64(solo)]
+                if (*east - expected_east).abs() < 1e-12
+                    && (*west - 1.0).abs() < 1e-12
+                    && solo.is_nan()
+        ));
 
         Ok(())
     }

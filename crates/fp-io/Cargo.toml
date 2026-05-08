@@ -1,6 +1,6 @@
 [package]
 name = "fp-io"
-description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, Excel, Feather, Arrow IPC, SQL (SqlConnection with SQLite default backend)."
+description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, Excel, Feather, Arrow IPC, Pickle, SQL (SqlConnection with SQLite default backend)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -27,6 +27,7 @@ quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 scraper = { workspace = true }
+serde-pickle = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

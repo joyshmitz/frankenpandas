@@ -2,8 +2,9 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! eleven supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, and XML.
+//! twelve supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
+//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML, and
+//! Pickle.
 //!
 //! ## Format readers / writers
 //!
@@ -21,6 +22,8 @@
 //! - **Markdown / LaTeX / HTML / XML**: [`write_markdown_string`],
 //!   [`write_latex_string`], [`write_html_string`], [`read_html_str`],
 //!   [`write_xml_string`], [`read_xml_str`].
+//! - **Pickle**: [`write_pickle_bytes`], [`read_pickle_bytes`] for the
+//!   fail-closed FrankenPandas DataFrame snapshot envelope.
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -132,6 +135,8 @@ pub enum IoError {
     Html(String),
     #[error("xml error: {0}")]
     Xml(String),
+    #[error("pickle error: {0}")]
+    Pickle(String),
     #[error("arrow ipc error: {0}")]
     Arrow(String),
     #[error("sql error: {0}")]
@@ -351,6 +356,10 @@ pub fn write_xml_string(frame: &DataFrame) -> Result<String, IoError> {
     write_xml_string_with_options(frame, &XmlWriteOptions::default())
 }
 
+pub fn write_pickle_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    write_pickle_bytes_with_options(frame, &PickleWriteOptions::default())
+}
+
 /// Options controlling CSV serialization.
 ///
 /// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
@@ -458,6 +467,40 @@ impl Default for HtmlWriteOptions {
 pub struct HtmlReadOptions {
     /// Zero-based table index to parse. Default: `0`.
     pub table_index: usize,
+}
+
+/// Pickle protocol used by [`write_pickle_bytes_with_options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickleProtocol {
+    /// Python pickle protocol 2, compatible with Python 2 and 3.
+    V2,
+    /// Python pickle protocol 3, the serde-pickle default.
+    V3,
+}
+
+/// Options controlling Pickle serialization.
+///
+/// This surface serializes a versioned FrankenPandas DataFrame envelope. It
+/// does not try to emit arbitrary pandas Python objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickleWriteOptions {
+    /// Pickle protocol to emit. Default: protocol 3.
+    pub protocol: PickleProtocol,
+}
+
+impl Default for PickleWriteOptions {
+    fn default() -> Self {
+        Self {
+            protocol: PickleProtocol::V3,
+        }
+    }
+}
+
+/// Options controlling Pickle deserialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PickleReadOptions {
+    /// Decode legacy protocol 0-2 STRING opcodes as UTF-8. Default: false.
+    pub decode_legacy_strings: bool,
 }
 
 /// Options controlling XML serialization.
@@ -775,6 +818,116 @@ pub fn read_html_str_with_options(
         }
         let headers = (0..width).map(|idx| idx.to_string()).collect::<Vec<_>>();
         html_rows_to_frame(headers, data_rows)
+    }
+}
+
+const PICKLE_FORMAT_KEY: &str = "__frankenpandas_pickle_format";
+const PICKLE_FORMAT_VERSION: &str = "frankenpandas.dataframe.v1";
+const PICKLE_ORIENT_KEY: &str = "orient";
+const PICKLE_PAYLOAD_KEY: &str = "payload";
+
+/// Serialize a DataFrame to Pickle bytes.
+///
+/// This emits a fail-closed FrankenPandas envelope containing the existing
+/// split-orient DataFrame representation. It is intentionally narrower than
+/// pandas' arbitrary Python-object pickle support.
+pub fn write_pickle_bytes_with_options(
+    frame: &DataFrame,
+    options: &PickleWriteOptions,
+) -> Result<Vec<u8>, IoError> {
+    let split_json = write_json_string(frame, JsonOrient::Split)?;
+    let split_value = serde_json::from_str::<serde_json::Value>(&split_json)?;
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(
+        PICKLE_FORMAT_KEY.to_owned(),
+        serde_json::Value::String(PICKLE_FORMAT_VERSION.to_owned()),
+    );
+    envelope.insert(
+        PICKLE_ORIENT_KEY.to_owned(),
+        serde_json::Value::String("split".to_owned()),
+    );
+    envelope.insert(PICKLE_PAYLOAD_KEY.to_owned(), split_value);
+
+    serde_pickle::to_vec(
+        &serde_json::Value::Object(envelope),
+        pickle_ser_options(options),
+    )
+    .map_err(|err| IoError::Pickle(err.to_string()))
+}
+
+/// Deserialize a DataFrame from Pickle bytes.
+pub fn read_pickle_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
+    read_pickle_bytes_with_options(input, &PickleReadOptions::default())
+}
+
+/// Deserialize a DataFrame from Pickle bytes with options.
+///
+/// Only the versioned FrankenPandas envelope is accepted. Foreign Python
+/// pickles fail closed with [`IoError::Pickle`].
+pub fn read_pickle_bytes_with_options(
+    input: &[u8],
+    options: &PickleReadOptions,
+) -> Result<DataFrame, IoError> {
+    let value = serde_pickle::from_slice::<serde_json::Value>(input, pickle_de_options(options))
+        .map_err(|err| IoError::Pickle(err.to_string()))?;
+    let envelope = value
+        .as_object()
+        .ok_or_else(|| IoError::Pickle("pickle payload must be an object".to_owned()))?;
+
+    match envelope
+        .get(PICKLE_FORMAT_KEY)
+        .and_then(|value| value.as_str())
+    {
+        Some(PICKLE_FORMAT_VERSION) => {}
+        Some(other) => {
+            return Err(IoError::Pickle(format!(
+                "unsupported FrankenPandas pickle format '{other}'"
+            )));
+        }
+        None => {
+            return Err(IoError::Pickle(
+                "pickle payload is missing FrankenPandas format marker".to_owned(),
+            ));
+        }
+    }
+
+    match envelope
+        .get(PICKLE_ORIENT_KEY)
+        .and_then(|value| value.as_str())
+    {
+        Some("split") => {}
+        Some(other) => {
+            return Err(IoError::Pickle(format!(
+                "unsupported FrankenPandas pickle orient '{other}'"
+            )));
+        }
+        None => {
+            return Err(IoError::Pickle(
+                "pickle payload is missing orient".to_owned(),
+            ));
+        }
+    }
+
+    let payload = envelope
+        .get(PICKLE_PAYLOAD_KEY)
+        .ok_or_else(|| IoError::Pickle("pickle payload is missing data".to_owned()))?;
+    let payload_json = serde_json::to_string(payload)?;
+    read_json_str(&payload_json, JsonOrient::Split)
+}
+
+fn pickle_ser_options(options: &PickleWriteOptions) -> serde_pickle::SerOptions {
+    match options.protocol {
+        PickleProtocol::V2 => serde_pickle::SerOptions::new().proto_v2(),
+        PickleProtocol::V3 => serde_pickle::SerOptions::new(),
+    }
+}
+
+fn pickle_de_options(options: &PickleReadOptions) -> serde_pickle::DeOptions {
+    let de_options = serde_pickle::DeOptions::new();
+    if options.decode_legacy_strings {
+        de_options.decode_strings()
+    } else {
+        de_options
     }
 }
 
@@ -2930,6 +3083,38 @@ pub fn read_json(path: &Path, orient: JsonOrient) -> Result<DataFrame, IoError> 
 
 pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
     let content = write_json_string(frame, orient)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+// ── File-based Pickle ──────────────────────────────────────────────────
+
+/// Read a DataFrame from a Pickle file.
+pub fn read_pickle(path: &Path) -> Result<DataFrame, IoError> {
+    read_pickle_with_options(path, &PickleReadOptions::default())
+}
+
+/// Read a DataFrame from a Pickle file with options.
+pub fn read_pickle_with_options(
+    path: &Path,
+    options: &PickleReadOptions,
+) -> Result<DataFrame, IoError> {
+    let content = std::fs::read(path)?;
+    read_pickle_bytes_with_options(&content, options)
+}
+
+/// Write a DataFrame to a Pickle file.
+pub fn write_pickle(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_pickle_with_options(frame, path, &PickleWriteOptions::default())
+}
+
+/// Write a DataFrame to a Pickle file with options.
+pub fn write_pickle_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &PickleWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_pickle_bytes_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -8106,6 +8291,32 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_json()` with no path.
     fn to_json_string(&self, orient: JsonOrient) -> Result<String, IoError>;
 
+    /// Write this DataFrame to a Pickle file.
+    ///
+    /// Matches `pd.DataFrame.to_pickle(path)` for the supported envelope.
+    fn to_pickle(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a Pickle file.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_pickle`].
+    fn to_pickle_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a Pickle file with explicit options.
+    fn to_pickle_with_options(
+        &self,
+        path: &Path,
+        options: &PickleWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to Pickle bytes.
+    fn to_pickle_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Serialize this DataFrame to Pickle bytes with explicit options.
+    fn to_pickle_bytes_with_options(
+        &self,
+        options: &PickleWriteOptions,
+    ) -> Result<Vec<u8>, IoError>;
+
     /// Write this DataFrame to an Excel (.xlsx) file.
     ///
     /// Matches `pd.DataFrame.to_excel(path)`.
@@ -8248,6 +8459,33 @@ impl DataFrameIoExt for DataFrame {
         write_json_string(self, orient)
     }
 
+    fn to_pickle(&self, path: &Path) -> Result<(), IoError> {
+        write_pickle(self, path)
+    }
+
+    fn to_pickle_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_pickle(path)
+    }
+
+    fn to_pickle_with_options(
+        &self,
+        path: &Path,
+        options: &PickleWriteOptions,
+    ) -> Result<(), IoError> {
+        write_pickle_with_options(self, path, options)
+    }
+
+    fn to_pickle_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_pickle_bytes(self)
+    }
+
+    fn to_pickle_bytes_with_options(
+        &self,
+        options: &PickleWriteOptions,
+    ) -> Result<Vec<u8>, IoError> {
+        write_pickle_bytes_with_options(self, options)
+    }
+
     fn to_excel(&self, path: &Path) -> Result<(), IoError> {
         write_excel(self, path)
     }
@@ -8325,14 +8563,16 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, HtmlReadOptions, HtmlWriteOptions, IoError,
-        LatexWriteOptions, MarkdownWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html, read_html_str,
-        read_html_str_with_options, read_parquet_bytes, read_xml, read_xml_str,
+        CsvWriteOptions, ExcelReadOptions, HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient,
+        LatexWriteOptions, MarkdownWriteOptions, PickleProtocol, PickleWriteOptions,
+        XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
+        read_feather_bytes, read_html, read_html_str, read_html_str_with_options, read_json_str,
+        read_parquet_bytes, read_pickle, read_pickle_bytes, read_xml, read_xml_str,
         read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_html,
-        write_html_string, write_html_string_with_options, write_jsonl_string, write_latex_string,
-        write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
-        write_xml, write_xml_string, write_xml_string_with_options,
+        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
+        write_latex_string, write_latex_string_with_options, write_markdown_string,
+        write_markdown_string_with_options, write_pickle, write_pickle_bytes, write_xml,
+        write_xml_string, write_xml_string_with_options,
     };
 
     #[test]
@@ -8650,6 +8890,86 @@ mod tests {
         let wide = "<table><tr><th>a</th></tr><tr><td>1</td><td>2</td></tr></table>";
         let err = read_html_str(wide).expect_err("wide row");
         assert!(matches!(err, IoError::Html(message) if message.contains("row 0")));
+    }
+
+    #[test]
+    fn pickle_bytes_roundtrip_preserves_split_frame_shape() {
+        let source = read_json_str(
+            r#"{"columns":["name","value","flag"],"index":["r1","r2"],"data":[["alice",1,true],[null,2.5,false]]}"#,
+            JsonOrient::Split,
+        )
+        .expect("source frame");
+
+        let bytes = write_pickle_bytes(&source).expect("write pickle bytes");
+        assert!(!bytes.is_empty());
+        let roundtrip = read_pickle_bytes(&bytes).expect("read pickle bytes");
+
+        assert_eq!(
+            write_json_string(&roundtrip, JsonOrient::Split).expect("roundtrip json"),
+            write_json_string(&source, JsonOrient::Split).expect("source json")
+        );
+    }
+
+    #[test]
+    fn pickle_path_reader_matches_bytes_reader() {
+        let source = make_table_format_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_pickle_reader_{}_{}.pkl",
+            std::process::id(),
+            line!()
+        ));
+
+        write_pickle(&source, &path).expect("write pickle path");
+
+        let via_path = read_pickle(&path).expect("read pickle path");
+        let via_bytes =
+            read_pickle_bytes(&std::fs::read(&path).expect("read pickle bytes from path"))
+                .expect("read pickle bytes");
+
+        assert_eq!(
+            write_json_string(&via_path, JsonOrient::Split).expect("path json"),
+            write_json_string(&via_bytes, JsonOrient::Split).expect("bytes json")
+        );
+    }
+
+    #[test]
+    fn pickle_protocol_v2_and_extension_aliases_roundtrip() {
+        use super::DataFrameIoExt;
+
+        let source = make_table_format_dataframe();
+        let options = PickleWriteOptions {
+            protocol: PickleProtocol::V2,
+        };
+        let bytes = source
+            .to_pickle_bytes_with_options(&options)
+            .expect("trait pickle protocol v2");
+        let roundtrip = read_pickle_bytes(&bytes).expect("read protocol v2");
+
+        assert_eq!(
+            write_json_string(&roundtrip, JsonOrient::Split).expect("roundtrip json"),
+            write_json_string(&source, JsonOrient::Split).expect("source json")
+        );
+        assert_eq!(
+            source.to_pickle_bytes().expect("trait pickle bytes"),
+            write_pickle_bytes(&source).expect("free pickle bytes")
+        );
+    }
+
+    #[test]
+    fn pickle_reader_rejects_malformed_and_foreign_payloads() {
+        let err = read_pickle_bytes(b"not a pickle").expect_err("malformed pickle");
+        assert!(matches!(err, IoError::Pickle(_)));
+
+        let foreign = serde_pickle::to_vec(
+            &serde_json::json!({"payload": {"columns": [], "index": [], "data": []}}),
+            serde_pickle::SerOptions::new(),
+        )
+        .expect("foreign pickle");
+        let err = read_pickle_bytes(&foreign).expect_err("foreign pickle");
+        assert!(matches!(
+            err,
+            IoError::Pickle(message) if message.contains("format marker")
+        ));
     }
 
     #[test]
@@ -9651,10 +9971,7 @@ mod tests {
 
     // === bd-2gi.19: IO Complete Contract Tests ===
 
-    use super::{
-        CsvOnBadLines, CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str,
-        write_json_string,
-    };
+    use super::{CsvOnBadLines, CsvReadOptions, read_csv_with_options};
 
     #[test]
     fn csv_with_custom_delimiter() {

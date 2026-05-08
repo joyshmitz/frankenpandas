@@ -131,6 +131,10 @@ pub use fp_io::{
     IoError,
     // JSON
     JsonOrient,
+    // Pickle
+    PickleProtocol,
+    PickleReadOptions,
+    PickleWriteOptions,
     // SQL
     SqlBackendCaps,
     SqlChunkIterator,
@@ -186,6 +190,10 @@ pub use fp_io::{
     // Parquet
     read_parquet,
     read_parquet_bytes,
+    read_pickle,
+    read_pickle_bytes,
+    read_pickle_bytes_with_options,
+    read_pickle_with_options,
     read_sql,
     read_sql_chunks,
     read_sql_chunks_with_index_col,
@@ -245,6 +253,10 @@ pub use fp_io::{
     write_jsonl_string,
     write_parquet,
     write_parquet_bytes,
+    write_pickle,
+    write_pickle_bytes,
+    write_pickle_bytes_with_options,
+    write_pickle_with_options,
     write_sql,
     write_sql_with_options,
 };

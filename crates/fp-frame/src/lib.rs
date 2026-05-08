@@ -12652,6 +12652,12 @@ impl SeriesGroupBy<'_> {
     /// Per-group monotonic-increasing predicate.
     pub fn is_monotonic_increasing(&self) -> Result<Series, FrameError> {
         self.agg_scalar(self.series.name(), |indices| {
+            if indices
+                .iter()
+                .any(|&idx| self.series.column.values()[idx].is_missing())
+            {
+                return Scalar::Bool(false);
+            }
             let ok = indices.windows(2).all(|pair| {
                 compare_scalars_with_na_last(
                     &self.series.column.values()[pair[0]],
@@ -12666,6 +12672,12 @@ impl SeriesGroupBy<'_> {
     /// Per-group monotonic-decreasing predicate.
     pub fn is_monotonic_decreasing(&self) -> Result<Series, FrameError> {
         self.agg_scalar(self.series.name(), |indices| {
+            if indices
+                .iter()
+                .any(|&idx| self.series.column.values()[idx].is_missing())
+            {
+                return Scalar::Bool(false);
+            }
             let ok = indices.windows(2).all(|pair| {
                 compare_scalars_with_na_last(
                     &self.series.column.values()[pair[0]],
@@ -66403,6 +66415,70 @@ mod tests {
         assert_eq!(
             gb.is_monotonic_decreasing().unwrap().column().values(),
             &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn test_series_groupby_monotonic_missing_values_nt65g10() {
+        let values = Series::from_values(
+            "data",
+            (0_i64..12).map(Into::into).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..12).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("inc_missing".into()),
+                Scalar::Utf8("inc_missing".into()),
+                Scalar::Utf8("inc_missing".into()),
+                Scalar::Utf8("dec_missing".into()),
+                Scalar::Utf8("dec_missing".into()),
+                Scalar::Utf8("dec_missing".into()),
+                Scalar::Utf8("all_missing".into()),
+                Scalar::Utf8("all_missing".into()),
+                Scalar::Utf8("inc_clean".into()),
+                Scalar::Utf8("inc_clean".into()),
+                Scalar::Utf8("equal".into()),
+                Scalar::Utf8("equal".into()),
+            ],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+
+        assert_eq!(
+            gb.is_monotonic_increasing().unwrap().column().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ]
+        );
+        assert_eq!(
+            gb.is_monotonic_decreasing().unwrap().column().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]
         );
     }
 

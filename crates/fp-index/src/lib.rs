@@ -4557,6 +4557,12 @@ impl MultiIndex {
         &self.names
     }
 
+    /// Scalar index name, matching `pd.MultiIndex.name`.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        None
+    }
+
     /// Number of entries, matching `pd.MultiIndex.size`.
     #[must_use]
     pub fn size(&self) -> usize {
@@ -8884,6 +8890,8 @@ mod tests {
             vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
             vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
         ];
+        assert_eq!(mi.name(), None);
+        assert_eq!(mi.names(), &[Some("letter".into()), Some("number".into())]);
         assert_eq!(mi.size(), 3);
         assert_eq!(mi.shape(), (3,));
         assert_eq!(mi.ndim(), 1);

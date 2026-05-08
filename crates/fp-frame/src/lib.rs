@@ -12281,6 +12281,13 @@ impl SeriesGroupBy<'_> {
         Series::from_values(name, labels, values)
     }
 
+    fn grouped_value_or_null(values: &[Scalar], index: Option<usize>) -> Scalar {
+        index
+            .and_then(|idx| values.get(idx))
+            .cloned()
+            .unwrap_or(Scalar::Null(NullKind::NaN))
+    }
+
     /// Group labels in first-seen order.
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
@@ -13383,10 +13390,16 @@ impl SeriesGroupBy<'_> {
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
+        let series_values = self.series.column.values();
         for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             labels.push(order[i].clone());
-            values.push(self.series.column.values()[indices[0]].clone());
+            let first_valid = indices.iter().copied().find(|&idx| {
+                series_values
+                    .get(idx)
+                    .is_some_and(|value| !value.is_missing())
+            });
+            values.push(Self::grouped_value_or_null(series_values, first_valid));
         }
         Series::from_values(self.series.name(), labels, values)
     }
@@ -13396,10 +13409,16 @@ impl SeriesGroupBy<'_> {
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
+        let series_values = self.series.column.values();
         for (i, key) in order_keys.iter().enumerate() {
             let indices = &groups[key];
             labels.push(order[i].clone());
-            values.push(self.series.column.values()[*indices.last().unwrap()].clone());
+            let last_valid = indices.iter().rev().copied().find(|&idx| {
+                series_values
+                    .get(idx)
+                    .is_some_and(|value| !value.is_missing())
+            });
+            values.push(Self::grouped_value_or_null(series_values, last_valid));
         }
         Series::from_values(self.series.name(), labels, values)
     }
@@ -66480,6 +66499,64 @@ mod tests {
                 Scalar::Bool(true),
             ]
         );
+    }
+
+    #[test]
+    fn test_series_groupby_first_last_skip_missing_nt65g11() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            (0_i64..10).map(Into::into).collect(),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(6.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..10).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("leading_missing".into()),
+                Scalar::Utf8("leading_missing".into()),
+                Scalar::Utf8("leading_missing".into()),
+                Scalar::Utf8("trailing_missing".into()),
+                Scalar::Utf8("trailing_missing".into()),
+                Scalar::Utf8("trailing_missing".into()),
+                Scalar::Utf8("all_missing".into()),
+                Scalar::Utf8("all_missing".into()),
+                Scalar::Utf8("clean".into()),
+                Scalar::Utf8("clean".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        assert_eq!(
+            gb.first()?.column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ]
+        );
+        assert_eq!(
+            gb.last()?.column().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(6.0),
+            ]
+        );
+
+        Ok(())
     }
 
     #[test]

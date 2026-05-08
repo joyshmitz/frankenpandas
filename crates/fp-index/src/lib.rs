@@ -5553,6 +5553,42 @@ impl MultiIndex {
         self.slice_locs(start, end)
     }
 
+    /// Insertion positions for target tuples, matching `pd.MultiIndex.searchsorted`.
+    ///
+    /// `side` is `"left"` for the first valid insertion position or `"right"`
+    /// for the position after an equal run. Like pandas, callers are expected
+    /// to use this on lexicographically sorted indexes.
+    pub fn searchsorted(&self, target: &Self, side: &str) -> Result<Vec<usize>, IndexError> {
+        if side != "left" && side != "right" {
+            return Err(IndexError::InvalidArgument(format!(
+                "searchsorted: side must be 'left' or 'right', got {side:?}"
+            )));
+        }
+
+        Ok((0..target.len())
+            .map(|target_row| {
+                let needle = target.tuple_at(target_row);
+                let mut lo = 0_usize;
+                let mut hi = self.len();
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let cmp = self.tuple_at(mid).cmp(&needle);
+                    use std::cmp::Ordering;
+                    let go_right = matches!(
+                        (cmp, side),
+                        (Ordering::Less, _) | (Ordering::Equal, "right")
+                    );
+                    if go_right {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo
+            })
+            .collect())
+    }
+
     /// Compute a non-unique indexer against another MultiIndex.
     ///
     /// Matches `pd.MultiIndex.get_indexer_non_unique(target)` by expanding
@@ -9504,6 +9540,61 @@ mod tests {
                 position: 2,
                 length: 2
             }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_searchsorted_left_and_right_d89fe6() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 0_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["c".into(), 0_i64.into()],
+        ])?;
+
+        assert_eq!(
+            source.searchsorted(&target, "left")?,
+            vec![0, 0, 1, 1, 2, 4]
+        );
+        assert_eq!(
+            source.searchsorted(&target, "right")?,
+            vec![0, 1, 1, 2, 4, 4]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_searchsorted_empty_target_d89fe6() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+        let target = MultiIndex::from_tuples(Vec::new())?;
+
+        assert_eq!(source.searchsorted(&target, "left")?, Vec::<usize>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_searchsorted_rejects_invalid_side_d89fe6() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+        let target = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+
+        let err = source.searchsorted(&target, "middle").unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(message)
+                if message == "searchsorted: side must be 'left' or 'right', got \"middle\""
         ));
 
         Ok(())

@@ -4581,6 +4581,18 @@ impl MultiIndex {
         self.is_empty()
     }
 
+    fn shift_unsupported_error() -> IndexError {
+        IndexError::InvalidArgument(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type MultiIndex"
+                .to_owned(),
+        )
+    }
+
+    /// Unsupported temporal shift, matching `pd.MultiIndex.shift(...)`.
+    pub fn shift(&self, _periods: i64, _freq: Option<&str>) -> Result<Self, IndexError> {
+        Err(Self::shift_unsupported_error())
+    }
+
     /// Set the names for all levels.
     #[must_use]
     pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
@@ -9787,6 +9799,28 @@ mod tests {
         ];
 
         for (err, expected) in cases {
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message) if message == expected
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_shift_rejects_temporal_shift_d89fe9() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let expected = "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type MultiIndex";
+
+        for err in [
+            mi.shift(1, None).unwrap_err(),
+            mi.shift(0, None).unwrap_err(),
+            mi.shift(1, Some("D")).unwrap_err(),
+        ] {
             assert!(matches!(
                 err,
                 super::IndexError::InvalidArgument(message) if message == expected

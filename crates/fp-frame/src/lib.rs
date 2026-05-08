@@ -12970,6 +12970,51 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let (_order, order_keys, groups) = self.build_groups();
+        let values = self.series.column.values();
+        let mut selected = Vec::new();
+
+        for key in &order_keys {
+            let mut group_positions: Vec<usize> = groups[key]
+                .iter()
+                .copied()
+                .filter(|idx| !values[*idx].is_missing())
+                .collect();
+            group_positions.sort_by(|left, right| {
+                let ordering = if largest {
+                    values[*right].semantic_cmp(&values[*left])
+                } else {
+                    values[*left].semantic_cmp(&values[*right])
+                };
+                if ordering == Ordering::Equal {
+                    left.cmp(right)
+                } else {
+                    ordering
+                }
+            });
+            selected.extend(group_positions.into_iter().take(n));
+        }
+
+        selected
+    }
+
+    /// Return up to `n` largest non-missing values from each group.
+    pub fn nlargest(&self, n: usize) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, true);
+        self.take_positions(&positions)
+    }
+
+    /// Return up to `n` smallest non-missing values from each group.
+    pub fn nsmallest(&self, n: usize) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, false);
+        self.take_positions(&positions)
+    }
+
     /// Broadcast a named per-group reduction back to the original Series shape.
     ///
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
@@ -66766,6 +66811,104 @@ mod tests {
                 Scalar::Float64(99.0),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_nlargest_nsmallest_nt65g6() -> Result<(), FrameError> {
+        let missing = Scalar::Null(NullKind::NaN);
+        let values = Series::from_values(
+            "data",
+            vec![
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into(),
+                13_i64.into(),
+                14_i64.into(),
+                15_i64.into(),
+                16_i64.into(),
+                17_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(7.0),
+                missing.clone(),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                missing.clone(),
+                Scalar::Float64(9.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into(),
+                13_i64.into(),
+                14_i64.into(),
+                15_i64.into(),
+                16_i64.into(),
+                17_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let largest = gb.nlargest(2)?;
+        assert_eq!(
+            largest.index().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(17),
+                IndexLabel::Int64(13),
+            ]
+        );
+        assert_eq!(
+            largest.column().values(),
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(9.0),
+                Scalar::Float64(7.0),
+            ]
+        );
+
+        let smallest = gb.nsmallest(2)?;
+        assert_eq!(
+            smallest.index().labels(),
+            &[
+                IndexLabel::Int64(14),
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(15),
+                IndexLabel::Int64(13),
+            ]
+        );
+        assert_eq!(
+            smallest.column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(7.0),
+            ]
+        );
+
+        let empty = gb.nlargest(0)?;
+        assert!(empty.is_empty());
+        assert_eq!(empty.dtype(), values.dtype());
 
         Ok(())
     }

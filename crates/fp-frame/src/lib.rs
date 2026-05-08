@@ -37172,6 +37172,158 @@ mod tests {
     }
 
     #[test]
+    fn null_nan_metamorphic_series_reindex_dropna_identity_tn6qb6() -> Result<(), FrameError> {
+        let original = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-0.0),
+            ],
+        )?;
+
+        let expanded = original.reindex(vec![
+            "ghost".into(),
+            "a".into(),
+            "ghost".into(),
+            "b".into(),
+            "c".into(),
+        ])?;
+        let compacted = expanded.dropna()?;
+        let baseline = original.dropna()?;
+
+        assert_eq!(compacted.index().labels(), baseline.index().labels());
+        assert_eq!(compacted.column().values(), baseline.column().values());
+        assert!(matches!(
+            compacted.column().values()[1],
+            Scalar::Float64(v) if v.to_bits() == (-0.0_f64).to_bits()
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn null_nan_metamorphic_concat_axis1_matches_outer_alignment_tn6qb6() -> Result<(), FrameError>
+    {
+        let left = DataFrame::from_dict_with_index(
+            vec![("left", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+            vec![0_i64.into(), 1_i64.into()],
+        )?;
+        let right = DataFrame::from_dict_with_index(
+            vec![(
+                "right",
+                vec![Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)],
+            )],
+            vec![1_i64.into(), 2_i64.into()],
+        )?;
+
+        let concatenated = concat_dataframes_with_axis(&[&left, &right], 1)?;
+        let (aligned_left, aligned_right) = left.align_on_index(&right, AlignMode::Outer)?;
+        let concatenated_left = concatenated.column("left").ok_or_else(|| {
+            FrameError::CompatibilityRejected("concat output missing 'left' column".to_owned())
+        })?;
+        let concatenated_right = concatenated.column("right").ok_or_else(|| {
+            FrameError::CompatibilityRejected("concat output missing 'right' column".to_owned())
+        })?;
+        let aligned_left_col = aligned_left.column("left").ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "aligned left output missing 'left' column".to_owned(),
+            )
+        })?;
+        let aligned_right_col = aligned_right.column("right").ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "aligned right output missing 'right' column".to_owned(),
+            )
+        })?;
+
+        assert_eq!(concatenated.index().labels(), aligned_left.index().labels());
+        assert_eq!(
+            concatenated.index().labels(),
+            aligned_right.index().labels()
+        );
+        assert_eq!(concatenated_left.values(), aligned_left_col.values());
+        assert_eq!(concatenated_right.values(), aligned_right_col.values());
+        assert!(concatenated_left.values()[2].is_missing());
+        assert!(concatenated_right.values()[0].is_missing());
+        assert!(concatenated_right.values()[2].is_missing());
+
+        Ok(())
+    }
+
+    #[test]
+    fn null_nan_metamorphic_series_groupby_missing_key_isolation_tn6qb6() -> Result<(), FrameError>
+    {
+        let base_values = Series::from_values(
+            "v",
+            (0_i64..3).map(Into::into).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(3.0),
+            ],
+        )?;
+        let base_keys = Series::from_values(
+            "key",
+            (0_i64..3).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )?;
+        let base_sum = base_values.groupby(&base_keys)?.sum()?;
+
+        let mutated_values = Series::from_values(
+            "v",
+            (0_i64..5).map(Into::into).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1000.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )?;
+        let mutated_keys = Series::from_values(
+            "key",
+            (0_i64..5).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Float64(f64::NAN),
+            ],
+        )?;
+        let mutated_sum = mutated_values.groupby(&mutated_keys)?.sum()?;
+
+        assert_eq!(
+            base_sum.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            mutated_sum.index().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("NaN".into()),
+                IndexLabel::Utf8("b".into()),
+            ]
+        );
+        assert_eq!(
+            base_sum.column().values()[0],
+            mutated_sum.column().values()[0]
+        );
+        assert_eq!(
+            base_sum.column().values()[1],
+            mutated_sum.column().values()[2]
+        );
+        assert_eq!(mutated_sum.column().values()[1], Scalar::Float64(1000.0));
+
+        Ok(())
+    }
+
+    #[test]
     fn concat_dataframes_axis0_inner_uses_column_intersection() {
         let left = DataFrame::from_dict(
             &["a", "b"],

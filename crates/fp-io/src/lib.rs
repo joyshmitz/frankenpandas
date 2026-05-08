@@ -19,8 +19,8 @@
 //!   [`write_sql_with_options`], plus the chunked variants
 //!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
 //! - **Markdown / LaTeX / HTML / XML**: [`write_markdown_string`],
-//!   [`write_latex_string`], [`write_html_string`], [`write_xml_string`],
-//!   [`read_xml_str`].
+//!   [`write_latex_string`], [`write_html_string`], [`read_html_str`],
+//!   [`write_xml_string`], [`read_xml_str`].
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -106,6 +106,7 @@ use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use quick_xml::{Reader as XmlReader, events::Event};
+use scraper::{ElementRef, Html, Selector};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -127,6 +128,8 @@ pub enum IoError {
     Parquet(String),
     #[error("excel error: {0}")]
     Excel(String),
+    #[error("html error: {0}")]
+    Html(String),
     #[error("xml error: {0}")]
     Xml(String),
     #[error("arrow ipc error: {0}")]
@@ -446,6 +449,17 @@ impl Default for HtmlWriteOptions {
     }
 }
 
+/// Options controlling HTML table parsing.
+///
+/// Covers the first-table subset of pandas `read_html` for already-fetched
+/// HTML strings and local files. Network fetching, JavaScript execution, and
+/// rowspan/colspan expansion are intentionally out of scope for this slice.
+#[derive(Debug, Clone, Default)]
+pub struct HtmlReadOptions {
+    /// Zero-based table index to parse. Default: `0`.
+    pub table_index: usize,
+}
+
 /// Options controlling XML serialization.
 ///
 /// Covers the writer-only default shape of pandas `DataFrame.to_xml`.
@@ -678,6 +692,90 @@ pub fn write_html_string_with_options(
     }
 
     Ok(frame.to_html(options.include_index))
+}
+
+/// Parse a DataFrame from the first HTML table in a document string.
+///
+/// This is the local, table-oriented subset of pandas `read_html`: it parses
+/// static HTML with an HTML5 parser, uses the first `<thead><tr>` as headers
+/// when present, otherwise uses the first row with header cells, and fills
+/// short body rows with nulls.
+pub fn read_html_str(input: &str) -> Result<DataFrame, IoError> {
+    read_html_str_with_options(input, &HtmlReadOptions::default())
+}
+
+/// Parse a DataFrame from an HTML document string with options.
+pub fn read_html_str_with_options(
+    input: &str,
+    options: &HtmlReadOptions,
+) -> Result<DataFrame, IoError> {
+    let document = Html::parse_document(input);
+    let table_selector = html_selector("table")?;
+    let row_selector = html_selector("tr")?;
+    let thead_row_selector = html_selector("thead tr")?;
+    let tbody_row_selector = html_selector("tbody tr")?;
+    let cell_selector = html_selector("th, td")?;
+    let th_selector = html_selector("th")?;
+
+    let table = document
+        .select(&table_selector)
+        .nth(options.table_index)
+        .ok_or_else(|| {
+            IoError::Html(format!(
+                "html input contains no table at index {}",
+                options.table_index
+            ))
+        })?;
+
+    let header_rows = table
+        .select(&thead_row_selector)
+        .map(|row| html_row_cells(row, &cell_selector))
+        .filter(|cells| !cells.is_empty())
+        .collect::<Vec<_>>();
+    let body_rows = table
+        .select(&tbody_row_selector)
+        .map(|row| html_row_cells(row, &cell_selector))
+        .filter(|cells| !cells.is_empty())
+        .collect::<Vec<_>>();
+
+    if let Some(header_cells) = header_rows.first() {
+        let headers = normalize_html_headers(header_cells)?;
+        return html_rows_to_frame(headers, body_rows);
+    }
+
+    let all_rows = table
+        .select(&row_selector)
+        .map(|row| {
+            let has_header_cell = row.select(&th_selector).next().is_some();
+            (has_header_cell, html_row_cells(row, &cell_selector))
+        })
+        .filter(|(_, cells)| !cells.is_empty())
+        .collect::<Vec<_>>();
+    if all_rows.is_empty() {
+        return Err(IoError::Html(
+            "html table contains no rows with cells".to_owned(),
+        ));
+    }
+
+    let mut all_rows = all_rows.into_iter();
+    let (first_has_header, first_cells) = all_rows
+        .next()
+        .ok_or_else(|| IoError::Html("html table contains no rows with cells".to_owned()))?;
+
+    if first_has_header {
+        let headers = normalize_html_headers(&first_cells)?;
+        let data_rows = all_rows.map(|(_, cells)| cells).collect::<Vec<_>>();
+        html_rows_to_frame(headers, data_rows)
+    } else {
+        let mut data_rows = vec![first_cells];
+        data_rows.extend(all_rows.map(|(_, cells)| cells));
+        let width = data_rows.iter().map(Vec::len).max().unwrap_or(0);
+        if width == 0 {
+            return Err(IoError::Html("html table contains no cells".to_owned()));
+        }
+        let headers = (0..width).map(|idx| idx.to_string()).collect::<Vec<_>>();
+        html_rows_to_frame(headers, data_rows)
+    }
 }
 
 /// Parse a DataFrame from a row-oriented XML document string.
@@ -1023,6 +1121,96 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
             }
         }
     }
+}
+
+fn html_selector(pattern: &str) -> Result<Selector, IoError> {
+    Selector::parse(pattern).map_err(|err| {
+        IoError::Html(format!(
+            "invalid built-in html selector {pattern:?}: {err:?}"
+        ))
+    })
+}
+
+fn html_row_cells(row: ElementRef<'_>, cell_selector: &Selector) -> Vec<String> {
+    row.select(cell_selector)
+        .map(|cell| cell.text().collect::<String>().trim().to_owned())
+        .collect()
+}
+
+fn normalize_html_headers(raw_headers: &[String]) -> Result<Vec<String>, IoError> {
+    if raw_headers.is_empty() {
+        return Err(IoError::Html(
+            "html table header row contains no cells".to_owned(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut headers = Vec::with_capacity(raw_headers.len());
+    for (idx, raw) in raw_headers.iter().enumerate() {
+        let name = if raw.trim().is_empty() {
+            format!("Unnamed: {idx}")
+        } else {
+            raw.trim().to_owned()
+        };
+        if !seen.insert(name.clone()) {
+            return Err(IoError::DuplicateColumnName(name));
+        }
+        headers.push(name);
+    }
+    Ok(headers)
+}
+
+fn html_rows_to_frame(
+    column_order: Vec<String>,
+    rows: Vec<Vec<String>>,
+) -> Result<DataFrame, IoError> {
+    let width = column_order.len();
+    if width == 0 {
+        return Err(IoError::Html(
+            "html table must contain at least one column".to_owned(),
+        ));
+    }
+
+    let mut values_by_column = column_order
+        .iter()
+        .map(|name| (name.clone(), Vec::with_capacity(rows.len())))
+        .collect::<BTreeMap<_, _>>();
+    for (row_idx, row) in rows.iter().enumerate() {
+        if row.len() > width {
+            return Err(IoError::Html(format!(
+                "html row {row_idx} has {} cells but header has {width}",
+                row.len()
+            )));
+        }
+        for (col_idx, name) in column_order.iter().enumerate() {
+            let value = row
+                .get(col_idx)
+                .map_or(Scalar::Null(NullKind::Null), |cell| parse_scalar(cell));
+            let column_values = values_by_column.get_mut(name).ok_or_else(|| {
+                IoError::Html(format!("html column '{name}' was not initialized"))
+            })?;
+            column_values.push(value);
+        }
+    }
+
+    let mut columns = BTreeMap::new();
+    for name in &column_order {
+        let values = values_by_column
+            .remove(name)
+            .ok_or_else(|| IoError::Html(format!("html column '{name}' has no values")))?;
+        columns.insert(name.clone(), Column::from_values(values)?);
+    }
+    let row_count = i64::try_from(rows.len()).map_err(|_| {
+        IoError::Html(format!(
+            "html table row count {} exceeds supported i64 index range",
+            rows.len()
+        ))
+    })?;
+    Ok(DataFrame::new_with_column_order(
+        Index::from_i64((0..row_count).collect()),
+        columns,
+        column_order,
+    )?)
 }
 
 fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> String {
@@ -1907,6 +2095,18 @@ pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
 }
 
 // ── File-based HTML ────────────────────────────────────────────────────
+
+pub fn read_html(path: &Path) -> Result<DataFrame, IoError> {
+    read_html_with_options(path, &HtmlReadOptions::default())
+}
+
+pub fn read_html_with_options(
+    path: &Path,
+    options: &HtmlReadOptions,
+) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_html_str_with_options(&content, options)
+}
 
 pub fn write_html(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     write_html_with_options(frame, path, &HtmlWriteOptions::default())
@@ -8125,12 +8325,12 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, HtmlWriteOptions, IoError, LatexWriteOptions,
-        MarkdownWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_parquet_bytes,
-        read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_html, write_html_string,
-        write_html_string_with_options, write_jsonl_string, write_latex_string,
+        CsvWriteOptions, ExcelReadOptions, HtmlReadOptions, HtmlWriteOptions, IoError,
+        LatexWriteOptions, MarkdownWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html, read_html_str,
+        read_html_str_with_options, read_parquet_bytes, read_xml, read_xml_str,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_html,
+        write_html_string, write_html_string_with_options, write_jsonl_string, write_latex_string,
         write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
         write_xml, write_xml_string, write_xml_string_with_options,
     };
@@ -8332,6 +8532,124 @@ mod tests {
             std::fs::read_to_string(&no_index_path).expect("read trait html"),
             write_html_string_with_options(&frame, &no_index_options).expect("free html options")
         );
+    }
+
+    #[test]
+    fn html_reader_parses_first_table_headers_and_missing_cells() {
+        let html = concat!(
+            "<html><body>",
+            "<table><tr><td>ignored</td></tr></table>",
+            "<table>",
+            "<thead><tr><th>name</th><th>value</th><th>flag</th></tr></thead>",
+            "<tbody>",
+            "<tr><td>A&amp;B</td><td>1</td><td>True</td></tr>",
+            "<tr><td>missing</td><td></td></tr>",
+            "</tbody>",
+            "</table>",
+            "</body></html>",
+        );
+
+        let frame = read_html_str_with_options(html, &HtmlReadOptions { table_index: 1 })
+            .expect("read second table");
+
+        assert_eq!(
+            frame
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["name", "value", "flag"]
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[0],
+            Scalar::Utf8("A&B".to_owned())
+        );
+        assert_eq!(
+            frame.column("value").expect("value").values()[0],
+            Scalar::Int64(1)
+        );
+        assert!(frame.column("value").expect("value").values()[1].is_missing());
+        assert_eq!(
+            frame.column("flag").expect("flag").values()[0],
+            Scalar::Bool(true)
+        );
+        assert!(matches!(
+            frame.column("flag").expect("flag").values()[1],
+            Scalar::Null(NullKind::Null)
+        ));
+    }
+
+    #[test]
+    fn html_reader_roundtrips_writer_output_as_columns() {
+        let source = make_table_format_dataframe();
+        let html = write_html_string(&source).expect("write html");
+
+        let frame = read_html_str(&html).expect("read writer html");
+
+        assert_eq!(
+            frame
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["Unnamed: 0", "name", "value"]
+        );
+        assert_eq!(
+            frame.column("Unnamed: 0").expect("index column").values()[0],
+            Scalar::Utf8("r&1".to_owned())
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[0],
+            Scalar::Utf8("A|B".to_owned())
+        );
+        assert!(frame.column("value").expect("value").values()[0].is_missing());
+        assert_eq!(
+            frame.column("value").expect("value").values()[1],
+            Scalar::Float64(2.0)
+        );
+    }
+
+    #[test]
+    fn html_reader_path_reader_matches_string_reader() {
+        use std::io::Write;
+
+        let html = "<table><tr><th>name</th></tr><tr><td>A</td></tr></table>\n";
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_html_reader_{}_{}.html",
+            std::process::id(),
+            line!()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create html fixture");
+        file.write_all(html.as_bytes()).expect("write html fixture");
+
+        let via_path = read_html(&path).expect("read path html");
+        let via_str = read_html_str(html).expect("read string html");
+
+        assert_eq!(via_path.column_names(), via_str.column_names());
+        assert_eq!(
+            via_path.column("name").expect("path name").values(),
+            via_str.column("name").expect("str name").values()
+        );
+    }
+
+    #[test]
+    fn html_reader_rejects_no_table_duplicate_headers_and_wide_rows() {
+        let err = read_html_str("<p>no table</p>").expect_err("missing table");
+        assert!(matches!(err, IoError::Html(message) if message.contains("no table")));
+
+        let duplicate = "<table><tr><th>a</th><th>a</th></tr><tr><td>1</td><td>2</td></tr></table>";
+        assert!(matches!(
+            read_html_str(duplicate),
+            Err(IoError::DuplicateColumnName(name)) if name == "a"
+        ));
+
+        let wide = "<table><tr><th>a</th></tr><tr><td>1</td><td>2</td></tr></table>";
+        let err = read_html_str(wide).expect_err("wide row");
+        assert!(matches!(err, IoError::Html(message) if message.contains("row 0")));
     }
 
     #[test]

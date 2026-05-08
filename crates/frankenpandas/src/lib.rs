@@ -125,6 +125,8 @@ pub use fp_io::{
     // Excel
     ExcelReadOptions,
     ExcelWriteOptions,
+    // HTML
+    HtmlReadOptions,
     // Error type
     IoError,
     // JSON
@@ -172,6 +174,9 @@ pub use fp_io::{
     // Feather (Arrow IPC)
     read_feather,
     read_feather_bytes,
+    read_html,
+    read_html_str,
+    read_html_str_with_options,
     read_ipc_stream_bytes,
     read_json,
     read_json_str,

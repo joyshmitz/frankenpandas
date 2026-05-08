@@ -13224,6 +13224,19 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// Grouped exponentially weighted moving window operations.
+    ///
+    /// Matches the narrow `pd.SeriesGroupBy.ewm(span=..., alpha=...)`
+    /// reduction shape. Results are mapped back onto the original flat
+    /// Series index.
+    pub fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> SeriesGroupByEwm<'_, '_> {
+        SeriesGroupByEwm {
+            groupby: self,
+            span,
+            alpha,
+        }
+    }
+
     fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
         if n == 0 {
             return Vec::new();
@@ -13686,6 +13699,110 @@ impl SeriesGroupBy<'_> {
     /// pandas spelling alias for [`Self::agg`].
     pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         self.agg(funcs)
+    }
+}
+
+/// Grouped exponentially weighted window over a `SeriesGroupBy`.
+///
+/// Created by `SeriesGroupBy::ewm()`. Applies existing Series EWM operations
+/// within each group independently, then maps the results back to the original
+/// flat Series index.
+pub struct SeriesGroupByEwm<'grouped, 'data> {
+    groupby: &'grouped SeriesGroupBy<'data>,
+    span: Option<f64>,
+    alpha: Option<f64>,
+}
+
+impl SeriesGroupByEwm<'_, '_> {
+    fn apply_grouped_ewm<F>(&self, agg: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series, Option<f64>, Option<f64>) -> Result<Series, FrameError>,
+    {
+        let (_order, order_keys, groups) = self.groupby.build_groups();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.groupby.series.len()];
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy ewm state".to_owned(),
+                )
+            })?;
+            let mut group_values = Vec::with_capacity(row_indices.len());
+            for &idx in row_indices {
+                let value = self
+                    .groupby
+                    .series
+                    .values()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(
+                            "SeriesGroupBy ewm source index out of bounds".to_owned(),
+                        )
+                    })?;
+                group_values.push(value);
+            }
+
+            let mut group_index = Vec::with_capacity(group_values.len());
+            for pos in 0..group_values.len() {
+                let label = i64::try_from(pos).map_err(|_| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy ewm group is too large to label".to_owned(),
+                    )
+                })?;
+                group_index.push(IndexLabel::Int64(label));
+            }
+
+            let group_series =
+                Series::from_values(self.groupby.series.name(), group_index, group_values)?;
+            let weighted = agg(&group_series, self.span, self.alpha)?;
+            if weighted.len() != row_indices.len() {
+                return Err(FrameError::LengthMismatch {
+                    index_len: row_indices.len(),
+                    column_len: weighted.len(),
+                });
+            }
+
+            for (group_pos, &source_pos) in row_indices.iter().enumerate() {
+                let value = weighted.values().get(group_pos).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy ewm result index out of bounds".to_owned(),
+                    )
+                })?;
+                let slot = out.get_mut(source_pos).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy ewm output index out of bounds".to_owned(),
+                    )
+                })?;
+                *slot = value;
+            }
+        }
+
+        self.groupby.series_from_groupby_apply_parts(
+            self.groupby.series.name(),
+            self.groupby.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Grouped EWM mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_ewm(|series, span, alpha| series.ewm(span, alpha).mean())
+    }
+
+    /// Grouped EWM sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_ewm(|series, span, alpha| series.ewm(span, alpha).sum())
+    }
+
+    /// Grouped EWM sample standard deviation.
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_ewm(|series, span, alpha| series.ewm(span, alpha).std())
+    }
+
+    /// Grouped EWM sample variance.
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_ewm(|series, span, alpha| series.ewm(span, alpha).var())
     }
 }
 
@@ -68732,6 +68849,81 @@ mod tests {
                 Scalar::Float64(2.0),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_ewm_reductions_fz20b() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&groups)?;
+        let ewm = grouped.ewm(None, Some(0.5));
+
+        let means = ewm.mean()?;
+        assert_eq!(means.index().labels(), values.index().labels());
+        assert!(matches!(
+            means.values(),
+            [
+                Scalar::Float64(a),
+                Scalar::Float64(b),
+                Scalar::Float64(c),
+                Scalar::Float64(d),
+                Scalar::Float64(e),
+            ] if (*a - 1.0).abs() < 1e-12
+                && (*b - 1.5).abs() < 1e-12
+                && (*c - 10.0).abs() < 1e-12
+                && (*d - 15.0).abs() < 1e-12
+                && (*e - 22.5).abs() < 1e-12
+        ));
+
+        let sums = ewm.sum()?;
+        assert!(matches!(
+            sums.values(),
+            [
+                Scalar::Float64(a),
+                Scalar::Float64(b),
+                Scalar::Float64(c),
+                Scalar::Float64(d),
+                Scalar::Float64(e),
+            ] if (*a - 1.0).abs() < 1e-12
+                && (*b - 2.5).abs() < 1e-12
+                && (*c - 10.0).abs() < 1e-12
+                && (*d - 25.0).abs() < 1e-12
+                && (*e - 42.5).abs() < 1e-12
+        ));
 
         Ok(())
     }

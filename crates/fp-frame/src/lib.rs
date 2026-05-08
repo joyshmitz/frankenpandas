@@ -12261,6 +12261,26 @@ impl SeriesGroupBy<'_> {
         Series::from_values(name, labels, values)
     }
 
+    fn agg_values_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Scalar,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+
+        for (i, key) in order_keys.iter().enumerate() {
+            let group_vals: Vec<Scalar> = groups[key]
+                .iter()
+                .map(|&idx| self.series.column.values()[idx].clone())
+                .collect();
+            labels.push(order[i].clone());
+            values.push(func(&group_vals));
+        }
+
+        Series::from_values(name, labels, values)
+    }
+
     /// Group labels in first-seen order.
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
@@ -12429,6 +12449,28 @@ impl SeriesGroupBy<'_> {
             }
             Scalar::Int64(seen.len() as i64)
         })
+    }
+
+    /// Quantile of each group using linear interpolation.
+    pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        if !q.is_finite() || !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "quantile must be between 0 and 1, got {q}"
+            )));
+        }
+        self.agg_values_scalar(self.series.name(), |values| {
+            fp_types::nanquantile(values, q)
+        })
+    }
+
+    /// Standard error of the mean for each group.
+    pub fn sem(&self) -> Result<Series, FrameError> {
+        self.agg_values_scalar(self.series.name(), |values| fp_types::nansem(values, 1))
+    }
+
+    /// Skewness of each group.
+    pub fn skew(&self) -> Result<Series, FrameError> {
+        self.agg_values_scalar(self.series.name(), fp_types::nanskew)
     }
 
     /// Original index label of the minimum value in each group.
@@ -13135,6 +13177,8 @@ impl SeriesGroupBy<'_> {
                 "nunique" => self.nunique()?,
                 "idxmin" => self.idxmin()?,
                 "idxmax" => self.idxmax()?,
+                "sem" => self.sem()?,
+                "skew" => self.skew()?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "SeriesGroupBy.agg: unsupported function '{func}'"
@@ -66460,6 +66504,89 @@ mod tests {
         assert!(gb.sample(Some(1), Some(0.5), false, Some(1)).is_err());
         assert!(gb.sample(Some(4), None, false, Some(1)).is_err());
         assert!(gb.sample(None, Some(1.5), false, Some(1)).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_quantile_sem_skew_nt65g4() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+                6_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+                6_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let quantile = gb.quantile(0.5)?;
+        assert_eq!(
+            quantile.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            quantile.column().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(20.0)]
+        );
+
+        let sem = gb.sem()?;
+        assert!(matches!(
+            sem.column().values(),
+            [Scalar::Float64(a), Scalar::Float64(b)]
+                if (a - 1.154_700_538_379_251_7).abs() < 1e-12
+                    && (b - 8.819_171_036_881_968).abs() < 1e-12
+        ));
+
+        let skew = gb.skew()?;
+        assert!(matches!(
+            skew.column().values(),
+            [Scalar::Float64(a), Scalar::Float64(b)]
+                if a.abs() < 1e-12 && (b - 0.935_219_529_582_825_2).abs() < 1e-12
+        ));
+
+        let aggregated = gb.agg(&["sem", "skew"])?;
+        assert_eq!(
+            aggregated.column_order,
+            &["sem".to_string(), "skew".to_string()]
+        );
+
+        let invalid_q = gb.quantile(1.5).expect_err("invalid quantile q");
+        assert!(invalid_q.to_string().contains("quantile must be"));
 
         Ok(())
     }

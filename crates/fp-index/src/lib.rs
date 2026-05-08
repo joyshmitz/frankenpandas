@@ -6225,6 +6225,40 @@ impl MultiIndex {
         })
     }
 
+    /// Construct a MultiIndex from frame-like columns.
+    ///
+    /// Matches `pd.MultiIndex.from_frame(frame)` at the payload level:
+    /// each input entry is one frame column, with the optional column name
+    /// becoming the corresponding level name.
+    pub fn from_frame(columns: Vec<(Option<String>, Vec<IndexLabel>)>) -> Result<Self, IndexError> {
+        if columns.is_empty() {
+            return Ok(Self {
+                levels: Vec::new(),
+                names: Vec::new(),
+            });
+        }
+
+        let expected_len = columns[0].1.len();
+        for (column_idx, (_, values)) in columns.iter().enumerate() {
+            if values.len() != expected_len {
+                return Err(IndexError::LengthMismatch {
+                    expected: expected_len,
+                    actual: values.len(),
+                    context: format!("from_frame column {column_idx} length mismatch"),
+                });
+            }
+        }
+
+        let mut names = Vec::with_capacity(columns.len());
+        let mut levels = Vec::with_capacity(columns.len());
+        for (name, values) in columns {
+            names.push(name);
+            levels.push(values);
+        }
+
+        Ok(Self { levels, names })
+    }
+
     /// Construct a MultiIndex from the Cartesian product of iterables.
     ///
     /// Matches `pd.MultiIndex.from_product(iterables)`.
@@ -8804,6 +8838,53 @@ mod tests {
             vec![1_i64.into()], // wrong length
         ]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn multi_index_from_frame_preserves_column_names_a1dv9() {
+        let mi = MultiIndex::from_frame(vec![
+            (
+                Some("letter".into()),
+                vec!["a".into(), "b".into(), "b".into()],
+            ),
+            (
+                Some("number".into()),
+                vec![1_i64.into(), 1_i64.into(), 2_i64.into()],
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(mi.names(), &[Some("letter".into()), Some("number".into())]);
+        assert_eq!(
+            mi.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+            ]
+        );
+
+        let empty = MultiIndex::from_frame(Vec::new()).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.nlevels(), 0);
+    }
+
+    #[test]
+    fn multi_index_from_frame_rejects_length_mismatch_a1dv9() {
+        let err = MultiIndex::from_frame(vec![
+            (Some("letter".into()), vec!["a".into(), "b".into()]),
+            (Some("number".into()), vec![1_i64.into()]),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::IndexError::LengthMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

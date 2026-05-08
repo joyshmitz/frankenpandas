@@ -13212,6 +13212,18 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// Grouped expanding window operations.
+    ///
+    /// Matches the narrow `pd.SeriesGroupBy.expanding(min_periods=...)`
+    /// reduction shape. Results are mapped back onto the original flat
+    /// Series index.
+    pub fn expanding(&self, min_periods: Option<usize>) -> SeriesGroupByExpanding<'_, '_> {
+        SeriesGroupByExpanding {
+            groupby: self,
+            min_periods: min_periods.unwrap_or(1),
+        }
+    }
+
     fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
         if n == 0 {
             return Vec::new();
@@ -13674,6 +13686,154 @@ impl SeriesGroupBy<'_> {
     /// pandas spelling alias for [`Self::agg`].
     pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         self.agg(funcs)
+    }
+}
+
+/// Grouped expanding window over a `SeriesGroupBy`.
+///
+/// Created by `SeriesGroupBy::expanding()`. Applies existing Series expanding
+/// operations within each group independently, then maps the results back to
+/// the original flat Series index.
+pub struct SeriesGroupByExpanding<'grouped, 'data> {
+    groupby: &'grouped SeriesGroupBy<'data>,
+    min_periods: usize,
+}
+
+impl SeriesGroupByExpanding<'_, '_> {
+    fn apply_grouped_expanding<F>(&self, agg: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series, usize) -> Result<Series, FrameError>,
+    {
+        let (_order, order_keys, groups) = self.groupby.build_groups();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.groupby.series.len()];
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy expanding state".to_owned(),
+                )
+            })?;
+            let mut group_values = Vec::with_capacity(row_indices.len());
+            for &idx in row_indices {
+                let value = self
+                    .groupby
+                    .series
+                    .values()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(
+                            "SeriesGroupBy expanding source index out of bounds".to_owned(),
+                        )
+                    })?;
+                group_values.push(value);
+            }
+
+            let mut group_index = Vec::with_capacity(group_values.len());
+            for pos in 0..group_values.len() {
+                let label = i64::try_from(pos).map_err(|_| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy expanding group is too large to label".to_owned(),
+                    )
+                })?;
+                group_index.push(IndexLabel::Int64(label));
+            }
+
+            let group_series =
+                Series::from_values(self.groupby.series.name(), group_index, group_values)?;
+            let expanded = agg(&group_series, self.min_periods)?;
+            if expanded.len() != row_indices.len() {
+                return Err(FrameError::LengthMismatch {
+                    index_len: row_indices.len(),
+                    column_len: expanded.len(),
+                });
+            }
+
+            for (group_pos, &source_pos) in row_indices.iter().enumerate() {
+                let value = expanded.values().get(group_pos).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy expanding result index out of bounds".to_owned(),
+                    )
+                })?;
+                let slot = out.get_mut(source_pos).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy expanding output index out of bounds".to_owned(),
+                    )
+                })?;
+                *slot = value;
+            }
+        }
+
+        self.groupby.series_from_groupby_apply_parts(
+            self.groupby.series.name(),
+            self.groupby.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    fn expanding_count(series: &Series, min_periods: usize) -> Result<Series, FrameError> {
+        let mut running = 0_usize;
+        let mut out = Vec::with_capacity(series.len());
+
+        for (pos, value) in series.values().iter().enumerate() {
+            if !value.is_missing() {
+                running += 1;
+            }
+            if pos + 1 < min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(running as f64));
+            }
+        }
+
+        Series::from_values(series.name(), series.index().labels().to_vec(), out)
+    }
+
+    /// Grouped expanding sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).sum()
+        })
+    }
+
+    /// Grouped expanding mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).mean()
+        })
+    }
+
+    /// Grouped expanding minimum.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).min()
+        })
+    }
+
+    /// Grouped expanding maximum.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).max()
+        })
+    }
+
+    /// Grouped expanding sample standard deviation.
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).std()
+        })
+    }
+
+    /// Grouped expanding count of non-null values.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(Self::expanding_count)
+    }
+
+    /// Grouped expanding sample variance.
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_expanding(|series, min_periods| {
+            series.expanding(Some(min_periods)).var()
+        })
     }
 }
 
@@ -68490,6 +68650,85 @@ mod tests {
                 Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_expanding_reductions_0hy7z() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&groups)?;
+        let expanding = grouped.expanding(Some(2));
+
+        let sums = expanding.sum()?;
+        assert_eq!(sums.index().labels(), values.index().labels());
+        assert!(matches!(
+            sums.values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(a),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(b),
+            ] if (*a - 3.0).abs() < 1e-12 && (*b - 40.0).abs() < 1e-12
+        ));
+
+        let means = expanding.mean()?;
+        assert!(matches!(
+            means.values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(a),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(b),
+            ] if (*a - 1.5).abs() < 1e-12 && (*b - 20.0).abs() < 1e-12
+        ));
+
+        let counts = expanding.count()?;
+        assert_eq!(
+            counts.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
             ]
         );

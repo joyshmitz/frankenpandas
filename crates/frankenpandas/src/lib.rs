@@ -192,6 +192,9 @@ pub use fp_io::{
     // JSONL
     read_jsonl,
     read_jsonl_str,
+    // ORC
+    read_orc,
+    read_orc_bytes,
     // Parquet
     read_parquet,
     read_parquet_bytes,
@@ -266,6 +269,8 @@ pub use fp_io::{
     write_markdown_string,
     write_markdown_string_with_options,
     write_markdown_with_options,
+    write_orc,
+    write_orc_bytes,
     write_parquet,
     write_parquet_bytes,
     write_pickle,
@@ -649,6 +654,8 @@ pub mod prelude {
         read_json_str,
         read_jsonl,
         read_jsonl_str,
+        read_orc,
+        read_orc_bytes,
         read_parquet,
         read_parquet_bytes,
         read_sql,
@@ -718,6 +725,8 @@ pub mod prelude {
         write_markdown_string,
         write_markdown_string_with_options,
         write_markdown_with_options,
+        write_orc,
+        write_orc_bytes,
         write_parquet,
         write_parquet_bytes,
         write_sql,

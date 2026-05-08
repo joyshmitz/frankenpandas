@@ -2,9 +2,9 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! twelve supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML, Pickle,
-//! and Stata.
+//! fourteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, ORC,
+//! Excel (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML,
+//! Pickle, and Stata.
 //!
 //! ## Format readers / writers
 //!
@@ -13,6 +13,7 @@
 //! - **JSON / JSONL**: [`read_json`], [`read_jsonl`], [`write_json`],
 //!   [`write_jsonl`]
 //! - **Parquet**: [`read_parquet`], [`write_parquet`]
+//! - **ORC**: [`read_orc`], [`write_orc`]
 //! - **Excel**: [`read_excel`], [`write_excel`]
 //! - **Feather / Arrow IPC**: [`read_feather`], [`write_feather`],
 //!   [`read_ipc_stream_bytes`], [`write_ipc_stream_bytes`]
@@ -120,6 +121,9 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
+use orc_rust::{
+    ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
+};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use quick_xml::{Reader as XmlReader, events::Event};
 use scraper::{ElementRef, Html, Selector};
@@ -142,6 +146,8 @@ pub enum IoError {
     JsonFormat(String),
     #[error("parquet error: {0}")]
     Parquet(String),
+    #[error("orc error: {0}")]
+    Orc(String),
     #[error("excel error: {0}")]
     Excel(String),
     #[error("html error: {0}")]
@@ -4167,6 +4173,74 @@ pub fn write_parquet(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
 pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
     let data = std::fs::read(path)?;
     read_parquet_bytes(&data)
+}
+
+// ── ORC I/O ────────────────────────────────────────────────────────────────
+
+/// Write a DataFrame to an in-memory ORC buffer.
+///
+/// Uses the shared Arrow conversion path, then delegates ORC physical encoding
+/// to `orc-rust`.
+pub fn write_orc_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    let batch = dataframe_to_record_batch(frame)?;
+    let mut buf = Vec::new();
+    let mut writer = OrcArrowWriterBuilder::new(&mut buf, batch.schema())
+        .try_build()
+        .map_err(|err| IoError::Orc(err.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|err| IoError::Orc(err.to_string()))?;
+    writer
+        .close()
+        .map_err(|err| IoError::Orc(err.to_string()))?;
+    Ok(buf)
+}
+
+/// Read a DataFrame from in-memory ORC bytes.
+pub fn read_orc_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
+    let bytes = bytes::Bytes::from(data.to_vec());
+    let reader = OrcArrowReaderBuilder::try_new(bytes)
+        .map_err(|err| IoError::Orc(err.to_string()))?
+        .build();
+
+    let mut all_frames: Vec<DataFrame> = Vec::new();
+    for batch_result in reader {
+        let batch = batch_result.map_err(|err| IoError::Orc(err.to_string()))?;
+        all_frames.push(record_batch_to_dataframe(&batch)?);
+    }
+
+    if all_frames.is_empty() {
+        return Ok(DataFrame::new_with_column_order(
+            Index::new(vec![]),
+            BTreeMap::new(),
+            vec![],
+        )?);
+    }
+
+    if all_frames.len() == 1 {
+        if let Some(frame) = all_frames.into_iter().next() {
+            return Ok(frame);
+        }
+        return Err(IoError::Orc(
+            "orc reader produced zero record batches".to_owned(),
+        ));
+    }
+
+    let refs: Vec<&DataFrame> = all_frames.iter().collect();
+    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+}
+
+/// Write a DataFrame to an ORC file.
+pub fn write_orc(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let bytes = write_orc_bytes(frame)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Read a DataFrame from an ORC file.
+pub fn read_orc(path: &Path) -> Result<DataFrame, IoError> {
+    let data = std::fs::read(path)?;
+    read_orc_bytes(&data)
 }
 
 // ── Excel (xlsx) I/O ────────────────────────────────────────────────────
@@ -8660,8 +8734,8 @@ pub fn write_sql_with_options<C: SqlConnection>(
 
 /// Extension trait that adds IO convenience methods to `DataFrame`.
 ///
-/// Import this trait to call `df.to_parquet(path)`, `df.to_parquet_bytes()`,
-/// `DataFrame::from_parquet(path)`, etc. directly on DataFrame values.
+/// Import this trait to call `df.to_parquet(path)`, `df.to_orc(path)`,
+/// `df.to_parquet_bytes()`, etc. directly on DataFrame values.
 pub trait DataFrameIoExt {
     /// Write this DataFrame to a Parquet file.
     ///
@@ -8672,6 +8746,19 @@ pub trait DataFrameIoExt {
     ///
     /// Matches `pd.DataFrame.to_parquet()` with no path (returns bytes).
     fn to_parquet_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Write this DataFrame to an ORC file.
+    ///
+    /// Matches the scoped `DataFrame.to_orc(path)` compatibility surface.
+    fn to_orc(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an ORC file.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_orc`].
+    fn to_orc_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to ORC bytes in memory.
+    fn to_orc_bytes(&self) -> Result<Vec<u8>, IoError>;
 
     /// Write this DataFrame to a CSV file.
     ///
@@ -8904,6 +8991,18 @@ impl DataFrameIoExt for DataFrame {
 
     fn to_parquet_bytes(&self) -> Result<Vec<u8>, IoError> {
         write_parquet_bytes(self)
+    }
+
+    fn to_orc(&self, path: &Path) -> Result<(), IoError> {
+        write_orc(self, path)
+    }
+
+    fn to_orc_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_orc(path)
+    }
+
+    fn to_orc_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_orc_bytes(self)
     }
 
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
@@ -9141,15 +9240,15 @@ mod tests {
         LatexWriteOptions, MarkdownWriteOptions, PickleProtocol, PickleWriteOptions,
         StataWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols,
         read_excel_bytes, read_feather_bytes, read_html, read_html_str, read_html_str_with_options,
-        read_json_str, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
-        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_html, write_html_string,
-        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
-        write_latex_string, write_latex_string_with_options, write_latex_with_options,
+        read_json_str, read_orc, read_orc_bytes, read_parquet_bytes, read_pickle,
+        read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_html,
+        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
+        write_latex, write_latex_string, write_latex_string_with_options, write_latex_with_options,
         write_markdown, write_markdown_string, write_markdown_string_with_options,
-        write_markdown_with_options, write_pickle, write_pickle_bytes, write_stata,
-        write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
-        write_xml_string_with_options,
+        write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
+        write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
+        write_xml_string, write_xml_string_with_options,
     };
 
     #[test]
@@ -11705,6 +11804,11 @@ mod tests {
                 .len(),
             frame.index().len()
         );
+        let orc = frame.to_orc_bytes().expect("orc bytes through extension");
+        assert_eq!(
+            read_orc_bytes(&orc).expect("orc roundtrip").index().len(),
+            frame.index().len()
+        );
         let feather = frame
             .to_feather_bytes()
             .expect("feather bytes through extension");
@@ -11960,6 +12064,99 @@ mod tests {
 
         let result = super::write_parquet_bytes(&frame);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn orc_bytes_roundtrip_preserves_supported_columns() {
+        let frame = make_test_dataframe();
+        let bytes = write_orc_bytes(&frame).expect("write orc");
+        assert!(bytes.starts_with(b"ORC"));
+
+        let frame2 = read_orc_bytes(&bytes).expect("read orc");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(
+            frame2
+                .column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ints", "floats", "names"]
+        );
+
+        assert_eq!(
+            frame2.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
+        assert_eq!(
+            frame2.column("floats").unwrap().values()[1],
+            Scalar::Float64(2.5)
+        );
+        assert_eq!(
+            frame2.column("names").unwrap().values()[2],
+            Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn orc_file_and_extension_aliases_roundtrip() {
+        use super::DataFrameIoExt;
+
+        let frame = make_test_dataframe();
+        let free_path = std::env::temp_dir().join(format!(
+            "fp_io_orc_free_{}_{}.orc",
+            std::process::id(),
+            line!()
+        ));
+        let trait_path = std::env::temp_dir().join(format!(
+            "fp_io_orc_trait_{}_{}.orc",
+            std::process::id(),
+            line!()
+        ));
+
+        write_orc(&frame, &free_path).expect("write orc path");
+        let free_roundtrip = read_orc(&free_path).expect("read orc path");
+        assert!(free_roundtrip.equals(&frame));
+
+        frame.to_orc_file(&trait_path).expect("trait orc path");
+        let trait_roundtrip = read_orc(&trait_path).expect("read trait orc path");
+        assert!(trait_roundtrip.equals(&frame));
+
+        let bytes = frame.to_orc_bytes().expect("trait orc bytes");
+        assert!(
+            read_orc_bytes(&bytes)
+                .expect("read trait orc bytes")
+                .equals(&frame)
+        );
+    }
+
+    #[test]
+    fn orc_row_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let bytes = write_orc_bytes(&frame).expect("write orc");
+        let roundtrip = read_orc_bytes(&bytes).expect("read orc");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.column("__index_level_0__").is_none());
+        assert_eq!(
+            roundtrip
+                .row_multiindex()
+                .expect("row multiindex should be restored")
+                .get_level_values(0)
+                .unwrap()
+                .labels(),
+            frame
+                .row_multiindex()
+                .expect("source row multiindex")
+                .get_level_values(0)
+                .unwrap()
+                .labels()
+        );
+    }
+
+    #[test]
+    fn orc_reader_rejects_malformed_input() {
+        let err = read_orc_bytes(b"not an orc file").expect_err("malformed orc should fail");
+        assert!(matches!(err, IoError::Orc(_)));
     }
 
     // ── Excel I/O tests ──────────────────────────────────────────────

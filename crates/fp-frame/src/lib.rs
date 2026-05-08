@@ -12980,6 +12980,34 @@ impl SeriesGroupBy<'_> {
         self.take_positions(&positions)
     }
 
+    /// Return positional rows from each group.
+    ///
+    /// Matches `pd.SeriesGroupBy.take(indices)`, resolving negative positions
+    /// relative to each group's length.
+    pub fn take(&self, indices: &[i64]) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy take state".to_owned(),
+                )
+            })?;
+            let normalized = DataFrame::normalize_take_indices(indices, row_indices.len(), 0)?;
+            for idx in normalized {
+                let position = row_indices.get(idx).copied().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "normalized SeriesGroupBy take index missing".to_owned(),
+                    )
+                })?;
+                positions.push(position);
+            }
+        }
+
+        self.take_positions(&positions)
+    }
+
     /// Select the nth row from each group. Negative `n` counts from the end.
     pub fn nth(&self, n: i64) -> Result<Series, FrameError> {
         let (_order, order_keys, groups) = self.build_groups();
@@ -66232,6 +66260,79 @@ mod tests {
                 Scalar::Float64(3.0),
             ]
         );
+    }
+
+    #[test]
+    fn test_series_groupby_take_nt65g2() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let first_and_last = gb.take(&[0, -1])?;
+        assert_eq!(
+            first_and_last.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(5),
+            ]
+        );
+        assert_eq!(
+            first_and_last.column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(40.0),
+            ]
+        );
+
+        let empty = gb.take(&[])?;
+        assert!(empty.is_empty());
+        assert_eq!(empty.name(), "data");
+        assert_eq!(empty.dtype(), DType::Float64);
+
+        assert!(gb.take(&[3]).is_err());
+        assert!(gb.take(&[-4]).is_err());
+
+        Ok(())
     }
 
     #[test]

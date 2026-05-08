@@ -5789,6 +5789,20 @@ impl MultiIndex {
         self.unique().len()
     }
 
+    /// Unsupported boolean reduction, matching `pd.MultiIndex.all()`.
+    pub fn all(&self) -> Result<bool, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "cannot perform all with this index type: MultiIndex".to_owned(),
+        ))
+    }
+
+    /// Unsupported boolean reduction, matching `pd.MultiIndex.any()`.
+    pub fn any(&self) -> Result<bool, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "cannot perform any with this index type: MultiIndex".to_owned(),
+        ))
+    }
+
     /// Factorize tuples into integer codes and unique tuples.
     ///
     /// Missing labels remain part of the composite tuple identity, matching
@@ -9742,6 +9756,43 @@ mod tests {
         let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
         assert_eq!(mi.duplicated(DuplicateKeep::First), Vec::<bool>::new());
         assert!(mi.is_unique());
+    }
+
+    #[test]
+    fn multi_index_all_any_reject_bool_reduction_d89fe7() -> Result<(), super::IndexError> {
+        let non_empty = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let empty = MultiIndex::from_arrays(vec![Vec::new(), Vec::new()])?;
+
+        let cases = [
+            (
+                non_empty.all().unwrap_err(),
+                "cannot perform all with this index type: MultiIndex",
+            ),
+            (
+                non_empty.any().unwrap_err(),
+                "cannot perform any with this index type: MultiIndex",
+            ),
+            (
+                empty.all().unwrap_err(),
+                "cannot perform all with this index type: MultiIndex",
+            ),
+            (
+                empty.any().unwrap_err(),
+                "cannot perform any with this index type: MultiIndex",
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message) if message == expected
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]

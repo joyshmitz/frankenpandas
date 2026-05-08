@@ -13332,6 +13332,105 @@ impl SeriesGroupBy<'_> {
         Series::from_values("count", out_labels, out_counts)
     }
 
+    /// Summary statistics per group.
+    ///
+    /// Matches `pd.SeriesGroupBy.describe()` for numeric grouped values.
+    pub fn describe(&self) -> Result<DataFrame, FrameError> {
+        let (order, order_keys, groups) = self.build_groups();
+        let values = self.series.column.values();
+
+        let mut counts = Vec::with_capacity(order_keys.len());
+        let mut means = Vec::with_capacity(order_keys.len());
+        let mut stds = Vec::with_capacity(order_keys.len());
+        let mut mins = Vec::with_capacity(order_keys.len());
+        let mut q25s = Vec::with_capacity(order_keys.len());
+        let mut q50s = Vec::with_capacity(order_keys.len());
+        let mut q75s = Vec::with_capacity(order_keys.len());
+        let mut maxs = Vec::with_capacity(order_keys.len());
+
+        for key in &order_keys {
+            let group_vals: Vec<f64> = groups[key]
+                .iter()
+                .filter_map(|&idx| {
+                    let value = &values[idx];
+                    if value.is_missing() {
+                        None
+                    } else {
+                        value.to_f64().ok()
+                    }
+                })
+                .collect();
+
+            let count = group_vals.len();
+            let mean = if count < 1 {
+                f64::NAN
+            } else {
+                group_vals.iter().sum::<f64>() / count as f64
+            };
+            let std = if count < 2 {
+                f64::NAN
+            } else {
+                let variance = group_vals
+                    .iter()
+                    .map(|value| (value - mean).powi(2))
+                    .sum::<f64>()
+                    / (count - 1) as f64;
+                variance.sqrt()
+            };
+
+            let mut sorted = group_vals;
+            sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+
+            let quantile = |q: f64| -> f64 {
+                if sorted.is_empty() {
+                    return f64::NAN;
+                }
+                let pos = q * (sorted.len() - 1) as f64;
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                if lo >= hi || hi >= sorted.len() {
+                    sorted[lo]
+                } else {
+                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+                }
+            };
+
+            counts.push(Scalar::Float64(count as f64));
+            means.push(Scalar::Float64(mean));
+            stds.push(Scalar::Float64(std));
+            mins.push(Scalar::Float64(sorted.first().copied().unwrap_or(f64::NAN)));
+            q25s.push(Scalar::Float64(quantile(0.25)));
+            q50s.push(Scalar::Float64(quantile(0.5)));
+            q75s.push(Scalar::Float64(quantile(0.75)));
+            maxs.push(Scalar::Float64(sorted.last().copied().unwrap_or(f64::NAN)));
+        }
+
+        let mut columns = BTreeMap::new();
+        columns.insert("count".to_owned(), Column::from_values(counts)?);
+        columns.insert("mean".to_owned(), Column::from_values(means)?);
+        columns.insert("std".to_owned(), Column::from_values(stds)?);
+        columns.insert("min".to_owned(), Column::from_values(mins)?);
+        columns.insert("25%".to_owned(), Column::from_values(q25s)?);
+        columns.insert("50%".to_owned(), Column::from_values(q50s)?);
+        columns.insert("75%".to_owned(), Column::from_values(q75s)?);
+        columns.insert("max".to_owned(), Column::from_values(maxs)?);
+
+        DataFrame::new_with_column_order(
+            Index::new(order),
+            columns,
+            vec![
+                "count".to_owned(),
+                "mean".to_owned(),
+                "std".to_owned(),
+                "min".to_owned(),
+                "25%".to_owned(),
+                "50%".to_owned(),
+                "75%".to_owned(),
+                "max".to_owned(),
+            ],
+        )
+    }
+
     /// Broadcast a named per-group reduction back to the original Series shape.
     ///
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
@@ -69153,6 +69252,93 @@ mod tests {
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
             ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_describe_summary_wwcl4() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "sales",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "store",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ],
+            vec![
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("east".into()),
+            ],
+        )?;
+
+        let desc = values.groupby(&groups)?.describe()?;
+
+        assert_eq!(
+            desc.index().labels(),
+            &[
+                IndexLabel::Utf8("east".into()),
+                IndexLabel::Utf8("west".into()),
+            ]
+        );
+        assert_eq!(
+            desc.column_order,
+            vec!["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+        );
+        assert_eq!(
+            desc.columns["count"].values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(1.0)]
+        );
+        assert_eq!(
+            desc.columns["mean"].values(),
+            &[Scalar::Float64(11.0), Scalar::Float64(10.0)]
+        );
+        assert!(matches!(
+            desc.columns["std"].values(),
+            [Scalar::Float64(east), Scalar::Float64(west)]
+                if (*east - 271.0_f64.sqrt()).abs() < 1e-12 && west.is_nan()
+        ));
+        assert_eq!(
+            desc.columns["min"].values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(10.0)]
+        );
+        assert_eq!(
+            desc.columns["25%"].values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(10.0)]
+        );
+        assert_eq!(
+            desc.columns["50%"].values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(10.0)]
+        );
+        assert_eq!(
+            desc.columns["75%"].values(),
+            &[Scalar::Float64(16.0), Scalar::Float64(10.0)]
+        );
+        assert_eq!(
+            desc.columns["max"].values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(10.0)]
         );
 
         Ok(())

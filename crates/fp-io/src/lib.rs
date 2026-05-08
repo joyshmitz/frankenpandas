@@ -2646,6 +2646,40 @@ pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+// ── File-based Markdown / LaTeX ────────────────────────────────────────
+
+/// Write a DataFrame to a Markdown table file.
+pub fn write_markdown(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_markdown_with_options(frame, path, &MarkdownWriteOptions::default())
+}
+
+/// Write a DataFrame to a Markdown table file with explicit options.
+pub fn write_markdown_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &MarkdownWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_markdown_string_with_options(frame, options)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+/// Write a DataFrame to a LaTeX tabular file.
+pub fn write_latex(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_latex_with_options(frame, path, &LatexWriteOptions::default())
+}
+
+/// Write a DataFrame to a LaTeX tabular file with explicit options.
+pub fn write_latex_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &LatexWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_latex_string_with_options(frame, options)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
 // ── File-based HTML ────────────────────────────────────────────────────
 
 pub fn read_html(path: &Path) -> Result<DataFrame, IoError> {
@@ -8659,10 +8693,45 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_markdown()` with no buffer.
     fn to_markdown_string(&self) -> Result<String, IoError>;
 
+    /// Serialize this DataFrame to a Markdown table string with explicit options.
+    fn to_markdown_string_with_options(
+        &self,
+        options: &MarkdownWriteOptions,
+    ) -> Result<String, IoError>;
+
+    /// Write this DataFrame to a Markdown table file.
+    ///
+    /// Uses a file-suffixed name to avoid colliding with
+    /// `DataFrame::to_markdown(include_index, tablefmt)`.
+    fn to_markdown_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a Markdown table file with explicit options.
+    fn to_markdown_file_with_options(
+        &self,
+        path: &Path,
+        options: &MarkdownWriteOptions,
+    ) -> Result<(), IoError>;
+
     /// Serialize this DataFrame to a LaTeX tabular string.
     ///
     /// Matches `pd.DataFrame.to_latex()` with no buffer.
     fn to_latex_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this DataFrame to a LaTeX tabular string with explicit options.
+    fn to_latex_string_with_options(&self, options: &LatexWriteOptions) -> Result<String, IoError>;
+
+    /// Write this DataFrame to a LaTeX tabular file.
+    ///
+    /// Uses a file-suffixed name to avoid colliding with
+    /// `DataFrame::to_latex(include_index)`.
+    fn to_latex_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a LaTeX tabular file with explicit options.
+    fn to_latex_file_with_options(
+        &self,
+        path: &Path,
+        options: &LatexWriteOptions,
+    ) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to an HTML table string.
     ///
@@ -8853,8 +8922,43 @@ impl DataFrameIoExt for DataFrame {
         write_markdown_string(self)
     }
 
+    fn to_markdown_string_with_options(
+        &self,
+        options: &MarkdownWriteOptions,
+    ) -> Result<String, IoError> {
+        write_markdown_string_with_options(self, options)
+    }
+
+    fn to_markdown_file(&self, path: &Path) -> Result<(), IoError> {
+        write_markdown(self, path)
+    }
+
+    fn to_markdown_file_with_options(
+        &self,
+        path: &Path,
+        options: &MarkdownWriteOptions,
+    ) -> Result<(), IoError> {
+        write_markdown_with_options(self, path, options)
+    }
+
     fn to_latex_string(&self) -> Result<String, IoError> {
         write_latex_string(self)
+    }
+
+    fn to_latex_string_with_options(&self, options: &LatexWriteOptions) -> Result<String, IoError> {
+        write_latex_string_with_options(self, options)
+    }
+
+    fn to_latex_file(&self, path: &Path) -> Result<(), IoError> {
+        write_latex(self, path)
+    }
+
+    fn to_latex_file_with_options(
+        &self,
+        path: &Path,
+        options: &LatexWriteOptions,
+    ) -> Result<(), IoError> {
+        write_latex_with_options(self, path, options)
     }
 
     fn to_html_string(&self) -> Result<String, IoError> {
@@ -9040,10 +9144,12 @@ mod tests {
         read_json_str, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
         read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
         write_csv_string_with_options, write_html, write_html_string,
-        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex_string,
-        write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
-        write_pickle, write_pickle_bytes, write_stata, write_stata_bytes,
-        write_stata_bytes_with_options, write_xml, write_xml_string, write_xml_string_with_options,
+        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
+        write_latex_string, write_latex_string_with_options, write_latex_with_options,
+        write_markdown, write_markdown_string, write_markdown_string_with_options,
+        write_markdown_with_options, write_pickle, write_pickle_bytes, write_stata,
+        write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
+        write_xml_string_with_options,
     };
 
     #[test]
@@ -9176,6 +9282,132 @@ mod tests {
                 "\\bottomrule\n",
                 "\\end{tabular}\n",
             )
+        );
+    }
+
+    #[test]
+    fn markdown_latex_file_writers_match_string_outputs() {
+        let frame = make_table_format_dataframe();
+        let markdown_path = std::env::temp_dir().join(format!(
+            "fp_io_markdown_writer_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        let latex_path = std::env::temp_dir().join(format!(
+            "fp_io_latex_writer_{}_{}.tex",
+            std::process::id(),
+            line!()
+        ));
+
+        write_markdown(&frame, &markdown_path).expect("write markdown path");
+        write_latex(&frame, &latex_path).expect("write latex path");
+
+        assert_eq!(
+            std::fs::read_to_string(&markdown_path).expect("read markdown path"),
+            write_markdown_string(&frame).expect("markdown string")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&latex_path).expect("read latex path"),
+            write_latex_string(&frame).expect("latex string")
+        );
+    }
+
+    #[test]
+    fn markdown_latex_trait_aliases_forward_options() {
+        use super::DataFrameIoExt;
+
+        let frame = make_table_format_dataframe();
+        let markdown_options = MarkdownWriteOptions {
+            include_index: false,
+            na_rep: "NA".to_owned(),
+            index_label: Some("ignored".to_owned()),
+        };
+        let latex_options = LatexWriteOptions {
+            include_index: false,
+            na_rep: "NA".to_owned(),
+            index_label: Some("ignored".to_owned()),
+            escape: true,
+        };
+        let markdown_path = std::env::temp_dir().join(format!(
+            "fp_io_markdown_trait_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        let latex_path = std::env::temp_dir().join(format!(
+            "fp_io_latex_trait_{}_{}.tex",
+            std::process::id(),
+            line!()
+        ));
+
+        frame
+            .to_markdown_file_with_options(&markdown_path, &markdown_options)
+            .expect("trait markdown file");
+        frame
+            .to_latex_file_with_options(&latex_path, &latex_options)
+            .expect("trait latex file");
+
+        assert_eq!(
+            frame
+                .to_markdown_string_with_options(&markdown_options)
+                .expect("trait markdown options"),
+            std::fs::read_to_string(&markdown_path).expect("read markdown trait path")
+        );
+        assert_eq!(
+            frame
+                .to_latex_string_with_options(&latex_options)
+                .expect("trait latex options"),
+            std::fs::read_to_string(&latex_path).expect("read latex trait path")
+        );
+
+        let default_markdown_path = std::env::temp_dir().join(format!(
+            "fp_io_markdown_trait_default_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        let default_latex_path = std::env::temp_dir().join(format!(
+            "fp_io_latex_trait_default_{}_{}.tex",
+            std::process::id(),
+            line!()
+        ));
+        frame
+            .to_markdown_file(&default_markdown_path)
+            .expect("trait markdown default file");
+        frame
+            .to_latex_file(&default_latex_path)
+            .expect("trait latex default file");
+
+        assert_eq!(
+            std::fs::read_to_string(&default_markdown_path).expect("read markdown default"),
+            write_markdown_string(&frame).expect("markdown default")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&default_latex_path).expect("read latex default"),
+            write_latex_string(&frame).expect("latex default")
+        );
+
+        let free_markdown_path = std::env::temp_dir().join(format!(
+            "fp_io_markdown_free_options_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        let free_latex_path = std::env::temp_dir().join(format!(
+            "fp_io_latex_free_options_{}_{}.tex",
+            std::process::id(),
+            line!()
+        ));
+        write_markdown_with_options(&frame, &free_markdown_path, &markdown_options)
+            .expect("free markdown options file");
+        write_latex_with_options(&frame, &free_latex_path, &latex_options)
+            .expect("free latex options file");
+        assert_eq!(
+            std::fs::read_to_string(&free_markdown_path).expect("read free markdown options"),
+            write_markdown_string_with_options(&frame, &markdown_options)
+                .expect("free markdown options string")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&free_latex_path).expect("read free latex options"),
+            write_latex_string_with_options(&frame, &latex_options)
+                .expect("free latex options string")
         );
     }
 

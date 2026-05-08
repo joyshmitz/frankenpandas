@@ -31763,6 +31763,51 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, column_order)
     }
 
+    /// Replace the column at a specific integer position.
+    ///
+    /// Matches `pd.DataFrame.isetitem(loc, value)` for a single column. This
+    /// keeps the existing column label at `loc` and installs a new column array
+    /// rather than mutating the old array in place.
+    pub fn isetitem(&self, loc: usize, column: Column) -> Result<Self, FrameError> {
+        if loc >= self.column_order.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "isetitem loc {loc} out of bounds for width {}",
+                self.column_order.len()
+            )));
+        }
+        if column.len() != self.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.len(),
+                column_len: column.len(),
+            });
+        }
+
+        let name = self.column_order[loc].clone();
+        let mut columns = self.columns.clone();
+        columns.insert(name, column);
+        Ok(Self {
+            index: self.index.clone(),
+            row_multiindex: self.row_multiindex.clone(),
+            columns,
+            column_order: self.column_order.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+        })
+    }
+
+    /// Replace the column at `loc` from scalar values.
+    ///
+    /// Convenience arraylike form for [`Self::isetitem`].
+    pub fn isetitem_values(&self, loc: usize, values: Vec<Scalar>) -> Result<Self, FrameError> {
+        self.isetitem(loc, Column::from_values(values)?)
+    }
+
+    /// Replace the column at `loc` with a scalar broadcast across every row.
+    ///
+    /// Convenience scalar form for [`Self::isetitem`].
+    pub fn isetitem_scalar(&self, loc: usize, value: Scalar) -> Result<Self, FrameError> {
+        self.isetitem_values(loc, vec![value; self.len()])
+    }
+
     /// Remove and return a column as a Series.
     ///
     /// Matches `col = df.pop('column_name')`. Returns the removed column
@@ -52782,6 +52827,92 @@ mod tests {
 
         let col = Column::from_values(vec![Scalar::Int64(99)]).unwrap();
         assert!(df.insert(0, "b", col).is_err());
+    }
+
+    #[test]
+    fn dataframe_isetitem_replaces_column_at_position() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ("c", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+        )
+        .unwrap();
+
+        let replacement = Column::from_values(vec![Scalar::Int64(30), Scalar::Int64(40)]).unwrap();
+        let result = df.isetitem(1, replacement).unwrap();
+        let names: Vec<&str> = result
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(
+            result.column("b").unwrap().values(),
+            &[Scalar::Int64(30), Scalar::Int64(40)]
+        );
+        assert_eq!(
+            df.column("b").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn dataframe_isetitem_values_and_scalar_forms() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let values = df
+            .isetitem_values(0, vec![Scalar::Int64(10), Scalar::Int64(20)])
+            .unwrap();
+        assert_eq!(
+            values.column("a").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+
+        let scalar = df.isetitem_scalar(1, Scalar::Int64(99)).unwrap();
+        assert_eq!(
+            scalar.column("b").unwrap().values(),
+            &[Scalar::Int64(99), Scalar::Int64(99)]
+        );
+    }
+
+    #[test]
+    fn dataframe_isetitem_rejects_out_of_bounds_position() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let col = Column::from_values(vec![Scalar::Int64(2)]).unwrap();
+
+        let err = df.isetitem(1, col).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
+        );
+    }
+
+    #[test]
+    fn dataframe_isetitem_rejects_length_mismatch() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let col = Column::from_values(vec![Scalar::Int64(99)]).unwrap();
+
+        assert!(matches!(
+            df.isetitem(0, col),
+            Err(FrameError::LengthMismatch {
+                index_len: 2,
+                column_len: 1
+            })
+        ));
     }
 
     // --- DataFrame.pop tests ---

@@ -4599,6 +4599,17 @@ impl MultiIndex {
         Err(Self::shift_unsupported_error())
     }
 
+    fn string_accessor_error() -> IndexError {
+        IndexError::InvalidArgument(
+            "Can only use .str accessor with Index, not MultiIndex".to_owned(),
+        )
+    }
+
+    /// Unsupported string accessor, matching `pd.MultiIndex.str`.
+    pub fn r#str(&self) -> Result<(), IndexError> {
+        Err(Self::string_accessor_error())
+    }
+
     /// Set the names for all levels.
     #[must_use]
     pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
@@ -10026,6 +10037,24 @@ mod tests {
                 super::IndexError::InvalidArgument(message) if message == expected
             ));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_str_rejects_string_accessor_d89fe12() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+
+        let err = mi.r#str().unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(message)
+                if message == "Can only use .str accessor with Index, not MultiIndex"
+        ));
 
         Ok(())
     }

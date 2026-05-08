@@ -4610,6 +4610,31 @@ impl MultiIndex {
         Err(Self::string_accessor_error())
     }
 
+    fn asof_comparison_type_name(&self) -> &'static str {
+        match self.levels.first().and_then(|level| level.first()) {
+            Some(IndexLabel::Int64(_)) => "int",
+            Some(IndexLabel::Utf8(_)) => "str",
+            Some(IndexLabel::Timedelta64(_)) => "Timedelta",
+            Some(IndexLabel::Datetime64(_)) => "Timestamp",
+            None => "object",
+        }
+    }
+
+    fn asof_unsupported_error(&self) -> IndexError {
+        IndexError::InvalidArgument(format!(
+            "'<' not supported between instances of 'tuple' and '{}'",
+            self.asof_comparison_type_name()
+        ))
+    }
+
+    /// Unsupported nearest-key lookup, matching `pd.MultiIndex.asof(...)`.
+    pub fn asof(&self, _key: &[IndexLabel]) -> Result<Option<Vec<IndexLabel>>, IndexError> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        Err(self.asof_unsupported_error())
+    }
+
     /// Set the names for all levels.
     #[must_use]
     pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
@@ -10055,6 +10080,39 @@ mod tests {
             super::IndexError::InvalidArgument(message)
                 if message == "Can only use .str accessor with Index, not MultiIndex"
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_asof_rejects_tuple_comparison_d89fe13() -> Result<(), super::IndexError> {
+        let string_level = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let int_level = MultiIndex::from_tuples(vec![
+            vec![1_i64.into(), "a".into()],
+            vec![2_i64.into(), "b".into()],
+        ])?;
+
+        let string_err = string_level
+            .asof(&[IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)])
+            .unwrap_err();
+        let int_err = int_level
+            .asof(&[IndexLabel::Int64(1), IndexLabel::Utf8("a".into())])
+            .unwrap_err();
+
+        assert!(matches!(
+            string_err,
+            super::IndexError::InvalidArgument(message)
+                if message == "'<' not supported between instances of 'tuple' and 'str'"
+        ));
+        assert!(matches!(
+            int_err,
+            super::IndexError::InvalidArgument(message)
+                if message == "'<' not supported between instances of 'tuple' and 'int'"
+        ));
+        assert_eq!(MultiIndex::from_tuples(Vec::new())?.asof(&[])?, None);
 
         Ok(())
     }

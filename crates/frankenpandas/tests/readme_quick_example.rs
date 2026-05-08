@@ -3032,10 +3032,10 @@ fn readme_module_level_functions_compiles_and_runs() -> Result<(), Box<dyn std::
 
 /// README "DataFrame Output Formats" table (lines 530-543).
 ///
-/// Locks in 11 inline output methods on DataFrame that previously had
+/// Locks in 12 inline output methods on DataFrame that previously had
 /// no integration coverage:
 /// - to_csv, to_json (multiple orients)
-/// - to_string_table, to_string_truncated
+/// - to_string, to_string_table, to_string_truncated
 /// - to_html, to_latex, to_markdown
 /// - to_dict, to_series_dict, to_records, to_numpy_2d
 ///
@@ -3058,9 +3058,14 @@ fn readme_dataframe_output_formats_compiles_and_runs() -> Result<(), Box<dyn std
     let json_columns = df.to_json("columns")?;
     assert!(json_columns.contains("ticker"));
 
-    // to_string_table — aligned ASCII output.
+    // to_string — pandas-named aligned ASCII output with index.
+    let pandas_string = df.to_string();
+    assert!(pandas_string.contains("AAPL"));
+
+    // to_string_table — aligned ASCII output with explicit index control.
     let table = df.to_string_table(true);
     assert!(table.contains("AAPL"));
+    assert_eq!(pandas_string, table);
 
     // to_string_truncated — head/tail with "..." between when over max_rows.
     let big = read_csv_str("v\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10")?;

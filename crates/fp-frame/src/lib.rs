@@ -27646,6 +27646,15 @@ impl DataFrame {
 
     /// Render the DataFrame as a formatted plain-text table.
     ///
+    /// Matches `df.to_string()` with pandas' default `index=True` behavior.
+    #[allow(clippy::inherent_to_string_shadow_display)]
+    pub fn to_string(&self) -> String {
+        self.to_string_table(true)
+    }
+
+    /// Render the DataFrame as a formatted plain-text table with explicit
+    /// index-column control.
+    ///
     /// Matches `df.to_string()`. Columns are right-aligned for numeric data,
     /// left-aligned for strings. Includes index column on the left.
     pub fn to_string_table(&self, include_index: bool) -> String {
@@ -57186,6 +57195,26 @@ mod tests {
         assert!(result.contains("age"));
         assert!(result.contains("Alice"));
         assert!(result.contains("30"));
+    }
+
+    #[test]
+    fn df_to_string_matches_default_table() {
+        let df = DataFrame::from_dict(
+            &["name", "age"],
+            vec![
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("Alice".to_owned()),
+                        Scalar::Utf8("Bob".to_owned()),
+                    ],
+                ),
+                ("age", vec![Scalar::Int64(30), Scalar::Int64(25)]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(df.to_string(), df.to_string_table(true));
     }
 
     #[test]

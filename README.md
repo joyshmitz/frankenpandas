@@ -525,13 +525,14 @@ let row = df.xs(&"2024-01-15".into())?;
 
 ### DataFrame Output Formats
 
-12 inline output methods for different consumption contexts (plus 14 file / bytes / string writers via the [`DataFrameIoExt`](crates/fp-io/src/lib.rs) extension trait — `to_parquet`, `to_parquet_bytes`, `to_csv_file`, `to_csv_string`, `to_json_file`, `to_excel`, `to_excel_file`, `to_excel_bytes`, `to_jsonl_file`, `to_feather`, `to_feather_file`, `to_feather_bytes`, `to_sql`, `to_sql_with_options`):
+12 inline output methods for different consumption contexts, plus the `Display` trait (and 14 file / bytes / string writers via the [`DataFrameIoExt`](crates/fp-io/src/lib.rs) extension trait — `to_parquet`, `to_parquet_bytes`, `to_csv_file`, `to_csv_string`, `to_json_file`, `to_excel`, `to_excel_file`, `to_excel_bytes`, `to_jsonl_file`, `to_feather`, `to_feather_file`, `to_feather_bytes`, `to_sql`, `to_sql_with_options`):
 
 | Method | pandas Equivalent | Format |
 |--------|-------------------|--------|
 | `to_csv(sep, include_index)` | `df.to_csv()` | Comma/tab-separated values |
 | `to_json(orient)` | `df.to_json()` | JSON with 5 orients |
-| `to_string_table(include_index)` | `df.to_string()` | Aligned ASCII table |
+| `to_string()` | `df.to_string()` | Pandas-named aligned ASCII table |
+| `to_string_table(include_index)` | `df.to_string(index=...)` | Aligned ASCII table with explicit index control |
 | `to_string_truncated(idx, rows, cols)` | `df.to_string(max_rows=)` | Truncated with head/tail + "..." |
 | `to_html(include_index)` | `df.to_html()` | HTML `<table>` |
 | `to_latex(include_index)` | `df.to_latex()` | LaTeX `tabular` |

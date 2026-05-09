@@ -2909,6 +2909,20 @@ impl DatetimeIndex {
         None
     }
 
+    /// Find positions of `[start, end]` for a label slice, matching
+    /// `pd.DatetimeIndex.slice_locs(start, end)`. Requires the index to
+    /// be monotonically increasing; non-monotonic input rejects.
+    pub fn slice_locs(&self, start: i64, end: i64) -> Result<(usize, usize), IndexError> {
+        if !self.is_monotonic_increasing() {
+            return Err(IndexError::InvalidArgument(
+                "slice_locs requires a monotonic increasing DatetimeIndex".to_owned(),
+            ));
+        }
+        let left = self.searchsorted(start, "left")?;
+        let right = self.searchsorted(end, "right")?;
+        Ok((left, right))
+    }
+
     /// Convert to a flat [`Index`], matching
     /// `pd.DatetimeIndex.to_flat_index()`. Clone-as-Index because the
     /// underlying storage is already a flat Index of Datetime64 labels.
@@ -3844,6 +3858,20 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
         None
+    }
+
+    /// Find positions of `[start, end]` for a label slice, matching
+    /// `pd.TimedeltaIndex.slice_locs(start, end)`. Requires the index to
+    /// be monotonically increasing.
+    pub fn slice_locs(&self, start: i64, end: i64) -> Result<(usize, usize), IndexError> {
+        if !self.is_monotonic_increasing() {
+            return Err(IndexError::InvalidArgument(
+                "slice_locs requires a monotonic increasing TimedeltaIndex".to_owned(),
+            ));
+        }
+        let left = self.searchsorted(start, "left")?;
+        let right = self.searchsorted(end, "right")?;
+        Ok((left, right))
     }
 
     /// Convert to a flat [`Index`], matching
@@ -13481,6 +13509,33 @@ mod tests {
         // Descending range rejects.
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.searchsorted(4, "left").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn datetime_timedelta_slice_locs_match_pandas_mxedz() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let d = 1_707_350_400_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c, d]);
+
+        // Slice [b, c]: positions [1, 3) (right is exclusive in slice_locs).
+        assert_eq!(dt.slice_locs(b, c)?, (1, 3));
+        // Slice [a, d]: full range.
+        assert_eq!(dt.slice_locs(a, d)?, (0, 4));
+        // Slice past the end: empty range.
+        assert_eq!(dt.slice_locs(d + 1, d + 2)?, (4, 4));
+
+        // Non-monotonic rejects.
+        let unsorted = super::DatetimeIndex::new(vec![c, a, b, d]);
+        assert!(unsorted.slice_locs(a, c).is_err());
+
+        // TimedeltaIndex spot check.
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]);
+        assert_eq!(td.slice_locs(150, 250)?, (1, 2));
+
         Ok(())
     }
 

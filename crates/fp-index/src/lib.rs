@@ -5717,6 +5717,27 @@ impl RangeIndex {
         Some((self.start, last))
     }
 
+    /// Sort values ascending, matching `pd.RangeIndex.sort_values()`.
+    /// Ascending or zero step returns a clone; descending step rebuilds
+    /// an ascending RangeIndex starting from min with positive step.
+    /// Empty returns clone of self.
+    #[must_use]
+    pub fn sort_values(&self) -> Self {
+        if self.is_empty() || self.step >= 0 {
+            return self.clone();
+        }
+        let len = self.len();
+        let last = self.start + (len as i64 - 1) * self.step;
+        let new_step = -self.step;
+        let new_stop = last + (len as i64) * new_step;
+        Self {
+            start: last,
+            stop: new_stop,
+            step: new_step,
+            name: self.name.clone(),
+        }
+    }
+
     /// Smallest value in the range, matching `pd.RangeIndex.min()`. Closed
     /// form on (start, step, len). Empty returns None.
     #[must_use]
@@ -14792,6 +14813,23 @@ mod tests {
         assert!(mixed.min().is_err());
         assert!(mixed.max().is_err());
         Ok(())
+    }
+
+    #[test]
+    fn range_index_sort_values_closed_form_mhcge() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert!(asc.sort_values().equals(&asc));
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        // Original values 10, 8, 6, 4, 2 → sorted ascending 2, 4, 6, 8, 10.
+        let sorted = desc.sort_values();
+        assert_eq!(sorted.values(), vec![2, 4, 6, 8, 10]);
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty.sort_values().is_empty());
+
+        let zero_step = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert!(zero_step.sort_values().equals(&zero_step));
     }
 
     #[test]

@@ -2478,6 +2478,134 @@ impl DatetimeIndex {
             .max()
     }
 
+    /// Labels present in both indexes, matching
+    /// `pd.DatetimeIndex.intersection(other)`. Preserves first-seen order
+    /// from `self`.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if other_set.contains(n) && seen.insert(*n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels from self followed by labels from other not already present,
+    /// matching `pd.DatetimeIndex.union(other)`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        let mut seen = HashSet::<i64>::new();
+        let mut nanos: Vec<i64> = Vec::new();
+        for label in self.index.labels().iter().chain(other.index.labels().iter()) {
+            if let IndexLabel::Datetime64(n) = label
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels in self not in other, matching
+    /// `pd.DatetimeIndex.difference(other)`.
+    #[must_use]
+    pub fn difference(&self, other: &Self) -> Self {
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if !other_set.contains(n) && seen.insert(*n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels in either but not both, matching
+    /// `pd.DatetimeIndex.symmetric_difference(other)`.
+    #[must_use]
+    pub fn symmetric_difference(&self, other: &Self) -> Self {
+        let self_set: HashSet<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let mut nanos: Vec<i64> = Vec::new();
+        for label in self.index.labels() {
+            if let IndexLabel::Datetime64(n) = label
+                && !other_set.contains(n)
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        for label in other.index.labels() {
+            if let IndexLabel::Datetime64(n) = label
+                && !self_set.contains(n)
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
     /// Sort labels ascending, matching `pd.DatetimeIndex.sort_values()`.
     /// NAT sorts first because the underlying sentinel is `i64::MIN`,
     /// matching pandas' `na_position='first'` default for datetime indexes.
@@ -3353,6 +3481,133 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .max()
+    }
+
+    /// Labels present in both indexes, matching
+    /// `pd.TimedeltaIndex.intersection(other)`.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if other_set.contains(n) && seen.insert(*n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels from self followed by labels from other not already present,
+    /// matching `pd.TimedeltaIndex.union(other)`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        let mut seen = HashSet::<i64>::new();
+        let mut nanos: Vec<i64> = Vec::new();
+        for label in self.index.labels().iter().chain(other.index.labels().iter()) {
+            if let IndexLabel::Timedelta64(n) = label
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels in self not in other, matching
+    /// `pd.TimedeltaIndex.difference(other)`.
+    #[must_use]
+    pub fn difference(&self, other: &Self) -> Self {
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if !other_set.contains(n) && seen.insert(*n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Labels in either but not both, matching
+    /// `pd.TimedeltaIndex.symmetric_difference(other)`.
+    #[must_use]
+    pub fn symmetric_difference(&self, other: &Self) -> Self {
+        let self_set: HashSet<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let other_set: HashSet<i64> = other
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::<i64>::new();
+        let mut nanos: Vec<i64> = Vec::new();
+        for label in self.index.labels() {
+            if let IndexLabel::Timedelta64(n) = label
+                && !other_set.contains(n)
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        for label in other.index.labels() {
+            if let IndexLabel::Timedelta64(n) = label
+                && !self_set.contains(n)
+                && seen.insert(*n)
+            {
+                nanos.push(*n);
+            }
+        }
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
     }
 
     /// Sort labels ascending, matching `pd.TimedeltaIndex.sort_values()`.
@@ -11769,6 +12024,61 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_set_ops_match_pandas_ik8if() {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let d = 1_707_350_400_i64 * NS;
+        let left = super::DatetimeIndex::new(vec![a, b, c]).set_name("ts");
+        let right = super::DatetimeIndex::new(vec![b, c, d]).set_name("ts");
+
+        // intersection: b, c (in self order).
+        let inter = left.intersection(&right);
+        assert_eq!(inter.values(), vec![Some(b), Some(c)]);
+        assert_eq!(inter.name(), Some("ts"));
+
+        // union: a, b, c then d.
+        let union = left.union(&right);
+        assert_eq!(union.values(), vec![Some(a), Some(b), Some(c), Some(d)]);
+
+        // difference: a (only in self).
+        let diff = left.difference(&right);
+        assert_eq!(diff.values(), vec![Some(a)]);
+
+        // symmetric_difference: a (self-only) then d (other-only).
+        let sym = left.symmetric_difference(&right);
+        assert_eq!(sym.values(), vec![Some(a), Some(d)]);
+
+        // Mismatched names drop the name.
+        let mismatched = super::DatetimeIndex::new(vec![b]).set_name("other");
+        assert_eq!(left.intersection(&mismatched).name(), None);
+        assert_eq!(left.union(&mismatched).name(), None);
+    }
+
+    #[test]
+    fn timedelta_index_set_ops_match_pandas_ik8if() {
+        let left = super::TimedeltaIndex::new(vec![100_i64, 200, 300]).set_name("d");
+        let right = super::TimedeltaIndex::new(vec![200_i64, 300, 400]).set_name("d");
+
+        let inter = left.intersection(&right);
+        assert_eq!(inter.values(), vec![Some(200), Some(300)]);
+        assert_eq!(inter.name(), Some("d"));
+
+        let union = left.union(&right);
+        assert_eq!(
+            union.values(),
+            vec![Some(100), Some(200), Some(300), Some(400)]
+        );
+
+        let diff = left.difference(&right);
+        assert_eq!(diff.values(), vec![Some(100)]);
+
+        let sym = left.symmetric_difference(&right);
+        assert_eq!(sym.values(), vec![Some(100), Some(400)]);
     }
 
     #[test]

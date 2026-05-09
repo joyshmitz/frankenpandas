@@ -2979,6 +2979,108 @@ impl TimedeltaIndex {
     pub fn nanoseconds(&self) -> Vec<Option<i64>> {
         map_timedelta_labels(self.index.labels(), |nanos| nanos.rem_euclid(1_000))
     }
+
+    /// Position of the maximum label, matching `pd.TimedeltaIndex.argmax()`.
+    /// Skips NAT and returns the first-tied position to match pandas
+    /// `skipna=True` default.
+    pub fn argmax(&self) -> Result<usize, IndexError> {
+        let labels = self.index.labels();
+        let mut best: Option<usize> = None;
+        for (i, label) in labels.iter().enumerate() {
+            let nanos = match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => *n,
+                _ => continue,
+            };
+            best = Some(match best {
+                Some(b) => match labels[b] {
+                    IndexLabel::Timedelta64(prev) if nanos > prev => i,
+                    _ => b,
+                },
+                None => i,
+            });
+        }
+        best.ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmax of an empty sequence".to_owned())
+        })
+    }
+
+    /// Position of the minimum label, matching `pd.TimedeltaIndex.argmin()`.
+    pub fn argmin(&self) -> Result<usize, IndexError> {
+        let labels = self.index.labels();
+        let mut best: Option<usize> = None;
+        for (i, label) in labels.iter().enumerate() {
+            let nanos = match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => *n,
+                _ => continue,
+            };
+            best = Some(match best {
+                Some(b) => match labels[b] {
+                    IndexLabel::Timedelta64(prev) if nanos < prev => i,
+                    _ => b,
+                },
+                None => i,
+            });
+        }
+        best.ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmin of an empty sequence".to_owned())
+        })
+    }
+
+    /// Positions that would sort the labels ascending, matching
+    /// `pd.TimedeltaIndex.argsort()`.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        self.index.argsort()
+    }
+
+    /// First-seen unique labels, matching `pd.TimedeltaIndex.unique()`.
+    pub fn unique(&self) -> Result<Self, IndexError> {
+        Self::from_index(self.index.unique())
+    }
+
+    /// Factorization, matching `pd.TimedeltaIndex.factorize()`. NAT inputs
+    /// receive `-1` codes; uniques excludes NAT.
+    pub fn factorize(&self) -> Result<(Vec<isize>, Self), IndexError> {
+        let (codes, uniques) = self.index.factorize();
+        Ok((codes, Self::from_index(uniques)?))
+    }
+
+    /// Value counts, matching `pd.TimedeltaIndex.value_counts()`. NAT is
+    /// dropped by default to match pandas.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        self.index.value_counts()
+    }
+
+    /// Duplicate mask per position, matching
+    /// `pd.TimedeltaIndex.duplicated(keep)`.
+    #[must_use]
+    pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        self.index.duplicated(keep)
+    }
+
+    /// Drop duplicate labels, matching `pd.TimedeltaIndex.drop_duplicates()`.
+    pub fn drop_duplicates(&self) -> Result<Self, IndexError> {
+        Self::from_index(self.index.drop_duplicates())
+    }
+
+    /// Drop NAT labels, matching `pd.TimedeltaIndex.dropna()`.
+    pub fn dropna(&self) -> Self {
+        let surviving: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        let mut filtered = Self::new(surviving);
+        if let Some(name) = self.name() {
+            filtered = filtered.set_name(name);
+        }
+        filtered
+    }
 }
 
 /// Public pandas-style period index wrapper.
@@ -10992,6 +11094,80 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn timedelta_index_forwarder_methods_match_index_vq4pf()
+    -> Result<(), super::IndexError> {
+        let a: i64 = 1_000;
+        let b: i64 = 2_000;
+        let c: i64 = 3_000;
+        let nat = fp_types::Timedelta::NAT;
+
+        // a, c, b, a, NAT, c (duplicates + NAT)
+        let td = super::TimedeltaIndex::new(vec![a, c, b, a, nat, c]);
+
+        assert_eq!(td.argmax()?, 1);
+        assert_eq!(td.argmin()?, 0);
+
+        let positions = td.argsort();
+        assert_eq!(positions.len(), td.len());
+
+        let unique = td.unique()?;
+        assert_eq!(unique.values(), vec![Some(a), Some(c), Some(b), None]);
+
+        let (codes, uniques) = td.factorize()?;
+        assert_eq!(codes.len(), td.len());
+        assert_eq!(uniques.values(), vec![Some(a), Some(c), Some(b)]);
+        assert_eq!(codes[4], -1);
+
+        let counts = td.value_counts();
+        let total: usize = counts.iter().map(|(_, n)| n).sum();
+        assert_eq!(total, 5); // NAT dropped
+
+        let dup_first = td.duplicated(super::DuplicateKeep::First);
+        assert_eq!(dup_first, vec![false, false, false, true, false, true]);
+
+        let deduped = td.drop_duplicates()?;
+        assert_eq!(deduped.values(), vec![Some(a), Some(c), Some(b), None]);
+
+        let dropped = td.dropna();
+        assert_eq!(
+            dropped.values(),
+            vec![Some(a), Some(c), Some(b), Some(a), Some(c)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timedelta_index_argmax_argmin_reject_empty_vq4pf() {
+        let empty = super::TimedeltaIndex::new(vec![]);
+        let err_max = empty.argmax().unwrap_err();
+        assert!(matches!(
+            err_max,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmax of an empty sequence"
+        ));
+        let err_min = empty.argmin().unwrap_err();
+        assert!(matches!(
+            err_min,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmin of an empty sequence"
+        ));
+
+        let only_nat =
+            super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT, fp_types::Timedelta::NAT]);
+        assert!(only_nat.argmax().is_err());
+        assert!(only_nat.argmin().is_err());
+    }
+
+    #[test]
+    fn timedelta_index_dropna_preserves_name_vq4pf() {
+        let td = super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT, 0_i64])
+            .set_name("delta");
+        let dropped = td.dropna();
+        assert_eq!(dropped.values(), vec![Some(0)]);
+        assert_eq!(dropped.name(), Some("delta"));
     }
 
     #[test]

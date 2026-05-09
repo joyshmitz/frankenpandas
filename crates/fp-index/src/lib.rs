@@ -4254,6 +4254,44 @@ impl PeriodIndex {
         }
     }
 
+    fn ensure_homogeneous_freq(&self) -> Result<Option<PeriodFreq>, IndexError> {
+        let mut iter = self.values.iter();
+        let Some(first) = iter.next() else {
+            return Ok(None);
+        };
+        for period in iter {
+            if period.freq != first.freq {
+                return Err(IndexError::InvalidArgument(format!(
+                    "PeriodIndex has mixed frequencies: {:?} and {:?}",
+                    first.freq, period.freq
+                )));
+            }
+        }
+        Ok(Some(first.freq))
+    }
+
+    /// Period with the smallest ordinal, matching `pd.PeriodIndex.min()`.
+    /// Mixed-frequency input rejects because pandas requires same-freq
+    /// comparisons; empty returns `Ok(None)` to mirror the pandas NaT result.
+    pub fn min(&self) -> Result<Option<Period>, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        Ok(self
+            .values
+            .iter()
+            .copied()
+            .min_by_key(|period| period.ordinal))
+    }
+
+    /// Period with the largest ordinal, matching `pd.PeriodIndex.max()`.
+    pub fn max(&self) -> Result<Option<Period>, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        Ok(self
+            .values
+            .iter()
+            .copied()
+            .max_by_key(|period| period.ordinal))
+    }
+
     /// Binary-search insertion position, matching
     /// `pd.PeriodIndex.searchsorted(value, side)`. Mixed-frequency lookups
     /// reject because pandas requires same-freq comparisons. side must be
@@ -4836,6 +4874,61 @@ impl RangeIndex {
             idx = idx.set_name(name);
         }
         idx
+    }
+
+    /// First and last value as (start, last), or None if empty. Used to
+    /// power closed-form reductions that don't materialize the full vector.
+    fn first_last(&self) -> Option<(i64, i64)> {
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        let last = self.start + (len as i64 - 1) * self.step;
+        Some((self.start, last))
+    }
+
+    /// Smallest value in the range, matching `pd.RangeIndex.min()`. Closed
+    /// form on (start, step, len). Empty returns None.
+    #[must_use]
+    pub fn min(&self) -> Option<i64> {
+        let (first, last) = self.first_last()?;
+        Some(first.min(last))
+    }
+
+    /// Largest value in the range, matching `pd.RangeIndex.max()`.
+    #[must_use]
+    pub fn max(&self) -> Option<i64> {
+        let (first, last) = self.first_last()?;
+        Some(first.max(last))
+    }
+
+    /// Sum of all values, matching `pd.RangeIndex.sum()`. Closed form via
+    /// arithmetic-progression: `n * (first + last) / 2` when `n*(first+last)`
+    /// is even; falls back to a precise i128 path otherwise.
+    #[must_use]
+    pub fn sum(&self) -> i64 {
+        let len = self.len();
+        if len == 0 {
+            return 0;
+        }
+        let Some((first, last)) = self.first_last() else {
+            return 0;
+        };
+        let n = i128::from(len as i64);
+        let total = (i128::from(first) + i128::from(last)) * n / 2;
+        i64::try_from(total).unwrap_or(i64::MAX)
+    }
+
+    /// Mean of all values, matching `pd.RangeIndex.mean()`. Returns `None`
+    /// for an empty range.
+    #[must_use]
+    pub fn mean(&self) -> Option<f64> {
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        let (first, last) = self.first_last()?;
+        Some((first as f64 + last as f64) / 2.0)
     }
 
     /// Binary-search insertion position, matching
@@ -12410,6 +12503,53 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn period_index_min_max_match_pandas_fwlv4() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p3, p1, p2]);
+        assert_eq!(pi.min()?, Some(p1));
+        assert_eq!(pi.max()?, Some(p3));
+
+        let empty = super::PeriodIndex::new(Vec::new());
+        assert_eq!(empty.min()?, None);
+        assert_eq!(empty.max()?, None);
+
+        // Mixed freq rejects.
+        let mixed = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(mixed.min().is_err());
+        assert!(mixed.max().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_min_max_sum_mean_closed_form_fwlv4() {
+        let asc = super::RangeIndex::new(1, 11, 1).unwrap();
+        // Values 1..=10
+        assert_eq!(asc.min(), Some(1));
+        assert_eq!(asc.max(), Some(10));
+        assert_eq!(asc.sum(), 55);
+        assert_eq!(asc.mean(), Some(5.5));
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        // Values 10, 8, 6, 4, 2 — sum=30, mean=6, min=2, max=10
+        assert_eq!(desc.min(), Some(2));
+        assert_eq!(desc.max(), Some(10));
+        assert_eq!(desc.sum(), 30);
+        assert_eq!(desc.mean(), Some(6.0));
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
+        assert_eq!(empty.sum(), 0);
+        assert_eq!(empty.mean(), None);
     }
 
     #[test]

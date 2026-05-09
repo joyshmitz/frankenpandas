@@ -6107,6 +6107,79 @@ impl CategoricalIndex {
         self.clone()
     }
 
+    /// Binary-search insertion position, matching
+    /// `pd.CategoricalIndex.searchsorted(value, side)`. Forwarded through
+    /// the underlying utf8 Index.
+    pub fn searchsorted(&self, value: &str, side: &str) -> Result<usize, IndexError> {
+        self.to_index()
+            .searchsorted(&IndexLabel::Utf8(value.to_owned()), side)
+    }
+
+    fn set_op_via_string<F>(&self, other: &Self, op: F) -> Self
+    where
+        F: FnOnce(Vec<&String>, Vec<&String>) -> Vec<String>,
+    {
+        let labels = op(self.labels.iter().collect(), other.labels.iter().collect());
+        let mut categories: Vec<String> = self.categories.clone();
+        for label in &labels {
+            if !categories.contains(label) {
+                categories.push(label.clone());
+            }
+        }
+        Self {
+            labels,
+            categories,
+            ordered: self.ordered,
+            name: if self.name == other.name {
+                self.name.clone()
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Labels in both indexes (first-seen order from self), matching
+    /// `pd.CategoricalIndex.intersection(other)`.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        self.set_op_via_string(other, |left, right| {
+            let right_set: HashSet<&&String> = right.iter().collect();
+            let mut seen = HashSet::<&String>::new();
+            left.into_iter()
+                .filter(|label| right_set.contains(label) && seen.insert(label))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Self labels then other labels not seen, matching
+    /// `pd.CategoricalIndex.union(other)`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        self.set_op_via_string(other, |left, right| {
+            let mut seen = HashSet::<&String>::new();
+            left.into_iter()
+                .chain(right)
+                .filter(|label| seen.insert(label))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Self labels not in other, matching
+    /// `pd.CategoricalIndex.difference(other)`.
+    #[must_use]
+    pub fn difference(&self, other: &Self) -> Self {
+        self.set_op_via_string(other, |left, right| {
+            let right_set: HashSet<&&String> = right.iter().collect();
+            let mut seen = HashSet::<&String>::new();
+            left.into_iter()
+                .filter(|label| !right_set.contains(label) && seen.insert(label))
+                .cloned()
+                .collect()
+        })
+    }
+
     /// Sort labels ascending, matching `pd.CategoricalIndex.sort_values()`.
     /// `ordered=true` sorts by category position; `ordered=false` sorts
     /// lexicographically. Categories list and ordered flag are preserved.
@@ -14280,6 +14353,45 @@ mod tests {
         let (codes, uniques) = pi.factorize();
         assert!(codes.is_empty());
         assert!(uniques.is_empty());
+    }
+
+    #[test]
+    fn categorical_index_searchsorted_set_ops_match_pandas_cmvs7()
+    -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            true,
+        )?;
+
+        // searchsorted on the sorted utf8 index.
+        assert_eq!(cat.searchsorted("b", "left")?, 1);
+        assert_eq!(cat.searchsorted("c", "right")?, 3);
+        assert!(cat.searchsorted("b", "middle").is_err());
+
+        let other = super::CategoricalIndex::from_values(
+            vec!["b".to_owned(), "c".to_owned(), "d".to_owned()],
+            false,
+        );
+        assert_eq!(
+            cat.intersection(&other).labels(),
+            vec!["b".to_owned(), "c".to_owned()].as_slice()
+        );
+        assert_eq!(
+            cat.union(&other).labels(),
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ]
+            .as_slice()
+        );
+        assert_eq!(
+            cat.difference(&other).labels(),
+            vec!["a".to_owned()].as_slice()
+        );
+        Ok(())
     }
 
     #[test]

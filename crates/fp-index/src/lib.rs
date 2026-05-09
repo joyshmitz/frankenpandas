@@ -2853,6 +2853,29 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Annotate a tz-naive index with `tz`, matching
+    /// `pd.DatetimeIndex.tz_localize(tz)`. FrankenPandas's storage is
+    /// already UTC-naive so localizing to `"UTC"` is a no-op clone;
+    /// every other timezone rejects until full tz metadata lands.
+    pub fn tz_localize(&self, tz: &str) -> Result<Self, IndexError> {
+        match tz {
+            "UTC" | "utc" => Ok(self.clone()),
+            other => Err(IndexError::InvalidArgument(format!(
+                "tz_localize: only 'UTC' is supported until timezone metadata lands; got {other:?}"
+            ))),
+        }
+    }
+
+    /// Convert a tz-aware index from its current zone to `tz`, matching
+    /// `pd.DatetimeIndex.tz_convert(tz)`. FrankenPandas indexes are
+    /// tz-naive (no source timezone) so this always rejects.
+    pub fn tz_convert(&self, _tz: &str) -> Result<Self, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "tz_convert: cannot convert tz-naive timestamps; call tz_localize('UTC') first"
+                .to_owned(),
+        ))
+    }
+
     /// Timezone label, matching `pd.DatetimeIndex.tz`. FrankenPandas
     /// stores naive UTC nanos so this always returns `None`; a
     /// follow-up bead will introduce timezone metadata.
@@ -13207,6 +13230,33 @@ mod tests {
         let one_day = durations[0].expect("non-NAT label decodes");
         assert_eq!(one_day.num_seconds(), 86_400);
         assert_eq!(durations[1], None);
+    }
+
+    #[test]
+    fn datetime_index_tz_localize_tz_convert_match_pandas_qm31w() {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]).set_name("ts");
+
+        // UTC is a no-op clone.
+        let utc = dt.tz_localize("UTC").expect("UTC localize");
+        assert!(utc.equals(&dt));
+        assert_eq!(utc.name(), Some("ts"));
+
+        // Other timezones reject.
+        let err = dt.tz_localize("US/Eastern").unwrap_err();
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(ref message)
+                if message.contains("tz_localize") && message.contains("UTC")
+        ));
+
+        // tz_convert always rejects.
+        let conv_err = dt.tz_convert("UTC").unwrap_err();
+        assert!(matches!(
+            conv_err,
+            super::IndexError::InvalidArgument(ref message)
+                if message.contains("tz_convert")
+        ));
     }
 
     #[test]

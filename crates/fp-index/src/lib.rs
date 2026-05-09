@@ -3170,6 +3170,65 @@ impl RangeIndex {
     pub fn drop_duplicates(&self) -> Self {
         self.clone()
     }
+
+    /// Per-position missingness mask, matching `pd.RangeIndex.isna()`.
+    /// Always all-false because RangeIndex is int64-typed.
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        vec![false; self.len()]
+    }
+
+    /// Alias for [`isna`], matching `pd.RangeIndex.isnull()`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Per-position non-missing mask, matching `pd.RangeIndex.notna()`.
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        vec![true; self.len()]
+    }
+
+    /// Alias for [`notna`], matching `pd.RangeIndex.notnull()`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    /// Whether any position is missing, matching `pd.RangeIndex.hasnans`.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        false
+    }
+
+    /// Drop missing positions, matching `pd.RangeIndex.dropna()`.
+    /// Returns a clone because RangeIndex cannot hold missing values.
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.clone()
+    }
+
+    /// Fill missing positions, matching `pd.RangeIndex.fillna(value)`.
+    /// Returns a clone — RangeIndex has no missing positions to fill.
+    #[must_use]
+    pub fn fillna(&self, _value: i64) -> Self {
+        self.clone()
+    }
+
+    /// Stringify each value, matching `pd.RangeIndex.format()`.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.values().into_iter().map(|v| v.to_string()).collect()
+    }
+
+    /// Identity factorization, matching `pd.RangeIndex.factorize()`.
+    /// Codes are [0..len) because every value is unique; uniques is a
+    /// clone of `self`.
+    #[must_use]
+    pub fn factorize(&self) -> (Vec<usize>, Self) {
+        ((0..self.len()).collect(), self.clone())
+    }
 }
 
 /// Public pandas-style categorical index wrapper.
@@ -10359,6 +10418,60 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert_eq!(empty.argsort(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn range_index_missingness_methods_are_closed_form_a4fih() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert_eq!(asc.isna(), vec![false; 5]);
+        assert_eq!(asc.isnull(), vec![false; 5]);
+        assert_eq!(asc.notna(), vec![true; 5]);
+        assert_eq!(asc.notnull(), vec![true; 5]);
+        assert!(!asc.hasnans());
+        assert!(asc.dropna().equals(&asc));
+        assert!(asc.fillna(99).equals(&asc));
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(desc.isna().len(), desc.len());
+        assert!(!desc.hasnans());
+        assert!(desc.dropna().equals(&desc));
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.isna(), Vec::<bool>::new());
+        assert_eq!(empty.notna(), Vec::<bool>::new());
+        assert!(!empty.hasnans());
+        assert!(empty.dropna().is_empty());
+        assert!(empty.fillna(0).is_empty());
+    }
+
+    #[test]
+    fn range_index_format_stringifies_each_value_a4fih() {
+        let asc = super::RangeIndex::new(0, 4, 1).unwrap();
+        assert_eq!(asc.format(), vec!["0", "1", "2", "3"]);
+
+        let desc = super::RangeIndex::new(5, 0, -2).unwrap();
+        assert_eq!(desc.format(), vec!["5", "3", "1"]);
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.format(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn range_index_factorize_is_identity_a4fih() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        let (codes, uniques) = asc.factorize();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        assert!(uniques.equals(&asc));
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        let (desc_codes, desc_uniques) = desc.factorize();
+        assert_eq!(desc_codes, (0..desc.len()).collect::<Vec<_>>());
+        assert!(desc_uniques.equals(&desc));
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        let (empty_codes, empty_uniques) = empty.factorize();
+        assert!(empty_codes.is_empty());
+        assert!(empty_uniques.is_empty());
     }
 
     #[test]

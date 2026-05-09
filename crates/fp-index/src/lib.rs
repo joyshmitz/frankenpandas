@@ -4885,6 +4885,67 @@ impl PeriodIndex {
         Ok(lo)
     }
 
+    /// Replace positions where `cond` is `false` with `other`, matching
+    /// `pd.PeriodIndex.where(cond, other)`. The replacement period must
+    /// share the index frequency.
+    pub fn r#where(&self, cond: &[bool], other: Period) -> Result<Self, IndexError> {
+        if cond.len() != self.values.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.values.len(),
+                actual: cond.len(),
+                context: "where: cond length must match index length".to_owned(),
+            });
+        }
+        if let Some(first) = self.values.first()
+            && first.freq != other.freq
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "where: replacement frequency {:?} does not match index frequency {:?}",
+                other.freq, first.freq
+            )));
+        }
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .zip(cond.iter())
+            .map(|(period, &keep)| if keep { *period } else { other })
+            .collect();
+        Ok(Self {
+            values,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Replace positions where `mask` is `true` with `value`, matching
+    /// `pd.PeriodIndex.putmask(mask, value)`.
+    pub fn putmask(&self, mask: &[bool], value: Period) -> Result<Self, IndexError> {
+        if mask.len() != self.values.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.values.len(),
+                actual: mask.len(),
+                context: "putmask: mask length must match index length".to_owned(),
+            });
+        }
+        if let Some(first) = self.values.first()
+            && first.freq != value.freq
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "putmask: replacement frequency {:?} does not match index frequency {:?}",
+                value.freq, first.freq
+            )));
+        }
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .zip(mask.iter())
+            .map(|(period, &replace)| if replace { value } else { *period })
+            .collect();
+        Ok(Self {
+            values,
+            name: self.name.clone(),
+        })
+    }
+
     /// Insert `period` at position `loc`, matching
     /// `pd.PeriodIndex.insert(loc, period)`.
     pub fn insert(&self, loc: usize, period: Period) -> Result<Self, IndexError> {
@@ -6074,6 +6135,77 @@ impl CategoricalIndex {
     #[must_use]
     pub fn format(&self) -> Vec<String> {
         self.labels.clone()
+    }
+
+    /// Replace positions where `cond` is `false` with `other`, matching
+    /// `pd.CategoricalIndex.where(cond, other)`. `other` must already be
+    /// a member of the categories list.
+    pub fn r#where(&self, cond: &[bool], other: &str) -> Result<Self, IndexError> {
+        if cond.len() != self.labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.labels.len(),
+                actual: cond.len(),
+                context: "where: cond length must match index length".to_owned(),
+            });
+        }
+        if !self.categories.iter().any(|cat| cat == other) {
+            return Err(IndexError::InvalidArgument(format!(
+                "where: replacement {other:?} is not a category"
+            )));
+        }
+        let labels: Vec<String> = self
+            .labels
+            .iter()
+            .zip(cond.iter())
+            .map(|(label, &keep)| {
+                if keep {
+                    label.clone()
+                } else {
+                    other.to_owned()
+                }
+            })
+            .collect();
+        Ok(Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Replace positions where `mask` is `true` with `value`, matching
+    /// `pd.CategoricalIndex.putmask(mask, value)`.
+    pub fn putmask(&self, mask: &[bool], value: &str) -> Result<Self, IndexError> {
+        if mask.len() != self.labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.labels.len(),
+                actual: mask.len(),
+                context: "putmask: mask length must match index length".to_owned(),
+            });
+        }
+        if !self.categories.iter().any(|cat| cat == value) {
+            return Err(IndexError::InvalidArgument(format!(
+                "putmask: replacement {value:?} is not a category"
+            )));
+        }
+        let labels: Vec<String> = self
+            .labels
+            .iter()
+            .zip(mask.iter())
+            .map(|(label, &replace)| {
+                if replace {
+                    value.to_owned()
+                } else {
+                    label.clone()
+                }
+            })
+            .collect();
+        Ok(Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
     }
 
     /// Alias for [`isna`], matching `pd.CategoricalIndex.isnull()`.
@@ -13943,6 +14075,65 @@ mod tests {
         // Mismatched names drop the name.
         let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
         assert_eq!(left.union(&other_name).name(), None);
+    }
+
+    #[test]
+    fn period_index_where_putmask_match_pandas_so9oh() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3]).set_name("p");
+
+        // where: keep position 0 and 2.
+        let masked = pi.r#where(&[true, false, true], p1)?;
+        assert_eq!(masked.values(), &[p1, p1, p3]);
+        assert_eq!(masked.name(), Some("p"));
+
+        // putmask: replace masked positions.
+        let put = pi.putmask(&[false, true, false], p1)?;
+        assert_eq!(put.values(), &[p1, p1, p3]);
+
+        // Length mismatch.
+        let bad_len = pi.r#where(&[true, false], p1).unwrap_err();
+        assert!(matches!(
+            bad_len,
+            super::IndexError::LengthMismatch { .. }
+        ));
+
+        // Mismatched freq replacement rejects.
+        let mismatch = Period::new(10, PeriodFreq::Annual);
+        assert!(pi.r#where(&[true, false, true], mismatch).is_err());
+        assert!(pi.putmask(&[false, true, false], mismatch).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn categorical_index_where_putmask_match_pandas_so9oh() -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            false,
+        )?;
+
+        let masked = cat.r#where(&[true, false, true], "d")?;
+        assert_eq!(
+            masked.labels(),
+            vec!["a".to_owned(), "d".to_owned(), "c".to_owned()].as_slice()
+        );
+
+        let put = cat.putmask(&[false, true, true], "d")?;
+        assert_eq!(
+            put.labels(),
+            vec!["a".to_owned(), "d".to_owned(), "d".to_owned()].as_slice()
+        );
+
+        // Replacement that's not a category rejects.
+        assert!(cat.r#where(&[true, false, true], "zzz").is_err());
+
+        // Length mismatch.
+        assert!(cat.putmask(&[true; 5], "a").is_err());
+        Ok(())
     }
 
     #[test]

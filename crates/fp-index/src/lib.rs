@@ -2743,6 +2743,38 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Replace NAT positions with `value`, matching
+    /// `pd.DatetimeIndex.fillna(value)`. Preserves the index name.
+    #[must_use]
+    pub fn fillna(&self, value: i64) -> Self {
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => *n,
+                _ => value,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Alias for [`isna`], matching `pd.DatetimeIndex.isnull()`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Alias for [`notna`], matching `pd.DatetimeIndex.notnull()`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
     /// Calendar date part of each label, matching `pd.DatetimeIndex.date`.
     #[must_use]
     pub fn date(&self) -> Vec<Option<chrono::NaiveDate>> {
@@ -3615,6 +3647,38 @@ impl TimedeltaIndex {
     pub fn searchsorted(&self, value: i64, side: &str) -> Result<usize, IndexError> {
         self.index
             .searchsorted(&IndexLabel::Timedelta64(value), side)
+    }
+
+    /// Replace NAT positions with `value`, matching
+    /// `pd.TimedeltaIndex.fillna(value)`. Preserves the index name.
+    #[must_use]
+    pub fn fillna(&self, value: i64) -> Self {
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => *n,
+                _ => value,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Alias for [`isna`], matching `pd.TimedeltaIndex.isnull()`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Alias for [`notna`], matching `pd.TimedeltaIndex.notnull()`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
     }
 
     /// Convert each label to a `chrono::Duration`, matching
@@ -12813,6 +12877,31 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_timedelta_fillna_isnull_match_pandas_az3t9() {
+        const NS: i64 = 1_000_000_000;
+        let unix = 1_704_067_200_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![unix, i64::MIN, 0]).set_name("ts");
+
+        let filled = dt.fillna(unix);
+        // NAT is replaced; existing values are preserved.
+        assert_eq!(filled.values(), vec![Some(unix), Some(unix), Some(0)]);
+        assert_eq!(filled.name(), Some("ts"));
+
+        let iso = dt.isnull();
+        assert_eq!(iso, dt.isna());
+        let nio = dt.notnull();
+        assert_eq!(nio, dt.notna());
+
+        let nat = fp_types::Timedelta::NAT;
+        let td = super::TimedeltaIndex::new(vec![100_i64, nat, 0]).set_name("d");
+        let td_filled = td.fillna(99);
+        assert_eq!(td_filled.values(), vec![Some(100), Some(99), Some(0)]);
+        assert_eq!(td_filled.name(), Some("d"));
+        assert_eq!(td.isnull(), td.isna());
+        assert_eq!(td.notnull(), td.notna());
     }
 
     #[test]

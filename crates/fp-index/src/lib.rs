@@ -5127,6 +5127,25 @@ impl PeriodIndex {
         })
     }
 
+    /// Whether period ordinals form a contiguous run, matching
+    /// `pd.PeriodIndex.is_full`. Empty and single-element indexes are
+    /// trivially full. Mixed-frequency input returns `false` because the
+    /// concept is undefined.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        if self.values.len() <= 1 {
+            return true;
+        }
+        // Mixed-freq: not full.
+        let first_freq = self.values[0].freq;
+        if self.values.iter().any(|p| p.freq != first_freq) {
+            return false;
+        }
+        let mut sorted: Vec<i64> = self.values.iter().map(|p| p.ordinal).collect();
+        sorted.sort_unstable();
+        sorted.windows(2).all(|w| w[1] - w[0] == 1)
+    }
+
     /// Stringify each period via Display, matching `pd.PeriodIndex.format()`.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
@@ -14789,6 +14808,38 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn period_index_is_full_match_pandas_7i32m() {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let p5 = Period::new(14, PeriodFreq::Monthly);
+
+        // Contiguous.
+        let full = super::PeriodIndex::new(vec![p1, p2, p3]);
+        assert!(full.is_full());
+
+        // Out-of-order but contiguous (sort first).
+        let unsorted = super::PeriodIndex::new(vec![p3, p1, p2]);
+        assert!(unsorted.is_full());
+
+        // Gap.
+        let gap = super::PeriodIndex::new(vec![p1, p2, p5]);
+        assert!(!gap.is_full());
+
+        // Empty / single-element.
+        assert!(super::PeriodIndex::new(Vec::new()).is_full());
+        assert!(super::PeriodIndex::new(vec![p1]).is_full());
+
+        // Mixed-frequency.
+        let mixed = super::PeriodIndex::new(vec![
+            p1,
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(!mixed.is_full());
     }
 
     #[test]

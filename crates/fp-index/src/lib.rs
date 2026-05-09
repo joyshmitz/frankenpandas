@@ -2654,6 +2654,42 @@ impl DatetimeIndex {
         Ok(out)
     }
 
+    /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
+    /// owns its label storage so view materializes a fresh clone instead
+    /// of an aliasing reference.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Identity transpose for a 1D index, matching
+    /// `pd.DatetimeIndex.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flatten labels to nanoseconds-since-epoch with NAT preserved,
+    /// matching `pd.DatetimeIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Option<i64>> {
+        self.values()
+    }
+
+    /// Number of levels in this Index, matching `pd.DatetimeIndex.nlevels`.
+    /// Always `1` because DatetimeIndex is a single-level index.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    /// Identity dtype-reinference for typed indexes, matching
+    /// `pd.DatetimeIndex.infer_objects()`.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
     /// Drop NAT labels, matching `pd.DatetimeIndex.dropna()`. Non-datetime
     /// labels (which the wrapper rejects on construction) and `i64::MIN`
     /// sentinels are removed; surviving labels keep their order.
@@ -3352,6 +3388,39 @@ impl TimedeltaIndex {
         Self::from_index(self.index.drop_duplicates())
     }
 
+    /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Identity transpose for a 1D index, matching
+    /// `pd.TimedeltaIndex.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flatten labels to nanosecond durations with NAT preserved,
+    /// matching `pd.TimedeltaIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Option<i64>> {
+        self.values()
+    }
+
+    /// Number of levels, matching `pd.TimedeltaIndex.nlevels`. Always `1`.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    /// Identity dtype-reinference for typed indexes, matching
+    /// `pd.TimedeltaIndex.infer_objects()`.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
     /// Drop NAT labels, matching `pd.TimedeltaIndex.dropna()`.
     pub fn dropna(&self) -> Self {
         let surviving: Vec<i64> = self
@@ -4037,6 +4106,39 @@ impl PeriodIndex {
         }
     }
 
+    /// Returns a clone, matching `pd.PeriodIndex.view()`.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Identity transpose for a 1D index, matching
+    /// `pd.PeriodIndex.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flatten periods to a Vec<Period>, matching
+    /// `pd.PeriodIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Period> {
+        self.values.clone()
+    }
+
+    /// Number of levels, matching `pd.PeriodIndex.nlevels`. Always `1`.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    /// Identity dtype-reinference for typed indexes, matching
+    /// `pd.PeriodIndex.infer_objects()`.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
     /// Per-position membership mask, matching `pd.PeriodIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[Period]) -> Vec<bool> {
@@ -4551,6 +4653,37 @@ impl RangeIndex {
         idx
     }
 
+    /// Returns a clone, matching `pd.RangeIndex.view()`.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Identity transpose for a 1D index, matching
+    /// `pd.RangeIndex.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flatten the range to a Vec<i64>, matching `pd.RangeIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<i64> {
+        self.values()
+    }
+
+    /// Number of levels, matching `pd.RangeIndex.nlevels`. Always `1`.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    /// Identity dtype-reinference, matching `pd.RangeIndex.infer_objects()`.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
     /// Per-position membership mask, matching `pd.RangeIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
@@ -4908,6 +5041,39 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_index(&self) -> Index {
         Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
+    }
+
+    /// Returns a clone, matching `pd.CategoricalIndex.view()`.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Identity transpose for a 1D index, matching
+    /// `pd.CategoricalIndex.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flatten labels to a Vec<String>, matching
+    /// `pd.CategoricalIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    /// Number of levels, matching `pd.CategoricalIndex.nlevels`. Always `1`.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    /// Identity dtype-reinference, matching
+    /// `pd.CategoricalIndex.infer_objects()`.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
     }
 
     /// First-seen unique labels, matching `pd.CategoricalIndex.unique()`.
@@ -12024,6 +12190,44 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn index_variants_view_transpose_ravel_nlevels_infer_objects_match_pandas_d0ph1() {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN]).set_name("ts");
+        assert!(dt.view().equals(&dt));
+        assert!(dt.transpose().equals(&dt));
+        assert_eq!(dt.ravel(), dt.values());
+        assert_eq!(dt.nlevels(), 1);
+        assert!(dt.infer_objects().equals(&dt));
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, fp_types::Timedelta::NAT]).set_name("d");
+        assert!(td.view().equals(&td));
+        assert_eq!(td.ravel(), td.values());
+        assert_eq!(td.nlevels(), 1);
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(11, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(pi.view().values(), pi.values());
+        assert_eq!(pi.ravel(), pi.values().to_vec());
+        assert_eq!(pi.nlevels(), 1);
+
+        let r = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert!(r.view().equals(&r));
+        assert_eq!(r.ravel(), r.values());
+        assert_eq!(r.nlevels(), 1);
+
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned()],
+            false,
+        );
+        assert_eq!(cat.view().labels(), cat.labels());
+        assert_eq!(cat.ravel(), cat.labels().to_vec());
+        assert_eq!(cat.nlevels(), 1);
     }
 
     #[test]

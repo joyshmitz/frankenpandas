@@ -2909,6 +2909,14 @@ impl DatetimeIndex {
         None
     }
 
+    /// Convert to a flat [`Index`], matching
+    /// `pd.DatetimeIndex.to_flat_index()`. Clone-as-Index because the
+    /// underlying storage is already a flat Index of Datetime64 labels.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Index {
+        self.index.clone()
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -3838,6 +3846,13 @@ impl TimedeltaIndex {
         None
     }
 
+    /// Convert to a flat [`Index`], matching
+    /// `pd.TimedeltaIndex.to_flat_index()`.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Index {
+        self.index.clone()
+    }
+
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -4673,6 +4688,13 @@ impl PeriodIndex {
         }
     }
 
+    /// Convert to a flat [`Index`] of period strings, matching
+    /// `pd.PeriodIndex.to_flat_index()`.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Index {
+        self.to_index()
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -5310,6 +5332,18 @@ impl RangeIndex {
         Ok(lo)
     }
 
+    /// Convert to a flat [`Index`] of i64 labels, matching
+    /// `pd.RangeIndex.to_flat_index()`.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Index {
+        let labels: Vec<IndexLabel> = self.values().into_iter().map(IndexLabel::Int64).collect();
+        let mut idx = Index::new(labels);
+        if let Some(name) = self.name() {
+            idx = idx.set_name(name);
+        }
+        idx
+    }
+
     /// Returns a clone, matching `pd.RangeIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -5900,6 +5934,13 @@ impl CategoricalIndex {
             ordered,
             name: self.name.clone(),
         })
+    }
+
+    /// Convert to a flat [`Index`] of utf8 labels, matching
+    /// `pd.CategoricalIndex.to_flat_index()`.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Index {
+        self.to_index()
     }
 
     /// Returns a clone, matching `pd.CategoricalIndex.view()`.
@@ -13441,6 +13482,46 @@ mod tests {
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.searchsorted(4, "left").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn index_variants_to_flat_index_match_pandas_wcpw5() {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]).set_name("ts");
+        let dt_flat = dt.to_flat_index();
+        assert_eq!(dt_flat.len(), 1);
+        assert_eq!(dt_flat.name(), Some("ts"));
+        assert!(matches!(
+            dt_flat.labels()[0],
+            super::IndexLabel::Datetime64(_)
+        ));
+
+        let td = super::TimedeltaIndex::new(vec![100_i64]).set_name("d");
+        let td_flat = td.to_flat_index();
+        assert_eq!(td_flat.len(), 1);
+        assert_eq!(td_flat.name(), Some("d"));
+
+        use fp_types::{Period, PeriodFreq};
+        let pi =
+            super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
+        let pi_flat = pi.to_flat_index();
+        assert_eq!(pi_flat.len(), 1);
+        assert!(matches!(
+            pi_flat.labels()[0],
+            super::IndexLabel::Utf8(_)
+        ));
+
+        let r = super::RangeIndex::new(0, 3, 1).unwrap().set_name("r");
+        let r_flat = r.to_flat_index();
+        assert_eq!(r_flat.len(), 3);
+        assert_eq!(r_flat.name(), Some("r"));
+
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned()],
+            false,
+        );
+        let cat_flat = cat.to_flat_index();
+        assert_eq!(cat_flat.len(), 2);
     }
 
     #[test]

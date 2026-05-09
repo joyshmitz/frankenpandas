@@ -2729,6 +2729,41 @@ impl DatetimeIndex {
             .searchsorted(&IndexLabel::Datetime64(value), side)
     }
 
+    /// Convert each label to a `chrono::DateTime<Utc>`, matching
+    /// `pd.DatetimeIndex.to_pydatetime()`. NAT propagates as `None`.
+    #[must_use]
+    pub fn to_pydatetime(&self) -> Vec<Option<chrono::DateTime<chrono::Utc>>> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => datetime_from_nanos(*nanos),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Convert each label to its Julian Date, matching
+    /// `pd.DatetimeIndex.to_julian_date()`. The formula is
+    /// `JD = unix_seconds / 86400 + 2440587.5` and the result is
+    /// computed in f64; NAT propagates as `None`.
+    #[must_use]
+    pub fn to_julian_date(&self) -> Vec<Option<f64>> {
+        const SECONDS_PER_DAY: f64 = 86_400.0;
+        const UNIX_EPOCH_JD: f64 = 2_440_587.5;
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
+                    let secs = (*nanos as f64) / 1_000_000_000.0;
+                    Some(secs / SECONDS_PER_DAY + UNIX_EPOCH_JD)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Timezone label, matching `pd.DatetimeIndex.tz`. FrankenPandas
     /// stores naive UTC nanos so this always returns `None`; a
     /// follow-up bead will introduce timezone metadata.
@@ -3567,6 +3602,22 @@ impl TimedeltaIndex {
     pub fn searchsorted(&self, value: i64, side: &str) -> Result<usize, IndexError> {
         self.index
             .searchsorted(&IndexLabel::Timedelta64(value), side)
+    }
+
+    /// Convert each label to a `chrono::Duration`, matching
+    /// `pd.TimedeltaIndex.to_pytimedelta()`. NAT propagates as `None`.
+    #[must_use]
+    pub fn to_pytimedelta(&self) -> Vec<Option<chrono::Duration>> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => {
+                    Some(chrono::Duration::nanoseconds(*nanos))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Frequency string, matching `pd.TimedeltaIndex.freq`. FrankenPandas
@@ -12574,6 +12625,37 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_to_pydatetime_and_julian_match_pandas_dww6m() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-01-01T00:00:00Z
+        let unix = 1_704_067_200_i64;
+        let total = unix * NS;
+        let dt = super::DatetimeIndex::new(vec![total, i64::MIN]);
+
+        let pydt = dt.to_pydatetime();
+        let first = pydt[0].expect("non-NAT label decodes");
+        assert_eq!(first.timestamp(), unix);
+        assert_eq!(pydt[1], None);
+
+        let julian = dt.to_julian_date();
+        // JD for 2024-01-01T00:00:00Z = 2_460_310.5.
+        let expected = (unix as f64) / 86_400.0 + 2_440_587.5;
+        let observed = julian[0].expect("non-NAT label decodes");
+        assert!((observed - expected).abs() < 1e-9);
+        assert_eq!(julian[1], None);
+    }
+
+    #[test]
+    fn timedelta_index_to_pytimedelta_match_pandas_dww6m() {
+        let one_day_nanos = fp_types::Timedelta::NANOS_PER_DAY;
+        let td = super::TimedeltaIndex::new(vec![one_day_nanos, fp_types::Timedelta::NAT]);
+        let durations = td.to_pytimedelta();
+        let one_day = durations[0].expect("non-NAT label decodes");
+        assert_eq!(one_day.num_seconds(), 86_400);
+        assert_eq!(durations[1], None);
     }
 
     #[test]

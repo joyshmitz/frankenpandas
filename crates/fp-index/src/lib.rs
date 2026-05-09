@@ -2729,6 +2729,39 @@ impl DatetimeIndex {
             .searchsorted(&IndexLabel::Datetime64(value), side)
     }
 
+    /// Timezone label, matching `pd.DatetimeIndex.tz`. FrankenPandas
+    /// stores naive UTC nanos so this always returns `None`; a
+    /// follow-up bead will introduce timezone metadata.
+    #[must_use]
+    pub fn tz(&self) -> Option<String> {
+        None
+    }
+
+    /// Alias for [`tz`], matching `pd.DatetimeIndex.tzinfo`.
+    #[must_use]
+    pub fn tzinfo(&self) -> Option<String> {
+        self.tz()
+    }
+
+    /// Frequency string, matching `pd.DatetimeIndex.freq`. FrankenPandas
+    /// does not infer datetime frequency yet so this returns `None`.
+    #[must_use]
+    pub fn freq(&self) -> Option<String> {
+        None
+    }
+
+    /// Frequency alias string, matching `pd.DatetimeIndex.freqstr`.
+    #[must_use]
+    pub fn freqstr(&self) -> Option<String> {
+        self.freq()
+    }
+
+    /// Inferred frequency, matching `pd.DatetimeIndex.inferred_freq`.
+    #[must_use]
+    pub fn inferred_freq(&self) -> Option<String> {
+        None
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -3536,6 +3569,25 @@ impl TimedeltaIndex {
             .searchsorted(&IndexLabel::Timedelta64(value), side)
     }
 
+    /// Frequency string, matching `pd.TimedeltaIndex.freq`. FrankenPandas
+    /// does not infer timedelta frequency yet so this returns `None`.
+    #[must_use]
+    pub fn freq(&self) -> Option<String> {
+        None
+    }
+
+    /// Frequency alias string, matching `pd.TimedeltaIndex.freqstr`.
+    #[must_use]
+    pub fn freqstr(&self) -> Option<String> {
+        self.freq()
+    }
+
+    /// Inferred frequency, matching `pd.TimedeltaIndex.inferred_freq`.
+    #[must_use]
+    pub fn inferred_freq(&self) -> Option<String> {
+        None
+    }
+
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -4327,6 +4379,25 @@ impl PeriodIndex {
             }
         }
         Ok(lo)
+    }
+
+    /// Frequency alias, matching `pd.PeriodIndex.freqstr`. Returns `None`
+    /// for an empty index; otherwise the Display form of the freq.
+    #[must_use]
+    pub fn freqstr(&self) -> Option<String> {
+        self.freq().map(|f| f.to_string())
+    }
+
+    /// Inferred frequency, matching `pd.PeriodIndex.inferred_freq`. Pandas
+    /// returns the freq when all periods share it, otherwise `None`. Mixed
+    /// frequency is detected via `ensure_homogeneous_freq` (the same guard
+    /// used by min/max).
+    #[must_use]
+    pub fn inferred_freq(&self) -> Option<String> {
+        match self.ensure_homogeneous_freq() {
+            Ok(Some(freq)) => Some(freq.to_string()),
+            Ok(None) | Err(_) => None,
+        }
     }
 
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
@@ -12503,6 +12574,47 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_timedelta_tz_freq_accessors_return_none_ze7et() {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]);
+        assert_eq!(dt.tz(), None);
+        assert_eq!(dt.tzinfo(), None);
+        assert_eq!(dt.freq(), None);
+        assert_eq!(dt.freqstr(), None);
+        assert_eq!(dt.inferred_freq(), None);
+
+        let td = super::TimedeltaIndex::new(vec![100_i64]);
+        assert_eq!(td.freq(), None);
+        assert_eq!(td.freqstr(), None);
+        assert_eq!(td.inferred_freq(), None);
+    }
+
+    #[test]
+    fn period_index_freqstr_inferred_freq_match_pandas_ze7et() {
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(11, PeriodFreq::Monthly),
+        ]);
+        let s = pi.freqstr().expect("homogeneous index has a freqstr");
+        assert!(!s.is_empty());
+        let inferred = pi.inferred_freq().expect("homogeneous freq is inferable");
+        assert_eq!(inferred, s);
+
+        // Mixed-frequency index: inferred_freq returns None.
+        let mixed = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert_eq!(mixed.inferred_freq(), None);
+
+        // Empty index: freqstr is None.
+        let empty = super::PeriodIndex::new(Vec::new());
+        assert_eq!(empty.freqstr(), None);
+        assert_eq!(empty.inferred_freq(), None);
     }
 
     #[test]

@@ -4706,6 +4706,114 @@ impl PeriodIndex {
         Ok(Some(first.freq))
     }
 
+    fn ensure_compatible_freq(&self, other: &Self) -> Result<(), IndexError> {
+        if let (Some(left), Some(right)) = (self.values.first(), other.values.first())
+            && left.freq != right.freq
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "set operation: incompatible frequencies {:?} vs {:?}",
+                left.freq, right.freq
+            )));
+        }
+        self.ensure_homogeneous_freq()?;
+        other.ensure_homogeneous_freq()?;
+        Ok(())
+    }
+
+    /// Periods present in both, matching
+    /// `pd.PeriodIndex.intersection(other)`. Mixed-freq rejects.
+    pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_compatible_freq(other)?;
+        let other_set: HashSet<&Period> = other.values.iter().collect();
+        let mut seen = HashSet::<&Period>::new();
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .filter(|p| other_set.contains(p) && seen.insert(p))
+            .copied()
+            .collect();
+        Ok(Self {
+            values,
+            name: if self.name == other.name {
+                self.name.clone()
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Self periods then other periods not seen, matching
+    /// `pd.PeriodIndex.union(other)`. Mixed-freq rejects.
+    pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_compatible_freq(other)?;
+        let mut seen = HashSet::<Period>::new();
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .chain(other.values.iter())
+            .filter(|p| seen.insert(**p))
+            .copied()
+            .collect();
+        Ok(Self {
+            values,
+            name: if self.name == other.name {
+                self.name.clone()
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Self periods not in other, matching
+    /// `pd.PeriodIndex.difference(other)`. Mixed-freq rejects.
+    pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_compatible_freq(other)?;
+        let other_set: HashSet<&Period> = other.values.iter().collect();
+        let mut seen = HashSet::<&Period>::new();
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .filter(|p| !other_set.contains(p) && seen.insert(p))
+            .copied()
+            .collect();
+        Ok(Self {
+            values,
+            name: if self.name == other.name {
+                self.name.clone()
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Periods in either but not both, matching
+    /// `pd.PeriodIndex.symmetric_difference(other)`. Mixed-freq rejects.
+    pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_compatible_freq(other)?;
+        let self_set: HashSet<&Period> = self.values.iter().collect();
+        let other_set: HashSet<&Period> = other.values.iter().collect();
+        let mut seen = HashSet::<Period>::new();
+        let mut values = Vec::<Period>::new();
+        for p in &self.values {
+            if !other_set.contains(p) && seen.insert(*p) {
+                values.push(*p);
+            }
+        }
+        for p in &other.values {
+            if !self_set.contains(p) && seen.insert(*p) {
+                values.push(*p);
+            }
+        }
+        Ok(Self {
+            values,
+            name: if self.name == other.name {
+                self.name.clone()
+            } else {
+                None
+            },
+        })
+    }
+
     /// Sort periods by ordinal ascending, matching
     /// `pd.PeriodIndex.sort_values()`. Mixed-frequency rejects.
     pub fn sort_values(&self) -> Result<Self, IndexError> {
@@ -13691,6 +13799,34 @@ mod tests {
         let empty = super::PeriodIndex::new(Vec::new());
         assert_eq!(empty.freqstr(), None);
         assert_eq!(empty.inferred_freq(), None);
+    }
+
+    #[test]
+    fn period_index_set_ops_match_pandas_8042v() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let p4 = Period::new(13, PeriodFreq::Monthly);
+        let left = super::PeriodIndex::new(vec![p1, p2, p3]).set_name("p");
+        let right = super::PeriodIndex::new(vec![p2, p3, p4]).set_name("p");
+
+        assert_eq!(left.intersection(&right)?.values(), &[p2, p3]);
+        assert_eq!(left.union(&right)?.values(), &[p1, p2, p3, p4]);
+        assert_eq!(left.difference(&right)?.values(), &[p1]);
+        assert_eq!(left.symmetric_difference(&right)?.values(), &[p1, p4]);
+
+        // Mismatched freq rejects.
+        let mismatch = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Annual)]);
+        assert!(left.intersection(&mismatch).is_err());
+        assert!(left.union(&mismatch).is_err());
+        assert!(left.difference(&mismatch).is_err());
+        assert!(left.symmetric_difference(&mismatch).is_err());
+
+        // Mismatched names drop the name.
+        let other_name = super::PeriodIndex::new(vec![p2]).set_name("other");
+        assert_eq!(left.union(&other_name)?.name(), None);
+        Ok(())
     }
 
     #[test]

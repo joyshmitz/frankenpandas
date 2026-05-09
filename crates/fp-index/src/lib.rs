@@ -4885,6 +4885,36 @@ impl PeriodIndex {
         Ok(lo)
     }
 
+    /// First position of `period`, matching
+    /// `pd.PeriodIndex.get_loc(period)`.
+    pub fn get_loc(&self, period: Period) -> Result<usize, IndexError> {
+        self.values
+            .iter()
+            .position(|p| *p == period)
+            .ok_or_else(|| {
+                IndexError::InvalidArgument(format!(
+                    "get_loc: period {period} not in PeriodIndex"
+                ))
+            })
+    }
+
+    /// Locate each target period in the index, matching
+    /// `pd.PeriodIndex.get_indexer(targets)`. Returns `Vec<isize>`
+    /// where `-1` means "missing".
+    #[must_use]
+    pub fn get_indexer(&self, targets: &[Period]) -> Vec<isize> {
+        let mut positions = HashMap::<Period, isize>::new();
+        for (i, period) in self.values.iter().enumerate() {
+            positions
+                .entry(*period)
+                .or_insert_with(|| isize::try_from(i).unwrap_or(isize::MAX));
+        }
+        targets
+            .iter()
+            .map(|p| positions.get(p).copied().unwrap_or(-1))
+            .collect()
+    }
+
     /// Replace positions where `cond` is `false` with `other`, matching
     /// `pd.PeriodIndex.where(cond, other)`. The replacement period must
     /// share the index frequency.
@@ -5680,6 +5710,39 @@ impl RangeIndex {
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: HashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
+    }
+
+    /// First position of `value`, matching `pd.RangeIndex.get_loc(value)`.
+    /// Closed-form on (start, step, len).
+    pub fn get_loc(&self, value: i64) -> Result<usize, IndexError> {
+        if self.step == 0 {
+            return Err(IndexError::InvalidArgument(
+                "get_loc: zero-step RangeIndex is invalid".to_owned(),
+            ));
+        }
+        let offset = value - self.start;
+        if offset.checked_rem_euclid(self.step) != Some(0) {
+            return Err(IndexError::InvalidArgument(format!(
+                "get_loc: {value} not in RangeIndex"
+            )));
+        }
+        let pos = offset / self.step;
+        if pos < 0 || (pos as usize) >= self.len() {
+            return Err(IndexError::InvalidArgument(format!(
+                "get_loc: {value} not in RangeIndex"
+            )));
+        }
+        Ok(pos as usize)
+    }
+
+    /// Locate each target value, matching
+    /// `pd.RangeIndex.get_indexer(targets)`. Closed-form per target.
+    #[must_use]
+    pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
+        targets
+            .iter()
+            .map(|&v| self.get_loc(v).map(|p| p as isize).unwrap_or(-1))
+            .collect()
     }
 
     /// Replace positions where `cond` is `false` with `other`, matching
@@ -14155,6 +14218,37 @@ mod tests {
         // Mismatched names drop the name.
         let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
         assert_eq!(left.union(&other_name).name(), None);
+    }
+
+    #[test]
+    fn period_range_get_loc_get_indexer_match_pandas_e7psu()
+    -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3]);
+        assert_eq!(pi.get_loc(p2)?, 1);
+        assert!(pi.get_loc(Period::new(99, PeriodFreq::Monthly)).is_err());
+        assert_eq!(
+            pi.get_indexer(&[p3, p1, Period::new(99, PeriodFreq::Monthly)]),
+            vec![2, 0, -1]
+        );
+
+        // RangeIndex with step=2: 0, 2, 4, 6, 8.
+        let r = super::RangeIndex::new(0, 10, 2).unwrap();
+        assert_eq!(r.get_loc(0)?, 0);
+        assert_eq!(r.get_loc(8)?, 4);
+        assert!(r.get_loc(7).is_err()); // not in step
+        assert!(r.get_loc(99).is_err()); // out of range
+        assert_eq!(r.get_indexer(&[4, 7, 0, 99]), vec![2, -1, 0, -1]);
+
+        // Negative step: 10, 8, 6, 4, 2.
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(desc.get_loc(10)?, 0);
+        assert_eq!(desc.get_loc(2)?, 4);
+        assert!(desc.get_loc(7).is_err());
+        Ok(())
     }
 
     #[test]

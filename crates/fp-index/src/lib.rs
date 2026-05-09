@@ -2280,6 +2280,112 @@ impl DatetimeIndex {
         map_datetime_labels(self.index.labels(), |dt| dt.format(format).to_string())
     }
 
+    /// Position of the maximum label, matching `pd.DatetimeIndex.argmax()`.
+    /// Pandas returns the *first* tied position and skips NAT entries; this
+    /// method walks the labels itself to match that ordering exactly. Empty
+    /// indexes (or all-NAT indexes) raise pandas-style `ValueError` mirrored
+    /// as [`IndexError::InvalidArgument`].
+    pub fn argmax(&self) -> Result<usize, IndexError> {
+        let labels = self.index.labels();
+        let mut best: Option<usize> = None;
+        for (i, label) in labels.iter().enumerate() {
+            let nanos = match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => *n,
+                _ => continue,
+            };
+            best = Some(match best {
+                Some(b) => match labels[b] {
+                    IndexLabel::Datetime64(prev) if nanos > prev => i,
+                    _ => b,
+                },
+                None => i,
+            });
+        }
+        best.ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmax of an empty sequence".to_owned())
+        })
+    }
+
+    /// Position of the minimum label, matching `pd.DatetimeIndex.argmin()`.
+    /// Returns the first-tied position and skips NAT to match pandas semantics.
+    pub fn argmin(&self) -> Result<usize, IndexError> {
+        let labels = self.index.labels();
+        let mut best: Option<usize> = None;
+        for (i, label) in labels.iter().enumerate() {
+            let nanos = match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => *n,
+                _ => continue,
+            };
+            best = Some(match best {
+                Some(b) => match labels[b] {
+                    IndexLabel::Datetime64(prev) if nanos < prev => i,
+                    _ => b,
+                },
+                None => i,
+            });
+        }
+        best.ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmin of an empty sequence".to_owned())
+        })
+    }
+
+    /// Positions that would sort the labels ascending, matching
+    /// `pd.DatetimeIndex.argsort()`.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        self.index.argsort()
+    }
+
+    /// First-seen unique labels, matching `pd.DatetimeIndex.unique()`.
+    /// Returns a new DatetimeIndex.
+    pub fn unique(&self) -> Result<Self, IndexError> {
+        Self::from_index(self.index.unique())
+    }
+
+    /// Identity-stable factorization, matching `pd.DatetimeIndex.factorize()`.
+    /// Returns `(codes, uniques)` where `uniques` is rebuilt as DatetimeIndex.
+    pub fn factorize(&self) -> Result<(Vec<isize>, Self), IndexError> {
+        let (codes, uniques) = self.index.factorize();
+        Ok((codes, Self::from_index(uniques)?))
+    }
+
+    /// Value counts, matching `pd.DatetimeIndex.value_counts()`.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        self.index.value_counts()
+    }
+
+    /// Duplicate mask per position, matching `pd.DatetimeIndex.duplicated(keep)`.
+    #[must_use]
+    pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        self.index.duplicated(keep)
+    }
+
+    /// Drop duplicate labels, matching `pd.DatetimeIndex.drop_duplicates()`.
+    pub fn drop_duplicates(&self) -> Result<Self, IndexError> {
+        Self::from_index(self.index.drop_duplicates())
+    }
+
+    /// Drop NAT labels, matching `pd.DatetimeIndex.dropna()`. Non-datetime
+    /// labels (which the wrapper rejects on construction) and `i64::MIN`
+    /// sentinels are removed; surviving labels keep their order.
+    pub fn dropna(&self) -> Self {
+        let surviving: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        let mut filtered = Self::new(surviving);
+        if let Some(name) = self.name() {
+            filtered = filtered.set_name(name);
+        }
+        filtered
+    }
+
     #[must_use]
     pub fn year(&self) -> Vec<Option<i32>> {
         use chrono::Datelike;
@@ -10886,6 +10992,99 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_forwarder_methods_match_index_z9guv() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+
+        // a, c, b, a, NAT, c (duplicates + NAT to exercise every branch).
+        let dt = super::DatetimeIndex::new(vec![a, c, b, a, i64::MIN, c]);
+
+        // argmax / argmin skip NAT to match pandas skipna=True default.
+        assert_eq!(dt.argmax()?, 1);   // c at position 1 is first-seen max
+        assert_eq!(dt.argmin()?, 0);   // a at position 0 is first-seen min
+
+        // argsort returns positions in ascending label order (NAT sorts lowest
+        // because i64::MIN < every datetime). Stable on ties.
+        let positions = dt.argsort();
+        assert_eq!(positions.len(), dt.len());
+        let sorted_labels: Vec<&super::IndexLabel> =
+            positions.iter().map(|&p| &dt.as_index().labels()[p]).collect();
+        for w in sorted_labels.windows(2) {
+            assert!(w[0].cmp(w[1]).is_le());
+        }
+
+        let unique = dt.unique()?;
+        // First-seen order including NAT: a, c, b, NAT.
+        assert_eq!(unique.values(), vec![Some(a), Some(c), Some(b), None]);
+
+        let (codes, uniques) = dt.factorize()?;
+        assert_eq!(codes.len(), dt.len());
+        // factorize skips NAT in the uniques and emits -1 codes for NAT inputs
+        // (matches pandas).
+        assert_eq!(uniques.values(), vec![Some(a), Some(c), Some(b)]);
+        // Position 4 is the NAT input.
+        assert_eq!(codes[4], -1);
+
+        let counts = dt.value_counts();
+        // value_counts drops NAT by default (matches pandas dropna=True), so
+        // total = 5: a:2, c:2, b:1.
+        let total_count: usize = counts.iter().map(|(_, n)| n).sum();
+        assert_eq!(total_count, 5);
+        let a_count = counts
+            .iter()
+            .find_map(|(label, n)| match label {
+                super::IndexLabel::Datetime64(nanos) if *nanos == a => Some(*n),
+                _ => None,
+            })
+            .expect("a should be counted");
+        assert_eq!(a_count, 2);
+
+        let dup_first = dt.duplicated(super::DuplicateKeep::First);
+        // Positions 3 (second a) and 5 (second c) are duplicates.
+        assert_eq!(dup_first, vec![false, false, false, true, false, true]);
+
+        let deduped = dt.drop_duplicates()?;
+        // drop_duplicates preserves the NAT entry — only literal duplicates go.
+        assert_eq!(deduped.values(), vec![Some(a), Some(c), Some(b), None]);
+
+        let dropped = dt.dropna();
+        assert_eq!(
+            dropped.values(),
+            vec![Some(a), Some(c), Some(b), Some(a), Some(c)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn datetime_index_argmax_argmin_reject_empty_z9guv() {
+        let empty = super::DatetimeIndex::new(vec![]);
+        let err_max = empty.argmax().unwrap_err();
+        assert!(matches!(
+            err_max,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmax of an empty sequence"
+        ));
+        let err_min = empty.argmin().unwrap_err();
+        assert!(matches!(
+            err_min,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmin of an empty sequence"
+        ));
+        assert!(empty.argsort().is_empty());
+        assert!(empty.dropna().is_empty());
+    }
+
+    #[test]
+    fn datetime_index_dropna_preserves_name_z9guv() {
+        let dt = super::DatetimeIndex::new(vec![i64::MIN, 0_i64, i64::MIN]).set_name("ts");
+        let dropped = dt.dropna();
+        assert_eq!(dropped.values(), vec![Some(0)]);
+        assert_eq!(dropped.name(), Some("ts"));
     }
 
     #[test]

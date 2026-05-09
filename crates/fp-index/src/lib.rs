@@ -4599,6 +4599,60 @@ impl MultiIndex {
         Err(Self::shift_unsupported_error())
     }
 
+    fn astype_categorical_error() -> IndexError {
+        IndexError::InvalidArgument(
+            "> 1 ndim Categorical are not supported at this time".to_owned(),
+        )
+    }
+
+    fn astype_unsupported_dtype_error(dtype: &str) -> IndexError {
+        IndexError::InvalidArgument(format!(
+            "Setting a MultiIndex dtype to anything other than object is not supported; got {dtype}"
+        ))
+    }
+
+    /// Cast labels to a different dtype, matching `pd.MultiIndex.astype(...)`.
+    ///
+    /// Pandas only supports the object dtype on MultiIndex; categorical raises
+    /// `NotImplementedError` and any other dtype raises `TypeError`. Object
+    /// returns a clone of the index.
+    pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
+        match dtype {
+            "object" | "O" => Ok(self.clone()),
+            "category" => Err(Self::astype_categorical_error()),
+            other => Err(Self::astype_unsupported_dtype_error(other)),
+        }
+    }
+
+    fn diff_unsupported_error() -> IndexError {
+        IndexError::InvalidArgument(
+            "cannot perform __sub__ with this index type: MultiIndex".to_owned(),
+        )
+    }
+
+    /// Unsupported positional differencing, matching `pd.MultiIndex.diff(...)`.
+    ///
+    /// Pandas defines `Index.diff` as `self - self.shift(periods)` and raises
+    /// `TypeError` because tuple-valued levels do not support subtraction.
+    pub fn diff(&self, _periods: i64) -> Result<Self, IndexError> {
+        Err(Self::diff_unsupported_error())
+    }
+
+    fn round_unsupported_error() -> IndexError {
+        IndexError::InvalidArgument(
+            "loop of ufunc does not support argument 0 of type tuple which has no callable rint method"
+                .to_owned(),
+        )
+    }
+
+    /// Unsupported numeric rounding, matching `pd.MultiIndex.round(...)`.
+    ///
+    /// Pandas applies `np.around` to the underlying values; tuple-valued
+    /// MultiIndex labels do not support `rint`, so this surface always rejects.
+    pub fn round(&self, _decimals: i32) -> Result<Self, IndexError> {
+        Err(Self::round_unsupported_error())
+    }
+
     fn string_accessor_error() -> IndexError {
         IndexError::InvalidArgument(
             "Can only use .str accessor with Index, not MultiIndex".to_owned(),
@@ -10125,6 +10179,81 @@ mod tests {
             super::IndexError::InvalidArgument(message)
                 if message == "Can only use .str accessor with Index, not MultiIndex"
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_astype_object_clones_other_dtypes_reject_c2x17() -> Result<(), super::IndexError>
+    {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+
+        for dtype in ["object", "O"] {
+            let cloned = mi.astype(dtype)?;
+            assert!(cloned.equals(&mi));
+            assert_eq!(cloned.nlevels(), mi.nlevels());
+            assert_eq!(cloned.len(), mi.len());
+        }
+
+        let cat_err = mi.astype("category").unwrap_err();
+        assert!(matches!(
+            cat_err,
+            super::IndexError::InvalidArgument(message)
+                if message == "> 1 ndim Categorical are not supported at this time"
+        ));
+
+        for dtype in ["int64", "float64", "datetime64[ns]"] {
+            let err = mi.astype(dtype).unwrap_err();
+            let expected = format!(
+                "Setting a MultiIndex dtype to anything other than object is not supported; got {dtype}"
+            );
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message) if message == expected
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_diff_rejects_tuple_subtraction_c2x17() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])?;
+        let expected = "cannot perform __sub__ with this index type: MultiIndex";
+
+        for periods in [-1_i64, 0, 1, 2] {
+            let err = mi.diff(periods).unwrap_err();
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message) if message == expected
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_round_rejects_tuple_rint_c2x17() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let expected = "loop of ufunc does not support argument 0 of type tuple which has no callable rint method";
+
+        for decimals in [-1_i32, 0, 1, 4] {
+            let err = mi.round(decimals).unwrap_err();
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message) if message == expected
+            ));
+        }
 
         Ok(())
     }

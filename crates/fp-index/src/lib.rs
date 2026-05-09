@@ -2654,6 +2654,71 @@ impl DatetimeIndex {
         Ok(out)
     }
 
+    /// Replace positions where `cond` is `false` with `other`, matching
+    /// `pd.DatetimeIndex.where(cond, other)`. Pass `i64::MIN` to insert
+    /// NAT.
+    pub fn r#where(&self, cond: &[bool], other: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if cond.len() != labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: labels.len(),
+                actual: cond.len(),
+                context: "where: cond length must match index length".to_owned(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .zip(cond.iter())
+            .map(|(label, &keep)| {
+                if keep {
+                    match label {
+                        IndexLabel::Datetime64(n) => *n,
+                        _ => i64::MIN,
+                    }
+                } else {
+                    other
+                }
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Replace positions where `mask` is `true` with `value`, matching
+    /// `pd.DatetimeIndex.putmask(mask, value)`. The complement of `where`.
+    pub fn putmask(&self, mask: &[bool], value: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if mask.len() != labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: labels.len(),
+                actual: mask.len(),
+                context: "putmask: mask length must match index length".to_owned(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .zip(mask.iter())
+            .map(|(label, &replace)| {
+                if replace {
+                    value
+                } else {
+                    match label {
+                        IndexLabel::Datetime64(n) => *n,
+                        _ => i64::MIN,
+                    }
+                }
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
     /// Binary-search insertion position, matching
     /// `pd.DatetimeIndex.searchsorted(value, side)`. The needle is the
     /// nanoseconds-since-epoch value to locate; pandas behavior on NAT
@@ -3396,6 +3461,71 @@ impl TimedeltaIndex {
     /// Drop duplicate labels, matching `pd.TimedeltaIndex.drop_duplicates()`.
     pub fn drop_duplicates(&self) -> Result<Self, IndexError> {
         Self::from_index(self.index.drop_duplicates())
+    }
+
+    /// Replace positions where `cond` is `false` with `other`, matching
+    /// `pd.TimedeltaIndex.where(cond, other)`. Pass `Timedelta::NAT` to
+    /// insert NAT.
+    pub fn r#where(&self, cond: &[bool], other: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if cond.len() != labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: labels.len(),
+                actual: cond.len(),
+                context: "where: cond length must match index length".to_owned(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .zip(cond.iter())
+            .map(|(label, &keep)| {
+                if keep {
+                    match label {
+                        IndexLabel::Timedelta64(n) => *n,
+                        _ => Timedelta::NAT,
+                    }
+                } else {
+                    other
+                }
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Replace positions where `mask` is `true` with `value`, matching
+    /// `pd.TimedeltaIndex.putmask(mask, value)`.
+    pub fn putmask(&self, mask: &[bool], value: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if mask.len() != labels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: labels.len(),
+                actual: mask.len(),
+                context: "putmask: mask length must match index length".to_owned(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .zip(mask.iter())
+            .map(|(label, &replace)| {
+                if replace {
+                    value
+                } else {
+                    match label {
+                        IndexLabel::Timedelta64(n) => *n,
+                        _ => Timedelta::NAT,
+                    }
+                }
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
     }
 
     /// Binary-search insertion position, matching
@@ -12280,6 +12410,57 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_where_putmask_match_pandas_nwqty() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c]).set_name("ts");
+
+        // where: keep position 0 and 2; replace position 1 with i64::MIN (NAT).
+        let masked = dt.r#where(&[true, false, true], i64::MIN)?;
+        assert_eq!(masked.values(), vec![Some(a), None, Some(c)]);
+        assert_eq!(masked.name(), Some("ts"));
+
+        // putmask: replace positions where mask=true with c.
+        let put = dt.putmask(&[true, false, false], c)?;
+        assert_eq!(put.values(), vec![Some(c), Some(b), Some(c)]);
+
+        // Length mismatch errors.
+        let bad_cond = dt.r#where(&[true, false], i64::MIN).unwrap_err();
+        assert!(matches!(
+            bad_cond,
+            super::IndexError::LengthMismatch { expected: 3, actual: 2, .. }
+        ));
+        let bad_mask = dt.putmask(&[true; 5], c).unwrap_err();
+        assert!(matches!(
+            bad_mask,
+            super::IndexError::LengthMismatch { expected: 3, actual: 5, .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn timedelta_index_where_putmask_match_pandas_nwqty() -> Result<(), super::IndexError> {
+        let nat = fp_types::Timedelta::NAT;
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]).set_name("d");
+
+        let masked = td.r#where(&[false, true, false], nat)?;
+        assert_eq!(masked.values(), vec![None, Some(200), None]);
+        assert_eq!(masked.name(), Some("d"));
+
+        let put = td.putmask(&[false, true, true], 999)?;
+        assert_eq!(put.values(), vec![Some(100), Some(999), Some(999)]);
+
+        let bad = td.r#where(&[true, false], nat).unwrap_err();
+        assert!(matches!(
+            bad,
+            super::IndexError::LengthMismatch { expected: 3, actual: 2, .. }
+        ));
+        Ok(())
     }
 
     #[test]

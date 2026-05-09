@@ -2654,6 +2654,16 @@ impl DatetimeIndex {
         Ok(out)
     }
 
+    /// Binary-search insertion position, matching
+    /// `pd.DatetimeIndex.searchsorted(value, side)`. The needle is the
+    /// nanoseconds-since-epoch value to locate; pandas behavior on NAT
+    /// needles is to raise, mirrored as
+    /// [`IndexError::InvalidArgument("searchsorted: needle cannot be missing")`].
+    pub fn searchsorted(&self, value: i64, side: &str) -> Result<usize, IndexError> {
+        self.index
+            .searchsorted(&IndexLabel::Datetime64(value), side)
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -3388,6 +3398,14 @@ impl TimedeltaIndex {
         Self::from_index(self.index.drop_duplicates())
     }
 
+    /// Binary-search insertion position, matching
+    /// `pd.TimedeltaIndex.searchsorted(value, side)`. The needle is a
+    /// nanosecond duration; NAT needles raise.
+    pub fn searchsorted(&self, value: i64, side: &str) -> Result<usize, IndexError> {
+        self.index
+            .searchsorted(&IndexLabel::Timedelta64(value), side)
+    }
+
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -4106,6 +4124,43 @@ impl PeriodIndex {
         }
     }
 
+    /// Binary-search insertion position, matching
+    /// `pd.PeriodIndex.searchsorted(value, side)`. Mixed-frequency lookups
+    /// reject because pandas requires same-freq comparisons. side must be
+    /// `"left"` or `"right"`.
+    pub fn searchsorted(&self, value: Period, side: &str) -> Result<usize, IndexError> {
+        if side != "left" && side != "right" {
+            return Err(IndexError::InvalidArgument(format!(
+                "searchsorted: side must be 'left' or 'right', got {side:?}"
+            )));
+        }
+        if let Some(first) = self.values.first()
+            && first.freq != value.freq
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "searchsorted: needle frequency {:?} does not match index frequency {:?}",
+                value.freq, first.freq
+            )));
+        }
+        let mut lo = 0usize;
+        let mut hi = self.values.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let cmp = self.values[mid].ordinal.cmp(&value.ordinal);
+            use std::cmp::Ordering;
+            let go_right = matches!(
+                (cmp, side),
+                (Ordering::Less, _) | (Ordering::Equal, "right")
+            );
+            if go_right {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -4651,6 +4706,41 @@ impl RangeIndex {
             idx = idx.set_name(name);
         }
         idx
+    }
+
+    /// Binary-search insertion position, matching
+    /// `pd.RangeIndex.searchsorted(value, side)`. Restricted to
+    /// ascending ranges (`step > 0`) because searchsorted assumes a
+    /// monotonically-increasing input; negative-step ranges raise.
+    pub fn searchsorted(&self, value: i64, side: &str) -> Result<usize, IndexError> {
+        if side != "left" && side != "right" {
+            return Err(IndexError::InvalidArgument(format!(
+                "searchsorted: side must be 'left' or 'right', got {side:?}"
+            )));
+        }
+        if self.step < 0 {
+            return Err(IndexError::InvalidArgument(
+                "searchsorted requires a monotonically-increasing RangeIndex".to_owned(),
+            ));
+        }
+        let values = self.values();
+        let mut lo = 0usize;
+        let mut hi = values.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let cmp = values[mid].cmp(&value);
+            use std::cmp::Ordering;
+            let go_right = matches!(
+                (cmp, side),
+                (Ordering::Less, _) | (Ordering::Equal, "right")
+            );
+            if go_right {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -12190,6 +12280,51 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn index_variants_searchsorted_match_pandas_tam73() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c]);
+
+        assert_eq!(dt.searchsorted(a, "left")?, 0);
+        assert_eq!(dt.searchsorted(a, "right")?, 1);
+        assert_eq!(dt.searchsorted(c, "right")?, 3);
+        // Mid-range insertion (between a and b).
+        let mid = a + 1;
+        assert_eq!(dt.searchsorted(mid, "left")?, 1);
+
+        // Bad side.
+        assert!(dt.searchsorted(a, "middle").is_err());
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]);
+        assert_eq!(td.searchsorted(150, "left")?, 1);
+        assert_eq!(td.searchsorted(200, "right")?, 2);
+
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3]);
+        assert_eq!(pi.searchsorted(p2, "left")?, 1);
+        assert_eq!(pi.searchsorted(p3, "right")?, 3);
+        // Mismatched freq rejects.
+        let mismatch = Period::new(10, PeriodFreq::Annual);
+        assert!(pi.searchsorted(mismatch, "left").is_err());
+
+        let r = super::RangeIndex::new(0, 10, 2).unwrap();
+        // Range values: [0, 2, 4, 6, 8].
+        assert_eq!(r.searchsorted(4, "left")?, 2);
+        assert_eq!(r.searchsorted(4, "right")?, 3);
+        assert_eq!(r.searchsorted(7, "left")?, 4);
+
+        // Descending range rejects.
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert!(desc.searchsorted(4, "left").is_err());
+        Ok(())
     }
 
     #[test]

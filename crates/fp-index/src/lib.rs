@@ -2743,6 +2743,19 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Calendar date part of each label, matching `pd.DatetimeIndex.date`.
+    #[must_use]
+    pub fn date(&self) -> Vec<Option<chrono::NaiveDate>> {
+        map_datetime_labels(self.index.labels(), |dt| dt.date_naive())
+    }
+
+    /// Within-day clock time of each label, matching
+    /// `pd.DatetimeIndex.time`.
+    #[must_use]
+    pub fn time(&self) -> Vec<Option<chrono::NaiveTime>> {
+        map_datetime_labels(self.index.labels(), |dt| dt.time())
+    }
+
     /// Convert each label to its Julian Date, matching
     /// `pd.DatetimeIndex.to_julian_date()`. The formula is
     /// `JD = unix_seconds / 86400 + 2440587.5` and the result is
@@ -12624,6 +12637,36 @@ mod tests {
                 Some(true),
                 None
             ]
+        );
+    }
+
+    #[test]
+    fn datetime_index_date_and_time_accessors_match_pandas_66pll() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-01-15T12:34:56.789012345Z (computed in br-teeck).
+        let total: i64 = 1_705_322_096_i64 * NS + 789_012_345;
+        let dt = super::DatetimeIndex::new(vec![total, i64::MIN, 0]);
+
+        let dates = dt.date();
+        assert_eq!(
+            dates[0],
+            Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
+        );
+        assert_eq!(dates[1], None);
+        assert_eq!(
+            dates[2],
+            Some(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        );
+
+        let times = dt.time();
+        assert_eq!(
+            times[0],
+            chrono::NaiveTime::from_hms_nano_opt(12, 34, 56, 789_012_345)
+        );
+        assert_eq!(times[1], None);
+        assert_eq!(
+            times[2],
+            chrono::NaiveTime::from_hms_nano_opt(0, 0, 0, 0)
         );
     }
 

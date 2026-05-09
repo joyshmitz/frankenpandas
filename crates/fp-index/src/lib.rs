@@ -2257,6 +2257,29 @@ impl DatetimeIndex {
         self.nanos()
     }
 
+    /// Underlying nanoseconds-since-epoch, matching `pd.DatetimeIndex.asi8`.
+    /// NAT is preserved as `i64::MIN` to match the on-disk sentinel.
+    #[must_use]
+    pub fn asi8(&self) -> Vec<i64> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => *nanos,
+                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => {
+                    i64::MIN
+                }
+            })
+            .collect()
+    }
+
+    /// Format each timestamp using a chrono format string, matching
+    /// `pd.DatetimeIndex.strftime(format)`. NAT propagates as `None`.
+    #[must_use]
+    pub fn strftime(&self, format: &str) -> Vec<Option<String>> {
+        map_datetime_labels(self.index.labels(), |dt| dt.format(format).to_string())
+    }
+
     #[must_use]
     pub fn year(&self) -> Vec<Option<i32>> {
         use chrono::Datelike;
@@ -2817,6 +2840,38 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn total_seconds(&self) -> Vec<Option<f64>> {
         map_timedelta_labels(self.index.labels(), Timedelta::total_seconds)
+    }
+
+    /// Underlying nanosecond duration, matching `pd.TimedeltaIndex.asi8`.
+    /// `Timedelta::NAT` is preserved at the sentinel value.
+    #[must_use]
+    pub fn asi8(&self) -> Vec<i64> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) => *nanos,
+                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Datetime64(_) => {
+                    Timedelta::NAT
+                }
+            })
+            .collect()
+    }
+
+    /// Microseconds-within-second component (0..=999_999), matching
+    /// `pd.TimedeltaIndex.microseconds`.
+    #[must_use]
+    pub fn microseconds(&self) -> Vec<Option<i64>> {
+        map_timedelta_labels(self.index.labels(), |nanos| {
+            nanos.rem_euclid(Timedelta::NANOS_PER_SEC) / 1_000
+        })
+    }
+
+    /// Nanoseconds-within-microsecond component (0..=999), matching
+    /// `pd.TimedeltaIndex.nanoseconds`.
+    #[must_use]
+    pub fn nanoseconds(&self) -> Vec<Option<i64>> {
+        map_timedelta_labels(self.index.labels(), |nanos| nanos.rem_euclid(1_000))
     }
 }
 
@@ -10830,6 +10885,61 @@ mod tests {
                 Some(true),
                 None
             ]
+        );
+    }
+
+    #[test]
+    fn datetime_index_asi8_round_trips_nanos_teeck() {
+        const NS: i64 = 1_000_000_000;
+        let total: i64 = 1_704_067_200_i64 * NS + 123;
+        let dt = super::DatetimeIndex::new(vec![total, i64::MIN, 0]);
+        assert_eq!(dt.asi8(), vec![total, i64::MIN, 0]);
+
+        let empty = super::DatetimeIndex::new(vec![]);
+        assert!(empty.asi8().is_empty());
+    }
+
+    #[test]
+    fn datetime_index_strftime_formats_each_label_teeck() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-01-15T12:34:56.789Z:
+        //   2024-01-01 00:00:00Z = 1704067200 sec.
+        //   + 14 * 86400 = 1209600  -> 2024-01-15 00:00:00 = 1705276800
+        //   + 12*3600 + 34*60 + 56  -> 1705322096
+        //   * 1e9 + 789_000_000 ns
+        let with_ms: i64 = 1_705_322_096_i64 * NS + 789_000_000;
+        let dt = super::DatetimeIndex::new(vec![with_ms, i64::MIN]);
+        let formatted = dt.strftime("%Y-%m-%dT%H:%M:%S%.3f");
+        assert_eq!(
+            formatted,
+            vec![Some("2024-01-15T12:34:56.789".to_owned()), None]
+        );
+    }
+
+    #[test]
+    fn timedelta_index_asi8_microseconds_nanoseconds_match_pandas_teeck() {
+        // 1 day + 2:34:56.789012345
+        let one_day = fp_types::Timedelta::NANOS_PER_DAY;
+        let extra = 2 * fp_types::Timedelta::NANOS_PER_HOUR
+            + 34 * fp_types::Timedelta::NANOS_PER_MIN
+            + 56 * fp_types::Timedelta::NANOS_PER_SEC
+            + 789_012_345;
+        let total = one_day + extra;
+        let td = super::TimedeltaIndex::new(vec![total, fp_types::Timedelta::NAT, 0]);
+
+        assert_eq!(
+            td.asi8(),
+            vec![total, fp_types::Timedelta::NAT, 0]
+        );
+        // microseconds: 789_012_345 % 1_000_000_000 / 1_000 == 789_012
+        assert_eq!(
+            td.microseconds(),
+            vec![Some(789_012), None, Some(0)]
+        );
+        // nanoseconds: 789_012_345 % 1_000 == 345
+        assert_eq!(
+            td.nanoseconds(),
+            vec![Some(345), None, Some(0)]
         );
     }
 

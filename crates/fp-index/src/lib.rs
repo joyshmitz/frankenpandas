@@ -2923,6 +2923,39 @@ impl DatetimeIndex {
         "nanosecond"
     }
 
+    /// First position of `value`, matching `pd.DatetimeIndex.get_loc(value)`.
+    /// Pandas raises KeyError for missing values; this surface mirrors
+    /// that with [`IndexError::InvalidArgument`].
+    pub fn get_loc(&self, value: i64) -> Result<usize, IndexError> {
+        self.index
+            .labels()
+            .iter()
+            .position(|label| matches!(label, IndexLabel::Datetime64(n) if *n == value))
+            .ok_or_else(|| {
+                IndexError::InvalidArgument(format!("get_loc: {value} not in DatetimeIndex"))
+            })
+    }
+
+    /// Locate each label in `targets`, matching
+    /// `pd.DatetimeIndex.get_indexer(targets)`. Returns `Vec<isize>` where
+    /// `-1` means "missing".
+    #[must_use]
+    pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
+        let labels = self.index.labels();
+        let mut positions = HashMap::<i64, isize>::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Datetime64(n) = label {
+                positions
+                    .entry(*n)
+                    .or_insert_with(|| isize::try_from(i).unwrap_or(isize::MAX));
+            }
+        }
+        targets
+            .iter()
+            .map(|n| positions.get(n).copied().unwrap_or(-1))
+            .collect()
+    }
+
     /// Find positions of `[start, end]` for a label slice, matching
     /// `pd.DatetimeIndex.slice_locs(start, end)`. Requires the index to
     /// be monotonically increasing; non-monotonic input rejects.
@@ -3886,6 +3919,36 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn resolution(&self) -> &'static str {
         "nanosecond"
+    }
+
+    /// First position of `value`, matching `pd.TimedeltaIndex.get_loc(value)`.
+    pub fn get_loc(&self, value: i64) -> Result<usize, IndexError> {
+        self.index
+            .labels()
+            .iter()
+            .position(|label| matches!(label, IndexLabel::Timedelta64(n) if *n == value))
+            .ok_or_else(|| {
+                IndexError::InvalidArgument(format!("get_loc: {value} not in TimedeltaIndex"))
+            })
+    }
+
+    /// Locate each label in `targets`, matching
+    /// `pd.TimedeltaIndex.get_indexer(targets)`.
+    #[must_use]
+    pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
+        let labels = self.index.labels();
+        let mut positions = HashMap::<i64, isize>::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Timedelta64(n) = label {
+                positions
+                    .entry(*n)
+                    .or_insert_with(|| isize::try_from(i).unwrap_or(isize::MAX));
+            }
+        }
+        targets
+            .iter()
+            .map(|n| positions.get(n).copied().unwrap_or(-1))
+            .collect()
     }
 
     /// Find positions of `[start, end]` for a label slice, matching
@@ -13548,6 +13611,33 @@ mod tests {
         // Descending range rejects.
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.searchsorted(4, "left").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn datetime_timedelta_get_loc_get_indexer_match_pandas_6x9de() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c]);
+
+        // get_loc finds first position.
+        assert_eq!(dt.get_loc(b)?, 1);
+        let missing_err = dt.get_loc(b + 1).unwrap_err();
+        assert!(matches!(
+            missing_err,
+            super::IndexError::InvalidArgument(ref msg) if msg.contains("get_loc")
+        ));
+
+        // get_indexer maps each target.
+        let mapped = dt.get_indexer(&[c, a, b + 999]);
+        assert_eq!(mapped, vec![2, 0, -1]);
+
+        // TimedeltaIndex spot check.
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]);
+        assert_eq!(td.get_loc(200)?, 1);
+        assert_eq!(td.get_indexer(&[300, 999, 100]), vec![2, -1, 0]);
         Ok(())
     }
 

@@ -5000,6 +5000,31 @@ impl PeriodIndex {
             })
     }
 
+    /// Locate every position matching each target, matching
+    /// `pd.PeriodIndex.get_indexer_non_unique(targets)`.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, targets: &[Period]) -> (Vec<isize>, Vec<usize>) {
+        let mut by_value = HashMap::<Period, Vec<usize>>::new();
+        for (i, period) in self.values.iter().enumerate() {
+            by_value.entry(*period).or_default().push(i);
+        }
+        let mut positions = Vec::<isize>::new();
+        let mut missing = Vec::<usize>::new();
+        for (idx, target) in targets.iter().enumerate() {
+            if let Some(matches) = by_value.get(target) {
+                positions.extend(
+                    matches
+                        .iter()
+                        .map(|p| isize::try_from(*p).unwrap_or(isize::MAX)),
+                );
+            } else {
+                positions.push(-1);
+                missing.push(idx);
+            }
+        }
+        (positions, missing)
+    }
+
     /// Alias for [`get_indexer`], matching
     /// `pd.PeriodIndex.get_indexer_for(targets)`.
     #[must_use]
@@ -5856,6 +5881,26 @@ impl RangeIndex {
             )));
         }
         Ok(pos as usize)
+    }
+
+    /// Locate every position matching each target, matching
+    /// `pd.RangeIndex.get_indexer_non_unique(targets)`. RangeIndex is
+    /// always unique so each target either matches one position or
+    /// none.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
+        let mut positions = Vec::<isize>::new();
+        let mut missing = Vec::<usize>::new();
+        for (idx, target) in targets.iter().enumerate() {
+            match self.get_loc(*target) {
+                Ok(p) => positions.push(p as isize),
+                Err(_) => {
+                    positions.push(-1);
+                    missing.push(idx);
+                }
+            }
+        }
+        (positions, missing)
     }
 
     /// Alias for [`get_indexer`], matching
@@ -6935,6 +6980,54 @@ impl CategoricalIndex {
     pub fn isin(&self, values: &[String]) -> Vec<bool> {
         let needle: HashSet<&String> = values.iter().collect();
         self.labels.iter().map(|l| needle.contains(l)).collect()
+    }
+
+    /// Locate every position matching each target, matching
+    /// `pd.CategoricalIndex.get_indexer_non_unique(targets)`.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, targets: &[String]) -> (Vec<isize>, Vec<usize>) {
+        let mut by_value = HashMap::<&String, Vec<usize>>::new();
+        for (i, label) in self.labels.iter().enumerate() {
+            by_value.entry(label).or_default().push(i);
+        }
+        let mut positions = Vec::<isize>::new();
+        let mut missing = Vec::<usize>::new();
+        for (idx, target) in targets.iter().enumerate() {
+            if let Some(matches) = by_value.get(target) {
+                positions.extend(
+                    matches
+                        .iter()
+                        .map(|p| isize::try_from(*p).unwrap_or(isize::MAX)),
+                );
+            } else {
+                positions.push(-1);
+                missing.push(idx);
+            }
+        }
+        (positions, missing)
+    }
+
+    /// Locate each label in `targets`, matching
+    /// `pd.CategoricalIndex.get_indexer(targets)`.
+    #[must_use]
+    pub fn get_indexer(&self, targets: &[String]) -> Vec<isize> {
+        let mut positions = HashMap::<&String, isize>::new();
+        for (i, label) in self.labels.iter().enumerate() {
+            positions
+                .entry(label)
+                .or_insert_with(|| isize::try_from(i).unwrap_or(isize::MAX));
+        }
+        targets
+            .iter()
+            .map(|t| positions.get(t).copied().unwrap_or(-1))
+            .collect()
+    }
+
+    /// Alias for [`get_indexer`], matching
+    /// `pd.CategoricalIndex.get_indexer_for(targets)`.
+    #[must_use]
+    pub fn get_indexer_for(&self, targets: &[String]) -> Vec<isize> {
+        self.get_indexer(targets)
     }
 
     /// First position of `value`, matching
@@ -14461,6 +14554,46 @@ mod tests {
         // Descending rejects.
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.slice_locs(2, 6).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn period_range_categorical_get_indexer_non_unique_match_pandas_z9sna()
+    -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        // PeriodIndex with duplicate p1.
+        let pi = super::PeriodIndex::new(vec![p1, p2, p1]);
+        let (positions, missing) =
+            pi.get_indexer_non_unique(&[p1, Period::new(99, PeriodFreq::Monthly)]);
+        assert_eq!(positions, vec![0, 2, -1]);
+        assert_eq!(missing, vec![1]);
+
+        // RangeIndex (always unique).
+        let r = super::RangeIndex::new(0, 5, 1).unwrap();
+        let (positions, missing) = r.get_indexer_non_unique(&[2, 99]);
+        assert_eq!(positions, vec![2, -1]);
+        assert_eq!(missing, vec![1]);
+
+        // CategoricalIndex with duplicate "a".
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
+            false,
+        );
+        let (positions, missing) =
+            cat.get_indexer_non_unique(&["a".to_owned(), "z".to_owned()]);
+        assert_eq!(positions, vec![0, 2, -1]);
+        assert_eq!(missing, vec![1]);
+
+        // Categorical get_indexer also works.
+        let mapped = cat.get_indexer(&["b".to_owned(), "z".to_owned()]);
+        assert_eq!(mapped, vec![1, -1]);
+        // get_indexer_for is an alias.
+        assert_eq!(
+            cat.get_indexer_for(&["a".to_owned()]),
+            cat.get_indexer(&["a".to_owned()])
+        );
         Ok(())
     }
 

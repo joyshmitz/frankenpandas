@@ -2936,6 +2936,13 @@ impl DatetimeIndex {
             })
     }
 
+    /// Alias for [`get_indexer`], matching
+    /// `pd.DatetimeIndex.get_indexer_for(targets)`.
+    #[must_use]
+    pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
+        self.get_indexer(targets)
+    }
+
     /// Locate each label in `targets`, matching
     /// `pd.DatetimeIndex.get_indexer(targets)`. Returns `Vec<isize>` where
     /// `-1` means "missing".
@@ -3939,6 +3946,13 @@ impl TimedeltaIndex {
             })
     }
 
+    /// Alias for [`get_indexer`], matching
+    /// `pd.TimedeltaIndex.get_indexer_for(targets)`.
+    #[must_use]
+    pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
+        self.get_indexer(targets)
+    }
+
     /// Locate each label in `targets`, matching
     /// `pd.TimedeltaIndex.get_indexer(targets)`.
     #[must_use]
@@ -4927,6 +4941,13 @@ impl PeriodIndex {
             })
     }
 
+    /// Alias for [`get_indexer`], matching
+    /// `pd.PeriodIndex.get_indexer_for(targets)`.
+    #[must_use]
+    pub fn get_indexer_for(&self, targets: &[Period]) -> Vec<isize> {
+        self.get_indexer(targets)
+    }
+
     /// Locate each target period in the index, matching
     /// `pd.PeriodIndex.get_indexer(targets)`. Returns `Vec<isize>`
     /// where `-1` means "missing".
@@ -5776,6 +5797,13 @@ impl RangeIndex {
             )));
         }
         Ok(pos as usize)
+    }
+
+    /// Alias for [`get_indexer`], matching
+    /// `pd.RangeIndex.get_indexer_for(targets)`.
+    #[must_use]
+    pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
+        self.get_indexer(targets)
     }
 
     /// Locate each target value, matching
@@ -14374,6 +14402,29 @@ mod tests {
         // Descending rejects.
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.slice_locs(2, 6).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_index_variants_get_indexer_for_aliases_match_pandas_lf1jy()
+    -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]);
+        assert_eq!(
+            dt.get_indexer_for(&[1_704_067_200_i64 * NS, 0]),
+            dt.get_indexer(&[1_704_067_200_i64 * NS, 0])
+        );
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200]);
+        assert_eq!(td.get_indexer_for(&[200, 999]), td.get_indexer(&[200, 999]));
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]);
+        let target = vec![Period::new(10, PeriodFreq::Monthly)];
+        assert_eq!(pi.get_indexer_for(&target), pi.get_indexer(&target));
+
+        let r = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert_eq!(r.get_indexer_for(&[2, 99]), r.get_indexer(&[2, 99]));
         Ok(())
     }
 

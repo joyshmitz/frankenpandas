@@ -5491,6 +5491,181 @@ impl CategoricalIndex {
         Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
     }
 
+    /// Mark the categorical as ordered, matching
+    /// `pd.CategoricalIndex.as_ordered()`.
+    #[must_use]
+    pub fn as_ordered(&self) -> Self {
+        let mut out = self.clone();
+        out.ordered = true;
+        out
+    }
+
+    /// Mark the categorical as unordered, matching
+    /// `pd.CategoricalIndex.as_unordered()`.
+    #[must_use]
+    pub fn as_unordered(&self) -> Self {
+        let mut out = self.clone();
+        out.ordered = false;
+        out
+    }
+
+    /// Extend the categories list with new entries, matching
+    /// `pd.CategoricalIndex.add_categories(new)`. Rejects when any new
+    /// category is already present.
+    pub fn add_categories(&self, new: Vec<String>) -> Result<Self, IndexError> {
+        for cat in &new {
+            if self.categories.contains(cat) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "add_categories: {cat:?} is already a category"
+                )));
+            }
+        }
+        let mut categories = self.categories.clone();
+        categories.extend(new);
+        Ok(Self {
+            labels: self.labels.clone(),
+            categories,
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Drop categories from the list, matching
+    /// `pd.CategoricalIndex.remove_categories(removals)`. Rejects when any
+    /// removed category is still in use by a label (FrankenPandas does not
+    /// yet carry NaN-labeled categoricals).
+    pub fn remove_categories(&self, removals: &[String]) -> Result<Self, IndexError> {
+        for cat in removals {
+            if !self.categories.contains(cat) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "remove_categories: {cat:?} is not a category"
+                )));
+            }
+            if self.labels.contains(cat) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "remove_categories: {cat:?} is still in use by labels"
+                )));
+            }
+        }
+        let removals_set: HashSet<&String> = removals.iter().collect();
+        let categories: Vec<String> = self
+            .categories
+            .iter()
+            .filter(|cat| !removals_set.contains(cat))
+            .cloned()
+            .collect();
+        Ok(Self {
+            labels: self.labels.clone(),
+            categories,
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Narrow categories to the set of labels actually present, matching
+    /// `pd.CategoricalIndex.remove_unused_categories()`.
+    #[must_use]
+    pub fn remove_unused_categories(&self) -> Self {
+        let used: HashSet<&String> = self.labels.iter().collect();
+        let categories: Vec<String> = self
+            .categories
+            .iter()
+            .filter(|cat| used.contains(cat))
+            .cloned()
+            .collect();
+        Self {
+            labels: self.labels.clone(),
+            categories,
+            ordered: self.ordered,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Replace the categories list, matching
+    /// `pd.CategoricalIndex.set_categories(new_categories)`. Rejects when
+    /// any current label is missing from the new categories list.
+    pub fn set_categories(&self, new_categories: Vec<String>) -> Result<Self, IndexError> {
+        for label in &self.labels {
+            if !new_categories.contains(label) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "set_categories: label {label:?} is not in the new categories"
+                )));
+            }
+        }
+        Ok(Self {
+            labels: self.labels.clone(),
+            categories: new_categories,
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Rename categories pos-by-pos, matching
+    /// `pd.CategoricalIndex.rename_categories(new)`. Rejects when the
+    /// new list has a different length.
+    pub fn rename_categories(&self, new: Vec<String>) -> Result<Self, IndexError> {
+        if new.len() != self.categories.len() {
+            return Err(IndexError::InvalidArgument(format!(
+                "rename_categories: expected {} new names, got {}",
+                self.categories.len(),
+                new.len()
+            )));
+        }
+        let mapping: std::collections::HashMap<&String, &String> = self
+            .categories
+            .iter()
+            .zip(new.iter())
+            .collect();
+        let labels: Vec<String> = self
+            .labels
+            .iter()
+            .map(|label| (*mapping.get(label).expect("label is a category")).clone())
+            .collect();
+        Ok(Self {
+            labels,
+            categories: new,
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Reorder the categories list, matching
+    /// `pd.CategoricalIndex.reorder_categories(new, ordered)`. Rejects
+    /// when the new list is not a permutation of the existing categories.
+    pub fn reorder_categories(
+        &self,
+        new: Vec<String>,
+        ordered: bool,
+    ) -> Result<Self, IndexError> {
+        if new.len() != self.categories.len() {
+            return Err(IndexError::InvalidArgument(format!(
+                "reorder_categories: expected {} categories, got {}",
+                self.categories.len(),
+                new.len()
+            )));
+        }
+        let existing: HashSet<&String> = self.categories.iter().collect();
+        for cat in &new {
+            if !existing.contains(cat) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "reorder_categories: {cat:?} is not an existing category"
+                )));
+            }
+        }
+        let new_set: HashSet<&String> = new.iter().collect();
+        if new_set.len() != new.len() {
+            return Err(IndexError::InvalidArgument(
+                "reorder_categories: new categories contain duplicates".to_owned(),
+            ));
+        }
+        Ok(Self {
+            labels: self.labels.clone(),
+            categories: new,
+            ordered,
+            name: self.name.clone(),
+        })
+    }
+
     /// Returns a clone, matching `pd.CategoricalIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -13299,6 +13474,92 @@ mod tests {
         let (codes, uniques) = pi.factorize();
         assert!(codes.is_empty());
         assert!(uniques.is_empty());
+    }
+
+    #[test]
+    fn categorical_index_category_management_match_pandas_zy2vd() -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            false,
+        )?;
+
+        // as_ordered / as_unordered.
+        assert!(cat.as_ordered().ordered());
+        assert!(!cat.as_ordered().as_unordered().ordered());
+
+        // add_categories: appends "d".
+        let added = cat.add_categories(vec!["d".to_owned()])?;
+        assert_eq!(
+            added.categories(),
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()].as_slice()
+        );
+        // Adding a duplicate rejects.
+        assert!(cat.add_categories(vec!["a".to_owned()]).is_err());
+
+        // remove_categories drops "c" (unused).
+        let pruned = cat.remove_categories(&["c".to_owned()])?;
+        assert_eq!(
+            pruned.categories(),
+            vec!["a".to_owned(), "b".to_owned()].as_slice()
+        );
+        // Trying to remove a category that's still in use rejects.
+        assert!(cat.remove_categories(&["a".to_owned()]).is_err());
+        // Removing a missing category rejects.
+        assert!(cat.remove_categories(&["zzz".to_owned()]).is_err());
+
+        // remove_unused_categories trims "c" automatically.
+        let trimmed = cat.remove_unused_categories();
+        assert_eq!(
+            trimmed.categories(),
+            vec!["a".to_owned(), "b".to_owned()].as_slice()
+        );
+
+        // set_categories: extending to {a, b, c, d}.
+        let extended = cat.set_categories(vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+        ])?;
+        assert_eq!(extended.categories().len(), 4);
+        // set_categories must include every current label.
+        assert!(cat.set_categories(vec!["b".to_owned(), "c".to_owned()]).is_err());
+
+        // rename_categories: a→A, b→B, c→C.
+        let renamed = cat.rename_categories(vec![
+            "A".to_owned(),
+            "B".to_owned(),
+            "C".to_owned(),
+        ])?;
+        assert_eq!(renamed.labels(), vec!["A".to_owned(), "B".to_owned()].as_slice());
+        assert_eq!(
+            renamed.categories(),
+            vec!["A".to_owned(), "B".to_owned(), "C".to_owned()].as_slice()
+        );
+        // Wrong length rejects.
+        assert!(cat.rename_categories(vec!["X".to_owned()]).is_err());
+
+        // reorder_categories: permutation passes; ordered flag flips.
+        let reordered = cat.reorder_categories(
+            vec!["c".to_owned(), "b".to_owned(), "a".to_owned()],
+            true,
+        )?;
+        assert!(reordered.ordered());
+        assert_eq!(
+            reordered.categories(),
+            vec!["c".to_owned(), "b".to_owned(), "a".to_owned()].as_slice()
+        );
+        // Non-permutation rejects.
+        assert!(cat
+            .reorder_categories(vec!["a".to_owned(), "b".to_owned(), "x".to_owned()], false)
+            .is_err());
+        // Duplicate-bearing input rejects.
+        assert!(cat
+            .reorder_categories(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()], false)
+            .is_err());
+
+        Ok(())
     }
 
     #[test]

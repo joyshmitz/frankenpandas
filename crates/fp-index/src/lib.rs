@@ -3346,6 +3346,112 @@ impl PeriodIndex {
         Index::from_utf8(self.values.iter().map(Period::to_string).collect())
             .set_names(self.name.as_deref())
     }
+
+    /// First-seen unique periods, matching `pd.PeriodIndex.unique()`.
+    /// Preserves the index name.
+    #[must_use]
+    pub fn unique(&self) -> Self {
+        let mut seen = HashSet::<&Period>::new();
+        let mut uniques = Vec::<Period>::new();
+        for period in &self.values {
+            if seen.insert(period) {
+                uniques.push(*period);
+            }
+        }
+        Self {
+            values: uniques,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Per-position duplicate mask, matching
+    /// `pd.PeriodIndex.duplicated(keep)`.
+    #[must_use]
+    pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        let mut result = vec![false; self.values.len()];
+        match keep {
+            DuplicateKeep::First => {
+                let mut seen = HashSet::<&Period>::new();
+                for (i, period) in self.values.iter().enumerate() {
+                    if !seen.insert(period) {
+                        result[i] = true;
+                    }
+                }
+            }
+            DuplicateKeep::Last => {
+                let mut seen = HashSet::<&Period>::new();
+                for (i, period) in self.values.iter().enumerate().rev() {
+                    if !seen.insert(period) {
+                        result[i] = true;
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                let mut counts = HashMap::<&Period, usize>::new();
+                for period in &self.values {
+                    *counts.entry(period).or_insert(0) += 1;
+                }
+                for (i, period) in self.values.iter().enumerate() {
+                    if counts.get(period).copied().unwrap_or(0) > 1 {
+                        result[i] = true;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Drop duplicate periods (keep first), matching
+    /// `pd.PeriodIndex.drop_duplicates()`.
+    #[must_use]
+    pub fn drop_duplicates(&self) -> Self {
+        self.unique()
+    }
+
+    /// Value counts, matching `pd.PeriodIndex.value_counts()`. Pandas
+    /// sorts descending by count.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(Period, usize)> {
+        let mut order = Vec::<&Period>::new();
+        let mut counts = HashMap::<&Period, usize>::new();
+        for period in &self.values {
+            let entry = counts.entry(period).or_insert_with(|| {
+                order.push(period);
+                0
+            });
+            *entry += 1;
+        }
+        let mut pairs: Vec<(Period, usize)> = order.iter().map(|p| (**p, counts[*p])).collect();
+        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        pairs
+    }
+
+    /// Factorize, matching `pd.PeriodIndex.factorize()`. Returns
+    /// `(codes, uniques)` with isize codes — Period currently has no
+    /// missing-value sentinel so all codes are non-negative.
+    #[must_use]
+    pub fn factorize(&self) -> (Vec<isize>, Self) {
+        let mut positions = HashMap::<&Period, isize>::new();
+        let mut uniques = Vec::<Period>::new();
+        let mut codes = Vec::with_capacity(self.values.len());
+        for period in &self.values {
+            if let Some(code) = positions.get(period) {
+                codes.push(*code);
+            } else {
+                let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                positions.insert(period, code);
+                uniques.push(*period);
+                codes.push(code);
+            }
+        }
+        (
+            codes,
+            Self {
+                values: uniques,
+                name: self.name.clone(),
+            },
+        )
+    }
 }
 
 /// Public pandas-style range index wrapper.
@@ -11176,6 +11282,58 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn period_index_forwarder_methods_match_pandas_zke9k() {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p1, p3, p2, p1]).set_name("p");
+
+        let unique = pi.unique();
+        assert_eq!(unique.values(), &[p1, p2, p3]);
+        assert_eq!(unique.name(), Some("p"));
+
+        let dup_first = pi.duplicated(super::DuplicateKeep::First);
+        assert_eq!(dup_first, vec![false, false, true, false, true, true]);
+
+        let dup_last = pi.duplicated(super::DuplicateKeep::Last);
+        assert_eq!(dup_last, vec![true, true, true, false, false, false]);
+
+        let dup_none = pi.duplicated(super::DuplicateKeep::None);
+        // None marks every position whose value occurs >1 time.
+        assert_eq!(dup_none, vec![true, true, true, false, true, true]);
+
+        let dropped = pi.drop_duplicates();
+        assert_eq!(dropped.values(), &[p1, p2, p3]);
+
+        let counts = pi.value_counts();
+        let total: usize = counts.iter().map(|(_, n)| n).sum();
+        assert_eq!(total, pi.len());
+        // First entry is the most frequent (p1 with 3 occurrences).
+        assert_eq!(counts[0].1, 3);
+        let p1_count = counts
+            .iter()
+            .find_map(|(period, n)| (*period == p1).then_some(*n))
+            .expect("p1 should be counted");
+        assert_eq!(p1_count, 3);
+
+        let (codes, factor_uniques) = pi.factorize();
+        assert_eq!(codes, vec![0, 1, 0, 2, 1, 0]);
+        assert_eq!(factor_uniques.values(), &[p1, p2, p3]);
+    }
+
+    #[test]
+    fn period_index_unique_handles_empty_zke9k() {
+        let pi = super::PeriodIndex::new(Vec::new());
+        assert!(pi.unique().is_empty());
+        assert!(pi.drop_duplicates().is_empty());
+        assert!(pi.value_counts().is_empty());
+        let (codes, uniques) = pi.factorize();
+        assert!(codes.is_empty());
+        assert!(uniques.is_empty());
     }
 
     #[test]

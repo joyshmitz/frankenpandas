@@ -165,6 +165,8 @@ pub enum IoError {
     Stata(String),
     #[error("fwf error: {0}")]
     Fwf(String),
+    #[error("deferred reader: {0}")]
+    Deferred(String),
     #[error("arrow ipc error: {0}")]
     Arrow(String),
     #[error("sql error: {0}")]
@@ -2925,6 +2927,60 @@ pub fn read_table_with_options_path(
 pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
     let content = std::fs::read_to_string(path)?;
     read_fwf_str(&content, options)
+}
+
+// ── Deferred reader surfaces ───────────────────────────────────────────
+//
+// pandas exposes pd.read_clipboard / pd.read_gbq / pd.read_sas / pd.read_spss.
+// Each is out of scope for FrankenPandas's local file-format charter:
+//
+//   * read_clipboard pulls from the OS clipboard (GUI-only, headless-hostile).
+//   * read_gbq calls Google BigQuery (external service, GCP credentials).
+//   * read_sas / read_spss are proprietary statistical-software formats with
+//     no first-party Rust reader at parity (pandas calls into pyreadstat /
+//     sas7bdat).
+//
+// Following the deferral precedent in fp-frame for plotting (see
+// `plotting_deferred`), expose typed reject-closed entry points so callers
+// can program against the surface and fall through to a clean error rather
+// than a missing symbol.
+
+fn deferred_reader_error(method: &str, reason: &str) -> IoError {
+    IoError::Deferred(format!(
+        "{method}: in scope but deferred; {reason}. Use the pandas surface in the meantime."
+    ))
+}
+
+/// Reject-closed clipboard reader, matching `pd.read_clipboard()` shape.
+pub fn read_clipboard() -> Result<DataFrame, IoError> {
+    Err(deferred_reader_error(
+        "read_clipboard",
+        "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
+    ))
+}
+
+/// Reject-closed BigQuery reader, matching `pd.read_gbq(query, project_id)`.
+pub fn read_gbq(_query: &str, _project_id: Option<&str>) -> Result<DataFrame, IoError> {
+    Err(deferred_reader_error(
+        "read_gbq",
+        "Google BigQuery integration is outside FrankenPandas's local file-format scope",
+    ))
+}
+
+/// Reject-closed SAS reader, matching `pd.read_sas(path)`.
+pub fn read_sas(_path: &Path) -> Result<DataFrame, IoError> {
+    Err(deferred_reader_error(
+        "read_sas",
+        "no first-party Rust SAS sas7bdat/xport reader exists at pandas-parity yet",
+    ))
+}
+
+/// Reject-closed SPSS reader, matching `pd.read_spss(path)`.
+pub fn read_spss(_path: &Path) -> Result<DataFrame, IoError> {
+    Err(deferred_reader_error(
+        "read_spss",
+        "no first-party Rust SPSS .sav reader exists at pandas-parity yet",
+    ))
 }
 
 // ── File-based Markdown / LaTeX ────────────────────────────────────────
@@ -12289,6 +12345,60 @@ mod tests {
         match err {
             super::IoError::Fwf(message) => {
                 assert!(message.contains("infer"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ── Deferred reader surfaces 2yy4d ─────────────────────────────────
+
+    #[test]
+    fn read_clipboard_rejects_with_deferred_marker_2yy4d() {
+        let err = super::read_clipboard().expect_err("must reject");
+        match err {
+            super::IoError::Deferred(message) => {
+                assert!(message.contains("read_clipboard"));
+                assert!(message.contains("headless"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_gbq_rejects_with_deferred_marker_2yy4d() {
+        let err = super::read_gbq("SELECT 1", Some("proj")).expect_err("must reject");
+        match err {
+            super::IoError::Deferred(message) => {
+                assert!(message.contains("read_gbq"));
+                assert!(message.contains("BigQuery"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let no_project_err = super::read_gbq("SELECT 1", None).expect_err("must reject");
+        assert!(matches!(no_project_err, super::IoError::Deferred(_)));
+    }
+
+    #[test]
+    fn read_sas_rejects_with_deferred_marker_2yy4d() {
+        let path = std::path::Path::new("/nonexistent.sas7bdat");
+        let err = super::read_sas(path).expect_err("must reject");
+        match err {
+            super::IoError::Deferred(message) => {
+                assert!(message.contains("read_sas"));
+                assert!(message.contains("sas7bdat"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_spss_rejects_with_deferred_marker_2yy4d() {
+        let path = std::path::Path::new("/nonexistent.sav");
+        let err = super::read_spss(path).expect_err("must reject");
+        match err {
+            super::IoError::Deferred(message) => {
+                assert!(message.contains("read_spss"));
+                assert!(message.contains(".sav"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

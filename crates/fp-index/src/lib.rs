@@ -3198,6 +3198,18 @@ impl DatetimeIndex {
         self.index.clone()
     }
 
+    /// One-column row materialization, matching `pd.DatetimeIndex.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_flat_index().to_frame()
+    }
+
+    /// Series-shaped materialization using datetime labels as both index and values.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.to_flat_index().to_series()
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4283,6 +4295,18 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
         self.index.clone()
+    }
+
+    /// One-column row materialization, matching `pd.TimedeltaIndex.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_flat_index().to_frame()
+    }
+
+    /// Series-shaped materialization using timedelta labels as both index and values.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.to_flat_index().to_series()
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5684,6 +5708,18 @@ impl PeriodIndex {
         self.to_index()
     }
 
+    /// One-column row materialization, matching `pd.PeriodIndex.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_flat_index().to_frame()
+    }
+
+    /// Series-shaped materialization using period labels as both index and values.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.to_flat_index().to_series()
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6412,6 +6448,18 @@ impl RangeIndex {
             idx = idx.set_name(name);
         }
         idx
+    }
+
+    /// One-column row materialization, matching `pd.RangeIndex.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_flat_index().to_frame()
+    }
+
+    /// Series-shaped materialization using range labels as both index and values.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.to_flat_index().to_series()
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7339,6 +7387,18 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
         self.to_index()
+    }
+
+    /// One-column row materialization, matching `pd.CategoricalIndex.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_flat_index().to_frame()
+    }
+
+    /// Series-shaped materialization using category labels as both index and values.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.to_flat_index().to_series()
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16033,26 +16093,36 @@ mod tests {
             dt_flat.labels()[0],
             super::IndexLabel::Datetime64(_)
         ));
+        assert_eq!(dt.to_frame(), dt_flat.to_frame());
+        assert_eq!(dt.to_series(), dt_flat.to_series());
 
         let td = super::TimedeltaIndex::new(vec![100_i64]).set_name("d");
         let td_flat = td.to_flat_index();
         assert_eq!(td_flat.len(), 1);
         assert_eq!(td_flat.name(), Some("d"));
+        assert_eq!(td.to_frame(), td_flat.to_frame());
+        assert_eq!(td.to_series(), td_flat.to_series());
 
         use fp_types::{Period, PeriodFreq};
         let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
         let pi_flat = pi.to_flat_index();
         assert_eq!(pi_flat.len(), 1);
         assert!(matches!(pi_flat.labels()[0], super::IndexLabel::Utf8(_)));
+        assert_eq!(pi.to_frame(), pi_flat.to_frame());
+        assert_eq!(pi.to_series(), pi_flat.to_series());
 
         let r = super::RangeIndex::new(0, 3, 1).unwrap().set_name("r");
         let r_flat = r.to_flat_index();
         assert_eq!(r_flat.len(), 3);
         assert_eq!(r_flat.name(), Some("r"));
+        assert_eq!(r.to_frame(), r_flat.to_frame());
+        assert_eq!(r.to_series(), r_flat.to_series());
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
         let cat_flat = cat.to_flat_index();
         assert_eq!(cat_flat.len(), 2);
+        assert_eq!(cat.to_frame(), cat_flat.to_frame());
+        assert_eq!(cat.to_series(), cat_flat.to_series());
     }
 
     #[test]

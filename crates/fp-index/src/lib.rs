@@ -6162,6 +6162,48 @@ impl RangeIndex {
         Some(first.max(last))
     }
 
+    /// Median value, matching `pd.RangeIndex.median()`. Returns `None`
+    /// for an empty range; for an even-length range, returns the average
+    /// of the two middle values as f64.
+    #[must_use]
+    pub fn median(&self) -> Option<f64> {
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        let values = self.values();
+        let mid = len / 2;
+        if len % 2 == 1 {
+            Some(values[mid] as f64)
+        } else {
+            Some((values[mid - 1] as f64 + values[mid] as f64) / 2.0)
+        }
+    }
+
+    /// Sample variance (ddof=1), matching `pd.RangeIndex.var()`. Returns
+    /// `None` for fewer than two values.
+    #[must_use]
+    pub fn var(&self) -> Option<f64> {
+        let values: Vec<f64> = self.values().into_iter().map(|v| v as f64).collect();
+        if values.len() < 2 {
+            return None;
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        Some(
+            values
+                .iter()
+                .map(|v| (v - mean).powi(2))
+                .sum::<f64>()
+                / (values.len() as f64 - 1.0),
+        )
+    }
+
+    /// Sample standard deviation (ddof=1), matching `pd.RangeIndex.std()`.
+    #[must_use]
+    pub fn std(&self) -> Option<f64> {
+        self.var().map(f64::sqrt)
+    }
+
     /// Product of all values, matching `pd.RangeIndex.prod()`. Empty
     /// returns 1; saturating to i64 on overflow.
     #[must_use]
@@ -15421,6 +15463,29 @@ mod tests {
 
         let zero_step = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(zero_step.sort_values().equals(&zero_step));
+    }
+
+    #[test]
+    fn range_index_std_var_median_closed_form_tkc0m() {
+        let r = super::RangeIndex::new(1, 11, 1).unwrap();
+        // 1..=10: median = 5.5; var = sum((x - 5.5)^2)/9; std = sqrt(var).
+        assert_eq!(r.median(), Some(5.5));
+        let var = r.var().unwrap();
+        // Expected variance for 1..=10 is 9.166666...
+        assert!((var - 9.1666666666).abs() < 1e-6);
+        let std_val = r.std().unwrap();
+        assert!((std_val - var.sqrt()).abs() < 1e-12);
+
+        // Single element: var/std None; median = the value.
+        let one = super::RangeIndex::new(5, 6, 1).unwrap();
+        assert_eq!(one.median(), Some(5.0));
+        assert_eq!(one.var(), None);
+        assert_eq!(one.std(), None);
+
+        // Empty: all None.
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.median(), None);
+        assert_eq!(empty.var(), None);
     }
 
     #[test]

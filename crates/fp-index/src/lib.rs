@@ -3098,6 +3098,14 @@ impl DatetimeIndex {
         map_datetime_labels(self.index.labels(), |dt| dt.time())
     }
 
+    /// Time component preserving timezone semantics, matching
+    /// `pd.DatetimeIndex.timetz`. FrankenPandas currently stores
+    /// timezone-naive UTC nanoseconds, so this matches [`Self::time`].
+    #[must_use]
+    pub fn timetz(&self) -> Vec<Option<chrono::NaiveTime>> {
+        self.time()
+    }
+
     /// Convert each label to its Julian Date, matching
     /// `pd.DatetimeIndex.to_julian_date()`. The formula is
     /// `JD = unix_seconds / 86400 + 2440587.5` and the result is
@@ -15731,6 +15739,7 @@ mod tests {
         );
         assert_eq!(times[1], None);
         assert_eq!(times[2], chrono::NaiveTime::from_hms_nano_opt(0, 0, 0, 0));
+        assert_eq!(dt.timetz(), times);
     }
 
     #[test]

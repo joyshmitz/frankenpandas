@@ -4724,6 +4724,27 @@ impl Series {
                 out.push(Scalar::Utf8(clipped.to_string()));
                 continue;
             }
+            if let Scalar::Timedelta64(nanos) = val {
+                let mut clipped = *nanos;
+                if let Some(lo) = lower.as_ref()
+                    && i < lo.len()
+                    && let Scalar::Timedelta64(lo_nanos) = &lo.column.values()[i]
+                    && *lo_nanos != Timedelta::NAT
+                    && clipped < *lo_nanos
+                {
+                    clipped = *lo_nanos;
+                }
+                if let Some(hi) = upper.as_ref()
+                    && i < hi.len()
+                    && let Scalar::Timedelta64(hi_nanos) = &hi.column.values()[i]
+                    && *hi_nanos != Timedelta::NAT
+                    && clipped > *hi_nanos
+                {
+                    clipped = *hi_nanos;
+                }
+                out.push(Scalar::Timedelta64(clipped));
+                continue;
+            }
             let Ok(v) = val.to_f64() else {
                 out.push(val.clone());
                 continue;
@@ -78862,6 +78883,117 @@ mod tests {
                 Scalar::Utf8("b".into()),
                 Scalar::Utf8("m".into()),
                 Scalar::Utf8("dog".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_timedelta_lower_clips() {
+        use fp_types::Timedelta;
+
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(5 * Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN),
+            ],
+        )
+        .unwrap();
+        let lower = Series::from_values(
+            "lower",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+            ],
+        )
+        .unwrap();
+
+        let out = s.clip_with_series(Some(&lower), None).unwrap();
+
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Timedelta64(5 * Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_timedelta_upper_clips() {
+        use fp_types::Timedelta;
+
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(5 * Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN),
+            ],
+        )
+        .unwrap();
+        let upper = Series::from_values(
+            "upper",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+            ],
+        )
+        .unwrap();
+
+        let out = s.clip_with_series(None, Some(&upper)).unwrap();
+
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_clip_with_series_timedelta_nat_bounds_are_missing() {
+        use fp_types::Timedelta;
+
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN),
+                Scalar::Timedelta64(5 * Timedelta::NANOS_PER_HOUR),
+            ],
+        )
+        .unwrap();
+        let lower = Series::from_values(
+            "lower",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(Timedelta::NAT),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_HOUR),
+            ],
+        )
+        .unwrap();
+        let upper = Series::from_values(
+            "upper",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Timedelta64(6 * Timedelta::NANOS_PER_HOUR),
+                Scalar::Timedelta64(Timedelta::NAT),
+            ],
+        )
+        .unwrap();
+
+        let out = s.clip_with_series(Some(&lower), Some(&upper)).unwrap();
+
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Timedelta64(30 * Timedelta::NANOS_PER_MIN),
+                Scalar::Timedelta64(5 * Timedelta::NANOS_PER_HOUR),
             ]
         );
     }

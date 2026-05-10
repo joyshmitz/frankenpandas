@@ -89,7 +89,7 @@ use std::{
 
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset,
-    TimeZone, Utc,
+    TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
@@ -1183,6 +1183,236 @@ fn shift_date_string(date_str: &str, count: i32, unit: char) -> Result<String, F
             "unsupported offset unit: '{unit}'"
         ))),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsFreqUnit {
+    Days,
+    Hours,
+    Minutes,
+    Seconds,
+    Months,
+    Years,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsFreqLabelStyle {
+    DateOnlyUtf8,
+    DateTimeUtf8,
+    Datetime64,
+}
+
+fn parse_asfreq_step(freq: &str) -> Result<(i32, AsFreqUnit), FrameError> {
+    let freq = freq.trim();
+    if freq.is_empty() {
+        return Err(FrameError::CompatibilityRejected(
+            "asfreq: empty frequency".to_owned(),
+        ));
+    }
+
+    let split_at = freq
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_ascii_digit()).then_some(idx))
+        .unwrap_or(freq.len());
+    let (count_part, unit_part) = freq.split_at(split_at);
+    let count = if count_part.is_empty() {
+        1
+    } else {
+        count_part.parse::<i32>().map_err(|_| {
+            FrameError::CompatibilityRejected(format!("asfreq: invalid frequency '{freq}'"))
+        })?
+    };
+    if count <= 0 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "asfreq: frequency step must be positive (got {freq})"
+        )));
+    }
+
+    let unit = match unit_part.to_ascii_uppercase().as_str() {
+        "D" | "DAY" | "DAYS" => AsFreqUnit::Days,
+        "H" | "HR" | "HOUR" | "HOURS" => AsFreqUnit::Hours,
+        "T" | "MIN" | "MINS" | "MINUTE" | "MINUTES" => AsFreqUnit::Minutes,
+        "S" | "SEC" | "SECS" | "SECOND" | "SECONDS" => AsFreqUnit::Seconds,
+        "M" | "ME" | "MONTH" | "MONTHS" => AsFreqUnit::Months,
+        "Y" | "A" | "YE" | "YEAR" | "YEARS" => AsFreqUnit::Years,
+        _ => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "asfreq: unsupported frequency '{freq}'; supported: S, T/min, H, D, M, Y/A"
+            )));
+        }
+    };
+    Ok((count, unit))
+}
+
+fn parse_asfreq_label(label: &IndexLabel) -> Result<(NaiveDateTime, AsFreqLabelStyle), FrameError> {
+    match label {
+        IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => {
+            Err(FrameError::CompatibilityRejected(
+                "asfreq requires non-NaT datetime index labels".into(),
+            ))
+        }
+        IndexLabel::Datetime64(nanos) => Ok((
+            datetime64_nanos_to_naive(*nanos)?,
+            AsFreqLabelStyle::Datetime64,
+        )),
+        IndexLabel::Utf8(value) => {
+            let trimmed = value.trim();
+            if trimmed == "NaT" {
+                return Err(FrameError::CompatibilityRejected(
+                    "asfreq requires non-NaT datetime index labels".into(),
+                ));
+            }
+            let date_only = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").is_ok();
+            let parsed = parse_naive_datetime_value(trimmed).map_err(|_| {
+                FrameError::CompatibilityRejected(format!(
+                    "asfreq requires datetime-like row index labels, got {label:?}"
+                ))
+            })?;
+            let style = if date_only {
+                AsFreqLabelStyle::DateOnlyUtf8
+            } else {
+                AsFreqLabelStyle::DateTimeUtf8
+            };
+            Ok((parsed, style))
+        }
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "asfreq requires datetime-like row index labels, got {other:?}"
+        ))),
+    }
+}
+
+fn shift_asfreq_datetime(
+    value: NaiveDateTime,
+    count: i32,
+    unit: AsFreqUnit,
+) -> Result<NaiveDateTime, FrameError> {
+    match unit {
+        AsFreqUnit::Days => value
+            .checked_add_signed(Duration::days(i64::from(count)))
+            .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned())),
+        AsFreqUnit::Hours => value
+            .checked_add_signed(Duration::hours(i64::from(count)))
+            .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned())),
+        AsFreqUnit::Minutes => value
+            .checked_add_signed(Duration::minutes(i64::from(count)))
+            .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned())),
+        AsFreqUnit::Seconds => value
+            .checked_add_signed(Duration::seconds(i64::from(count)))
+            .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned())),
+        AsFreqUnit::Months | AsFreqUnit::Years => {
+            let month_step = if unit == AsFreqUnit::Years {
+                count.checked_mul(12).ok_or_else(|| {
+                    FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                })?
+            } else {
+                count
+            };
+            let month0 = i32::try_from(value.month0()).map_err(|_| {
+                FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+            })?;
+            let total_months = value
+                .year()
+                .checked_mul(12)
+                .and_then(|base| base.checked_add(month0))
+                .and_then(|base| base.checked_add(month_step))
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+                })?;
+            let year = total_months.div_euclid(12);
+            let month = total_months.rem_euclid(12) + 1;
+            let max_day = u32::try_from(days_in_month(year, month)).map_err(|_| {
+                FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+            })?;
+            let month = u32::try_from(month).map_err(|_| {
+                FrameError::CompatibilityRejected("asfreq date overflow".to_owned())
+            })?;
+            let day = value.day().min(max_day);
+            NaiveDate::from_ymd_opt(year, month, day)
+                .and_then(|date| {
+                    date.and_hms_nano_opt(
+                        value.hour(),
+                        value.minute(),
+                        value.second(),
+                        value.nanosecond(),
+                    )
+                })
+                .ok_or_else(|| FrameError::CompatibilityRejected("asfreq date overflow".to_owned()))
+        }
+    }
+}
+
+fn format_asfreq_label(
+    value: NaiveDateTime,
+    style: AsFreqLabelStyle,
+) -> Result<IndexLabel, FrameError> {
+    match style {
+        AsFreqLabelStyle::DateOnlyUtf8 => {
+            Ok(IndexLabel::Utf8(value.format("%Y-%m-%d").to_string()))
+        }
+        AsFreqLabelStyle::DateTimeUtf8 => Ok(IndexLabel::Utf8(format_naive_datetime(value))),
+        AsFreqLabelStyle::Datetime64 => {
+            let nanos = value.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+                FrameError::CompatibilityRejected("asfreq datetime64 overflow".to_owned())
+            })?;
+            Ok(IndexLabel::Datetime64(nanos))
+        }
+    }
+}
+
+fn asfreq_target_labels(index: &Index, freq: &str) -> Result<Vec<IndexLabel>, FrameError> {
+    if index.is_empty() {
+        return Ok(Vec::new());
+    }
+    if index.has_duplicates() {
+        return Err(FrameError::CompatibilityRejected(
+            "asfreq cannot handle duplicate index labels".to_owned(),
+        ));
+    }
+
+    let (step, unit) = parse_asfreq_step(freq)?;
+    let parsed = index
+        .labels()
+        .iter()
+        .map(parse_asfreq_label)
+        .collect::<Result<Vec<_>, _>>()?;
+    let style = parsed[0].1;
+    if parsed
+        .iter()
+        .any(|(_, candidate_style)| *candidate_style != style)
+    {
+        return Err(FrameError::CompatibilityRejected(
+            "asfreq requires uniform datetime-like index label types".to_owned(),
+        ));
+    }
+    if parsed.windows(2).any(|window| window[0].0 >= window[1].0) {
+        return Err(FrameError::CompatibilityRejected(
+            "asfreq requires a strictly increasing datetime-like index".to_owned(),
+        ));
+    }
+
+    let end = parsed
+        .last()
+        .expect("non-empty parsed index should have a final label")
+        .0;
+    let mut current = parsed[0].0;
+    let mut labels = Vec::new();
+    while current <= end {
+        if labels.len() >= 1_000_000 {
+            return Err(FrameError::CompatibilityRejected(
+                "asfreq generated more than 1000000 labels".to_owned(),
+            ));
+        }
+        labels.push(format_asfreq_label(current, style)?);
+        let next = shift_asfreq_datetime(current, step, unit)?;
+        if next <= current {
+            return Err(FrameError::CompatibilityRejected(
+                "asfreq frequency did not advance datetime labels".to_owned(),
+            ));
+        }
+        current = next;
+    }
+
+    Ok(labels)
 }
 
 /// Convert (year, month, day) to Julian Day Number.
@@ -26918,6 +27148,45 @@ impl DataFrame {
             df: self,
             freq: freq.to_string(),
         }
+    }
+
+    /// Conform the row index to a datetime frequency.
+    ///
+    /// Matches the row-axis default of `pd.DataFrame.asfreq(freq)` for flat,
+    /// strictly increasing datetime-like indexes. Missing rows introduced by
+    /// the new frequency are filled with NaN.
+    pub fn asfreq(&self, freq: &str) -> Result<Self, FrameError> {
+        self.asfreq_with_options(freq, None, None)
+    }
+
+    /// Conform the row index to a datetime frequency with optional fill.
+    ///
+    /// `method` accepts pandas spellings `"ffill"`/`"pad"` and
+    /// `"bfill"`/`"backfill"` for labels introduced by the frequency grid.
+    /// `fill_value`, when present, fills any remaining missing values after
+    /// reindexing/method fill.
+    pub fn asfreq_with_options(
+        &self,
+        freq: &str,
+        method: Option<&str>,
+        fill_value: Option<Scalar>,
+    ) -> Result<Self, FrameError> {
+        if self.row_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "asfreq currently supports flat row indexes only".to_owned(),
+            ));
+        }
+
+        let labels = asfreq_target_labels(&self.index, freq)?;
+        let mut result = match method {
+            Some(method) => self.reindex_with_method(labels, method)?,
+            None => self.reindex(labels)?,
+        };
+        if let Some(fill_value) = fill_value {
+            result = result.fillna(&fill_value)?;
+        }
+        result.index = result.index.set_names(self.index.name());
+        Ok(result)
     }
 
     /// Select rows where the time component of the index is between two times.
@@ -59511,6 +59780,84 @@ mod tests {
         assert_eq!(
             resample.asfreq().unwrap().columns()["label"].values(),
             &[Scalar::Utf8("a".into()), Scalar::Utf8("c".into())]
+        );
+    }
+
+    #[test]
+    fn dataframe_asfreq_daily_inserts_missing_rows_4c9zl() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("sales", vec![Scalar::Float64(10.0), Scalar::Float64(30.0)])],
+            vec!["2024-01-01".into(), "2024-01-03".into()],
+        )
+        .unwrap();
+
+        let result = df.asfreq("D").unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-01".into()),
+                IndexLabel::Utf8("2024-01-02".into()),
+                IndexLabel::Utf8("2024-01-03".into())
+            ]
+        );
+        assert_eq!(
+            result.columns()["sales"].values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_asfreq_fill_value_and_methods_4c9zl() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("units", vec![Scalar::Int64(10), Scalar::Int64(30)])],
+            vec!["2024-01-01".into(), "2024-01-03".into()],
+        )
+        .unwrap();
+
+        let filled = df
+            .asfreq_with_options("D", None, Some(Scalar::Int64(0)))
+            .unwrap();
+        assert_eq!(filled.columns()["units"].values()[1], Scalar::Int64(0));
+
+        let ffilled = df.asfreq_with_options("D", Some("ffill"), None).unwrap();
+        assert_eq!(ffilled.columns()["units"].values()[1], Scalar::Int64(10));
+
+        let bfilled = df.asfreq_with_options("D", Some("bfill"), None).unwrap();
+        assert_eq!(bfilled.columns()["units"].values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn dataframe_asfreq_handles_empty_and_rejects_invalid_inputs_4c9zl() {
+        let empty = DataFrame::from_dict(&[], Vec::new()).unwrap();
+        assert!(empty.asfreq("D").unwrap().is_empty());
+
+        let non_datetime = nk54a_df().asfreq("D").unwrap_err();
+        assert!(
+            matches!(non_datetime, FrameError::CompatibilityRejected(msg) if msg.contains("datetime-like"))
+        );
+
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["2024-01-01".into(), "2024-01-03".into()],
+        )
+        .unwrap();
+        let bad_freq = df.asfreq("fortnight").unwrap_err();
+        assert!(
+            matches!(bad_freq, FrameError::CompatibilityRejected(msg) if msg.contains("unsupported frequency"))
+        );
+
+        let descending = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["2024-01-03".into(), "2024-01-01".into()],
+        )
+        .unwrap();
+        let bad_order = descending.asfreq("D").unwrap_err();
+        assert!(
+            matches!(bad_order, FrameError::CompatibilityRejected(msg) if msg.contains("strictly increasing"))
         );
     }
 

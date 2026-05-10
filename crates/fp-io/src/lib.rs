@@ -9299,6 +9299,11 @@ pub trait DataFrameIoExt {
     /// Write this DataFrame to an XML file.
     ///
     /// Matches `pd.DataFrame.to_xml(path)`.
+    fn to_xml(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an XML file.
+    ///
+    /// Matches `pd.DataFrame.to_xml(path)`.
     fn to_xml_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Write this DataFrame to an XML file with explicit options.
@@ -9552,8 +9557,12 @@ impl DataFrameIoExt for DataFrame {
         write_xml_string_with_options(self, options)
     }
 
-    fn to_xml_file(&self, path: &Path) -> Result<(), IoError> {
+    fn to_xml(&self, path: &Path) -> Result<(), IoError> {
         write_xml(self, path)
+    }
+
+    fn to_xml_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_xml(path)
     }
 
     fn to_xml_file_with_options(
@@ -10699,6 +10708,17 @@ mod tests {
         );
         assert_eq!(
             frame.to_xml_string().expect("trait xml string"),
+            write_xml_string(&frame).expect("free xml string")
+        );
+
+        let trait_path = std::env::temp_dir().join(format!(
+            "fp_io_xml_writer_trait_alias_{}_{}.xml",
+            std::process::id(),
+            line!()
+        ));
+        frame.to_xml(&trait_path).expect("trait xml alias");
+        assert_eq!(
+            std::fs::read_to_string(&trait_path).expect("read trait xml alias"),
             write_xml_string(&frame).expect("free xml string")
         );
 

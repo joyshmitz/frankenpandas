@@ -321,11 +321,11 @@ impl Default for CsvReadOptions {
 
 /// Options for [`read_fwf_str`] and [`read_fwf`].
 ///
-/// Phase A surface: callers MUST supply either `colspecs` (explicit
-/// `(start, end)` character ranges, end-exclusive, matching pandas) or
-/// `widths` (per-column character widths that get translated to
-/// cumulative colspecs). Auto-inference (`colspecs='infer'`) is deferred
-/// to a follow-up bead and currently rejects with [`IoError::Fwf`].
+/// Callers can supply either `colspecs` (explicit `(start, end)`
+/// character ranges, end-exclusive, matching pandas) or `widths`
+/// (per-column character widths that get translated to cumulative
+/// colspecs). When both are omitted, `read_fwf` infers colspecs from
+/// non-whitespace runs across the non-skipped input lines.
 #[derive(Debug, Clone)]
 pub struct FwfReadOptions {
     /// Explicit `(start, end)` column ranges in characters. End is
@@ -375,7 +375,70 @@ impl Default for FwfReadOptions {
     }
 }
 
-fn resolve_fwf_colspecs(options: &FwfReadOptions) -> Result<Vec<(usize, usize)>, IoError> {
+fn infer_fwf_colspecs(
+    input: &str,
+    options: &FwfReadOptions,
+) -> Result<Vec<(usize, usize)>, IoError> {
+    let mut candidate_lines: Vec<&str> = input.lines().skip(options.skiprows).collect();
+    if options.skipfooter > 0 {
+        let retained = candidate_lines.len().saturating_sub(options.skipfooter);
+        candidate_lines.truncate(retained);
+    }
+
+    let candidate_lines: Vec<&str> = candidate_lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if candidate_lines.is_empty() {
+        return Err(IoError::Fwf(
+            "cannot infer fixed-width colspecs from empty input".to_owned(),
+        ));
+    }
+
+    let max_width = candidate_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut occupied = vec![false; max_width];
+    for line in candidate_lines {
+        for (idx, ch) in line.chars().enumerate() {
+            if !ch.is_whitespace()
+                && let Some(slot) = occupied.get_mut(idx)
+            {
+                *slot = true;
+            }
+        }
+    }
+
+    let mut specs = Vec::new();
+    let mut idx = 0usize;
+    while idx < occupied.len() {
+        while idx < occupied.len() && !occupied.get(idx).copied().unwrap_or(false) {
+            idx += 1;
+        }
+        if idx == occupied.len() {
+            break;
+        }
+        let start = idx;
+        while idx < occupied.len() && occupied.get(idx).copied().unwrap_or(false) {
+            idx += 1;
+        }
+        specs.push((start, idx));
+    }
+
+    if specs.is_empty() {
+        return Err(IoError::Fwf(
+            "cannot infer fixed-width colspecs from whitespace-only input".to_owned(),
+        ));
+    }
+    Ok(specs)
+}
+
+fn resolve_fwf_colspecs(
+    input: &str,
+    options: &FwfReadOptions,
+) -> Result<Vec<(usize, usize)>, IoError> {
     match (&options.colspecs, &options.widths) {
         (Some(_), Some(_)) => Err(IoError::Fwf(
             "You must specify only one of 'widths' and 'colspecs'".to_owned(),
@@ -402,10 +465,7 @@ fn resolve_fwf_colspecs(options: &FwfReadOptions) -> Result<Vec<(usize, usize)>,
             }
             Ok(specs)
         }
-        (None, None) => Err(IoError::Fwf(
-            "colspecs='infer' is not supported in Phase A; supply explicit colspecs or widths"
-                .to_owned(),
-        )),
+        (None, None) => infer_fwf_colspecs(input, options),
     }
 }
 
@@ -472,11 +532,12 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
 
 /// Parse a fixed-width string, matching `pd.read_fwf(io.StringIO(s), ...)`.
 ///
-/// Phase A: explicit colspecs or widths are required. Tokens are sliced
-/// by character index, then trimmed of leading and trailing whitespace
-/// before being threaded through the standard CSV scalar-coercion path.
+/// Tokens are sliced by character index, then trimmed of leading and
+/// trailing whitespace before being threaded through the standard CSV
+/// scalar-coercion path. When `colspecs` and `widths` are omitted, the
+/// ranges are inferred from non-whitespace runs across the input.
 pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
-    let colspecs = resolve_fwf_colspecs(options)?;
+    let colspecs = resolve_fwf_colspecs(input, options)?;
     let csv_input = fwf_lines_to_csv(input, &colspecs);
     let csv_options = fwf_csv_options(options);
     read_csv_with_options(&csv_input, &csv_options)
@@ -2922,8 +2983,9 @@ pub fn read_table_with_options_path(
 
 /// Read a fixed-width file from disk, matching `pd.read_fwf(path, ...)`.
 ///
-/// See [`read_fwf_str`] for the option semantics. Phase A requires
-/// explicit `colspecs` or `widths`; auto-inference is deferred.
+/// See [`read_fwf_str`] for the option semantics. When neither explicit
+/// `colspecs` nor `widths` are supplied, column ranges are inferred from
+/// non-whitespace runs.
 pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
     let content = std::fs::read_to_string(path)?;
     read_fwf_str(&content, options)
@@ -12378,24 +12440,51 @@ mod tests {
             ..Default::default()
         };
         let err = super::read_fwf_str("x\n1\n", &opts).expect_err("must reject");
-        match err {
-            super::IoError::Fwf(message) => {
-                assert!(message.contains("only one of"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, super::IoError::Fwf(message) if message.contains("only one of")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
-    fn read_fwf_rejects_missing_specs_pending_infer_23n8u() {
+    fn read_fwf_infers_colspecs_when_specs_are_omitted_htdmp() {
         let opts = super::FwfReadOptions::default();
-        let err = super::read_fwf_str("a b\n1 2\n", &opts).expect_err("must reject infer");
-        match err {
-            super::IoError::Fwf(message) => {
-                assert!(message.contains("infer"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let frame = super::read_fwf_str("a b\n1 2\n3 4\n", &opts).expect("infer fwf specs");
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("b").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn read_fwf_infers_aligned_wide_colspecs_htdmp() {
+        let input = "name    age   active\nalice   30    true\nbob     25    false\n";
+        let opts = super::FwfReadOptions {
+            true_values: vec!["true".into()],
+            false_values: vec!["false".into()],
+            ..Default::default()
+        };
+        let frame = super::read_fwf_str(input, &opts).expect("infer aligned fwf specs");
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".into())
+        );
+        assert_eq!(frame.column("age").unwrap().values()[1], Scalar::Int64(25));
+        assert_eq!(
+            frame.column("active").unwrap().values()[1],
+            Scalar::Bool(false)
+        );
+    }
+
+    #[test]
+    fn read_fwf_infer_honors_skiprows_and_skipfooter_htdmp() {
+        let input = "ignored wide banner\nx y\n1 2\nfooter text ignored\n";
+        let opts = super::FwfReadOptions {
+            skiprows: 1,
+            skipfooter: 1,
+            ..Default::default()
+        };
+        let frame = super::read_fwf_str(input, &opts).expect("infer after skipping");
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("y").unwrap().values()[0], Scalar::Int64(2));
     }
 
     // ── Deferred reader surfaces 2yy4d ─────────────────────────────────
@@ -12403,25 +12492,21 @@ mod tests {
     #[test]
     fn read_clipboard_rejects_with_deferred_marker_2yy4d() {
         let err = super::read_clipboard().expect_err("must reject");
-        match err {
-            super::IoError::Deferred(message) => {
-                assert!(message.contains("read_clipboard"));
-                assert!(message.contains("headless"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, super::IoError::Deferred(message)
+                if message.contains("read_clipboard") && message.contains("headless")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
     fn read_gbq_rejects_with_deferred_marker_2yy4d() {
         let err = super::read_gbq("SELECT 1", Some("proj")).expect_err("must reject");
-        match err {
-            super::IoError::Deferred(message) => {
-                assert!(message.contains("read_gbq"));
-                assert!(message.contains("BigQuery"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, super::IoError::Deferred(message)
+                if message.contains("read_gbq") && message.contains("BigQuery")),
+            "unexpected error: {err:?}"
+        );
         let no_project_err = super::read_gbq("SELECT 1", None).expect_err("must reject");
         assert!(matches!(no_project_err, super::IoError::Deferred(_)));
     }
@@ -12455,26 +12540,22 @@ mod tests {
     fn read_sas_rejects_with_deferred_marker_2yy4d() {
         let path = std::path::Path::new("/nonexistent.sas7bdat");
         let err = super::read_sas(path).expect_err("must reject");
-        match err {
-            super::IoError::Deferred(message) => {
-                assert!(message.contains("read_sas"));
-                assert!(message.contains("sas7bdat"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, super::IoError::Deferred(message)
+                if message.contains("read_sas") && message.contains("sas7bdat")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
     fn read_spss_rejects_with_deferred_marker_2yy4d() {
         let path = std::path::Path::new("/nonexistent.sav");
         let err = super::read_spss(path).expect_err("must reject");
-        match err {
-            super::IoError::Deferred(message) => {
-                assert!(message.contains("read_spss"));
-                assert!(message.contains(".sav"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, super::IoError::Deferred(message)
+                if message.contains("read_spss") && message.contains(".sav")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

@@ -19,6 +19,17 @@ def _series_payload(values, index):
     }
 
 
+def _utf8_series_payload(values):
+    return {
+        "index": [{"kind": "int64", "value": i} for i, _ in enumerate(values)],
+        "values": [{"kind": "utf8", "value": value} for value in values],
+    }
+
+
+def _expected_values(response):
+    return [item["value"] for item in response["expected_series"]["values"]]
+
+
 def test_series_add_produces_index_aligned_sum(oracle, pd):
     payload = {
         "operation": "series_add",
@@ -50,6 +61,28 @@ def test_series_nunique_counts_distinct(oracle, pd):
     response = oracle.dispatch(pd, payload)
     assert response["expected_scalar"]["kind"] == "int64"
     assert response["expected_scalar"]["value"] == 3
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("series_str_swapcase", ["aBc", "HELLO", "123", " ", ""]),
+        ("series_str_isdigit", [False, False, True, False, False]),
+        ("series_str_isalpha", [True, True, False, False, False]),
+        ("series_str_isalnum", [True, True, True, False, False]),
+        ("series_str_isspace", [False, False, False, True, False]),
+        ("series_str_islower", [False, True, False, False, False]),
+        ("series_str_isupper", [False, False, False, False, False]),
+        ("series_str_isnumeric", [False, False, True, False, False]),
+    ],
+)
+def test_series_str_unary_dispatches_to_pandas(oracle, pd, operation, expected):
+    payload = {
+        "operation": operation,
+        "left": _utf8_series_payload(["AbC", "hello", "123", " ", ""]),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert _expected_values(response) == expected
 
 
 def test_dispatch_rejects_unknown_operation(oracle, pd):

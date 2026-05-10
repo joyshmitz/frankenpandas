@@ -3325,8 +3325,8 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _str_unary_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[str, Any]:
-    # Per br-frankenpandas-637c19: thin shared dispatcher for unary str.* ops
-    # that take no parameters (lower, upper, strip, len, capitalize, title).
+    # Thin shared dispatcher for unary str.* ops that take no parameters
+    # (case transforms, predicates, len, and whitespace trimming).
     left = payload.get("left")
     if left is None:
         raise OracleError(f"{op_name} requires left payload")
@@ -3362,12 +3362,44 @@ def op_series_str_title(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_title", "title")
 
 
+def op_series_str_swapcase(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_swapcase", "swapcase")
+
+
 def op_series_str_lstrip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_lstrip", "lstrip")
 
 
 def op_series_str_rstrip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_rstrip", "rstrip")
+
+
+def op_series_str_isdigit(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isdigit", "isdigit")
+
+
+def op_series_str_isalpha(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isalpha", "isalpha")
+
+
+def op_series_str_isalnum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isalnum", "isalnum")
+
+
+def op_series_str_isspace(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isspace", "isspace")
+
+
+def op_series_str_islower(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_islower", "islower")
+
+
+def op_series_str_isupper(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isupper", "isupper")
+
+
+def op_series_str_isnumeric(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isnumeric", "isnumeric")
 
 
 def op_series_str_slice(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -5865,10 +5897,26 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_capitalize(pd, payload)
     if op in {"series_str_title", "series_str_title_default"}:
         return op_series_str_title(pd, payload)
+    if op in {"series_str_swapcase", "series_str_swapcase_default"}:
+        return op_series_str_swapcase(pd, payload)
     if op in {"series_str_lstrip", "series_str_lstrip_default"}:
         return op_series_str_lstrip(pd, payload)
     if op in {"series_str_rstrip", "series_str_rstrip_default"}:
         return op_series_str_rstrip(pd, payload)
+    if op in {"series_str_isdigit", "series_str_isdigit_default"}:
+        return op_series_str_isdigit(pd, payload)
+    if op in {"series_str_isalpha", "series_str_isalpha_default"}:
+        return op_series_str_isalpha(pd, payload)
+    if op in {"series_str_isalnum", "series_str_isalnum_default"}:
+        return op_series_str_isalnum(pd, payload)
+    if op in {"series_str_isspace", "series_str_isspace_default"}:
+        return op_series_str_isspace(pd, payload)
+    if op in {"series_str_islower", "series_str_islower_default"}:
+        return op_series_str_islower(pd, payload)
+    if op in {"series_str_isupper", "series_str_isupper_default"}:
+        return op_series_str_isupper(pd, payload)
+    if op in {"series_str_isnumeric", "series_str_isnumeric_default"}:
+        return op_series_str_isnumeric(pd, payload)
     if op in {"series_str_slice", "series_str_slice_default"}:
         return op_series_str_slice(pd, payload)
     if op in {"series_str_repeat", "series_str_repeat_default"}:

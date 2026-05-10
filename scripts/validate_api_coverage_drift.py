@@ -57,6 +57,10 @@ IO_DATAFRAME_METHODS = {
     "to_xml",
 }
 DATAFRAME_IO_IMPL_KEY = "crates/fp-io/src/lib.rs::DataFrameIoExt for DataFrame"
+DATAFRAME_EXPR_IMPL_KEY = "crates/fp-expr/src/lib.rs::DataFrameExprExt for DataFrame"
+DATAFRAME_JOIN_IMPL_KEY = "crates/fp-join/src/lib.rs::DataFrameMergeExt for DataFrame"
+DATAFRAME_EXPR_METHODS = {"eval", "query"}
+DATAFRAME_JOIN_METHODS = {"join", "merge"}
 STATIC_PANDAS_READERS = {
     "read_clipboard",
     "read_csv",
@@ -310,6 +314,10 @@ def trait_impl_start_re(trait_name: str, type_name: str) -> re.Pattern[str]:
     )
 
 
+def trait_start_re(trait_name: str) -> re.Pattern[str]:
+    return re.compile(rf"^\s*pub\s+trait\s+{re.escape(trait_name)}\s*\{{")
+
+
 def extract_impl_methods(path: Path, type_name: str, public_only: bool = True) -> set[str]:
     lines = path.read_text(encoding="utf-8").splitlines()
     start_re = impl_start_re(type_name)
@@ -355,6 +363,28 @@ def extract_trait_impl_methods(path: Path, trait_name: str, type_name: str) -> s
     return methods
 
 
+def extract_trait_methods(path: Path, trait_name: str) -> set[str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start_re = trait_start_re(trait_name)
+    methods: set[str] = set()
+    in_trait = False
+    for line in lines:
+        if not in_trait:
+            if start_re.search(line):
+                in_trait = True
+                match = FN_RE.search(line)
+                if match:
+                    methods.add(normalize_rust_identifier(match.group(1)))
+            continue
+        if line == "}":
+            in_trait = False
+            continue
+        match = FN_RE.search(line)
+        if match:
+            methods.add(normalize_rust_identifier(match.group(1)))
+    return methods
+
+
 def extract_top_level_pub_functions(path: Path) -> set[str]:
     methods: set[str] = set()
     in_block_comment = False
@@ -380,10 +410,18 @@ def collect_rust_methods(spec: SurfaceSpec) -> tuple[set[str], dict[str, list[st
         all_methods.update(methods)
         by_impl[f"{impl.path}::{impl.type_name}"] = sorted(methods)
     if spec.name == "DataFrame":
-        io_ext_methods = dataframe_io_ext_pandas_methods()
-        all_methods.update(io_ext_methods)
-        by_impl[DATAFRAME_IO_IMPL_KEY] = sorted(io_ext_methods)
+        for key, methods in dataframe_extension_pandas_methods().items():
+            all_methods.update(methods)
+            by_impl[key] = sorted(methods)
     return all_methods, by_impl
+
+
+def dataframe_extension_pandas_methods() -> dict[str, set[str]]:
+    return {
+        DATAFRAME_IO_IMPL_KEY: dataframe_io_ext_methods() & IO_DATAFRAME_METHODS,
+        DATAFRAME_EXPR_IMPL_KEY: dataframe_expr_ext_methods() & DATAFRAME_EXPR_METHODS,
+        DATAFRAME_JOIN_IMPL_KEY: dataframe_join_ext_methods() & DATAFRAME_JOIN_METHODS,
+    }
 
 
 def dataframe_io_ext_methods() -> set[str]:
@@ -391,8 +429,24 @@ def dataframe_io_ext_methods() -> set[str]:
     return extract_trait_impl_methods(io_path, "DataFrameIoExt", "DataFrame")
 
 
-def dataframe_io_ext_pandas_methods() -> set[str]:
-    return dataframe_io_ext_methods() & IO_DATAFRAME_METHODS
+def dataframe_expr_ext_methods() -> set[str]:
+    expr_path = REPO_ROOT / "crates/fp-expr/src/lib.rs"
+    impl_methods = extract_trait_impl_methods(
+        expr_path, "DataFrameExprExt", "fp_frame::DataFrame"
+    )
+    if not impl_methods:
+        return set()
+    return impl_methods | extract_trait_methods(expr_path, "DataFrameExprExt")
+
+
+def dataframe_join_ext_methods() -> set[str]:
+    join_path = REPO_ROOT / "crates/fp-join/src/lib.rs"
+    impl_methods = extract_trait_impl_methods(
+        join_path, "DataFrameMergeExt", "fp_frame::DataFrame"
+    )
+    if not impl_methods:
+        return set()
+    return impl_methods | extract_trait_methods(join_path, "DataFrameMergeExt")
 
 
 def collect_io_rust_methods() -> tuple[set[str], dict[str, list[str]]]:

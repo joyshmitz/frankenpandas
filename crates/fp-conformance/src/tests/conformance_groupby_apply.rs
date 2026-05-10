@@ -1,9 +1,6 @@
 //! Live pandas shape contracts for `DataFrameGroupBy.apply` (frankenpandas-0kx7).
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -117,7 +114,7 @@ cases = {
 print(json.dumps({name: encode(result) for name, result in cases.items()}, separators=(",", ":")))
 "#;
 
-    let mut child = Command::new(&config.python_bin)
+    let child = Command::new(&config.python_bin)
         .arg("-c")
         .arg(script)
         .arg(&config.oracle_root)
@@ -126,20 +123,11 @@ print(json.dumps({name: encode(result) for name, result in cases.items()}, separ
         } else {
             "0"
         })
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("spawn pandas GroupBy.apply oracle failed: {err}"))?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "pandas GroupBy.apply oracle stdin unavailable".to_owned())?;
-    stdin
-        .write_all(b"")
-        .map_err(|err| format!("write pandas GroupBy.apply oracle payload failed: {err}"))?;
-    drop(stdin);
 
     let output = child
         .wait_with_output()
@@ -157,10 +145,9 @@ print(json.dumps({name: encode(result) for name, result in cases.items()}, separ
 }
 
 #[test]
-fn conformance_groupby_apply_live_shape_contracts() {
-    let Some(actual) = pandas_groupby_apply_shapes_or_skip().expect("pandas groupby apply oracle")
-    else {
-        return;
+fn conformance_groupby_apply_live_shape_contracts() -> Result<(), String> {
+    let Some(actual) = pandas_groupby_apply_shapes_or_skip()? else {
+        return Ok(());
     };
 
     let expected = json!({
@@ -233,4 +220,5 @@ fn conformance_groupby_apply_live_shape_contracts() {
     });
 
     assert_eq!(actual, expected);
+    Ok(())
 }

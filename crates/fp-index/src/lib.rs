@@ -2486,6 +2486,32 @@ impl DatetimeIndex {
         i64::try_from(total / count).ok()
     }
 
+    /// Sample standard deviation of non-NAT labels in nanoseconds,
+    /// matching `pd.DatetimeIndex.std(ddof=1)`. Returns `None` for
+    /// fewer than two non-NAT entries.
+    #[must_use]
+    pub fn std(&self) -> Option<i64> {
+        let nanos: Vec<f64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => Some(*n as f64),
+                _ => None,
+            })
+            .collect();
+        if nanos.len() < 2 {
+            return None;
+        }
+        let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+        let var = nanos
+            .iter()
+            .map(|n| (n - mean).powi(2))
+            .sum::<f64>()
+            / (nanos.len() as f64 - 1.0);
+        Some(var.sqrt() as i64)
+    }
+
     /// Median non-NAT label, matching `pd.DatetimeIndex.median()`. Empty
     /// returns None. For an even-length non-NAT subset, returns the
     /// average of the two middle values.
@@ -4323,6 +4349,32 @@ impl TimedeltaIndex {
             return None;
         }
         i64::try_from(total / count).ok()
+    }
+
+    /// Sample standard deviation of non-NAT labels in nanoseconds,
+    /// matching `pd.TimedeltaIndex.std(ddof=1)`. Returns `None` for
+    /// fewer than two non-NAT entries.
+    #[must_use]
+    pub fn std(&self) -> Option<i64> {
+        let nanos: Vec<f64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => Some(*n as f64),
+                _ => None,
+            })
+            .collect();
+        if nanos.len() < 2 {
+            return None;
+        }
+        let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+        let var = nanos
+            .iter()
+            .map(|n| (n - mean).powi(2))
+            .sum::<f64>()
+            / (nanos.len() as f64 - 1.0);
+        Some(var.sqrt() as i64)
     }
 
     /// Median non-NAT label, matching `pd.TimedeltaIndex.median()`.
@@ -15562,6 +15614,29 @@ mod tests {
 
         let sym = left.symmetric_difference(&right);
         assert_eq!(sym.values(), vec![Some(100), Some(400)]);
+    }
+
+    #[test]
+    fn datetime_timedelta_std_match_pandas_3hb3t() {
+        // [10, 20, 30] sample std with ddof=1: sqrt((100 + 0 + 100) / 2) = 10.
+        let td = super::TimedeltaIndex::new(vec![10_i64, 20, 30]);
+        assert_eq!(td.std(), Some(10));
+
+        // [10, 30] sample std: sqrt(((10-20)^2 + (30-20)^2) / 1) = sqrt(200).
+        let td2 = super::TimedeltaIndex::new(vec![10_i64, 30]);
+        let expected = 200f64.sqrt() as i64;
+        assert_eq!(td2.std(), Some(expected));
+
+        // Single element / NAT-only: not enough data.
+        let one = super::TimedeltaIndex::new(vec![5_i64]);
+        assert_eq!(one.std(), None);
+        let nat = super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT]);
+        assert_eq!(nat.std(), None);
+
+        // DatetimeIndex spot check.
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![10 * NS, 20 * NS, 30 * NS]);
+        assert!(dt.std().is_some());
     }
 
     #[test]

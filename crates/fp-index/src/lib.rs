@@ -7602,6 +7602,70 @@ impl CategoricalIndex {
             })
     }
 
+    /// Position of the maximum label, matching
+    /// `pd.CategoricalIndex.argmax()`. ordered=true uses category
+    /// position; unordered uses lexicographic ordering. Empty raises
+    /// pandas-style "attempt to get argmax of an empty sequence".
+    pub fn argmax(&self) -> Result<usize, IndexError> {
+        if self.labels.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmax of an empty sequence".to_owned(),
+            ));
+        }
+        let mut best = 0;
+        if self.ordered {
+            let position = |label: &String| {
+                self.categories
+                    .iter()
+                    .position(|cat| cat == label)
+                    .unwrap_or(0)
+            };
+            for i in 1..self.labels.len() {
+                if position(&self.labels[i]) > position(&self.labels[best]) {
+                    best = i;
+                }
+            }
+        } else {
+            for i in 1..self.labels.len() {
+                if self.labels[i] > self.labels[best] {
+                    best = i;
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Position of the minimum label, matching
+    /// `pd.CategoricalIndex.argmin()`. Same ordering rules as argmax.
+    pub fn argmin(&self) -> Result<usize, IndexError> {
+        if self.labels.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmin of an empty sequence".to_owned(),
+            ));
+        }
+        let mut best = 0;
+        if self.ordered {
+            let position = |label: &String| {
+                self.categories
+                    .iter()
+                    .position(|cat| cat == label)
+                    .unwrap_or(usize::MAX)
+            };
+            for i in 1..self.labels.len() {
+                if position(&self.labels[i]) < position(&self.labels[best]) {
+                    best = i;
+                }
+            }
+        } else {
+            for i in 1..self.labels.len() {
+                if self.labels[i] < self.labels[best] {
+                    best = i;
+                }
+            }
+        }
+        Ok(best)
+    }
+
     /// Smallest label in category order when ordered, lexicographic when
     /// unordered, matching `pd.CategoricalIndex.min()`. Empty returns
     /// `None`.
@@ -16486,6 +16550,22 @@ mod tests {
             cat.symmetric_difference(&other).labels(),
             vec!["a".to_owned(), "d".to_owned()].as_slice()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn categorical_index_argmax_argmin_match_pandas_d46wi() -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["b".to_owned(), "a".to_owned(), "c".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            true,
+        )?;
+        assert_eq!(cat.argmax()?, 2);
+        assert_eq!(cat.argmin()?, 1);
+
+        let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
+        assert!(empty.argmax().is_err());
+        assert!(empty.argmin().is_err());
         Ok(())
     }
 

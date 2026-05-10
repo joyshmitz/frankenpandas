@@ -56,6 +56,7 @@ IO_DATAFRAME_METHODS = {
     "to_string",
     "to_xml",
 }
+DATAFRAME_IO_IMPL_KEY = "crates/fp-io/src/lib.rs::DataFrameIoExt for DataFrame"
 STATIC_PANDAS_READERS = {
     "read_clipboard",
     "read_csv",
@@ -378,7 +379,20 @@ def collect_rust_methods(spec: SurfaceSpec) -> tuple[set[str], dict[str, list[st
         methods = extract_impl_methods(path, impl.type_name)
         all_methods.update(methods)
         by_impl[f"{impl.path}::{impl.type_name}"] = sorted(methods)
+    if spec.name == "DataFrame":
+        io_ext_methods = dataframe_io_ext_pandas_methods()
+        all_methods.update(io_ext_methods)
+        by_impl[DATAFRAME_IO_IMPL_KEY] = sorted(io_ext_methods)
     return all_methods, by_impl
+
+
+def dataframe_io_ext_methods() -> set[str]:
+    io_path = REPO_ROOT / "crates/fp-io/src/lib.rs"
+    return extract_trait_impl_methods(io_path, "DataFrameIoExt", "DataFrame")
+
+
+def dataframe_io_ext_pandas_methods() -> set[str]:
+    return dataframe_io_ext_methods() & IO_DATAFRAME_METHODS
 
 
 def collect_io_rust_methods() -> tuple[set[str], dict[str, list[str]]]:
@@ -386,7 +400,7 @@ def collect_io_rust_methods() -> tuple[set[str], dict[str, list[str]]]:
     io_path = REPO_ROOT / "crates/fp-io/src/lib.rs"
     frame_methods = extract_impl_methods(frame_path, "DataFrame")
     top_level = extract_top_level_pub_functions(io_path)
-    trait_impl = extract_trait_impl_methods(io_path, "DataFrameIoExt", "DataFrame")
+    trait_impl = dataframe_io_ext_methods()
     io_methods = {
         method
         for method in frame_methods | top_level | trait_impl
@@ -398,7 +412,7 @@ def collect_io_rust_methods() -> tuple[set[str], dict[str, list[str]]]:
             method for method in frame_methods if method.startswith(("to_", "from_"))
         ),
         "crates/fp-io/src/lib.rs::top_level": sorted(top_level),
-        "crates/fp-io/src/lib.rs::DataFrameIoExt for DataFrame": sorted(trait_impl),
+        DATAFRAME_IO_IMPL_KEY: sorted(trait_impl),
     }
 
 

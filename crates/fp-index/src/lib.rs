@@ -1933,6 +1933,48 @@ fn datetime_from_nanos(nanos: i64) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::from_timestamp(secs, subsec_nanos)
 }
 
+fn datetime_to_period_error(message: impl Into<String>) -> IndexError {
+    IndexError::InvalidArgument(format!(
+        "DatetimeIndex to_period failed: {}",
+        message.into()
+    ))
+}
+
+fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexError> {
+    let dt = datetime_from_nanos(nanos).ok_or_else(|| {
+        datetime_to_period_error(format!("invalid or NaT datetime nanos {nanos}"))
+    })?;
+    let date = dt.date_naive();
+    let year_offset = i64::from(date.year()) - 1970;
+    match freq {
+        PeriodFreq::Annual => Ok(year_offset),
+        PeriodFreq::Quarterly => year_offset
+            .checked_mul(4)
+            .and_then(|base| base.checked_add(i64::from((date.month() - 1) / 3)))
+            .ok_or_else(|| datetime_to_period_error("quarterly ordinal overflow")),
+        PeriodFreq::Monthly => year_offset
+            .checked_mul(12)
+            .and_then(|base| base.checked_add(i64::from(date.month() - 1)))
+            .ok_or_else(|| datetime_to_period_error("monthly ordinal overflow")),
+        PeriodFreq::Daily => {
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .ok_or_else(|| datetime_to_period_error("invalid epoch boundary"))?;
+            Ok(date.signed_duration_since(epoch).num_days())
+        }
+        PeriodFreq::Hourly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_HOUR)),
+        PeriodFreq::Minutely => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MIN)),
+        PeriodFreq::Secondly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_SEC)),
+        PeriodFreq::Weekly | PeriodFreq::Business => Err(datetime_to_period_error(format!(
+            "frequency '{freq}' is not supported yet"
+        ))),
+        _ => Err(datetime_to_period_error("unsupported period frequency")),
+    }
+}
+
+fn datetime_nanos_to_period(nanos: i64, freq: PeriodFreq) -> Result<Period, IndexError> {
+    datetime_period_ordinal(nanos, freq).map(|ordinal| Period::new(ordinal, freq))
+}
+
 fn map_datetime_labels<T, F>(labels: &[IndexLabel], func: F) -> Vec<Option<T>>
 where
     F: Fn(chrono::DateTime<chrono::Utc>) -> T,
@@ -2589,6 +2631,31 @@ impl DatetimeIndex {
                 IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => i64::MIN,
             })
             .collect()
+    }
+
+    /// Convert datetime labels to period ordinals at the requested frequency,
+    /// matching `pd.DatetimeIndex.to_period(freq)` for supported fixed
+    /// calendar frequencies.
+    pub fn to_period(&self, freq: &str) -> Result<PeriodIndex, IndexError> {
+        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            IndexError::InvalidArgument(format!("to_period: unsupported frequency '{freq}'"))
+        })?;
+        let periods = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => datetime_nanos_to_period(*nanos, period_freq),
+                other => Err(IndexError::InvalidArgument(format!(
+                    "to_period requires DatetimeIndex labels, got {other:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = PeriodIndex::new(periods);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
     }
 
     /// Format each timestamp using a chrono format string, matching
@@ -17565,6 +17632,100 @@ mod tests {
             super::IndexError::InvalidArgument(message)
                 if message.contains("Categorical has no 'diff' method")
         ));
+    }
+
+    #[test]
+    fn datetime_index_to_period_matches_pandas_ordinals_002sq()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn ns(value: &str) -> Result<i64, super::DateRangeError> {
+            super::parse_datetime_to_nanos(value)
+        }
+
+        use fp_types::{Period, PeriodFreq};
+
+        let dt = super::DatetimeIndex::new(vec![
+            ns("1969-12-31 23:59:59")?,
+            ns("1970-01-01 00:00:00")?,
+            ns("2024-02-29 12:34:56")?,
+        ])
+        .set_name("ts");
+
+        assert_eq!(
+            dt.to_period("Y")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Annual),
+                Period::new(0, PeriodFreq::Annual),
+                Period::new(54, PeriodFreq::Annual),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("Q")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Quarterly),
+                Period::new(0, PeriodFreq::Quarterly),
+                Period::new(216, PeriodFreq::Quarterly),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("M")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Monthly),
+                Period::new(0, PeriodFreq::Monthly),
+                Period::new(649, PeriodFreq::Monthly),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("D")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Daily),
+                Period::new(0, PeriodFreq::Daily),
+                Period::new(19_782, PeriodFreq::Daily),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("H")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Hourly),
+                Period::new(0, PeriodFreq::Hourly),
+                Period::new(474_780, PeriodFreq::Hourly),
+            ]
+        );
+        let minutely = dt.to_period("min")?;
+        assert_eq!(
+            minutely.values(),
+            &[
+                Period::new(-1, PeriodFreq::Minutely),
+                Period::new(0, PeriodFreq::Minutely),
+                Period::new(28_486_834, PeriodFreq::Minutely),
+            ]
+        );
+        assert_eq!(minutely.name(), Some("ts"));
+        assert_eq!(
+            dt.to_period("S")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Secondly),
+                Period::new(0, PeriodFreq::Secondly),
+                Period::new(1_709_210_096, PeriodFreq::Secondly),
+            ]
+        );
+
+        assert!(matches!(
+            super::DatetimeIndex::new(vec![i64::MIN]).to_period("M"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("invalid or NaT datetime nanos")
+        ));
+        assert!(matches!(
+            dt.to_period("W"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("frequency 'W' is not supported yet")
+        ));
+        assert!(matches!(
+            dt.to_period("fortnight"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("unsupported frequency")
+        ));
+
+        Ok(())
     }
 
     #[test]

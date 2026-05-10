@@ -74,6 +74,7 @@
 //! - **fp-join** consumes alignment plans for merge-style joins.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fmt,
     sync::OnceLock,
@@ -1784,7 +1785,7 @@ impl Index {
     /// String accessor for Utf8 labels, matching `pd.Index.str`.
     #[must_use]
     pub fn r#str(&self) -> IndexStringAccessor<'_> {
-        IndexStringAccessor { index: self }
+        IndexStringAccessor::borrowed(self)
     }
 
     /// Group label positions by label value, matching `pd.Index.groupby`.
@@ -1874,12 +1875,24 @@ impl Index {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IndexStringAccessor<'a> {
-    index: &'a Index,
+    index: Cow<'a, Index>,
 }
 
-impl IndexStringAccessor<'_> {
+impl<'a> IndexStringAccessor<'a> {
+    fn borrowed(index: &'a Index) -> Self {
+        Self {
+            index: Cow::Borrowed(index),
+        }
+    }
+
+    fn owned(index: Index) -> Self {
+        Self {
+            index: Cow::Owned(index),
+        }
+    }
+
     fn map_utf8<T>(&self, func: impl Fn(&str) -> T) -> Vec<Option<T>> {
         self.index
             .labels()
@@ -3667,6 +3680,12 @@ impl DatetimeIndex {
         self.index.clone()
     }
 
+    /// String accessor for the flat datetime labels.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor::owned(self.to_flat_index())
+    }
+
     /// One-column row materialization, matching `pd.DatetimeIndex.to_frame(index=False)`.
     #[must_use]
     pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
@@ -4897,6 +4916,12 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
         self.index.clone()
+    }
+
+    /// String accessor for the flat timedelta labels.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor::owned(self.to_flat_index())
     }
 
     /// One-column row materialization, matching `pd.TimedeltaIndex.to_frame(index=False)`.
@@ -6542,6 +6567,12 @@ impl PeriodIndex {
         self.to_index()
     }
 
+    /// String accessor for rendered period labels.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor::owned(self.to_flat_index())
+    }
+
     /// One-column row materialization, matching `pd.PeriodIndex.to_frame(index=False)`.
     #[must_use]
     pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
@@ -7362,6 +7393,12 @@ impl RangeIndex {
             idx = idx.set_name(name);
         }
         idx
+    }
+
+    /// String accessor for the flat integer labels.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor::owned(self.to_flat_index())
     }
 
     /// One-column row materialization, matching `pd.RangeIndex.to_frame(index=False)`.
@@ -8381,6 +8418,12 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
         self.to_index()
+    }
+
+    /// String accessor for categorical string labels.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor::owned(self.to_flat_index())
     }
 
     /// One-column row materialization, matching `pd.CategoricalIndex.to_frame(index=False)`.
@@ -12430,6 +12473,46 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn typed_index_str_accessors_forward_flat_labels_e7ms9() -> Result<(), super::IndexError> {
+        let flat = Index::new(vec!["Alpha".into(), 1_i64.into(), "".into()]);
+        assert_eq!(
+            flat.r#str().lower(),
+            vec![Some("alpha".to_owned()), None, Some(String::new())]
+        );
+
+        let range = RangeIndex::new(1, 4, 1)?;
+        assert_eq!(range.r#str().len(), vec![None, None, None]);
+
+        let dt = DatetimeIndex::new(vec![1_704_067_200_000_000_000]);
+        assert_eq!(dt.r#str().upper(), vec![None]);
+
+        let td = TimedeltaIndex::new(vec![90_061_000_000_000]);
+        assert_eq!(td.r#str().contains("day"), vec![None]);
+
+        let period = PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 2);
+        let expected_period_lower: Vec<Option<String>> = period
+            .format()
+            .into_iter()
+            .map(|label| Some(label.to_lowercase()))
+            .collect();
+        assert_eq!(period.r#str().lower(), expected_period_lower);
+
+        let categorical = CategoricalIndex::from_values(
+            vec!["Low".to_owned(), "HIGH".to_owned(), String::new()],
+            false,
+        );
+        assert_eq!(
+            categorical.r#str().lower(),
+            vec![
+                Some("low".to_owned()),
+                Some("high".to_owned()),
+                Some(String::new())
+            ]
+        );
+        Ok(())
     }
 
     #[test]

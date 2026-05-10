@@ -26466,6 +26466,13 @@ impl DataFrame {
         })
     }
 
+    /// Reindex this DataFrame to match another DataFrame's row index.
+    ///
+    /// Matches `pd.DataFrame.reindex_like(other)` for row-index alignment.
+    pub fn reindex_like(&self, other: &Self) -> Result<Self, FrameError> {
+        self.reindex(other.index.labels().to_vec())
+    }
+
     /// Conform DataFrame to new index or columns.
     ///
     /// Matches `pd.DataFrame.reindex(labels, axis=...)`.
@@ -47482,6 +47489,60 @@ mod tests {
         .unwrap();
 
         let err = df.reindex(vec![1_i64.into()]).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index")
+        ));
+    }
+
+    #[test]
+    fn dataframe_reindex_like_matches_other_row_index() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let other = DataFrame::from_dict_with_index(
+            vec![(
+                "marker",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+            vec![2_i64.into(), 0_i64.into(), 5_i64.into()],
+        )
+        .unwrap();
+
+        let reindexed = df.reindex_like(&other).unwrap();
+
+        assert_eq!(reindexed.index().labels(), other.index().labels());
+        assert_eq!(reindexed.column_names(), vec!["val"]);
+        assert_eq!(reindexed.columns["val"].values()[0], Scalar::Float64(30.0));
+        assert_eq!(reindexed.columns["val"].values()[1], Scalar::Float64(10.0));
+        assert!(reindexed.columns["val"].values()[2].is_missing());
+    }
+
+    #[test]
+    fn dataframe_reindex_like_duplicate_index_rejected() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+            vec![1_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+        let other = DataFrame::from_dict_with_index(
+            vec![("marker", vec![Scalar::Int64(1)])],
+            vec![1_i64.into()],
+        )
+        .unwrap();
+
+        let err = df.reindex_like(&other).unwrap_err();
+
         assert!(matches!(
             err,
             FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index")

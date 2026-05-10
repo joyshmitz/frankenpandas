@@ -1953,6 +1953,52 @@ fn datetime_to_period_error(message: impl Into<String>) -> IndexError {
     ))
 }
 
+fn date_to_weekly_period_ordinal(date: chrono::NaiveDate) -> Result<i64, IndexError> {
+    let base = period_epoch_date(1969, 12, 22)?;
+    Ok(date.signed_duration_since(base).num_days().div_euclid(7))
+}
+
+fn business_period_anchor_date(date: chrono::NaiveDate) -> Result<chrono::NaiveDate, IndexError> {
+    match date.weekday().num_days_from_monday() {
+        5 => period_add_days(date, 2),
+        6 => period_add_days(date, 1),
+        _ => Ok(date),
+    }
+}
+
+fn date_to_business_period_ordinal(date: chrono::NaiveDate) -> Result<i64, IndexError> {
+    let adjusted = business_period_anchor_date(date)?;
+    let days = adjusted
+        .signed_duration_since(period_epoch_date(1970, 1, 1)?)
+        .num_days();
+    let rem_ordinal = match days.rem_euclid(7) {
+        0 => 0,
+        1 => 1,
+        4 => 2,
+        5 => 3,
+        6 => 4,
+        _ => {
+            return Err(datetime_to_period_error(
+                "business period anchor did not land on a business day",
+            ));
+        }
+    };
+    days.div_euclid(7)
+        .checked_mul(5)
+        .and_then(|base| base.checked_add(rem_ordinal))
+        .ok_or_else(|| datetime_to_period_error("business ordinal overflow"))
+}
+
+fn business_period_end_anchor_date(
+    date: chrono::NaiveDate,
+) -> Result<chrono::NaiveDate, IndexError> {
+    match date.weekday().num_days_from_monday() {
+        5 => period_add_days(date, -1),
+        6 => period_add_days(date, -2),
+        _ => Ok(date),
+    }
+}
+
 fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexError> {
     let dt = datetime_from_nanos(nanos).ok_or_else(|| {
         datetime_to_period_error(format!("invalid or NaT datetime nanos {nanos}"))
@@ -1977,11 +2023,24 @@ fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexErr
         PeriodFreq::Hourly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_HOUR)),
         PeriodFreq::Minutely => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MIN)),
         PeriodFreq::Secondly => Ok(nanos.div_euclid(Timedelta::NANOS_PER_SEC)),
-        PeriodFreq::Weekly | PeriodFreq::Business => Err(datetime_to_period_error(format!(
-            "frequency '{freq}' is not supported yet"
-        ))),
+        PeriodFreq::Weekly => date_to_weekly_period_ordinal(date),
+        PeriodFreq::Business => date_to_business_period_ordinal(date),
         _ => Err(datetime_to_period_error("unsupported period frequency")),
     }
+}
+
+fn datetime_period_ordinal_at_boundary(
+    nanos: i64,
+    freq: PeriodFreq,
+    boundary: PeriodBoundary,
+) -> Result<i64, IndexError> {
+    if freq == PeriodFreq::Business && matches!(boundary, PeriodBoundary::End) {
+        let dt = datetime_from_nanos(nanos).ok_or_else(|| {
+            datetime_to_period_error(format!("invalid or NaT datetime nanos {nanos}"))
+        })?;
+        return date_to_business_period_ordinal(business_period_end_anchor_date(dt.date_naive())?);
+    }
+    datetime_period_ordinal(nanos, freq)
 }
 
 fn datetime_nanos_to_period(nanos: i64, freq: PeriodFreq) -> Result<Period, IndexError> {
@@ -6143,7 +6202,8 @@ impl PeriodIndex {
             .copied()
             .map(|period| {
                 let nanos = period_boundary_nanos(period, boundary)?;
-                datetime_nanos_to_period(nanos, target_freq)
+                datetime_period_ordinal_at_boundary(nanos, target_freq, boundary)
+                    .map(|ordinal| Period::new(ordinal, target_freq))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
@@ -12715,6 +12775,25 @@ mod tests {
 
         let single_year = [2020];
         let single_month = [1];
+        let weekly = PeriodIndex::from_fields(PeriodFields {
+            month: Some(&single_month),
+            freq: Some(PeriodFreq::Weekly),
+            ..PeriodFields::new(&single_year)
+        })?;
+        assert_eq!(weekly.values(), &[Period::new(2_610, PeriodFreq::Weekly)]);
+
+        let weekend_day = [4];
+        let business = PeriodIndex::from_fields(PeriodFields {
+            month: Some(&single_month),
+            day: Some(&weekend_day),
+            freq: Some(PeriodFreq::Business),
+            ..PeriodFields::new(&single_year)
+        })?;
+        assert_eq!(
+            business.values(),
+            &[Period::new(13_047, PeriodFreq::Business)]
+        );
+
         let days = [2];
         let hours = [3];
         let minutes = [4];
@@ -18075,6 +18154,22 @@ mod tests {
             ]
         );
         assert_eq!(
+            dt.to_period("W")?.values(),
+            &[
+                Period::new(1, PeriodFreq::Weekly),
+                Period::new(1, PeriodFreq::Weekly),
+                Period::new(2_827, PeriodFreq::Weekly),
+            ]
+        );
+        assert_eq!(
+            dt.to_period("B")?.values(),
+            &[
+                Period::new(-1, PeriodFreq::Business),
+                Period::new(0, PeriodFreq::Business),
+                Period::new(14_130, PeriodFreq::Business),
+            ]
+        );
+        assert_eq!(
             dt.to_period("H")?.values(),
             &[
                 Period::new(-1, PeriodFreq::Hourly),
@@ -18105,11 +18200,6 @@ mod tests {
             super::DatetimeIndex::new(vec![i64::MIN]).to_period("M"),
             Err(super::IndexError::InvalidArgument(message))
                 if message.contains("invalid or NaT datetime nanos")
-        ));
-        assert!(matches!(
-            dt.to_period("W"),
-            Err(super::IndexError::InvalidArgument(message))
-                if message.contains("frequency 'W' is not supported yet")
         ));
         assert!(matches!(
             dt.to_period("fortnight"),
@@ -18183,12 +18273,20 @@ mod tests {
                 Period::new(2_678_400, PeriodFreq::Secondly),
             ]
         );
-
-        assert!(matches!(
-            monthly.asfreq("B"),
-            Err(super::IndexError::InvalidArgument(message))
-                if message.contains("frequency 'B' is not supported yet")
-        ));
+        assert_eq!(
+            monthly.asfreq("B")?.values(),
+            &[
+                Period::new(21, PeriodFreq::Business),
+                Period::new(41, PeriodFreq::Business),
+            ]
+        );
+        assert_eq!(
+            monthly.asfreq_with_how("W", "start")?.values(),
+            &[
+                Period::new(1, PeriodFreq::Weekly),
+                Period::new(5, PeriodFreq::Weekly),
+            ]
+        );
         assert!(matches!(
             monthly.asfreq_with_how("D", "middle"),
             Err(super::IndexError::InvalidArgument(message))

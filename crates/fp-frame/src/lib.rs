@@ -18618,10 +18618,10 @@ fn period_index_label(label: &IndexLabel, freq: PeriodFreq) -> Result<IndexLabel
     match label {
         IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => Ok(IndexLabel::Utf8("NaT".into())),
         IndexLabel::Datetime64(nanos) => datetime64_nanos_to_naive(*nanos)
-            .map(|dt| IndexLabel::Utf8(format_period_label(dt, freq))),
+            .and_then(|dt| format_period_label(dt, freq).map(IndexLabel::Utf8)),
         IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(IndexLabel::Utf8("NaT".into())),
         IndexLabel::Utf8(value) => parse_naive_datetime_value(value)
-            .map(|dt| IndexLabel::Utf8(format_period_label(dt, freq))),
+            .and_then(|dt| format_period_label(dt, freq).map(IndexLabel::Utf8)),
         other => Err(FrameError::CompatibilityRejected(format!(
             "to_period requires datetime-like row index labels, got {other:?}"
         ))),
@@ -18636,17 +18636,50 @@ fn datetime64_nanos_to_naive(nanos: i64) -> Result<NaiveDateTime, FrameError> {
         .ok_or_else(|| FrameError::CompatibilityRejected(format!("invalid datetime nanos {nanos}")))
 }
 
-fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> String {
-    match freq {
+fn add_period_label_days(date: NaiveDate, days: i64) -> Result<NaiveDate, FrameError> {
+    let delta = Duration::try_days(days).ok_or_else(|| {
+        FrameError::CompatibilityRejected("to_period date offset overflow".to_owned())
+    })?;
+    date.checked_add_signed(delta)
+        .ok_or_else(|| FrameError::CompatibilityRejected("to_period date overflow".to_owned()))
+}
+
+fn weekly_period_bounds(date: NaiveDate) -> Result<(NaiveDate, NaiveDate), FrameError> {
+    let start = add_period_label_days(date, -i64::from(date.weekday().num_days_from_monday()))?;
+    let end = add_period_label_days(start, 6)?;
+    Ok((start, end))
+}
+
+fn business_period_label_date(date: NaiveDate) -> Result<NaiveDate, FrameError> {
+    match date.weekday().num_days_from_monday() {
+        5 => add_period_label_days(date, 2),
+        6 => add_period_label_days(date, 1),
+        _ => Ok(date),
+    }
+}
+
+fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> Result<String, FrameError> {
+    Ok(match freq {
         PeriodFreq::Annual => dt.format("%Y").to_string(),
         PeriodFreq::Quarterly => format!("{}Q{}", dt.year(), ((dt.month() - 1) / 3) + 1),
         PeriodFreq::Monthly => dt.format("%Y-%m").to_string(),
+        PeriodFreq::Weekly => {
+            let (start, end) = weekly_period_bounds(dt.date())?;
+            format!("{}/{}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+        }
         PeriodFreq::Daily => dt.format("%Y-%m-%d").to_string(),
+        PeriodFreq::Business => business_period_label_date(dt.date())?
+            .format("%Y-%m-%d")
+            .to_string(),
         PeriodFreq::Hourly => dt.format("%Y-%m-%d %H:00").to_string(),
         PeriodFreq::Minutely => dt.format("%Y-%m-%d %H:%M").to_string(),
         PeriodFreq::Secondly => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        _ => unreachable!("checked by DataFrame::to_period"),
-    }
+        _ => {
+            return Err(FrameError::CompatibilityRejected(
+                "to_period frequency is not supported yet".to_owned(),
+            ));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24078,7 +24111,8 @@ impl DataFrame {
     /// Convert a datetime-like row index to period-style labels.
     ///
     /// Matches the row-index default of `pd.DataFrame.to_period(freq)` for the
-    /// supported `Y`, `Q`, `M`, `D`, `H`, `T`/`min`, and `S` frequencies.
+    /// supported `Y`, `Q`, `M`, `W`, `D`, `B`, `H`, `T`/`min`, and `S`
+    /// frequencies.
     /// FrankenPandas stores the converted labels in the existing flat `Index`
     /// as canonical period strings until a dedicated Period label variant lands.
     pub fn to_period(&self, freq: &str) -> Result<Self, FrameError> {
@@ -24091,12 +24125,6 @@ impl DataFrame {
         let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("to_period: unsupported frequency '{freq}'"))
         })?;
-        if matches!(period_freq, PeriodFreq::Weekly | PeriodFreq::Business) {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "to_period: frequency '{freq}' is not supported yet"
-            )));
-        }
-
         let labels = self
             .index
             .labels()
@@ -79047,17 +79075,62 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_period_converts_weekly_and_business_labels_d52r7() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec![
+                "2020-01-01".to_owned(),
+                "2020-01-04".to_owned(),
+                "NaT".to_owned(),
+            ])
+            .set_names(Some("when")),
+            columns,
+            vec!["value".to_owned()],
+        )
+        .unwrap();
+
+        let weekly = df.to_period("W").unwrap();
+        assert_eq!(
+            weekly.index().labels(),
+            &[
+                IndexLabel::Utf8("2019-12-30/2020-01-05".into()),
+                IndexLabel::Utf8("2019-12-30/2020-01-05".into()),
+                IndexLabel::Utf8("NaT".into()),
+            ]
+        );
+        assert_eq!(weekly.index().name(), Some("when"));
+
+        let business = df.to_period("B").unwrap();
+        assert_eq!(
+            business.index().labels(),
+            &[
+                IndexLabel::Utf8("2020-01-01".into()),
+                IndexLabel::Utf8("2020-01-06".into()),
+                IndexLabel::Utf8("NaT".into()),
+            ]
+        );
+        assert_eq!(
+            business.column("value").unwrap().values(),
+            df.column("value").unwrap().values()
+        );
+    }
+
+    #[test]
     fn dataframe_to_period_rejects_unsupported_or_non_datetime_index() {
         let df = nk54a_df();
 
         let non_datetime = df.to_period("M").unwrap_err();
         assert!(
             matches!(non_datetime, FrameError::CompatibilityRejected(msg) if msg.contains("datetime-like"))
-        );
-
-        let unsupported = df.to_period("B").unwrap_err();
-        assert!(
-            matches!(unsupported, FrameError::CompatibilityRejected(msg) if msg.contains("not supported yet"))
         );
 
         let bad_freq = df.to_period("fortnight").unwrap_err();

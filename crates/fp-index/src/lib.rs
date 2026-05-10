@@ -3259,6 +3259,23 @@ impl DatetimeIndex {
         self.to_flat_index().asof_locs(where_index, mask)
     }
 
+    /// Drop datetime labels, returning a flat Index.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+        self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Join datetime labels with another flat Index.
+    pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().join(other, how)
+    }
+
+    /// Sort datetime labels and return the positional sorter.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Index, Vec<usize>) {
+        self.to_flat_index().sortlevel()
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4405,6 +4422,23 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
         self.to_flat_index().asof_locs(where_index, mask)
+    }
+
+    /// Drop timedelta labels, returning a flat Index.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+        self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Join timedelta labels with another flat Index.
+    pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().join(other, how)
+    }
+
+    /// Sort timedelta labels and return the positional sorter.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Index, Vec<usize>) {
+        self.to_flat_index().sortlevel()
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5867,6 +5901,23 @@ impl PeriodIndex {
         self.to_flat_index().asof_locs(where_index, mask)
     }
 
+    /// Drop period labels, returning a flat Index.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+        self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Join period labels with another flat Index.
+    pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().join(other, how)
+    }
+
+    /// Sort period labels and return the positional sorter.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Index, Vec<usize>) {
+        self.to_flat_index().sortlevel()
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6656,6 +6707,23 @@ impl RangeIndex {
     #[must_use]
     pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
         self.to_flat_index().asof_locs(where_index, mask)
+    }
+
+    /// Drop range labels, returning a flat Index.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+        self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Join range labels with another flat Index.
+    pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().join(other, how)
+    }
+
+    /// Sort range labels and return the positional sorter.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Index, Vec<usize>) {
+        self.to_flat_index().sortlevel()
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7644,6 +7712,23 @@ impl CategoricalIndex {
     #[must_use]
     pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
         self.to_flat_index().asof_locs(where_index, mask)
+    }
+
+    /// Drop category labels, returning a flat Index.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+        self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Join category labels with another flat Index.
+    pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().join(other, how)
+    }
+
+    /// Sort category labels and return the positional sorter.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Index, Vec<usize>) {
+        self.to_flat_index().sortlevel()
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16627,6 +16712,55 @@ mod tests {
         );
         let cat_key = super::IndexLabel::Utf8("d".to_owned());
         assert_eq!(cat.asof(&cat_key), cat.to_flat_index().asof(&cat_key));
+    }
+
+    #[test]
+    fn index_variants_drop_join_sortlevel_forward_flat_gr6kj() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 3 * NS, 5 * NS]).set_name("ts");
+        let drop_dt = [super::IndexLabel::Datetime64(3 * NS)];
+        assert_eq!(dt.drop(&drop_dt), dt.to_flat_index().drop(&drop_dt));
+        assert_eq!(dt.drop(&drop_dt).name(), Some("ts"));
+
+        let td = super::TimedeltaIndex::new(vec![30, 10, 20]);
+        let (td_sorted, td_order) = td.sortlevel();
+        let (flat_td_sorted, flat_td_order) = td.to_flat_index().sortlevel();
+        assert_eq!(td_sorted, flat_td_sorted);
+        assert_eq!(td_order, flat_td_order);
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(2, PeriodFreq::Monthly),
+            Period::new(1, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(
+            pi.join(&pi.to_flat_index(), "outer").unwrap(),
+            pi.to_flat_index()
+        );
+
+        let range = super::RangeIndex::new(2, 8, 2).unwrap();
+        let other = super::Index::new(vec![
+            super::IndexLabel::Int64(4),
+            super::IndexLabel::Int64(6),
+            super::IndexLabel::Int64(9),
+        ]);
+        assert_eq!(
+            range.join(&other, "inner").unwrap(),
+            range.to_flat_index().join(&other, "inner").unwrap()
+        );
+        assert!(range.join(&other, "sideways").is_err());
+
+        let cat = super::CategoricalIndex::from_values(
+            vec!["b".to_owned(), "a".to_owned(), "b".to_owned()],
+            false,
+        );
+        let (cat_sorted, cat_order) = cat.sortlevel();
+        let (flat_cat_sorted, flat_cat_order) = cat.to_flat_index().sortlevel();
+        assert_eq!(cat_sorted, flat_cat_sorted);
+        assert_eq!(cat_order, flat_cat_order);
+        let drop_cat = [super::IndexLabel::Utf8("b".to_owned())];
+        assert_eq!(cat.drop(&drop_cat), cat.to_flat_index().drop(&drop_cat));
     }
 
     #[test]

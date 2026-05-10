@@ -3619,6 +3619,11 @@ impl DatetimeIndex {
         self.to_flat_index().get_level_values(level)
     }
 
+    /// Drop a level. DatetimeIndex is flat, so removing its only level is invalid.
+    pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().droplevel(level)
+    }
+
     /// Group equal datetime labels into position buckets.
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
@@ -4844,6 +4849,11 @@ impl TimedeltaIndex {
     /// Get labels for a level. TimedeltaIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Drop a level. TimedeltaIndex is flat, so removing its only level is invalid.
+    pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().droplevel(level)
     }
 
     /// Group equal timedelta labels into position buckets.
@@ -6453,6 +6463,11 @@ impl PeriodIndex {
         self.to_flat_index().get_level_values(level)
     }
 
+    /// Drop a level. PeriodIndex is flat, so removing its only level is invalid.
+    pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().droplevel(level)
+    }
+
     /// Group equal period labels into position buckets.
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
@@ -7268,6 +7283,11 @@ impl RangeIndex {
     /// Get labels for a level. RangeIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Drop a level. RangeIndex is flat, so removing its only level is invalid.
+    pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().droplevel(level)
     }
 
     /// Group equal range labels into position buckets.
@@ -8282,6 +8302,11 @@ impl CategoricalIndex {
     /// Get labels for a level. CategoricalIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Drop a level. CategoricalIndex is flat, so removing its only level is invalid.
+    pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().droplevel(level)
     }
 
     /// Group equal category labels into position buckets.
@@ -17175,6 +17200,53 @@ mod tests {
 
         assert!(matches!(
             cat.get_level_values(1),
+            Err(super::IndexError::OutOfBounds {
+                position: 1,
+                length: 1
+            })
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn index_variants_droplevel_forward_flat_errors_t8vpw() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 2 * NS]).set_name("ts");
+        assert!(matches!(
+            dt.droplevel(0),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "cannot remove the only level from a flat Index"
+        ));
+
+        let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
+        assert!(matches!(
+            td.droplevel(0),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "cannot remove the only level from a flat Index"
+        ));
+
+        use fp_types::{Period, PeriodFreq};
+        let pi =
+            super::PeriodIndex::new(vec![Period::new(1, PeriodFreq::Monthly)]).set_name("period");
+        assert!(matches!(
+            pi.droplevel(0),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "cannot remove the only level from a flat Index"
+        ));
+
+        let range = super::RangeIndex::new(1, 4, 1)?.set_name("row");
+        assert!(matches!(
+            range.droplevel(0),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "cannot remove the only level from a flat Index"
+        ));
+
+        let cat =
+            super::CategoricalIndex::from_values(vec!["a".to_owned()], false).set_name("category");
+        assert!(matches!(
+            cat.droplevel(1),
             Err(super::IndexError::OutOfBounds {
                 position: 1,
                 length: 1

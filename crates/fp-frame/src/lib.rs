@@ -9754,6 +9754,7 @@ impl Rolling<'_> {
             index: self.series.index().clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -10351,6 +10352,7 @@ impl Expanding<'_> {
             index: self.series.index().clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -10743,6 +10745,7 @@ impl Ewm<'_> {
             index: self.series.index().clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -11092,6 +11095,7 @@ impl Resample<'_> {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -11396,6 +11400,7 @@ impl DataFrameRolling<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11494,6 +11499,7 @@ impl DataFrameRolling<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11566,6 +11572,7 @@ impl DataFrameRolling<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11601,6 +11608,7 @@ impl DataFrameRolling<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11677,6 +11685,7 @@ impl DataFrameExpanding<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11782,6 +11791,7 @@ impl DataFrameExpanding<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11858,6 +11868,7 @@ impl DataFrameEwm<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -11915,6 +11926,7 @@ impl DataFrameEwm<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -12008,6 +12020,7 @@ impl DataFrameResample<'_> {
             index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -12036,6 +12049,7 @@ impl DataFrameResample<'_> {
             index: result_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -12142,6 +12156,7 @@ impl DataFrameResample<'_> {
             index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -12338,6 +12353,7 @@ impl DataFrameResample<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -14141,6 +14157,7 @@ impl SeriesGroupBy<'_> {
             index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -15825,6 +15842,7 @@ impl StringAccessor<'_> {
             index: self.series.index().clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -15909,6 +15927,7 @@ impl StringAccessor<'_> {
             index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -20179,6 +20198,19 @@ pub struct DataFrame {
     column_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     column_multiindex: Option<fp_index::MultiIndex>,
+    #[serde(
+        default = "default_allows_duplicate_labels",
+        skip_serializing_if = "bool_is_true"
+    )]
+    allows_duplicate_labels: bool,
+}
+
+const fn default_allows_duplicate_labels() -> bool {
+    true
+}
+
+fn bool_is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -20510,6 +20542,27 @@ impl DataFrame {
                     column_len: column.len(),
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn has_duplicate_row_labels(
+        index: &Index,
+        row_multiindex: Option<&fp_index::MultiIndex>,
+    ) -> bool {
+        index.has_duplicates() || row_multiindex.is_some_and(fp_index::MultiIndex::has_duplicates)
+    }
+
+    fn validate_duplicate_label_policy(
+        allows_duplicate_labels: bool,
+        index: &Index,
+        row_multiindex: Option<&fp_index::MultiIndex>,
+        operation: &str,
+    ) -> Result<(), FrameError> {
+        if !allows_duplicate_labels && Self::has_duplicate_row_labels(index, row_multiindex) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{operation}: duplicate labels are present"
+            )));
         }
         Ok(())
     }
@@ -20918,6 +20971,7 @@ impl DataFrame {
             columns,
             column_order,
             column_multiindex,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -23369,6 +23423,7 @@ impl DataFrame {
             columns: self.columns.clone(),
             column_order: self.column_order.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -23655,6 +23710,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         }
     }
 
@@ -23673,6 +23729,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         }
     }
 
@@ -23692,6 +23749,7 @@ impl DataFrame {
             index: self.index.set_name(name),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -24341,7 +24399,7 @@ impl DataFrame {
     #[must_use]
     pub fn flags(&self) -> DataFrameFlags {
         DataFrameFlags {
-            allows_duplicate_labels: true,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         }
     }
 
@@ -24350,18 +24408,17 @@ impl DataFrame {
     /// Matches `pd.DataFrame.set_flags(allows_duplicate_labels=...)` for the
     /// duplicate-label flag.
     pub fn set_flags(&self, allows_duplicate_labels: Option<bool>) -> Result<Self, FrameError> {
-        if matches!(allows_duplicate_labels, Some(false))
-            && (self.index.has_duplicates()
-                || self
-                    .row_multiindex
-                    .as_ref()
-                    .is_some_and(fp_index::MultiIndex::has_duplicates))
-        {
-            return Err(FrameError::CompatibilityRejected(
-                "set_flags: duplicate labels are present".to_string(),
-            ));
-        }
-        Ok(self.clone())
+        let next_allows = allows_duplicate_labels.unwrap_or(self.allows_duplicate_labels);
+        Self::validate_duplicate_label_policy(
+            next_allows,
+            &self.index,
+            self.row_multiindex.as_ref(),
+            "set_flags",
+        )?;
+
+        let mut out = self.clone();
+        out.allows_duplicate_labels = next_allows;
+        Ok(out)
     }
 
     /// Styling accessor placeholder.
@@ -24851,6 +24908,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -24915,6 +24973,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25025,6 +25084,7 @@ impl DataFrame {
             index: new_index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25166,6 +25226,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25241,6 +25302,7 @@ impl DataFrame {
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25296,6 +25358,7 @@ impl DataFrame {
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25416,6 +25479,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25523,6 +25587,7 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25556,6 +25621,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25596,6 +25662,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25657,6 +25724,7 @@ impl DataFrame {
             index: first.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25826,6 +25894,7 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25919,6 +25988,7 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -25972,6 +26042,7 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26154,6 +26225,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26180,6 +26252,7 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26234,12 +26307,19 @@ impl DataFrame {
                     });
                 }
                 let new_index = Index::new(labels);
+                Self::validate_duplicate_label_policy(
+                    self.allows_duplicate_labels,
+                    &new_index,
+                    None,
+                    "set_axis",
+                )?;
                 Ok(Self {
                     columns: self.columns.clone(),
                     column_order: self.column_order.clone(),
                     index: new_index,
                     column_multiindex: self.column_multiindex.clone(),
                     row_multiindex: None,
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
             1 => {
@@ -26260,6 +26340,7 @@ impl DataFrame {
                     index: self.index.clone(),
                     column_multiindex: None,
                     row_multiindex: None,
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -26639,6 +26720,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26687,12 +26769,20 @@ impl DataFrame {
             result_cols.insert(col_name.clone(), Column::new(col.dtype(), new_vals)?);
         }
 
+        let index = Index::new(new_labels);
+        Self::validate_duplicate_label_policy(
+            self.allows_duplicate_labels,
+            &index,
+            None,
+            "reindex",
+        )?;
         Ok(Self {
             columns: result_cols,
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index,
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26728,6 +26818,7 @@ impl DataFrame {
                     index: self.index.clone(),
                     column_multiindex: None,
                     row_multiindex: None,
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
@@ -26769,12 +26860,20 @@ impl DataFrame {
             }
             result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
         }
+        let index = Index::new(new_labels);
+        Self::validate_duplicate_label_policy(
+            self.allows_duplicate_labels,
+            &index,
+            None,
+            "reindex",
+        )?;
         Ok(Self {
             columns: result_cols,
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index,
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26825,6 +26924,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26874,6 +26974,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -26961,6 +27062,7 @@ impl DataFrame {
             index: Index::new(union_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -27022,6 +27124,7 @@ impl DataFrame {
             index: plan.union_index,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -27104,6 +27207,7 @@ impl DataFrame {
             column_order: union_cols,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -28702,6 +28806,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -28820,6 +28925,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -28905,6 +29011,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -28934,6 +29041,7 @@ impl DataFrame {
                 index: s.index().clone(),
                 column_multiindex: None,
                 row_multiindex: None,
+                allows_duplicate_labels: self.allows_duplicate_labels,
             })
         } else {
             // Row-wise: apply func to each row
@@ -28955,6 +29063,7 @@ impl DataFrame {
                 index: self.index.clone(),
                 column_multiindex: None,
                 row_multiindex: None,
+                allows_duplicate_labels: self.allows_duplicate_labels,
             })
         }
     }
@@ -29005,6 +29114,7 @@ impl DataFrame {
                     index: self.index.clone(),
                     column_multiindex: None,
                     row_multiindex: None,
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
             "broadcast" => {
@@ -29049,6 +29159,7 @@ impl DataFrame {
                     index: self.index.clone(),
                     column_multiindex: self.column_multiindex.clone(),
                     row_multiindex: self.row_multiindex.clone(),
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
             _ => {
@@ -29077,6 +29188,7 @@ impl DataFrame {
                     index: self.index.clone(),
                     column_multiindex: None,
                     row_multiindex: None,
+                    allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
         }
@@ -29219,6 +29331,7 @@ impl DataFrame {
             columns,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -30372,6 +30485,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -30537,6 +30651,7 @@ impl DataFrame {
             columns: out_cols,
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -30864,6 +30979,7 @@ impl DataFrame {
                 index: self.index.clone(),
                 column_multiindex: self.column_multiindex.clone(),
                 row_multiindex: self.row_multiindex.clone(),
+                allows_duplicate_labels: self.allows_duplicate_labels,
             });
         }
 
@@ -30902,6 +31018,7 @@ impl DataFrame {
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
             row_multiindex: left.row_multiindex.clone(),
+            allows_duplicate_labels: left.allows_duplicate_labels,
         })
     }
 
@@ -31012,6 +31129,7 @@ impl DataFrame {
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
             row_multiindex: left.row_multiindex.clone(),
+            allows_duplicate_labels: left.allows_duplicate_labels,
         })
     }
 
@@ -31132,6 +31250,7 @@ impl DataFrame {
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
             row_multiindex: left.row_multiindex.clone(),
+            allows_duplicate_labels: left.allows_duplicate_labels,
         })
     }
 
@@ -31224,6 +31343,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31463,6 +31583,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31525,6 +31646,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31562,6 +31684,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31588,6 +31711,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31625,6 +31749,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31691,6 +31816,7 @@ impl DataFrame {
             columns: out_columns,
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31774,6 +31900,7 @@ impl DataFrame {
             columns: out_columns,
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31846,6 +31973,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31898,6 +32026,7 @@ impl DataFrame {
             columns: result_cols,
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31918,6 +32047,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -31949,6 +32079,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -32212,6 +32343,7 @@ impl DataFrame {
             columns,
             column_order: self.column_order.clone(),
             column_multiindex: self.column_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -32270,6 +32402,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -32316,6 +32449,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -32349,6 +32483,7 @@ impl DataFrame {
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -32942,6 +33077,7 @@ impl DataFrame {
             index: Index::new(index_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: true,
         })
     }
 
@@ -33013,6 +33149,7 @@ impl DataFrame {
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
                     row_multiindex: ct.row_multiindex,
+                    allows_duplicate_labels: ct.allows_duplicate_labels,
                 })
             }
             "columns" => {
@@ -33046,6 +33183,7 @@ impl DataFrame {
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
                     row_multiindex: ct.row_multiindex,
+                    allows_duplicate_labels: ct.allows_duplicate_labels,
                 })
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
@@ -33131,6 +33269,7 @@ impl DataFrame {
             index: Index::new(new_indices),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         };
         if ignore_index {
             out.reset_index(true)
@@ -33223,6 +33362,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         })
     }
 
@@ -33257,6 +33397,7 @@ impl DataFrame {
             index: Index::new(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
         }
     }
 
@@ -33497,6 +33638,7 @@ impl DataFrameGroupBy<'_> {
                 index: Index::new(int_labels),
                 column_multiindex: None,
                 row_multiindex: None,
+                allows_duplicate_labels: self.df.allows_duplicate_labels,
             })
         }
     }
@@ -34893,6 +35035,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -34955,6 +35098,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35027,6 +35171,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35095,6 +35240,7 @@ impl DataFrameGroupBy<'_> {
                 index: Index::new(group_labels),
                 column_multiindex: None,
                 row_multiindex: None,
+                allows_duplicate_labels: self.df.allows_duplicate_labels,
             };
 
             if func(&group_df)? {
@@ -35127,6 +35273,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: self.df.column_multiindex.clone(),
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35180,6 +35327,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35414,6 +35562,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35605,6 +35754,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35718,6 +35868,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -35964,6 +36115,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -36037,6 +36189,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -36115,6 +36268,7 @@ impl DataFrameGroupBy<'_> {
             index: Index::new(out_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -36294,6 +36448,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -36346,6 +36501,7 @@ impl DataFrameGroupBy<'_> {
             index: self.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
         })
     }
 
@@ -36483,6 +36639,7 @@ impl GroupByRolling<'_> {
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
         })
     }
 
@@ -36597,6 +36754,7 @@ impl GroupByExpanding<'_> {
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
         })
     }
 
@@ -36707,6 +36865,7 @@ impl GroupByEwm<'_> {
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
         })
     }
 
@@ -36832,6 +36991,7 @@ impl GroupByResample<'_> {
             index: Index::new(all_labels),
             column_multiindex: None,
             row_multiindex: None,
+            allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
         })
     }
 
@@ -77503,7 +77663,27 @@ mod tests {
         assert!(bool_df.attrs().is_empty());
         assert!(bool_df.flags().allows_duplicate_labels());
         assert_eq!(bool_df.set_flags(None).unwrap(), bool_df);
-        assert_eq!(bool_df.set_flags(Some(false)).unwrap(), bool_df);
+        let strict = bool_df.set_flags(Some(false)).unwrap();
+        assert!(!strict.flags().allows_duplicate_labels());
+        assert!(!strict.copy().flags().allows_duplicate_labels());
+        assert!(
+            !strict
+                .set_flags(None)
+                .unwrap()
+                .flags()
+                .allows_duplicate_labels()
+        );
+        assert!(
+            strict
+                .set_flags(Some(true))
+                .unwrap()
+                .flags()
+                .allows_duplicate_labels()
+        );
+        assert_eq!(
+            strict.column("flag").unwrap().values(),
+            bool_df.column("flag").unwrap().values()
+        );
         assert_eq!(bool_df.style().dataframe(), &bool_df);
         assert_eq!(bool_df.sparse().dataframe(), &bool_df);
 
@@ -77523,6 +77703,39 @@ mod tests {
         let df = DataFrame::new(Index::new(vec![0_i64.into(), 0_i64.into()]), columns).unwrap();
 
         let err = df.set_flags(Some(false)).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
+    }
+
+    #[test]
+    fn dataframe_qn0bj_strict_flags_reject_duplicate_label_reindexing() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap()
+        .set_flags(Some(false))
+        .unwrap();
+
+        let err = df
+            .set_axis(vec![0_i64.into(), 0_i64.into()], 0)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
+
+        let err = df.reindex(vec![0_i64.into(), 0_i64.into()]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
+
+        let err = df
+            .reindex_fill(
+                vec![0_i64.into(), 0_i64.into()],
+                Scalar::Null(NullKind::NaN),
+            )
+            .unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
         );

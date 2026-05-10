@@ -20585,6 +20585,33 @@ pub struct DataFrameDictTight {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DataFrameXArrayVariable {
+    pub dims: Vec<String>,
+    pub data: Vec<Scalar>,
+    pub dtype: DType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataFrameXArrayDataset {
+    pub dim_name: String,
+    pub coords: BTreeMap<String, Vec<Scalar>>,
+    pub data_vars: BTreeMap<String, DataFrameXArrayVariable>,
+    pub data_var_order: Vec<String>,
+}
+
+impl DataFrameXArrayDataset {
+    #[must_use]
+    pub fn coord(&self, name: &str) -> Option<&[Scalar]> {
+        self.coords.get(name).map(Vec::as_slice)
+    }
+
+    #[must_use]
+    pub fn data_var(&self, name: &str) -> Option<&DataFrameXArrayVariable> {
+        self.data_vars.get(name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataFrameDictResult {
     Mapping(BTreeMap<String, Vec<(String, Scalar)>>),
     List(BTreeMap<String, Vec<Scalar>>),
@@ -28004,6 +28031,62 @@ impl DataFrame {
             result.insert(col_name.clone(), series);
         }
         result
+    }
+
+    /// Convert a flat-index DataFrame into an xarray-like Dataset snapshot.
+    ///
+    /// Matches the practical `pd.DataFrame.to_xarray()` shape for scalar
+    /// columns: the row index becomes the single coordinate/dimension, and
+    /// each DataFrame column becomes one 1-D data variable.
+    pub fn to_xarray(&self) -> Result<DataFrameXArrayDataset, FrameError> {
+        if self.row_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "to_xarray does not yet support row MultiIndex dimensional metadata".to_owned(),
+            ));
+        }
+        if self.column_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "to_xarray does not yet support column MultiIndex dimensional metadata".to_owned(),
+            ));
+        }
+
+        let dim_name = self.index.name().unwrap_or("index").to_owned();
+        if self.columns.contains_key(&dim_name) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "to_xarray index coordinate name {dim_name:?} collides with a column label"
+            )));
+        }
+
+        let coords = BTreeMap::from([(
+            dim_name.clone(),
+            self.index
+                .labels()
+                .iter()
+                .map(Self::index_label_to_scalar)
+                .collect(),
+        )]);
+        let mut data_vars = BTreeMap::new();
+        for name in &self.column_order {
+            let column = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            data_vars.insert(
+                name.clone(),
+                DataFrameXArrayVariable {
+                    dims: vec![dim_name.clone()],
+                    data: column.values().to_vec(),
+                    dtype: column.dtype(),
+                },
+            );
+        }
+
+        Ok(DataFrameXArrayDataset {
+            dim_name,
+            coords,
+            data_vars,
+            data_var_order: self.column_order.clone(),
+        })
     }
 
     /// Export DataFrame to CSV string.
@@ -52711,6 +52794,107 @@ mod tests {
         let tight = result.as_tight().expect("tight");
         assert_eq!(tight.data.len(), 2);
         assert!(tight.data[1][0].is_missing());
+    }
+
+    #[test]
+    fn dataframe_52cf9_to_xarray_preserves_flat_index_and_columns() -> Result<(), FrameError> {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("sales", vec![Scalar::Int64(10), Scalar::Int64(12)]),
+                (
+                    "region",
+                    vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())],
+                ),
+            ],
+            vec!["r0".into(), "r1".into()],
+        )?
+        .rename_axis("row")?;
+
+        let dataset = df.to_xarray()?;
+        let expected_coord = vec![Scalar::Utf8("r0".into()), Scalar::Utf8("r1".into())];
+        assert_eq!(dataset.dim_name, "row");
+        assert_eq!(dataset.coord("row"), Some(expected_coord.as_slice()));
+        assert_eq!(
+            dataset.data_var_order,
+            vec!["sales".to_owned(), "region".to_owned()]
+        );
+
+        let sales = dataset.data_var("sales").ok_or_else(|| {
+            FrameError::CompatibilityRejected("missing sales data variable".into())
+        })?;
+        assert_eq!(sales.dims, vec!["row".to_owned()]);
+        assert_eq!(sales.dtype, DType::Int64);
+        assert_eq!(sales.data, vec![Scalar::Int64(10), Scalar::Int64(12)]);
+
+        let region = dataset.data_var("region").ok_or_else(|| {
+            FrameError::CompatibilityRejected("missing region data variable".into())
+        })?;
+        assert_eq!(region.dtype, DType::Utf8);
+        assert_eq!(
+            region.data,
+            vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dataframe_52cf9_to_xarray_fails_closed_for_unsupported_metadata() -> Result<(), FrameError> {
+        let collision = DataFrame::from_dict(
+            &["index"],
+            vec![("index", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )?;
+        let Err(err) = collision.to_xarray() else {
+            return Err(FrameError::CompatibilityRejected(
+                "to_xarray unexpectedly accepted a coordinate collision".into(),
+            ));
+        };
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("collides")));
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)])?,
+        );
+        let row_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::Utf8("north".into()),
+                IndexLabel::Utf8("south".into()),
+            ],
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+        ])?;
+        let row_multi = DataFrame::new_with_row_multiindex(
+            Index::from_utf8(vec!["north|a".into(), "south|b".into()]),
+            row_multiindex,
+            columns.clone(),
+        )?;
+        let Err(err) = row_multi.to_xarray() else {
+            return Err(FrameError::CompatibilityRejected(
+                "to_xarray unexpectedly accepted row MultiIndex metadata".into(),
+            ));
+        };
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("row MultiIndex"))
+        );
+
+        let column_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Utf8("value".into())],
+            vec![IndexLabel::Utf8("sum".into())],
+        ])?;
+        let column_multi = DataFrame::new_with_column_order_and_multiindex(
+            Index::from_i64(vec![0, 1]),
+            columns,
+            vec!["value".to_owned()],
+            Some(column_multiindex),
+        )?;
+        let Err(err) = column_multi.to_xarray() else {
+            return Err(FrameError::CompatibilityRejected(
+                "to_xarray unexpectedly accepted column MultiIndex metadata".into(),
+            ));
+        };
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column MultiIndex"))
+        );
+        Ok(())
     }
 
     #[test]

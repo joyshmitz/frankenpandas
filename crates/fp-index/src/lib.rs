@@ -2266,9 +2266,7 @@ impl DatetimeIndex {
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) => *nanos,
-                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => {
-                    i64::MIN
-                }
+                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => i64::MIN,
             })
             .collect()
     }
@@ -2527,13 +2525,7 @@ impl DatetimeIndex {
             return None;
         }
         let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
-        Some(
-            nanos
-                .iter()
-                .map(|n| (n - mean).powi(2))
-                .sum::<f64>()
-                / (nanos.len() as f64 - 1.0),
-        )
+        Some(nanos.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / (nanos.len() as f64 - 1.0))
     }
 
     /// Sample standard deviation of non-NAT labels in nanoseconds,
@@ -2554,11 +2546,8 @@ impl DatetimeIndex {
             return None;
         }
         let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
-        let var = nanos
-            .iter()
-            .map(|n| (n - mean).powi(2))
-            .sum::<f64>()
-            / (nanos.len() as f64 - 1.0);
+        let var =
+            nanos.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / (nanos.len() as f64 - 1.0);
         Some(var.sqrt() as i64)
     }
 
@@ -2639,7 +2628,12 @@ impl DatetimeIndex {
     pub fn union(&self, other: &Self) -> Self {
         let mut seen = HashSet::<i64>::new();
         let mut nanos: Vec<i64> = Vec::new();
-        for label in self.index.labels().iter().chain(other.index.labels().iter()) {
+        for label in self
+            .index
+            .labels()
+            .iter()
+            .chain(other.index.labels().iter())
+        {
             if let IndexLabel::Datetime64(n) = label
                 && seen.insert(*n)
             {
@@ -3213,6 +3207,13 @@ impl DatetimeIndex {
         self.clone()
     }
 
+    /// Alias for `transpose`, matching `pd.DatetimeIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
     /// Flatten labels to nanoseconds-since-epoch with NAT preserved,
     /// matching `pd.DatetimeIndex.ravel()`.
     #[must_use]
@@ -3371,8 +3372,7 @@ impl DatetimeIndex {
     pub fn is_leap_year(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
         map_datetime_labels(self.index.labels(), |dt| {
-            chrono::NaiveDate::from_ymd_opt(dt.year(), 1, 1)
-                .is_some_and(|d| d.leap_year())
+            chrono::NaiveDate::from_ymd_opt(dt.year(), 1, 1).is_some_and(|d| d.leap_year())
         })
     }
 
@@ -4292,6 +4292,13 @@ impl TimedeltaIndex {
         self.clone()
     }
 
+    /// Alias for `transpose`, matching `pd.TimedeltaIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
     /// Flatten labels to nanosecond durations with NAT preserved,
     /// matching `pd.TimedeltaIndex.ravel()`.
     #[must_use]
@@ -4506,13 +4513,7 @@ impl TimedeltaIndex {
             return None;
         }
         let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
-        Some(
-            nanos
-                .iter()
-                .map(|n| (n - mean).powi(2))
-                .sum::<f64>()
-                / (nanos.len() as f64 - 1.0),
-        )
+        Some(nanos.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / (nanos.len() as f64 - 1.0))
     }
 
     /// Sample standard deviation of non-NAT labels in nanoseconds,
@@ -4533,11 +4534,8 @@ impl TimedeltaIndex {
             return None;
         }
         let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
-        let var = nanos
-            .iter()
-            .map(|n| (n - mean).powi(2))
-            .sum::<f64>()
-            / (nanos.len() as f64 - 1.0);
+        let var =
+            nanos.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / (nanos.len() as f64 - 1.0);
         Some(var.sqrt() as i64)
     }
 
@@ -4615,7 +4613,12 @@ impl TimedeltaIndex {
     pub fn union(&self, other: &Self) -> Self {
         let mut seen = HashSet::<i64>::new();
         let mut nanos: Vec<i64> = Vec::new();
-        for label in self.index.labels().iter().chain(other.index.labels().iter()) {
+        for label in self
+            .index
+            .labels()
+            .iter()
+            .chain(other.index.labels().iter())
+        {
             if let IndexLabel::Timedelta64(n) = label
                 && seen.insert(*n)
             {
@@ -5338,9 +5341,8 @@ impl PeriodIndex {
         };
         let total: i128 = self.values.iter().map(|p| i128::from(p.ordinal)).sum();
         let count = self.values.len() as i128;
-        let avg = i64::try_from(total / count).map_err(|_| {
-            IndexError::InvalidArgument("mean: ordinal overflow".to_owned())
-        })?;
+        let avg = i64::try_from(total / count)
+            .map_err(|_| IndexError::InvalidArgument("mean: ordinal overflow".to_owned()))?;
         Ok(Some(Period::new(avg, freq)))
     }
 
@@ -5359,9 +5361,8 @@ impl PeriodIndex {
             ordinals[mid]
         } else {
             let total = i128::from(ordinals[mid - 1]) + i128::from(ordinals[mid]);
-            i64::try_from(total / 2).map_err(|_| {
-                IndexError::InvalidArgument("median: ordinal overflow".to_owned())
-            })?
+            i64::try_from(total / 2)
+                .map_err(|_| IndexError::InvalidArgument("median: ordinal overflow".to_owned()))?
         };
         Ok(Some(Period::new(median, freq)))
     }
@@ -5458,9 +5459,7 @@ impl PeriodIndex {
             .iter()
             .position(|p| *p == period)
             .ok_or_else(|| {
-                IndexError::InvalidArgument(format!(
-                    "get_loc: period {period} not in PeriodIndex"
-                ))
+                IndexError::InvalidArgument(format!("get_loc: period {period} not in PeriodIndex"))
             })
     }
 
@@ -5679,6 +5678,13 @@ impl PeriodIndex {
     #[must_use]
     pub fn transpose(&self) -> Self {
         self.clone()
+    }
+
+    /// Alias for `transpose`, matching `pd.PeriodIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
     }
 
     /// Flatten periods to a Vec<Period>, matching
@@ -6289,13 +6295,7 @@ impl RangeIndex {
             return None;
         }
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        Some(
-            values
-                .iter()
-                .map(|v| (v - mean).powi(2))
-                .sum::<f64>()
-                / (values.len() as f64 - 1.0),
-        )
+        Some(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() as f64 - 1.0))
     }
 
     /// Sample standard deviation (ddof=1), matching `pd.RangeIndex.std()`.
@@ -6402,6 +6402,13 @@ impl RangeIndex {
     #[must_use]
     pub fn transpose(&self) -> Self {
         self.clone()
+    }
+
+    /// Alias for `transpose`, matching `pd.RangeIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
     }
 
     /// Flatten the range to a Vec<i64>, matching `pd.RangeIndex.ravel()`.
@@ -7256,11 +7263,8 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let mapping: std::collections::HashMap<&String, &String> = self
-            .categories
-            .iter()
-            .zip(new.iter())
-            .collect();
+        let mapping: std::collections::HashMap<&String, &String> =
+            self.categories.iter().zip(new.iter()).collect();
         let labels: Vec<String> = self
             .labels
             .iter()
@@ -7277,11 +7281,7 @@ impl CategoricalIndex {
     /// Reorder the categories list, matching
     /// `pd.CategoricalIndex.reorder_categories(new, ordered)`. Rejects
     /// when the new list is not a permutation of the existing categories.
-    pub fn reorder_categories(
-        &self,
-        new: Vec<String>,
-        ordered: bool,
-    ) -> Result<Self, IndexError> {
+    pub fn reorder_categories(&self, new: Vec<String>, ordered: bool) -> Result<Self, IndexError> {
         if new.len() != self.categories.len() {
             return Err(IndexError::InvalidArgument(format!(
                 "reorder_categories: expected {} categories, got {}",
@@ -7335,6 +7335,13 @@ impl CategoricalIndex {
     #[must_use]
     pub fn transpose(&self) -> Self {
         self.clone()
+    }
+
+    /// Alias for `transpose`, matching `pd.CategoricalIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
     }
 
     /// Flatten labels to a Vec<String>, matching
@@ -7487,10 +7494,7 @@ impl CategoricalIndex {
     #[must_use]
     pub fn sort_values(&self) -> Self {
         let positions = self.argsort();
-        let labels: Vec<String> = positions
-            .iter()
-            .map(|&p| self.labels[p].clone())
-            .collect();
+        let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
         Self {
             labels,
             categories: self.categories.clone(),
@@ -7675,14 +7679,9 @@ impl CategoricalIndex {
     /// First position of `value`, matching
     /// `pd.CategoricalIndex.get_loc(value)`.
     pub fn get_loc(&self, value: &str) -> Result<usize, IndexError> {
-        self.labels
-            .iter()
-            .position(|l| l == value)
-            .ok_or_else(|| {
-                IndexError::InvalidArgument(format!(
-                    "get_loc: {value:?} not in CategoricalIndex"
-                ))
-            })
+        self.labels.iter().position(|l| l == value).ok_or_else(|| {
+            IndexError::InvalidArgument(format!("get_loc: {value:?} not in CategoricalIndex"))
+        })
     }
 
     /// Position of the maximum label, matching
@@ -14803,17 +14802,11 @@ mod tests {
 
         // 2024 is a leap year. Jan 15 = ordinal 15. Jan 21 = ordinal 21.
         // Apr 30 = 31+29+31+30 = 121.
-        assert_eq!(
-            dt.dayofyear(),
-            vec![Some(15), Some(21), Some(121), None]
-        );
+        assert_eq!(dt.dayofyear(), vec![Some(15), Some(21), Some(121), None]);
         assert_eq!(dt.day_of_year(), dt.dayofyear());
 
         // Mon=0, Sun=6. Apr 30 2024 was a Tuesday → 1.
-        assert_eq!(
-            dt.dayofweek(),
-            vec![Some(0), Some(6), Some(1), None]
-        );
+        assert_eq!(dt.dayofweek(), vec![Some(0), Some(6), Some(1), None]);
         assert_eq!(dt.day_of_week(), dt.dayofweek());
         assert_eq!(dt.weekday(), dt.dayofweek());
 
@@ -14827,10 +14820,7 @@ mod tests {
         );
 
         // Jan -> 31, Apr -> 30.
-        assert_eq!(
-            dt.days_in_month(),
-            vec![Some(31), Some(31), Some(30), None]
-        );
+        assert_eq!(dt.days_in_month(), vec![Some(31), Some(31), Some(30), None]);
         assert_eq!(dt.daysinmonth(), dt.days_in_month());
     }
 
@@ -14839,17 +14829,16 @@ mod tests {
         // 2024 is a leap year. Each entry is the 00:00:00Z second-of-epoch
         // multiplied by 1_000_000_000.
         const NS: i64 = 1_000_000_000;
-        let jan_01 = 1_704_067_200_i64 * NS;       // year/quarter/month start
-        let jan_31 = 1_706_659_200_i64 * NS;       // month end (Jan)
-        let feb_29 = 1_709_164_800_i64 * NS;       // leap-month end
-        let mar_31 = 1_711_843_200_i64 * NS;       // quarter/month end (Q1)
-        let apr_01 = 1_711_929_600_i64 * NS;       // quarter/month start (Q2)
-        let dec_31 = 1_735_603_200_i64 * NS;       // year/quarter/month end
+        let jan_01 = 1_704_067_200_i64 * NS; // year/quarter/month start
+        let jan_31 = 1_706_659_200_i64 * NS; // month end (Jan)
+        let feb_29 = 1_709_164_800_i64 * NS; // leap-month end
+        let mar_31 = 1_711_843_200_i64 * NS; // quarter/month end (Q1)
+        let apr_01 = 1_711_929_600_i64 * NS; // quarter/month start (Q2)
+        let dec_31 = 1_735_603_200_i64 * NS; // year/quarter/month end
         let nat = i64::MIN;
 
-        let dt = super::DatetimeIndex::new(vec![
-            jan_01, jan_31, feb_29, mar_31, apr_01, dec_31, nat,
-        ]);
+        let dt =
+            super::DatetimeIndex::new(vec![jan_01, jan_31, feb_29, mar_31, apr_01, dec_31, nat]);
 
         // is_year_start: only Jan 1.
         assert_eq!(
@@ -14951,7 +14940,10 @@ mod tests {
         // OOB.
         assert!(matches!(
             dt.insert(99, b).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 99, length: 2 }
+            super::IndexError::OutOfBounds {
+                position: 99,
+                length: 2
+            }
         ));
 
         let td = super::TimedeltaIndex::new(vec![100_i64, 300]).set_name("d");
@@ -14999,12 +14991,8 @@ mod tests {
         let pi_fmt = pi.format();
         assert!(!pi_fmt[0].is_empty());
 
-        let cat =
-            super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
-        assert_eq!(
-            cat.format(),
-            vec!["a".to_owned(), "b".to_owned()]
-        );
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
+        assert_eq!(cat.format(), vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]
@@ -15056,10 +15044,7 @@ mod tests {
             chrono::NaiveTime::from_hms_nano_opt(12, 34, 56, 789_012_345)
         );
         assert_eq!(times[1], None);
-        assert_eq!(
-            times[2],
-            chrono::NaiveTime::from_hms_nano_opt(0, 0, 0, 0)
-        );
+        assert_eq!(times[2], chrono::NaiveTime::from_hms_nano_opt(0, 0, 0, 0));
     }
 
     #[test]
@@ -15262,7 +15247,10 @@ mod tests {
             Period::new(12, PeriodFreq::Monthly),
         ]);
         assert_eq!(
-            pi.slice_indexer(Period::new(11, PeriodFreq::Monthly), Period::new(12, PeriodFreq::Monthly))?,
+            pi.slice_indexer(
+                Period::new(11, PeriodFreq::Monthly),
+                Period::new(12, PeriodFreq::Monthly)
+            )?,
             1..3
         );
 
@@ -15370,8 +15358,7 @@ mod tests {
             vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
             false,
         );
-        let (positions, missing) =
-            cat.get_indexer_non_unique(&["a".to_owned(), "z".to_owned()]);
+        let (positions, missing) = cat.get_indexer_non_unique(&["a".to_owned(), "z".to_owned()]);
         assert_eq!(positions, vec![0, 2, -1]);
         assert_eq!(missing, vec![1]);
 
@@ -15410,8 +15397,7 @@ mod tests {
     }
 
     #[test]
-    fn period_range_get_loc_get_indexer_match_pandas_e7psu()
-    -> Result<(), super::IndexError> {
+    fn period_range_get_loc_get_indexer_match_pandas_e7psu() -> Result<(), super::IndexError> {
         use fp_types::{Period, PeriodFreq};
         let p1 = Period::new(10, PeriodFreq::Monthly);
         let p2 = Period::new(11, PeriodFreq::Monthly);
@@ -15459,10 +15445,7 @@ mod tests {
 
         // Length mismatch.
         let bad_len = pi.r#where(&[true, false], p1).unwrap_err();
-        assert!(matches!(
-            bad_len,
-            super::IndexError::LengthMismatch { .. }
-        ));
+        assert!(matches!(bad_len, super::IndexError::LengthMismatch { .. }));
 
         // Mismatched freq replacement rejects.
         let mismatch = Period::new(10, PeriodFreq::Annual);
@@ -15475,7 +15458,12 @@ mod tests {
     fn categorical_index_where_putmask_match_pandas_so9oh() -> Result<(), super::IndexError> {
         let cat = super::CategoricalIndex::with_categories(
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
             false,
         )?;
 
@@ -15546,14 +15534,25 @@ mod tests {
 
         // CategoricalIndex with ordered=true uses category position.
         let cat = super::CategoricalIndex::with_categories(
-            vec!["b".to_owned(), "a".to_owned(), "c".to_owned(), "a".to_owned()],
+            vec![
+                "b".to_owned(),
+                "a".to_owned(),
+                "c".to_owned(),
+                "a".to_owned(),
+            ],
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             true,
         )?;
         let cat_sorted = cat.sort_values();
         assert_eq!(
             cat_sorted.labels(),
-            vec!["a".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()].as_slice()
+            vec![
+                "a".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned()
+            ]
+            .as_slice()
         );
 
         Ok(())
@@ -15588,18 +15587,14 @@ mod tests {
         assert_eq!(empty.mean()?, None);
         assert_eq!(empty.median()?, None);
 
-        let mixed = super::PeriodIndex::new(vec![
-            p1,
-            Period::new(10, PeriodFreq::Annual),
-        ]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
         assert!(mixed.mean().is_err());
         assert!(mixed.median().is_err());
         Ok(())
     }
 
     #[test]
-    fn period_index_argmax_argmin_argsort_match_pandas_qg8u5()
-    -> Result<(), super::IndexError> {
+    fn period_index_argmax_argmin_argsort_match_pandas_qg8u5() -> Result<(), super::IndexError> {
         use fp_types::{Period, PeriodFreq};
         let p1 = Period::new(10, PeriodFreq::Monthly);
         let p2 = Period::new(11, PeriodFreq::Monthly);
@@ -15615,10 +15610,7 @@ mod tests {
         assert!(empty.argmin().is_err());
         assert!(empty.argsort()?.is_empty());
 
-        let mixed = super::PeriodIndex::new(vec![
-            p1,
-            Period::new(10, PeriodFreq::Annual),
-        ]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
         assert!(mixed.argmax().is_err());
         assert!(mixed.argsort().is_err());
         Ok(())
@@ -15641,10 +15633,7 @@ mod tests {
         assert_eq!(back.values()[0].ordinal, 9);
 
         // Mixed-freq rejects.
-        let mixed = super::PeriodIndex::new(vec![
-            p1,
-            Period::new(10, PeriodFreq::Annual),
-        ]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
         assert!(mixed.shift(1).is_err());
         Ok(())
     }
@@ -15674,10 +15663,7 @@ mod tests {
         assert!(super::PeriodIndex::new(vec![p1]).is_full());
 
         // Mixed-frequency.
-        let mixed = super::PeriodIndex::new(vec![
-            p1,
-            Period::new(10, PeriodFreq::Annual),
-        ]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
         assert!(!mixed.is_full());
     }
 
@@ -15804,12 +15790,20 @@ mod tests {
         let bad_cond = dt.r#where(&[true, false], i64::MIN).unwrap_err();
         assert!(matches!(
             bad_cond,
-            super::IndexError::LengthMismatch { expected: 3, actual: 2, .. }
+            super::IndexError::LengthMismatch {
+                expected: 3,
+                actual: 2,
+                ..
+            }
         ));
         let bad_mask = dt.putmask(&[true; 5], c).unwrap_err();
         assert!(matches!(
             bad_mask,
-            super::IndexError::LengthMismatch { expected: 3, actual: 5, .. }
+            super::IndexError::LengthMismatch {
+                expected: 3,
+                actual: 5,
+                ..
+            }
         ));
         Ok(())
     }
@@ -15829,7 +15823,11 @@ mod tests {
         let bad = td.r#where(&[true, false], nat).unwrap_err();
         assert!(matches!(
             bad,
-            super::IndexError::LengthMismatch { expected: 3, actual: 2, .. }
+            super::IndexError::LengthMismatch {
+                expected: 3,
+                actual: 2,
+                ..
+            }
         ));
         Ok(())
     }
@@ -15898,7 +15896,8 @@ mod tests {
     }
 
     #[test]
-    fn datetime_timedelta_get_loc_get_indexer_match_pandas_6x9de() -> Result<(), super::IndexError> {
+    fn datetime_timedelta_get_loc_get_indexer_match_pandas_6x9de() -> Result<(), super::IndexError>
+    {
         const NS: i64 = 1_000_000_000;
         let a = 1_704_067_200_i64 * NS;
         let b = 1_705_276_800_i64 * NS;
@@ -16001,24 +16000,17 @@ mod tests {
         assert_eq!(td_flat.name(), Some("d"));
 
         use fp_types::{Period, PeriodFreq};
-        let pi =
-            super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
+        let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
         let pi_flat = pi.to_flat_index();
         assert_eq!(pi_flat.len(), 1);
-        assert!(matches!(
-            pi_flat.labels()[0],
-            super::IndexLabel::Utf8(_)
-        ));
+        assert!(matches!(pi_flat.labels()[0], super::IndexLabel::Utf8(_)));
 
         let r = super::RangeIndex::new(0, 3, 1).unwrap().set_name("r");
         let r_flat = r.to_flat_index();
         assert_eq!(r_flat.len(), 3);
         assert_eq!(r_flat.name(), Some("r"));
 
-        let cat = super::CategoricalIndex::from_values(
-            vec!["a".to_owned(), "b".to_owned()],
-            false,
-        );
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
         let cat_flat = cat.to_flat_index();
         assert_eq!(cat_flat.len(), 2);
     }
@@ -16029,12 +16021,14 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN]).set_name("ts");
         assert!(dt.view().equals(&dt));
         assert!(dt.transpose().equals(&dt));
+        assert!(dt.T().identical(&dt));
         assert_eq!(dt.ravel(), dt.values());
         assert_eq!(dt.nlevels(), 1);
         assert!(dt.infer_objects().equals(&dt));
 
         let td = super::TimedeltaIndex::new(vec![100_i64, fp_types::Timedelta::NAT]).set_name("d");
         assert!(td.view().equals(&td));
+        assert!(td.T().identical(&td));
         assert_eq!(td.ravel(), td.values());
         assert_eq!(td.nlevels(), 1);
 
@@ -16044,19 +16038,19 @@ mod tests {
             Period::new(11, PeriodFreq::Monthly),
         ]);
         assert_eq!(pi.view().values(), pi.values());
+        assert!(pi.T().identical(&pi));
         assert_eq!(pi.ravel(), pi.values().to_vec());
         assert_eq!(pi.nlevels(), 1);
 
         let r = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(r.view().equals(&r));
+        assert!(r.T().identical(&r));
         assert_eq!(r.ravel(), r.values());
         assert_eq!(r.nlevels(), 1);
 
-        let cat = super::CategoricalIndex::from_values(
-            vec!["a".to_owned(), "b".to_owned()],
-            false,
-        );
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
         assert_eq!(cat.view().labels(), cat.labels());
+        assert!(cat.T().identical(&cat));
         assert_eq!(cat.ravel(), cat.labels().to_vec());
         assert_eq!(cat.nlevels(), 1);
     }
@@ -16172,12 +16166,14 @@ mod tests {
     fn datetime_timedelta_shift_match_pandas_1y3sx() {
         const NS: i64 = 1_000_000_000;
         let day_ns = 86_400 * NS;
-        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN])
-            .set_name("ts");
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN]).set_name("ts");
 
         // Shift by 2 days.
         let shifted = dt.shift(2, day_ns);
-        assert_eq!(shifted.values()[0], Some(1_704_067_200_i64 * NS + 2 * day_ns));
+        assert_eq!(
+            shifted.values()[0],
+            Some(1_704_067_200_i64 * NS + 2 * day_ns)
+        );
         assert_eq!(shifted.values()[1], None);
         assert_eq!(shifted.name(), Some("ts"));
 
@@ -16256,10 +16252,7 @@ mod tests {
         assert_eq!(td.max(), Some(300));
 
         let sorted = td.sort_values();
-        assert_eq!(
-            sorted.values(),
-            vec![None, Some(100), Some(200), Some(300)]
-        );
+        assert_eq!(sorted.values(), vec![None, Some(100), Some(200), Some(300)]);
         assert_eq!(sorted.name(), Some("d"));
 
         let all_nat = super::TimedeltaIndex::new(vec![nat, nat]);
@@ -16294,7 +16287,10 @@ mod tests {
         let oob = left.delete(5).unwrap_err();
         assert!(matches!(
             oob,
-            super::IndexError::OutOfBounds { position: 5, length: 2 }
+            super::IndexError::OutOfBounds {
+                position: 5,
+                length: 2
+            }
         ));
         Ok(())
     }
@@ -16312,7 +16308,10 @@ mod tests {
 
         assert!(matches!(
             left.delete(7).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 7, length: 2 }
+            super::IndexError::OutOfBounds {
+                position: 7,
+                length: 2
+            }
         ));
         Ok(())
     }
@@ -16338,7 +16337,10 @@ mod tests {
 
         assert!(matches!(
             left.delete(5).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 5, length: 2 }
+            super::IndexError::OutOfBounds {
+                position: 5,
+                length: 2
+            }
         ));
         Ok(())
     }
@@ -16371,7 +16373,10 @@ mod tests {
 
         assert!(matches!(
             left.delete(99).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 99, length: 3 }
+            super::IndexError::OutOfBounds {
+                position: 99,
+                length: 3
+            }
         ));
         Ok(())
     }
@@ -16391,7 +16396,10 @@ mod tests {
         let oob = dt.take(&[3]).unwrap_err();
         assert!(matches!(
             oob,
-            super::IndexError::OutOfBounds { position: 3, length: 3 }
+            super::IndexError::OutOfBounds {
+                position: 3,
+                length: 3
+            }
         ));
 
         let repeated = dt.repeat(2);
@@ -16418,13 +16426,23 @@ mod tests {
 
         assert!(matches!(
             td.take(&[7]).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 7, length: 3 }
+            super::IndexError::OutOfBounds {
+                position: 7,
+                length: 3
+            }
         ));
 
         let repeated = td.repeat(2);
         assert_eq!(
             repeated.values(),
-            vec![Some(100), Some(100), Some(200), Some(200), Some(300), Some(300)]
+            vec![
+                Some(100),
+                Some(100),
+                Some(200),
+                Some(200),
+                Some(300),
+                Some(300)
+            ]
         );
 
         let mask = td.isin(&[200, 999]);
@@ -16446,7 +16464,10 @@ mod tests {
 
         assert!(matches!(
             pi.take(&[5]).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 5, length: 3 }
+            super::IndexError::OutOfBounds {
+                position: 5,
+                length: 3
+            }
         ));
 
         let repeated = pi.repeat(2);
@@ -16473,7 +16494,10 @@ mod tests {
 
         assert!(matches!(
             r.take(&[10]).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 10, length: 5 }
+            super::IndexError::OutOfBounds {
+                position: 10,
+                length: 5
+            }
         ));
 
         let repeated = r.repeat(2);
@@ -16568,7 +16592,12 @@ mod tests {
     -> Result<(), super::IndexError> {
         let cat = super::CategoricalIndex::with_categories(
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
             false,
         )?
         .set_name("level");
@@ -16597,7 +16626,10 @@ mod tests {
         // delete OOB.
         assert!(matches!(
             cat.delete(99).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 99, length: 3 }
+            super::IndexError::OutOfBounds {
+                position: 99,
+                length: 3
+            }
         ));
         let trimmed = cat.delete(0)?;
         assert_eq!(
@@ -16609,7 +16641,13 @@ mod tests {
         let inserted = cat.insert(1, "d")?;
         assert_eq!(
             inserted.labels(),
-            vec!["a".to_owned(), "d".to_owned(), "b".to_owned(), "c".to_owned()].as_slice()
+            vec![
+                "a".to_owned(),
+                "d".to_owned(),
+                "b".to_owned(),
+                "c".to_owned()
+            ]
+            .as_slice()
         );
         assert!(cat.insert(1, "zzz").is_err());
 
@@ -16625,8 +16663,18 @@ mod tests {
     #[test]
     fn categorical_index_slice_locs_indexer_match_pandas_y93vb() -> Result<(), super::IndexError> {
         let cat = super::CategoricalIndex::with_categories(
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
             true,
         )?;
         assert_eq!(cat.slice_locs("b", "c")?, (1, 3));
@@ -16643,8 +16691,8 @@ mod tests {
     }
 
     #[test]
-    fn categorical_index_searchsorted_set_ops_match_pandas_cmvs7()
-    -> Result<(), super::IndexError> {
+    fn categorical_index_searchsorted_set_ops_match_pandas_cmvs7() -> Result<(), super::IndexError>
+    {
         let cat = super::CategoricalIndex::with_categories(
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
@@ -16705,7 +16753,12 @@ mod tests {
     #[test]
     fn categorical_index_forwarders_match_pandas_e2p82() -> Result<(), super::IndexError> {
         let cat = super::CategoricalIndex::with_categories(
-            vec!["b".to_owned(), "a".to_owned(), "c".to_owned(), "a".to_owned()],
+            vec![
+                "b".to_owned(),
+                "a".to_owned(),
+                "c".to_owned(),
+                "a".to_owned(),
+            ],
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             true,
         )?;
@@ -16728,7 +16781,10 @@ mod tests {
         );
         assert!(matches!(
             cat.take(&[7]).unwrap_err(),
-            super::IndexError::OutOfBounds { position: 7, length: 4 }
+            super::IndexError::OutOfBounds {
+                position: 7,
+                length: 4
+            }
         ));
 
         // isin membership.
@@ -16769,7 +16825,13 @@ mod tests {
         let added = cat.add_categories(vec!["d".to_owned()])?;
         assert_eq!(
             added.categories(),
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()].as_slice()
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned()
+            ]
+            .as_slice()
         );
         // Adding a duplicate rejects.
         assert!(cat.add_categories(vec!["a".to_owned()]).is_err());
@@ -16801,15 +16863,18 @@ mod tests {
         ])?;
         assert_eq!(extended.categories().len(), 4);
         // set_categories must include every current label.
-        assert!(cat.set_categories(vec!["b".to_owned(), "c".to_owned()]).is_err());
+        assert!(
+            cat.set_categories(vec!["b".to_owned(), "c".to_owned()])
+                .is_err()
+        );
 
         // rename_categories: a→A, b→B, c→C.
-        let renamed = cat.rename_categories(vec![
-            "A".to_owned(),
-            "B".to_owned(),
-            "C".to_owned(),
-        ])?;
-        assert_eq!(renamed.labels(), vec!["A".to_owned(), "B".to_owned()].as_slice());
+        let renamed =
+            cat.rename_categories(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()])?;
+        assert_eq!(
+            renamed.labels(),
+            vec!["A".to_owned(), "B".to_owned()].as_slice()
+        );
         assert_eq!(
             renamed.categories(),
             vec!["A".to_owned(), "B".to_owned(), "C".to_owned()].as_slice()
@@ -16818,23 +16883,23 @@ mod tests {
         assert!(cat.rename_categories(vec!["X".to_owned()]).is_err());
 
         // reorder_categories: permutation passes; ordered flag flips.
-        let reordered = cat.reorder_categories(
-            vec!["c".to_owned(), "b".to_owned(), "a".to_owned()],
-            true,
-        )?;
+        let reordered =
+            cat.reorder_categories(vec!["c".to_owned(), "b".to_owned(), "a".to_owned()], true)?;
         assert!(reordered.ordered());
         assert_eq!(
             reordered.categories(),
             vec!["c".to_owned(), "b".to_owned(), "a".to_owned()].as_slice()
         );
         // Non-permutation rejects.
-        assert!(cat
-            .reorder_categories(vec!["a".to_owned(), "b".to_owned(), "x".to_owned()], false)
-            .is_err());
+        assert!(
+            cat.reorder_categories(vec!["a".to_owned(), "b".to_owned(), "x".to_owned()], false)
+                .is_err()
+        );
         // Duplicate-bearing input rejects.
-        assert!(cat
-            .reorder_categories(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()], false)
-            .is_err());
+        assert!(
+            cat.reorder_categories(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()], false)
+                .is_err()
+        );
 
         Ok(())
     }
@@ -16849,8 +16914,8 @@ mod tests {
             "high".to_owned(),
             "low".to_owned(),
         ];
-        let categorical = super::CategoricalIndex::from_values(labels.clone(), false)
-            .set_name("level");
+        let categorical =
+            super::CategoricalIndex::from_values(labels.clone(), false).set_name("level");
 
         // unique: first-seen low, high, med.
         let unique = categorical.unique();
@@ -16899,8 +16964,7 @@ mod tests {
     }
 
     #[test]
-    fn timedelta_index_forwarder_methods_match_index_vq4pf()
-    -> Result<(), super::IndexError> {
+    fn timedelta_index_forwarder_methods_match_index_vq4pf() -> Result<(), super::IndexError> {
         let a: i64 = 1_000;
         let b: i64 = 2_000;
         let c: i64 = 3_000;
@@ -16965,8 +17029,8 @@ mod tests {
 
     #[test]
     fn timedelta_index_dropna_preserves_name_vq4pf() {
-        let td = super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT, 0_i64])
-            .set_name("delta");
+        let td =
+            super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT, 0_i64]).set_name("delta");
         let dropped = td.dropna();
         assert_eq!(dropped.values(), vec![Some(0)]);
         assert_eq!(dropped.name(), Some("delta"));
@@ -16983,15 +17047,17 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![a, c, b, a, i64::MIN, c]);
 
         // argmax / argmin skip NAT to match pandas skipna=True default.
-        assert_eq!(dt.argmax()?, 1);   // c at position 1 is first-seen max
-        assert_eq!(dt.argmin()?, 0);   // a at position 0 is first-seen min
+        assert_eq!(dt.argmax()?, 1); // c at position 1 is first-seen max
+        assert_eq!(dt.argmin()?, 0); // a at position 0 is first-seen min
 
         // argsort returns positions in ascending label order (NAT sorts lowest
         // because i64::MIN < every datetime). Stable on ties.
         let positions = dt.argsort();
         assert_eq!(positions.len(), dt.len());
-        let sorted_labels: Vec<&super::IndexLabel> =
-            positions.iter().map(|&p| &dt.as_index().labels()[p]).collect();
+        let sorted_labels: Vec<&super::IndexLabel> = positions
+            .iter()
+            .map(|&p| &dt.as_index().labels()[p])
+            .collect();
         for w in sorted_labels.windows(2) {
             assert!(w[0].cmp(w[1]).is_le());
         }
@@ -17104,20 +17170,11 @@ mod tests {
         let total = one_day + extra;
         let td = super::TimedeltaIndex::new(vec![total, fp_types::Timedelta::NAT, 0]);
 
-        assert_eq!(
-            td.asi8(),
-            vec![total, fp_types::Timedelta::NAT, 0]
-        );
+        assert_eq!(td.asi8(), vec![total, fp_types::Timedelta::NAT, 0]);
         // microseconds: 789_012_345 % 1_000_000_000 / 1_000 == 789_012
-        assert_eq!(
-            td.microseconds(),
-            vec![Some(789_012), None, Some(0)]
-        );
+        assert_eq!(td.microseconds(), vec![Some(789_012), None, Some(0)]);
         // nanoseconds: 789_012_345 % 1_000 == 345
-        assert_eq!(
-            td.nanoseconds(),
-            vec![Some(345), None, Some(0)]
-        );
+        assert_eq!(td.nanoseconds(), vec![Some(345), None, Some(0)]);
     }
 
     #[test]
@@ -17139,11 +17196,7 @@ mod tests {
         );
         assert_eq!(
             dt.day_name(),
-            vec![
-                Some("Monday".to_owned()),
-                Some("Tuesday".to_owned()),
-                None
-            ]
+            vec![Some("Monday".to_owned()), Some("Tuesday".to_owned()), None]
         );
     }
 

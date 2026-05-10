@@ -11,9 +11,9 @@
 //! available — matches the convention of sibling `live_oracle_*` tests.
 
 use super::{
-    EvidenceLedger, FixtureExpectedSeries, HarnessConfig, HarnessError, PacketFixture,
-    ResolvedExpected, RuntimePolicy, Scalar, build_series, capture_live_oracle_expected,
-    compare_scalar, compare_series_expected,
+    EvidenceLedger, FixtureExpectedSeries, FrameError, HarnessConfig, HarnessError, IndexLabel,
+    NullKind, PacketFixture, ResolvedExpected, RuntimePolicy, Scalar, Series, build_series,
+    capture_live_oracle_expected, compare_scalar, compare_series_expected,
 };
 
 fn oracle_series_expected(
@@ -300,4 +300,187 @@ fn conformance_series_nunique_all_duplicates() {
     }))
     .expect("fixture");
     check_series_nunique(fixture);
+}
+
+// ── list/struct accessor compatibility contracts ─────────────────────
+
+#[test]
+fn conformance_series_list_json_accessor_contract_zzbqc() {
+    let series = Series::from_values(
+        "items",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Utf8(r#"[1,"x",null]"#.into()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Utf8("[]".into()),
+            Scalar::Utf8("[true,2.5]".into()),
+        ],
+    )
+    .expect("list contract series");
+
+    let accessor = series.list();
+    assert!(accessor.is_supported());
+
+    let lengths = accessor.len().expect("list lengths");
+    assert_eq!(
+        lengths.values(),
+        &[
+            Scalar::Int64(3),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(0),
+            Scalar::Int64(2),
+        ]
+    );
+    assert_eq!(lengths.index().labels(), series.index().labels());
+
+    let second = accessor.get(1).expect("list get");
+    assert_eq!(
+        second.values(),
+        &[
+            Scalar::Utf8("x".into()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Float64(2.5),
+        ]
+    );
+
+    let missing = accessor.get(9).expect("list missing index");
+    assert_eq!(
+        missing.values(),
+        &[
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+        ]
+    );
+
+    let flattened = accessor.flatten().expect("list flatten");
+    assert_eq!(
+        flattened.values(),
+        &[
+            Scalar::Int64(1),
+            Scalar::Utf8("x".into()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Bool(true),
+            Scalar::Float64(2.5),
+        ]
+    );
+
+    let scalar_series =
+        Series::from_values("bad", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(1)])
+            .expect("bad list series");
+    let err = scalar_series.list().len().expect_err("non-list rejects");
+    assert!(
+        matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("UTF-8 JSON arrays") && msg.contains("position 0"))
+    );
+
+    let nested_series = Series::from_values(
+        "nested",
+        vec![IndexLabel::Int64(0)],
+        vec![Scalar::Utf8("[[1]]".into())],
+    )
+    .expect("nested list series");
+    let err = nested_series
+        .list()
+        .flatten()
+        .expect_err("nested list rejects");
+    assert!(
+        matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
+    );
+}
+
+#[test]
+fn conformance_series_struct_json_accessor_contract_zzbqc() {
+    let series = Series::from_values(
+        "records",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Utf8(r#"{"id":1,"name":"Ada"}"#.into()),
+            Scalar::Utf8(r#"{"id":null}"#.into()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Utf8("{}".into()),
+        ],
+    )
+    .expect("struct contract series");
+
+    let accessor = series.r#struct();
+    assert!(accessor.is_supported());
+    assert_eq!(
+        accessor.field_names().expect("field names"),
+        vec!["id", "name"]
+    );
+
+    let ids = accessor.field("id").expect("id field");
+    assert_eq!(ids.name(), "id");
+    assert_eq!(
+        ids.values(),
+        &[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+        ]
+    );
+    assert_eq!(ids.index().labels(), series.index().labels());
+
+    let names = accessor.field("name").expect("name field");
+    assert_eq!(
+        names.values(),
+        &[
+            Scalar::Utf8("Ada".into()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+        ]
+    );
+
+    let missing = accessor.field("missing").expect("missing field");
+    assert_eq!(
+        missing.values(),
+        &[
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::Null),
+        ]
+    );
+
+    let array_series = Series::from_values(
+        "array",
+        vec![IndexLabel::Int64(0)],
+        vec![Scalar::Utf8("[1]".into())],
+    )
+    .expect("array struct series");
+    let err = array_series
+        .r#struct()
+        .field_names()
+        .expect_err("non-struct rejects");
+    assert!(
+        matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("non-object JSON") && msg.contains("position 0"))
+    );
+
+    let nested_series = Series::from_values(
+        "nested",
+        vec![IndexLabel::Int64(0)],
+        vec![Scalar::Utf8(r#"{"payload":{"x":1}}"#.into())],
+    )
+    .expect("nested struct series");
+    let err = nested_series
+        .r#struct()
+        .field("payload")
+        .expect_err("nested struct rejects");
+    assert!(
+        matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
+    );
 }

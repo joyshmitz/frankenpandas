@@ -2316,6 +2316,16 @@ fn period_boundary_nanos(period: Period, boundary: PeriodBoundary) -> Result<i64
     }
 }
 
+fn parse_period_boundary_how(how: &str, context: &str) -> Result<PeriodBoundary, IndexError> {
+    match how.trim().to_ascii_lowercase().as_str() {
+        "" | "e" | "end" | "finish" => Ok(PeriodBoundary::End),
+        "s" | "start" | "begin" | "b" => Ok(PeriodBoundary::Start),
+        other => Err(IndexError::InvalidArgument(format!(
+            "{context} how must be 'start' or 'end', got {other:?}"
+        ))),
+    }
+}
+
 fn period_qyear(period: Period) -> Result<i32, IndexError> {
     let end_nanos = period_end_nanos(period)?;
     datetime_nanos_to_date(end_nanos)
@@ -5913,6 +5923,37 @@ impl PeriodIndex {
     pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
         positional_diff(self.values.len(), periods, |current, previous| {
             self.values[current].diff(&self.values[previous])
+        })
+    }
+
+    /// Convert periods to a new frequency using pandas' default end boundary.
+    ///
+    /// Matches `pd.PeriodIndex.asfreq(freq)` for supported target frequencies.
+    pub fn asfreq(&self, freq: &str) -> Result<Self, IndexError> {
+        self.asfreq_with_how(freq, "end")
+    }
+
+    /// Convert periods to a new frequency at the requested boundary.
+    ///
+    /// Supported `how` values mirror pandas' common aliases:
+    /// `start` / `s` / `begin` and `end` / `e` / `finish`.
+    pub fn asfreq_with_how(&self, freq: &str, how: &str) -> Result<Self, IndexError> {
+        let target_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            IndexError::InvalidArgument(format!("asfreq: unsupported frequency '{freq}'"))
+        })?;
+        let boundary = parse_period_boundary_how(how, "asfreq")?;
+        let values = self
+            .values
+            .iter()
+            .copied()
+            .map(|period| {
+                let nanos = period_boundary_nanos(period, boundary)?;
+                datetime_nanos_to_period(nanos, target_freq)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            values,
+            name: self.name.clone(),
         })
     }
 
@@ -17721,6 +17762,89 @@ mod tests {
         ));
         assert!(matches!(
             dt.to_period("fortnight"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("unsupported frequency")
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_asfreq_boundary_conversion_h1zia() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+
+        let annual = super::PeriodIndex::new(vec![
+            Period::new(0, PeriodFreq::Annual),
+            Period::new(1, PeriodFreq::Annual),
+        ])
+        .set_name("p");
+        assert_eq!(
+            annual.asfreq("M")?.values(),
+            &[
+                Period::new(11, PeriodFreq::Monthly),
+                Period::new(23, PeriodFreq::Monthly),
+            ]
+        );
+        let annual_start = annual.asfreq_with_how("M", "start")?;
+        assert_eq!(
+            annual_start.values(),
+            &[
+                Period::new(0, PeriodFreq::Monthly),
+                Period::new(12, PeriodFreq::Monthly),
+            ]
+        );
+        assert_eq!(annual_start.name(), Some("p"));
+
+        let quarterly = super::PeriodIndex::new(vec![
+            Period::new(0, PeriodFreq::Quarterly),
+            Period::new(1, PeriodFreq::Quarterly),
+        ]);
+        assert_eq!(
+            quarterly.asfreq("D")?.values(),
+            &[
+                Period::new(89, PeriodFreq::Daily),
+                Period::new(180, PeriodFreq::Daily),
+            ]
+        );
+        assert_eq!(
+            quarterly.asfreq_with_how("D", "s")?.values(),
+            &[
+                Period::new(0, PeriodFreq::Daily),
+                Period::new(90, PeriodFreq::Daily),
+            ]
+        );
+
+        let monthly = super::PeriodIndex::new(vec![
+            Period::new(0, PeriodFreq::Monthly),
+            Period::new(1, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(
+            monthly.asfreq("S")?.values(),
+            &[
+                Period::new(2_678_399, PeriodFreq::Secondly),
+                Period::new(5_097_599, PeriodFreq::Secondly),
+            ]
+        );
+        assert_eq!(
+            monthly.asfreq_with_how("S", "begin")?.values(),
+            &[
+                Period::new(0, PeriodFreq::Secondly),
+                Period::new(2_678_400, PeriodFreq::Secondly),
+            ]
+        );
+
+        assert!(matches!(
+            monthly.asfreq("B"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("frequency 'B' is not supported yet")
+        ));
+        assert!(matches!(
+            monthly.asfreq_with_how("D", "middle"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("asfreq how must be 'start' or 'end'")
+        ));
+        assert!(matches!(
+            monthly.asfreq("fortnight"),
             Err(super::IndexError::InvalidArgument(message))
                 if message.contains("unsupported frequency")
         ));

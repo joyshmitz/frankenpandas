@@ -20247,6 +20247,150 @@ impl<'a> SparseDataFrameView<'a> {
     pub fn dataframe(&self) -> &'a DataFrame {
         self.df
     }
+
+    fn default_fill_value(column: &Column) -> Scalar {
+        Scalar::missing_for_dtype(column.dtype())
+    }
+
+    fn column_npoints_for(column: &Column, fill_value: &Scalar) -> usize {
+        column
+            .values()
+            .iter()
+            .filter(|value| !value.semantic_eq(fill_value))
+            .count()
+    }
+
+    fn density_for(npoints: usize, total_cells: usize) -> f64 {
+        if total_cells == 0 {
+            0.0
+        } else {
+            npoints as f64 / total_cells as f64
+        }
+    }
+
+    fn total_cells(&self) -> usize {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| self.df.columns[name].values().len())
+            .sum()
+    }
+
+    /// Count non-fill values across all columns.
+    ///
+    /// Dense-backed DataFrames do not yet store per-column `SparseDType`
+    /// descriptors, so the default fill value is each column dtype's missing
+    /// marker.
+    #[must_use]
+    pub fn npoints(&self) -> usize {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| {
+                let column = &self.df.columns[name];
+                Self::column_npoints_for(column, &Self::default_fill_value(column))
+            })
+            .sum()
+    }
+
+    /// Return total non-fill density across the DataFrame.
+    #[must_use]
+    pub fn density(&self) -> f64 {
+        Self::density_for(self.npoints(), self.total_cells())
+    }
+
+    /// Count non-fill values in each column.
+    #[must_use]
+    pub fn column_npoints(&self) -> BTreeMap<String, usize> {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| {
+                let column = &self.df.columns[name];
+                (
+                    name.clone(),
+                    Self::column_npoints_for(column, &Self::default_fill_value(column)),
+                )
+            })
+            .collect()
+    }
+
+    /// Return non-fill density in each column.
+    #[must_use]
+    pub fn column_density(&self) -> BTreeMap<String, f64> {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| {
+                let column = &self.df.columns[name];
+                let npoints = Self::column_npoints_for(column, &Self::default_fill_value(column));
+                (
+                    name.clone(),
+                    Self::density_for(npoints, column.values().len()),
+                )
+            })
+            .collect()
+    }
+
+    /// Count values that differ from a caller-provided fill value.
+    ///
+    /// This mirrors the Series sparse accessor's `SparseDType(fill_value)`
+    /// semantics for callers that know the intended sparse fill value.
+    #[must_use]
+    pub fn npoints_with_fill_value(&self, fill_value: &Scalar) -> usize {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| Self::column_npoints_for(&self.df.columns[name], fill_value))
+            .sum()
+    }
+
+    /// Return total density using a caller-provided fill value.
+    #[must_use]
+    pub fn density_with_fill_value(&self, fill_value: &Scalar) -> f64 {
+        Self::density_for(self.npoints_with_fill_value(fill_value), self.total_cells())
+    }
+
+    /// Count per-column values that differ from a caller-provided fill value.
+    #[must_use]
+    pub fn column_npoints_with_fill_value(&self, fill_value: &Scalar) -> BTreeMap<String, usize> {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Self::column_npoints_for(&self.df.columns[name], fill_value),
+                )
+            })
+            .collect()
+    }
+
+    /// Return per-column density using a caller-provided fill value.
+    #[must_use]
+    pub fn column_density_with_fill_value(&self, fill_value: &Scalar) -> BTreeMap<String, f64> {
+        self.df
+            .column_order
+            .iter()
+            .map(|name| {
+                let column = &self.df.columns[name];
+                let npoints = Self::column_npoints_for(column, fill_value);
+                (
+                    name.clone(),
+                    Self::density_for(npoints, column.values().len()),
+                )
+            })
+            .collect()
+    }
+
+    /// Materialize the sparse view as a dense DataFrame.
+    ///
+    /// Current DataFrame storage is already dense; this returns a clone while
+    /// preserving DataFrame metadata such as duplicate-label policy.
+    #[must_use]
+    pub fn to_dense(&self) -> DataFrame {
+        self.df.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77706,6 +77850,57 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
         );
+    }
+
+    #[test]
+    fn dataframe_zvvtk_sparse_accessor_reports_density_npoints_and_dense_copy()
+    -> Result<(), FrameError> {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(0)],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .and_then(|df| df.set_flags(Some(false)))?;
+
+        let sparse = df.sparse();
+        assert_eq!(sparse.dataframe(), &df);
+
+        let default_npoints = sparse.column_npoints();
+        assert_eq!(default_npoints.get("a"), Some(&3));
+        assert_eq!(default_npoints.get("b"), Some(&2));
+        assert_eq!(sparse.npoints(), 5);
+        assert!((sparse.density() - (5.0 / 6.0)).abs() < f64::EPSILON);
+
+        let zero_npoints = sparse.column_npoints_with_fill_value(&Scalar::Int64(0));
+        assert_eq!(zero_npoints.get("a"), Some(&1));
+        assert_eq!(zero_npoints.get("b"), Some(&2));
+        assert_eq!(sparse.npoints_with_fill_value(&Scalar::Int64(0)), 3);
+
+        let zero_density = sparse.column_density_with_fill_value(&Scalar::Int64(0));
+        assert!(
+            matches!(zero_density.get("a"), Some(value) if (*value - (1.0 / 3.0)).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(zero_density.get("b"), Some(value) if (*value - (2.0 / 3.0)).abs() < f64::EPSILON)
+        );
+        assert!((sparse.density_with_fill_value(&Scalar::Int64(0)) - 0.5).abs() < f64::EPSILON);
+
+        let dense = sparse.to_dense();
+        assert_eq!(dense, df);
+        assert!(!dense.flags().allows_duplicate_labels());
+        Ok(())
     }
 
     #[test]

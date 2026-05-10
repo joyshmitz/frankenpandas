@@ -20235,6 +20235,64 @@ impl<'a> StyledDataFrame<'a> {
     pub fn dataframe(&self) -> &'a DataFrame {
         self.df
     }
+
+    fn escape_html_attr(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    /// Render the styled DataFrame as an HTML table.
+    ///
+    /// This delegates to the same table formatter as `DataFrame::to_html`.
+    #[must_use]
+    pub fn to_html(&self, include_index: bool) -> String {
+        self.df.to_html(include_index)
+    }
+
+    /// Render the styled DataFrame as the plain text table representation.
+    #[must_use]
+    pub fn to_string_table(&self, include_index: bool) -> String {
+        self.df.to_string_table(include_index)
+    }
+
+    /// Render the HTML table with a single CSS class.
+    #[must_use]
+    pub fn to_html_classed(&self, include_index: bool, class_name: &str) -> String {
+        self.to_html_with_classes(include_index, &[class_name])
+    }
+
+    /// Render the HTML table with caller-provided CSS classes.
+    ///
+    /// Empty class names are ignored. If no classes remain, the existing
+    /// `dataframe` class is preserved.
+    #[must_use]
+    pub fn to_html_with_classes(&self, include_index: bool, classes: &[&str]) -> String {
+        let class_attr = classes
+            .iter()
+            .filter_map(|class| {
+                let trimmed = class.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(Self::escape_html_attr(trimmed))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let class_attr = if class_attr.is_empty() {
+            "dataframe".to_owned()
+        } else {
+            class_attr
+        };
+        self.df.to_html(include_index).replacen(
+            "class=\"dataframe\"",
+            &format!("class=\"{class_attr}\""),
+            1,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77850,6 +77908,41 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
         );
+    }
+
+    #[test]
+    fn dataframe_ia1v9_style_renders_html_and_classed_tables() -> Result<(), FrameError> {
+        let df = DataFrame::from_dict(
+            &["label", "value"],
+            vec![
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("<low>".to_owned()),
+                        Scalar::Utf8("high".to_owned()),
+                    ],
+                ),
+                ("value", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )?;
+        let style = df.style();
+
+        assert_eq!(style.dataframe(), &df);
+        assert_eq!(style.to_html(true), df.to_html(true));
+        assert_eq!(style.to_string_table(false), df.to_string_table(false));
+
+        let classed = style.to_html_with_classes(true, &["report", " compact ", ""]);
+        assert!(classed.contains("class=\"report compact\""));
+        assert!(classed.contains("<td>&lt;low&gt;</td>"));
+        assert!(classed.contains("<th></th>"));
+
+        let escaped = style.to_html_classed(false, "summary\"<table>");
+        assert!(escaped.contains("class=\"summary&quot;&lt;table&gt;\""));
+        assert!(!escaped.contains("<th></th>"));
+
+        let default_class = style.to_html_with_classes(true, &["", "  "]);
+        assert!(default_class.contains("class=\"dataframe\""));
+        Ok(())
     }
 
     #[test]

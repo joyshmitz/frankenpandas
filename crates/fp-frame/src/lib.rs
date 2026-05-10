@@ -8925,9 +8925,9 @@ impl Series {
 
     /// Access list-array methods on this Series.
     ///
-    /// Matches the pandas `Series.list` namespace shape. FrankenPandas does
-    /// not have a first-class Arrow ListDtype yet, so operations exposed by
-    /// this accessor report that the dtype backend is pending.
+    /// Matches the pandas `Series.list` namespace shape. Until fp-types grows
+    /// a first-class list scalar, FrankenPandas supports a concrete
+    /// JSON-array-backed slice for UTF-8 object values plus missing values.
     #[must_use]
     pub fn list(&self) -> ListAccessor<'_> {
         ListAccessor { series: self }
@@ -14974,10 +14974,11 @@ impl SparseAccessor<'_> {
 
 // ── ListAccessor / StructAccessor ───────────────────────────────────────
 
-/// Accessor for Arrow-list operations on a Series.
+/// Accessor for list operations on a Series.
 ///
-/// Created by `Series::list()`. FrankenPandas exposes the namespace so callers
-/// get a stable API endpoint while the first-class list dtype is still pending.
+/// Created by `Series::list()`. Values are currently represented as UTF-8 JSON
+/// arrays, which gives callers real list namespace behavior while the native
+/// Arrow ListDtype storage backend is still pending.
 pub struct ListAccessor<'a> {
     series: &'a Series,
 }
@@ -14989,19 +14990,186 @@ impl ListAccessor<'_> {
         self.series.name()
     }
 
-    /// Whether this build has a native Arrow ListDtype backend.
+    /// Whether every non-missing value can be interpreted as a list.
     #[must_use]
-    pub const fn is_supported(&self) -> bool {
-        false
+    pub fn is_supported(&self) -> bool {
+        self.parsed_lists().is_ok()
     }
 
     /// Typed explanation for fail-closed list operations.
     #[must_use]
     pub fn unsupported_reason(&self) -> String {
-        format!(
-            "Series.list: Arrow ListDtype backend is not implemented for Series '{}'",
-            self.series.name()
+        match self.parsed_lists() {
+            Ok(()) => format!(
+                "Series.list: Series '{}' supports JSON-array UTF-8 list values",
+                self.series.name()
+            ),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// Return the length of each list value.
+    ///
+    /// Missing list values propagate as null. Non-list values reject the
+    /// operation before any output is produced.
+    pub fn len(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|list| {
+                list.map_or(Ok(Scalar::Null(NullKind::Null)), |items| {
+                    i64::try_from(items.len()).map(Scalar::Int64).map_err(|_| {
+                        FrameError::CompatibilityRejected(format!(
+                            "Series.list.len: list length exceeds i64 range for Series '{}'",
+                            self.series.name()
+                        ))
+                    })
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
         )
+    }
+
+    /// Extract one element from each list value.
+    ///
+    /// Negative positions count from the end of each list. Missing lists and
+    /// out-of-bounds positions produce nulls, matching pandas-style nullable
+    /// element extraction.
+    pub fn get(&self, index: i64) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|list| match list {
+                None => Ok(Scalar::Null(NullKind::Null)),
+                Some(items) => {
+                    let len = i64::try_from(items.len()).map_err(|_| {
+                        FrameError::CompatibilityRejected(format!(
+                            "Series.list.get: list length exceeds i64 range for Series '{}'",
+                            self.series.name()
+                        ))
+                    })?;
+                    let normalized = if index < 0 { len + index } else { index };
+                    if normalized < 0 || normalized >= len {
+                        Ok(Scalar::Null(NullKind::Null))
+                    } else {
+                        usize::try_from(normalized)
+                            .ok()
+                            .and_then(|position| items.get(position).cloned())
+                            .ok_or_else(|| {
+                                FrameError::CompatibilityRejected(format!(
+                                    "Series.list.get: normalized position {normalized} is invalid for Series '{}'",
+                                    self.series.name()
+                                ))
+                            })
+                    }
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Flatten list values into a single Series.
+    ///
+    /// Missing lists are skipped. Missing elements inside a list remain null
+    /// values in the flattened output.
+    pub fn flatten(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let mut out = Vec::new();
+        for list in values.into_iter().flatten() {
+            out.extend(list);
+        }
+        let stop = i64::try_from(out.len()).map_err(|_| {
+            FrameError::CompatibilityRejected(format!(
+                "Series.list.flatten: flattened length exceeds i64 range for Series '{}'",
+                self.series.name()
+            ))
+        })?;
+        Series::new(
+            self.series.name(),
+            Index::from_range(0, stop, 1),
+            Column::from_values(out)?,
+        )
+    }
+
+    fn parsed_lists(&self) -> Result<(), FrameError> {
+        self.list_values().map(|_| ())
+    }
+
+    fn list_values(&self) -> Result<Vec<Option<Vec<Scalar>>>, FrameError> {
+        self.series
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(row, value)| self.parse_list_value(value, row))
+            .collect()
+    }
+
+    fn parse_list_value(
+        &self,
+        value: &Scalar,
+        row: usize,
+    ) -> Result<Option<Vec<Scalar>>, FrameError> {
+        if value.is_missing() {
+            return Ok(None);
+        }
+
+        let Scalar::Utf8(raw) = value else {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Series.list: expected missing values or UTF-8 JSON arrays for Series '{}', found {value:?} at position {row}",
+                self.series.name()
+            )));
+        };
+
+        let parsed: Value = serde_json::from_str(raw).map_err(|err| {
+            FrameError::CompatibilityRejected(format!(
+                "Series.list: expected UTF-8 JSON array for Series '{}', failed to parse position {row}: {err}",
+                self.series.name()
+            ))
+        })?;
+        let Value::Array(items) = parsed else {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Series.list: expected UTF-8 JSON array for Series '{}', found non-array JSON at position {row}",
+                self.series.name()
+            )));
+        };
+
+        items
+            .iter()
+            .map(|item| self.json_list_item_to_scalar(item, row))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    fn json_list_item_to_scalar(&self, item: &Value, row: usize) -> Result<Scalar, FrameError> {
+        match item {
+            Value::Null => Ok(Scalar::Null(NullKind::Null)),
+            Value::Bool(value) => Ok(Scalar::Bool(*value)),
+            Value::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    Ok(Scalar::Int64(value))
+                } else if let Some(value) = value.as_f64() {
+                    Ok(Scalar::Float64(value))
+                } else {
+                    Err(FrameError::CompatibilityRejected(format!(
+                        "Series.list: JSON number at position {row} in Series '{}' is outside supported numeric range",
+                        self.series.name()
+                    )))
+                }
+            }
+            Value::String(value) => Ok(Scalar::Utf8(value.clone())),
+            Value::Array(_) | Value::Object(_) => Err(FrameError::CompatibilityRejected(format!(
+                "Series.list: nested JSON arrays/objects at position {row} in Series '{}' require native list/object scalar support",
+                self.series.name()
+            ))),
+        }
     }
 }
 
@@ -60896,7 +61064,10 @@ mod tests {
         let list = s.list();
         assert_eq!(list.series_name(), "x");
         assert!(!list.is_supported());
-        assert!(list.unsupported_reason().contains("Arrow ListDtype"));
+        assert!(
+            list.unsupported_reason()
+                .contains("expected missing values or UTF-8 JSON arrays")
+        );
 
         let struct_accessor = s.r#struct();
         assert_eq!(struct_accessor.series_name(), "x");
@@ -60905,6 +61076,121 @@ mod tests {
             struct_accessor
                 .unsupported_reason()
                 .contains("Arrow StructDtype")
+        );
+    }
+
+    #[test]
+    fn series_list_accessor_json_values_ego6v() {
+        let s = Series::from_values(
+            "items",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("d".into()),
+            ],
+            vec![
+                Scalar::Utf8(r#"[1,"x",null]"#.into()),
+                Scalar::Utf8("[]".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("[true,2.5]".into()),
+            ],
+        )
+        .unwrap();
+
+        let list = s.list();
+        assert!(list.is_supported());
+        assert!(
+            list.unsupported_reason()
+                .contains("supports JSON-array UTF-8 list values")
+        );
+
+        let lengths = list.len().unwrap();
+        assert_eq!(
+            lengths.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+            ]
+        );
+        assert_eq!(lengths.index().labels(), s.index().labels());
+
+        let second = list.get(1).unwrap();
+        assert_eq!(
+            second.values(),
+            &[
+                Scalar::Utf8("x".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(2.5),
+            ]
+        );
+
+        let last = list.get(-1).unwrap();
+        assert_eq!(
+            last.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+            ]
+        );
+
+        let flattened = list.flatten().unwrap();
+        assert_eq!(
+            flattened.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Utf8("x".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(true),
+                Scalar::Float64(2.5),
+            ]
+        );
+        assert_eq!(
+            flattened.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_list_accessor_rejects_non_list_values_ego6v() {
+        let scalar_series =
+            Series::from_values("bad", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(1)]).unwrap();
+        let err = scalar_series.list().len().unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("UTF-8 JSON arrays") && msg.contains("position 0"))
+        );
+
+        let object_series = Series::from_values(
+            "object",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8(r#"{"a":1}"#.into())],
+        )
+        .unwrap();
+        let err = object_series.list().get(0).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("non-array JSON") && msg.contains("position 0"))
+        );
+
+        let nested_series = Series::from_values(
+            "nested",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("[[1]]".into())],
+        )
+        .unwrap();
+        let err = nested_series.list().flatten().unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
         );
     }
 

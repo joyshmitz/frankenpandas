@@ -2465,6 +2465,54 @@ impl DatetimeIndex {
             .min()
     }
 
+    /// Average non-NAT label as nanoseconds-since-epoch, matching
+    /// `pd.DatetimeIndex.mean()`. Empty / all-NAT returns `None`.
+    /// Sum is computed in `i128` to avoid overflow.
+    #[must_use]
+    pub fn mean(&self) -> Option<i64> {
+        let mut total: i128 = 0;
+        let mut count: i128 = 0;
+        for label in self.index.labels() {
+            if let IndexLabel::Datetime64(n) = label
+                && *n != i64::MIN
+            {
+                total += i128::from(*n);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        i64::try_from(total / count).ok()
+    }
+
+    /// Median non-NAT label, matching `pd.DatetimeIndex.median()`. Empty
+    /// returns None. For an even-length non-NAT subset, returns the
+    /// average of the two middle values.
+    #[must_use]
+    pub fn median(&self) -> Option<i64> {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if nanos.is_empty() {
+            return None;
+        }
+        nanos.sort_unstable();
+        let mid = nanos.len() / 2;
+        if nanos.len() % 2 == 1 {
+            Some(nanos[mid])
+        } else {
+            let total = i128::from(nanos[mid - 1]) + i128::from(nanos[mid]);
+            i64::try_from(total / 2).ok()
+        }
+    }
+
     /// Maximum non-NAT label, matching `pd.DatetimeIndex.max()`.
     #[must_use]
     pub fn max(&self) -> Option<i64> {
@@ -4255,6 +4303,51 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .min()
+    }
+
+    /// Average non-NAT label as nanosecond duration, matching
+    /// `pd.TimedeltaIndex.mean()`. Empty / all-NAT returns `None`.
+    #[must_use]
+    pub fn mean(&self) -> Option<i64> {
+        let mut total: i128 = 0;
+        let mut count: i128 = 0;
+        for label in self.index.labels() {
+            if let IndexLabel::Timedelta64(n) = label
+                && *n != Timedelta::NAT
+            {
+                total += i128::from(*n);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        i64::try_from(total / count).ok()
+    }
+
+    /// Median non-NAT label, matching `pd.TimedeltaIndex.median()`.
+    #[must_use]
+    pub fn median(&self) -> Option<i64> {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if nanos.is_empty() {
+            return None;
+        }
+        nanos.sort_unstable();
+        let mid = nanos.len() / 2;
+        if nanos.len() % 2 == 1 {
+            Some(nanos[mid])
+        } else {
+            let total = i128::from(nanos[mid - 1]) + i128::from(nanos[mid]);
+            i64::try_from(total / 2).ok()
+        }
     }
 
     /// Maximum non-NAT label, matching `pd.TimedeltaIndex.max()`.
@@ -15469,6 +15562,35 @@ mod tests {
 
         let sym = left.symmetric_difference(&right);
         assert_eq!(sym.values(), vec![Some(100), Some(400)]);
+    }
+
+    #[test]
+    fn datetime_timedelta_mean_median_match_pandas_wp0gr() {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_000_000_000_i64 * NS;
+        let b = 2_000_000_000_i64 * NS;
+        let c = 3_000_000_000_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c, i64::MIN]);
+        // Mean: (a + b + c) / 3 = b (the middle, since arithmetic).
+        assert_eq!(dt.mean(), Some(b));
+        // Median: middle of three sorted values = b.
+        assert_eq!(dt.median(), Some(b));
+
+        // Even-length set: median is average of two middles.
+        let dt_even = super::DatetimeIndex::new(vec![a, b]);
+        let total = i128::from(a) + i128::from(b);
+        let expected = i64::try_from(total / 2).unwrap();
+        assert_eq!(dt_even.median(), Some(expected));
+
+        // All-NAT.
+        let nat = super::DatetimeIndex::new(vec![i64::MIN; 3]);
+        assert_eq!(nat.mean(), None);
+        assert_eq!(nat.median(), None);
+
+        // Timedelta spot check.
+        let td = super::TimedeltaIndex::new(vec![10_i64, 20, 30]);
+        assert_eq!(td.mean(), Some(20));
+        assert_eq!(td.median(), Some(20));
     }
 
     #[test]

@@ -25248,6 +25248,17 @@ impl DataFrame {
         })
     }
 
+    /// pandas alias for [`Self::agg`].
+    ///
+    /// Matches `pd.DataFrame.aggregate(...)` for dict-style column
+    /// aggregation specifications.
+    pub fn aggregate(
+        &self,
+        funcs: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<Self, FrameError> {
+        self.agg(funcs)
+    }
+
     /// Apply a function element-wise to every value in the DataFrame.
     ///
     /// Returns a new DataFrame with the same shape and index.
@@ -46938,6 +46949,69 @@ mod tests {
         // b: sum=60, mean=20
         assert_eq!(result.columns["b"].values()[0], Scalar::Float64(60.0));
         assert_eq!(result.columns["b"].values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_aggregate_alias_matches_agg() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(6.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(5.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut funcs = std::collections::HashMap::new();
+        funcs.insert("a".to_string(), vec!["sum".to_string(), "mean".to_string()]);
+        funcs.insert("b".to_string(), vec!["max".to_string()]);
+
+        let agg = df.agg(&funcs).unwrap();
+        let aggregate = df.aggregate(&funcs).unwrap();
+
+        assert_eq!(aggregate, agg);
+
+        let labels = aggregate.index.labels();
+        let sum_pos = labels
+            .iter()
+            .position(|label| label == &IndexLabel::Utf8("sum".to_owned()))
+            .expect("sum row");
+        let mean_pos = labels
+            .iter()
+            .position(|label| label == &IndexLabel::Utf8("mean".to_owned()))
+            .expect("mean row");
+        let max_pos = labels
+            .iter()
+            .position(|label| label == &IndexLabel::Utf8("max".to_owned()))
+            .expect("max row");
+
+        assert_eq!(
+            aggregate.columns["a"].values()[sum_pos],
+            Scalar::Float64(12.0)
+        );
+        assert_eq!(
+            aggregate.columns["a"].values()[mean_pos],
+            Scalar::Float64(4.0)
+        );
+        assert_eq!(
+            aggregate.columns["b"].values()[max_pos],
+            Scalar::Float64(5.0)
+        );
     }
 
     // ── applymap tests ──

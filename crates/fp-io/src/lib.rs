@@ -6816,17 +6816,36 @@ impl SqlConnection for rusqlite::Connection {
         F: FnOnce(&Self) -> Result<T, IoError>,
         Self: Sized,
     {
+        struct RollbackOnDrop<'conn> {
+            conn: &'conn rusqlite::Connection,
+            active: bool,
+        }
+
+        impl Drop for RollbackOnDrop<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = rusqlite::Connection::execute_batch(self.conn, "ROLLBACK");
+                }
+            }
+        }
+
         // rusqlite's pure-trait `Self: Sized` constraint means we operate on
         // `&rusqlite::Connection` directly without taking the `&mut` that
         // `Connection::transaction()` requires. We emulate the same
-        // BEGIN/COMMIT semantics with explicit pragmas; on closure error,
-        // ROLLBACK and propagate.
+        // BEGIN/COMMIT semantics with explicit pragmas. The guard keeps the
+        // connection from retaining a write transaction if the callback
+        // panics before we reach the explicit rollback/commit paths.
         self.execute_batch("BEGIN")
             .map_err(|e| IoError::Sql(format!("begin transaction failed: {e}")))?;
+        let mut rollback = RollbackOnDrop {
+            conn: self,
+            active: true,
+        };
         match f(self) {
             Ok(result) => {
                 self.execute_batch("COMMIT")
                     .map_err(|e| IoError::Sql(format!("commit transaction failed: {e}")))?;
+                rollback.active = false;
                 Ok(result)
             }
             Err(err) => {
@@ -6834,7 +6853,9 @@ impl SqlConnection for rusqlite::Connection {
                 // also fails (rollback failure is logged via the Sql error
                 // variant for diagnostics but the user wants the closure
                 // error preserved as the primary signal).
-                let _ = self.execute_batch("ROLLBACK");
+                if self.execute_batch("ROLLBACK").is_ok() {
+                    rollback.active = false;
+                }
                 Err(err)
             }
         }
@@ -17879,6 +17900,33 @@ mod tests {
         let row_count =
             super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM txn_rollback", &[]).unwrap();
         assert_eq!(row_count.rows[0][0], Scalar::Int64(0));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_with_transaction_rolls_back_on_panic() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE txn_panic (x INTEGER)").unwrap();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), IoError> = super::SqlConnection::with_transaction(&conn, |c| {
+                super::SqlConnection::execute_batch(c, "INSERT INTO txn_panic VALUES (99)")?;
+                std::panic::resume_unwind(Box::new("simulated transaction panic"));
+            });
+        }));
+        assert!(panic_result.is_err());
+
+        let row_count =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM txn_panic", &[]).unwrap();
+        assert_eq!(row_count.rows[0][0], Scalar::Int64(0));
+
+        let result: Result<(), IoError> = super::SqlConnection::with_transaction(&conn, |c| {
+            super::SqlConnection::execute_batch(c, "INSERT INTO txn_panic VALUES (7)")
+        });
+        assert!(result.is_ok());
+        let rows =
+            super::SqlConnection::query(&conn, "SELECT x FROM txn_panic ORDER BY x", &[]).unwrap();
+        assert_eq!(rows.rows, vec![vec![Scalar::Int64(7)]]);
     }
 
     #[test]

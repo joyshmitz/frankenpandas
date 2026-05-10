@@ -2465,6 +2465,29 @@ impl DatetimeIndex {
             .min()
     }
 
+    /// Shift each label by `periods` units of `freq_nanos`, matching
+    /// `pd.DatetimeIndex.shift(periods, freq)` once `freq` has been
+    /// resolved to a nanosecond duration. NAT propagates as NAT;
+    /// arithmetic overflow saturates.
+    #[must_use]
+    pub fn shift(&self, periods: i64, freq_nanos: i64) -> Self {
+        let delta = periods.saturating_mul(freq_nanos);
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => n.saturating_add(delta),
+                _ => i64::MIN,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
+    }
+
     /// Average non-NAT label as nanoseconds-since-epoch, matching
     /// `pd.DatetimeIndex.mean()`. Empty / all-NAT returns `None`.
     /// Sum is computed in `i128` to avoid overflow.
@@ -4356,6 +4379,27 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .min()
+    }
+
+    /// Shift each label by `periods` units of `freq_nanos`, matching
+    /// `pd.TimedeltaIndex.shift(periods, freq)`. NAT propagates as NAT.
+    #[must_use]
+    pub fn shift(&self, periods: i64, freq_nanos: i64) -> Self {
+        let delta = periods.saturating_mul(freq_nanos);
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => n.saturating_add(delta),
+                _ => Timedelta::NAT,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
     }
 
     /// Average non-NAT label as nanosecond duration, matching
@@ -15774,6 +15818,30 @@ mod tests {
         const NS: i64 = 1_000_000_000;
         let dt = super::DatetimeIndex::new(vec![10 * NS, 20 * NS, 30 * NS]);
         assert!(dt.std().is_some());
+    }
+
+    #[test]
+    fn datetime_timedelta_shift_match_pandas_1y3sx() {
+        const NS: i64 = 1_000_000_000;
+        let day_ns = 86_400 * NS;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN])
+            .set_name("ts");
+
+        // Shift by 2 days.
+        let shifted = dt.shift(2, day_ns);
+        assert_eq!(shifted.values()[0], Some(1_704_067_200_i64 * NS + 2 * day_ns));
+        assert_eq!(shifted.values()[1], None);
+        assert_eq!(shifted.name(), Some("ts"));
+
+        // Negative shift.
+        let back = dt.shift(-1, day_ns);
+        assert_eq!(back.values()[0], Some(1_704_067_200_i64 * NS - day_ns));
+
+        // TimedeltaIndex spot check.
+        let td = super::TimedeltaIndex::new(vec![100_i64, fp_types::Timedelta::NAT]);
+        let shifted_td = td.shift(3, 50);
+        assert_eq!(shifted_td.values()[0], Some(250));
+        assert_eq!(shifted_td.values()[1], None);
     }
 
     #[test]

@@ -85,6 +85,52 @@ def test_series_str_unary_dispatches_to_pandas(oracle, pd, operation, expected):
     assert _expected_values(response) == expected
 
 
+@pytest.mark.parametrize(
+    ("operation", "extra", "expected"),
+    [
+        ("series_str_contains", {"regex_pattern": "a"}, [True, True, False]),
+        ("series_str_startswith", {"regex_pattern": "a"}, [True, False, False]),
+        ("series_str_endswith", {"regex_pattern": "a"}, [True, True, False]),
+        (
+            "series_str_replace",
+            {"regex_pattern": "a", "replace_value": "X"},
+            ["XlphX", "betX", "end"],
+        ),
+    ],
+)
+def test_series_str_pattern_dispatches_to_pandas(oracle, pd, operation, extra, expected):
+    payload = {
+        "operation": operation,
+        "left": _utf8_series_payload(["alpha", "beta", "end"]),
+        **extra,
+    }
+    response = oracle.dispatch(pd, payload)
+    assert _expected_values(response) == expected
+
+
+@pytest.mark.parametrize(
+    ("operation", "extra", "expected"),
+    [
+        ("series_str_center", {}, ["--a--", "-abc-"]),
+        ("series_str_ljust", {}, ["a----", "abc--"]),
+        ("series_str_rjust", {}, ["----a", "--abc"]),
+        ("series_str_pad", {"str_pad_side": "both"}, ["--a--", "-abc-"]),
+        ("series_str_pad", {"str_pad_side": "left"}, ["----a", "--abc"]),
+        ("series_str_pad", {"str_pad_side": "right"}, ["a----", "abc--"]),
+    ],
+)
+def test_series_str_padding_dispatches_to_pandas(oracle, pd, operation, extra, expected):
+    payload = {
+        "operation": operation,
+        "left": _utf8_series_payload(["a", "abc"]),
+        "str_width": 5,
+        "str_fillchar": "-",
+        **extra,
+    }
+    response = oracle.dispatch(pd, payload)
+    assert _expected_values(response) == expected
+
+
 def test_dispatch_rejects_unknown_operation(oracle, pd):
     with pytest.raises(oracle.OracleError):
         oracle.dispatch(pd, {"operation": "operation_that_does_not_exist"})

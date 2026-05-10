@@ -3324,15 +3324,78 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
-def _str_unary_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[str, Any]:
-    # Thin shared dispatcher for unary str.* ops that take no parameters
-    # (case transforms, predicates, len, and whitespace trimming).
+def _series_for_str_op(pd, payload: dict[str, Any], op_name: str):
     left = payload.get("left")
     if left is None:
         raise OracleError(f"{op_name} requires left payload")
-    series = fixture_series_from_payload(pd, left, op_name)
+    return fixture_series_from_payload(pd, left, op_name)
+
+
+def _str_unary_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[str, Any]:
+    # Thin shared dispatcher for unary str.* ops that take no parameters
+    # (case transforms, predicates, len, and whitespace trimming).
+    series = _series_for_str_op(pd, payload, op_name)
     try:
         out = getattr(series.str, method)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def _str_width(payload: dict[str, Any], op_name: str) -> int:
+    width = payload.get("str_width")
+    if isinstance(width, bool) or not isinstance(width, int) or width < 0:
+        raise OracleError(f"{op_name} str_width must be a non-negative integer")
+    return width
+
+
+def _str_fillchar(payload: dict[str, Any], op_name: str) -> str:
+    fillchar = payload.get("str_fillchar", " ")
+    if not isinstance(fillchar, str) or len(fillchar) != 1:
+        raise OracleError(f"{op_name} str_fillchar must be a single character string")
+    return fillchar
+
+
+def op_series_str_contains(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_contains"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    try:
+        out = series.str.contains(pat, regex=False)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_startswith(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_startswith"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    try:
+        out = series.str.startswith(pat)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_endswith(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_endswith"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    try:
+        out = series.str.endswith(pat)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_replace"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    repl = required_string_payload(payload, "replace_value", op_name)
+    try:
+        out = series.str.replace(pat, repl, regex=False)
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -3400,6 +3463,53 @@ def op_series_str_isupper(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_str_isnumeric(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_isnumeric", "isnumeric")
+
+
+def op_series_str_center(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_center"
+    series = _series_for_str_op(pd, payload, op_name)
+    try:
+        out = series.str.center(_str_width(payload, op_name), fillchar=_str_fillchar(payload, op_name))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_ljust(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_ljust"
+    series = _series_for_str_op(pd, payload, op_name)
+    try:
+        out = series.str.ljust(_str_width(payload, op_name), fillchar=_str_fillchar(payload, op_name))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_rjust(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_rjust"
+    series = _series_for_str_op(pd, payload, op_name)
+    try:
+        out = series.str.rjust(_str_width(payload, op_name), fillchar=_str_fillchar(payload, op_name))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_pad(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_pad"
+    series = _series_for_str_op(pd, payload, op_name)
+    side = required_string_payload(payload, "str_pad_side", op_name)
+    if side not in {"left", "right", "both"}:
+        raise OracleError(f"{op_name} str_pad_side must be left, right, or both")
+    try:
+        out = series.str.pad(
+            _str_width(payload, op_name),
+            side=side,
+            fillchar=_str_fillchar(payload, op_name),
+        )
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_str_slice(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -5893,6 +6003,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_strip(pd, payload)
     if op in {"series_str_len", "series_str_len_default"}:
         return op_series_str_len(pd, payload)
+    if op in {"series_str_contains", "series_str_contains_default"}:
+        return op_series_str_contains(pd, payload)
+    if op in {"series_str_startswith", "series_str_startswith_default"}:
+        return op_series_str_startswith(pd, payload)
+    if op in {"series_str_endswith", "series_str_endswith_default"}:
+        return op_series_str_endswith(pd, payload)
+    if op in {"series_str_replace", "series_str_replace_default"}:
+        return op_series_str_replace(pd, payload)
     if op in {"series_str_capitalize", "series_str_capitalize_default"}:
         return op_series_str_capitalize(pd, payload)
     if op in {"series_str_title", "series_str_title_default"}:
@@ -5917,6 +6035,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_isupper(pd, payload)
     if op in {"series_str_isnumeric", "series_str_isnumeric_default"}:
         return op_series_str_isnumeric(pd, payload)
+    if op in {"series_str_center", "series_str_center_default"}:
+        return op_series_str_center(pd, payload)
+    if op in {"series_str_ljust", "series_str_ljust_default"}:
+        return op_series_str_ljust(pd, payload)
+    if op in {"series_str_rjust", "series_str_rjust_default"}:
+        return op_series_str_rjust(pd, payload)
+    if op in {"series_str_pad", "series_str_pad_default"}:
+        return op_series_str_pad(pd, payload)
     if op in {"series_str_slice", "series_str_slice_default"}:
         return op_series_str_slice(pd, payload)
     if op in {"series_str_repeat", "series_str_repeat_default"}:

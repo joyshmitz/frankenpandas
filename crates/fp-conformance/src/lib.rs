@@ -4766,9 +4766,16 @@ fn verify_asupersync_codec_evidence(
 
 #[cfg(not(feature = "asupersync"))]
 fn verify_asupersync_codec_evidence(
-    _sidecar: &RaptorQSidecarArtifact,
+    sidecar: &RaptorQSidecarArtifact,
     _report_bytes: &[u8],
 ) -> Result<(), HarnessError> {
+    if sidecar.asupersync_codec.is_some() {
+        return Err(HarnessError::RaptorQ(
+            "asupersync codec evidence is present, but fp-conformance was built without the \
+             asupersync feature needed to verify it"
+                .to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -24197,8 +24204,8 @@ mod tests {
     use fp_runtime::RuntimeMode;
 
     use super::{
-        ArtifactId, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate, CiGateResult,
-        CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
+        ArtifactId, AsupersyncCodecEvidence, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate,
+        CiGateResult, CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
         DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
         FailureForensicsReport, FailureSurfaceEntry, FaultInjectionClassification,
         FixtureExpectedAlignment, FixtureOperation, FixtureOracleSource, ForensicEventKind,
@@ -24602,6 +24609,30 @@ mod tests {
             generate_raptorq_sidecar("test/artifact", "conformance", payload, 8).expect("sidecar");
         let scrub = super::verify_raptorq_sidecar(&sidecar, payload).expect("scrub");
         assert_eq!(scrub.status, "ok");
+    }
+
+    #[cfg(not(feature = "asupersync"))]
+    #[test]
+    fn sidecar_verification_rejects_asupersync_evidence_without_feature_y13st() {
+        let payload = br#"{\"suite\":\"phase2c_packets\",\"passed\":2,\"failed\":0}"#;
+        let mut sidecar: RaptorQSidecarArtifact =
+            generate_raptorq_sidecar("test/artifact", "conformance", payload, 8).expect("sidecar");
+        sidecar.asupersync_codec = Some(AsupersyncCodecEvidence {
+            codec: "passthrough".to_owned(),
+            verifier: "fnv1a64".to_owned(),
+            encoded_bytes: payload.len(),
+            repair_symbols: 0,
+            integrity_verified: true,
+        });
+
+        let err = super::verify_raptorq_sidecar(&sidecar, payload)
+            .expect_err("no-feature build must not accept unchecked asupersync evidence");
+        let message = err.to_string();
+        assert!(
+            message.contains("asupersync codec evidence is present")
+                && message.contains("without the asupersync feature"),
+            "unexpected error: {message}"
+        );
     }
 
     // === Differential Harness Tests ===

@@ -3210,6 +3210,18 @@ impl DatetimeIndex {
         self.to_flat_index().to_series()
     }
 
+    /// Whether any datetime label coerces to true.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.to_flat_index().any()
+    }
+
+    /// Whether all datetime labels coerce to true.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.to_flat_index().all()
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4307,6 +4319,18 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
         self.to_flat_index().to_series()
+    }
+
+    /// Whether any timedelta label coerces to true.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.to_flat_index().any()
+    }
+
+    /// Whether all timedelta labels coerce to true.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.to_flat_index().all()
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5720,6 +5744,18 @@ impl PeriodIndex {
         self.to_flat_index().to_series()
     }
 
+    /// Whether any period label coerces to true.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.to_flat_index().any()
+    }
+
+    /// Whether all period labels coerce to true.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.to_flat_index().all()
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6460,6 +6496,18 @@ impl RangeIndex {
     #[must_use]
     pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
         self.to_flat_index().to_series()
+    }
+
+    /// Whether any range label coerces to true.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.to_flat_index().any()
+    }
+
+    /// Whether all range labels coerce to true.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.to_flat_index().all()
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7399,6 +7447,18 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
         self.to_flat_index().to_series()
+    }
+
+    /// Whether any category label coerces to true.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.to_flat_index().any()
+    }
+
+    /// Whether all category labels coerce to true.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.to_flat_index().all()
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16123,6 +16183,54 @@ mod tests {
         assert_eq!(cat_flat.len(), 2);
         assert_eq!(cat.to_frame(), cat_flat.to_frame());
         assert_eq!(cat.to_series(), cat_flat.to_series());
+    }
+
+    #[test]
+    fn index_variants_all_any_forward_flat_truthiness_ejwyw() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![0, NS]);
+        let dt_flat = dt.to_flat_index();
+        assert_eq!(dt.any(), dt_flat.any());
+        assert_eq!(dt.all(), dt_flat.all());
+        assert!(dt.any());
+        assert!(!dt.all());
+
+        let td = super::TimedeltaIndex::new(vec![0, 5]);
+        let td_flat = td.to_flat_index();
+        assert_eq!(td.any(), td_flat.any());
+        assert_eq!(td.all(), td_flat.all());
+        assert!(td.any());
+        assert!(!td.all());
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(1, PeriodFreq::Monthly),
+            Period::new(2, PeriodFreq::Monthly),
+        ]);
+        let pi_flat = pi.to_flat_index();
+        assert_eq!(pi.any(), pi_flat.any());
+        assert_eq!(pi.all(), pi_flat.all());
+        assert!(pi.any());
+        assert!(pi.all());
+
+        let range = super::RangeIndex::new(0, 3, 1).unwrap();
+        let range_flat = range.to_flat_index();
+        assert_eq!(range.any(), range_flat.any());
+        assert_eq!(range.all(), range_flat.all());
+        assert!(range.any());
+        assert!(!range.all());
+
+        let empty_range = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(!empty_range.any());
+        assert!(empty_range.all());
+
+        let cat = super::CategoricalIndex::from_values(vec![String::new(), "x".to_owned()], false);
+        let cat_flat = cat.to_flat_index();
+        assert_eq!(cat.any(), cat_flat.any());
+        assert_eq!(cat.all(), cat_flat.all());
+        assert!(cat.any());
+        assert!(!cat.all());
     }
 
     #[test]

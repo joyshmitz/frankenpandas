@@ -24866,19 +24866,23 @@ impl DataFrame {
         Ok(out)
     }
 
-    /// Styling accessor placeholder.
+    /// Styling accessor for DataFrame HTML and text rendering helpers.
     ///
     /// Matches `pd.DataFrame.style` as a typed accessor over the current
-    /// DataFrame.
+    /// DataFrame. The current implementation supports practical table
+    /// rendering methods such as [`StyledDataFrame::to_html`],
+    /// [`StyledDataFrame::to_string_table`], and classed HTML output.
     #[must_use]
     pub fn style(&self) -> StyledDataFrame<'_> {
         StyledDataFrame { df: self }
     }
 
-    /// Sparse accessor placeholder.
+    /// Sparse accessor for DataFrame density and dense materialization helpers.
     ///
     /// Matches `pd.DataFrame.sparse` as a typed accessor over the current
-    /// DataFrame.
+    /// DataFrame. The current dense-backed implementation exposes non-fill
+    /// counts, density metrics, caller-provided fill-value variants, and
+    /// [`SparseDataFrameView::to_dense`].
     #[must_use]
     pub fn sparse(&self) -> SparseDataFrameView<'_> {
         SparseDataFrameView { df: self }

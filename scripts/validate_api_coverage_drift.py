@@ -33,9 +33,10 @@ DEFAULT_ISSUES = REPO_ROOT / ".beads" / "issues.jsonl"
 BACKTICK_RE = re.compile(r"`([^`]+)`")
 METHOD_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUST_FN_IDENT = r"((?:r#)?[A-Za-z_][A-Za-z0-9_]*)"
-PUB_FN_RE = re.compile(rf"^\s*pub\s+fn\s+{RUST_FN_IDENT}\b")
-FN_RE = re.compile(rf"^\s*fn\s+{RUST_FN_IDENT}\b")
-TOP_LEVEL_PUB_FN_RE = re.compile(rf"^pub\s+fn\s+{RUST_FN_IDENT}\b")
+RUST_FN_QUALIFIERS = r"(?:(?:const|async|unsafe)\s+)*"
+PUB_FN_RE = re.compile(rf"^\s*pub\s+{RUST_FN_QUALIFIERS}fn\s+{RUST_FN_IDENT}\b")
+FN_RE = re.compile(rf"^\s*{RUST_FN_QUALIFIERS}fn\s+{RUST_FN_IDENT}\b")
+TOP_LEVEL_PUB_FN_RE = re.compile(rf"^pub\s+{RUST_FN_QUALIFIERS}fn\s+{RUST_FN_IDENT}\b")
 
 IO_DATAFRAME_METHODS = {
     "to_clipboard",

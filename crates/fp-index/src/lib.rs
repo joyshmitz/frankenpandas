@@ -5280,6 +5280,43 @@ impl PeriodIndex {
         Ok(positions)
     }
 
+    /// Period with the mean ordinal, matching `pd.PeriodIndex.mean()`.
+    /// Mixed-frequency input rejects.
+    pub fn mean(&self) -> Result<Option<Period>, IndexError> {
+        let freq = match self.ensure_homogeneous_freq()? {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        let total: i128 = self.values.iter().map(|p| i128::from(p.ordinal)).sum();
+        let count = self.values.len() as i128;
+        let avg = i64::try_from(total / count).map_err(|_| {
+            IndexError::InvalidArgument("mean: ordinal overflow".to_owned())
+        })?;
+        Ok(Some(Period::new(avg, freq)))
+    }
+
+    /// Period with the median ordinal, matching `pd.PeriodIndex.median()`.
+    /// For an even-length subset, returns the period at floor(median) of
+    /// the two middle ordinals.
+    pub fn median(&self) -> Result<Option<Period>, IndexError> {
+        let freq = match self.ensure_homogeneous_freq()? {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        let mut ordinals: Vec<i64> = self.values.iter().map(|p| p.ordinal).collect();
+        ordinals.sort_unstable();
+        let mid = ordinals.len() / 2;
+        let median = if ordinals.len() % 2 == 1 {
+            ordinals[mid]
+        } else {
+            let total = i128::from(ordinals[mid - 1]) + i128::from(ordinals[mid]);
+            i64::try_from(total / 2).map_err(|_| {
+                IndexError::InvalidArgument("median: ordinal overflow".to_owned())
+            })?
+        };
+        Ok(Some(Period::new(median, freq)))
+    }
+
     /// Period with the smallest ordinal, matching `pd.PeriodIndex.min()`.
     /// Mixed-frequency input rejects because pandas requires same-freq
     /// comparisons; empty returns `Ok(None)` to mirror the pandas NaT result.
@@ -15338,6 +15375,29 @@ mod tests {
 
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn period_index_mean_median_match_pandas_3rsrc() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(20, PeriodFreq::Monthly);
+        let p3 = Period::new(30, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3]);
+        assert_eq!(pi.mean()?.unwrap().ordinal, 20);
+        assert_eq!(pi.median()?.unwrap().ordinal, 20);
+
+        let empty = super::PeriodIndex::new(Vec::new());
+        assert_eq!(empty.mean()?, None);
+        assert_eq!(empty.median()?, None);
+
+        let mixed = super::PeriodIndex::new(vec![
+            p1,
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(mixed.mean().is_err());
+        assert!(mixed.median().is_err());
+        Ok(())
     }
 
     #[test]

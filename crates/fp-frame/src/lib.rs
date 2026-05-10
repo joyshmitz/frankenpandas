@@ -8935,8 +8935,10 @@ impl Series {
 
     /// Access struct-array methods on this Series.
     ///
-    /// Matches the pandas `Series.struct` namespace shape. Rust callers use
-    /// raw identifier syntax: `series.r#struct()`.
+    /// Matches the pandas `Series.struct` namespace shape. Until fp-types
+    /// grows a first-class struct scalar, FrankenPandas supports a concrete
+    /// JSON-object-backed slice for UTF-8 object values plus missing values.
+    /// Rust callers use raw identifier syntax: `series.r#struct()`.
     #[must_use]
     pub fn r#struct(&self) -> StructAccessor<'_> {
         StructAccessor { series: self }
@@ -15173,9 +15175,10 @@ impl ListAccessor<'_> {
     }
 }
 
-/// Accessor for Arrow-struct operations on a Series.
+/// Accessor for struct operations on a Series.
 ///
-/// Created by `Series::struct()`. Rust callers use `series.r#struct()`.
+/// Created by `Series::struct()`. Values are currently represented as UTF-8
+/// JSON objects. Rust callers use `series.r#struct()`.
 pub struct StructAccessor<'a> {
     series: &'a Series,
 }
@@ -15187,19 +15190,127 @@ impl StructAccessor<'_> {
         self.series.name()
     }
 
-    /// Whether this build has a native Arrow StructDtype backend.
+    /// Whether every non-missing value can be interpreted as a struct.
     #[must_use]
-    pub const fn is_supported(&self) -> bool {
-        false
+    pub fn is_supported(&self) -> bool {
+        self.parsed_structs().is_ok()
     }
 
     /// Typed explanation for fail-closed struct operations.
     #[must_use]
     pub fn unsupported_reason(&self) -> String {
-        format!(
-            "Series.struct: Arrow StructDtype backend is not implemented for Series '{}'",
-            self.series.name()
-        )
+        match self.parsed_structs() {
+            Ok(()) => format!(
+                "Series.struct: Series '{}' supports JSON-object UTF-8 struct values",
+                self.series.name()
+            ),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// Return the deterministic union of field names across non-missing rows.
+    pub fn field_names(&self) -> Result<Vec<String>, FrameError> {
+        let values = self.struct_values()?;
+        let mut names = BTreeMap::<String, ()>::new();
+        for fields in values.into_iter().flatten() {
+            for name in fields.keys() {
+                names.insert(name.clone(), ());
+            }
+        }
+        Ok(names.into_keys().collect())
+    }
+
+    /// Extract one field from each struct value.
+    ///
+    /// Missing structs and missing fields produce nulls. Non-object values
+    /// reject the operation before any output is produced.
+    pub fn field(&self, name: &str) -> Result<Series, FrameError> {
+        let values = self.struct_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|fields| {
+                fields
+                    .and_then(|fields| fields.get(name).cloned())
+                    .unwrap_or(Scalar::Null(NullKind::Null))
+            })
+            .collect();
+        Series::from_values(name, self.series.index().labels().to_vec(), out)
+    }
+
+    fn parsed_structs(&self) -> Result<(), FrameError> {
+        self.struct_values().map(|_| ())
+    }
+
+    fn struct_values(&self) -> Result<Vec<Option<BTreeMap<String, Scalar>>>, FrameError> {
+        self.series
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(row, value)| self.parse_struct_value(value, row))
+            .collect()
+    }
+
+    fn parse_struct_value(
+        &self,
+        value: &Scalar,
+        row: usize,
+    ) -> Result<Option<BTreeMap<String, Scalar>>, FrameError> {
+        if value.is_missing() {
+            return Ok(None);
+        }
+
+        let Scalar::Utf8(raw) = value else {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Series.struct: expected missing values or UTF-8 JSON objects for Series '{}', found {value:?} at position {row}",
+                self.series.name()
+            )));
+        };
+
+        let parsed: Value = serde_json::from_str(raw).map_err(|err| {
+            FrameError::CompatibilityRejected(format!(
+                "Series.struct: expected UTF-8 JSON object for Series '{}', failed to parse position {row}: {err}",
+                self.series.name()
+            ))
+        })?;
+        let Value::Object(fields) = parsed else {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Series.struct: expected UTF-8 JSON object for Series '{}', found non-object JSON at position {row}",
+                self.series.name()
+            )));
+        };
+
+        fields
+            .iter()
+            .map(|(name, item)| {
+                self.json_struct_field_to_scalar(item, row)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map(Some)
+    }
+
+    fn json_struct_field_to_scalar(&self, item: &Value, row: usize) -> Result<Scalar, FrameError> {
+        match item {
+            Value::Null => Ok(Scalar::Null(NullKind::Null)),
+            Value::Bool(value) => Ok(Scalar::Bool(*value)),
+            Value::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    Ok(Scalar::Int64(value))
+                } else if let Some(value) = value.as_f64() {
+                    Ok(Scalar::Float64(value))
+                } else {
+                    Err(FrameError::CompatibilityRejected(format!(
+                        "Series.struct: JSON number at position {row} in Series '{}' is outside supported numeric range",
+                        self.series.name()
+                    )))
+                }
+            }
+            Value::String(value) => Ok(Scalar::Utf8(value.clone())),
+            Value::Array(_) | Value::Object(_) => Err(FrameError::CompatibilityRejected(format!(
+                "Series.struct: nested JSON arrays/objects at position {row} in Series '{}' require native struct/object scalar support",
+                self.series.name()
+            ))),
+        }
     }
 }
 
@@ -61075,7 +61186,7 @@ mod tests {
         assert!(
             struct_accessor
                 .unsupported_reason()
-                .contains("Arrow StructDtype")
+                .contains("expected missing values or UTF-8 JSON objects")
         );
     }
 
@@ -61189,6 +61300,102 @@ mod tests {
         )
         .unwrap();
         let err = nested_series.list().flatten().unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
+        );
+    }
+
+    #[test]
+    fn series_struct_accessor_json_values_rnacv() {
+        let s = Series::from_values(
+            "records",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("d".into()),
+            ],
+            vec![
+                Scalar::Utf8(r#"{"id":1,"name":"Ada"}"#.into()),
+                Scalar::Utf8(r#"{"id":null}"#.into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("{}".into()),
+            ],
+        )
+        .unwrap();
+
+        let accessor = s.r#struct();
+        assert!(accessor.is_supported());
+        assert!(
+            accessor
+                .unsupported_reason()
+                .contains("supports JSON-object UTF-8 struct values")
+        );
+        assert_eq!(accessor.field_names().unwrap(), vec!["id", "name"]);
+
+        let ids = accessor.field("id").unwrap();
+        assert_eq!(ids.name(), "id");
+        assert_eq!(
+            ids.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+        assert_eq!(ids.index().labels(), s.index().labels());
+
+        let names = accessor.field("name").unwrap();
+        assert_eq!(
+            names.values(),
+            &[
+                Scalar::Utf8("Ada".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+
+        let missing = accessor.field("missing").unwrap();
+        assert_eq!(
+            missing.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_struct_accessor_rejects_non_struct_values_rnacv() {
+        let scalar_series =
+            Series::from_values("bad", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(1)]).unwrap();
+        let err = scalar_series.r#struct().field("a").unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("UTF-8 JSON objects") && msg.contains("position 0"))
+        );
+
+        let array_series = Series::from_values(
+            "array",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("[1]".into())],
+        )
+        .unwrap();
+        let err = array_series.r#struct().field_names().unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("non-object JSON") && msg.contains("position 0"))
+        );
+
+        let nested_series = Series::from_values(
+            "nested",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8(r#"{"payload":{"x":1}}"#.into())],
+        )
+        .unwrap();
+        let err = nested_series.r#struct().field("payload").unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
         );

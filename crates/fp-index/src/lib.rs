@@ -3247,6 +3247,18 @@ impl DatetimeIndex {
         self.to_flat_index().astype(dtype)
     }
 
+    /// Nearest preceding-or-equal datetime label lookup.
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        self.to_flat_index().asof(key)
+    }
+
+    /// Locate nearest preceding-or-equal datetime positions for each target label.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        self.to_flat_index().asof_locs(where_index, mask)
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4381,6 +4393,18 @@ impl TimedeltaIndex {
     /// Cast timedelta labels to a pandas dtype string, returning a flat Index.
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
         self.to_flat_index().astype(dtype)
+    }
+
+    /// Nearest preceding-or-equal timedelta label lookup.
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        self.to_flat_index().asof(key)
+    }
+
+    /// Locate nearest preceding-or-equal timedelta positions for each target label.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        self.to_flat_index().asof_locs(where_index, mask)
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5831,6 +5855,18 @@ impl PeriodIndex {
         self.to_flat_index().astype(dtype)
     }
 
+    /// Nearest preceding-or-equal period label lookup.
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        self.to_flat_index().asof(key)
+    }
+
+    /// Locate nearest preceding-or-equal period positions for each target label.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        self.to_flat_index().asof_locs(where_index, mask)
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6608,6 +6644,18 @@ impl RangeIndex {
     /// Cast range labels to a pandas dtype string, returning a flat Index.
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
         self.to_flat_index().astype(dtype)
+    }
+
+    /// Nearest preceding-or-equal range label lookup.
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        self.to_flat_index().asof(key)
+    }
+
+    /// Locate nearest preceding-or-equal range positions for each target label.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        self.to_flat_index().asof_locs(where_index, mask)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7584,6 +7632,18 @@ impl CategoricalIndex {
     /// Cast category labels to a pandas dtype string, returning a flat Index.
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
         self.to_flat_index().astype(dtype)
+    }
+
+    /// Nearest preceding-or-equal category label lookup.
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        self.to_flat_index().asof(key)
+    }
+
+    /// Locate nearest preceding-or-equal category positions for each target label.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        self.to_flat_index().asof_locs(where_index, mask)
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16519,6 +16579,54 @@ mod tests {
             cat.to_flat_index().astype("int").unwrap()
         );
         assert!(cat.astype("datetime64[ns]").is_err());
+    }
+
+    #[test]
+    fn index_variants_asof_forward_flat_and_mask_locs_955dj() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 3 * NS, 5 * NS]);
+        let dt_key = super::IndexLabel::Datetime64(4 * NS);
+        assert_eq!(dt.asof(&dt_key), dt.to_flat_index().asof(&dt_key));
+        assert_eq!(dt.asof(&super::IndexLabel::Datetime64(0)), None);
+
+        let td = super::TimedeltaIndex::new(vec![10, 20, 30]);
+        let where_td = super::Index::new(vec![
+            super::IndexLabel::Timedelta64(5),
+            super::IndexLabel::Timedelta64(20),
+            super::IndexLabel::Timedelta64(25),
+        ]);
+        let mask = [false, true, true];
+        assert_eq!(
+            td.asof_locs(&where_td, Some(&mask)),
+            td.to_flat_index().asof_locs(&where_td, Some(&mask))
+        );
+        assert_eq!(
+            td.asof_locs(&where_td, Some(&mask)),
+            vec![None, Some(1), Some(1)]
+        );
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(1, PeriodFreq::Monthly),
+            Period::new(2, PeriodFreq::Monthly),
+        ]);
+        let period_key = pi.to_flat_index().labels()[1].clone();
+        assert_eq!(pi.asof(&period_key), pi.to_flat_index().asof(&period_key));
+
+        let range = super::RangeIndex::new(2, 8, 2).unwrap();
+        let range_key = super::IndexLabel::Int64(5);
+        assert_eq!(
+            range.asof(&range_key),
+            range.to_flat_index().asof(&range_key)
+        );
+
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "c".to_owned(), "e".to_owned()],
+            false,
+        );
+        let cat_key = super::IndexLabel::Utf8("d".to_owned());
+        assert_eq!(cat.asof(&cat_key), cat.to_flat_index().asof(&cat_key));
     }
 
     #[test]

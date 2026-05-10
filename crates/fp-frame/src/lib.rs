@@ -18370,6 +18370,184 @@ fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeriodTimestampHow {
+    Start,
+    End,
+}
+
+fn normalize_period_timestamp_how(how: &str) -> Result<PeriodTimestampHow, FrameError> {
+    match how.trim().to_ascii_lowercase().as_str() {
+        "start" | "s" => Ok(PeriodTimestampHow::Start),
+        "end" | "e" => Ok(PeriodTimestampHow::End),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "to_timestamp how must be 'start'/'s' or 'end'/'e' (got {how})"
+        ))),
+    }
+}
+
+fn period_timestamp_parse_error(label: &str, freq: PeriodFreq) -> FrameError {
+    FrameError::CompatibilityRejected(format!(
+        "to_timestamp requires {freq} period-style row index labels, got {label:?}"
+    ))
+}
+
+fn period_last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let first = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let next_month = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)?
+    };
+    Some((next_month - first).num_days() as u32)
+}
+
+fn period_datetime_at(
+    date: NaiveDate,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanos: u32,
+) -> Result<NaiveDateTime, FrameError> {
+    date.and_hms_nano_opt(hour, minute, second, nanos)
+        .ok_or_else(|| FrameError::CompatibilityRejected("to_timestamp date overflow".to_owned()))
+}
+
+fn datetime64_label_from_naive(value: NaiveDateTime) -> Result<IndexLabel, FrameError> {
+    let nanos = value.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+        FrameError::CompatibilityRejected("to_timestamp datetime64 overflow".to_owned())
+    })?;
+    Ok(IndexLabel::Datetime64(nanos))
+}
+
+fn parse_quarter_period_label(label: &str) -> Option<(i32, u32)> {
+    let (year, quarter) = label
+        .split_once('Q')
+        .or_else(|| label.split_once('q'))?;
+    let year = year.parse::<i32>().ok()?;
+    let quarter = quarter.parse::<u32>().ok()?;
+    if (1..=4).contains(&quarter) {
+        Some((year, quarter))
+    } else {
+        None
+    }
+}
+
+fn period_label_to_timestamp(
+    label: &IndexLabel,
+    freq: PeriodFreq,
+    how: PeriodTimestampHow,
+) -> Result<IndexLabel, FrameError> {
+    let IndexLabel::Utf8(value) = label else {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "to_timestamp requires period-style row index labels, got {label:?}"
+        )));
+    };
+    let trimmed = value.trim();
+    if trimmed == "NaT" {
+        return Ok(IndexLabel::Datetime64(i64::MIN));
+    }
+
+    let datetime = match freq {
+        PeriodFreq::Annual => {
+            let year = trimmed
+                .parse::<i32>()
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            let date = if how == PeriodTimestampHow::Start {
+                NaiveDate::from_ymd_opt(year, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(year, 12, 31)
+            }
+            .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                period_datetime_at(date, 0, 0, 0, 0)?
+            } else {
+                period_datetime_at(date, 23, 59, 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Quarterly => {
+            let (year, quarter) =
+                parse_quarter_period_label(trimmed).ok_or_else(|| {
+                    period_timestamp_parse_error(trimmed, freq)
+                })?;
+            let start_month = (quarter - 1) * 3 + 1;
+            let (month, day, hour, minute, second, nanos) = if how == PeriodTimestampHow::Start {
+                (start_month, 1, 0, 0, 0, 0)
+            } else {
+                let end_month = start_month + 2;
+                let day = period_last_day_of_month(year, end_month)
+                    .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+                (end_month, day, 23, 59, 59, 999_999_999)
+            };
+            let date = NaiveDate::from_ymd_opt(year, month, day)
+                .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+            period_datetime_at(date, hour, minute, second, nanos)?
+        }
+        PeriodFreq::Monthly => {
+            let date = NaiveDate::parse_from_str(&format!("{trimmed}-01"), "%Y-%m-%d")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                period_datetime_at(date, 0, 0, 0, 0)?
+            } else {
+                let day = period_last_day_of_month(date.year(), date.month())
+                    .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+                let date = NaiveDate::from_ymd_opt(date.year(), date.month(), day)
+                    .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+                period_datetime_at(date, 23, 59, 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Daily => {
+            let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                period_datetime_at(date, 0, 0, 0, 0)?
+            } else {
+                period_datetime_at(date, 23, 59, 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Hourly => {
+            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:00")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                base
+            } else {
+                period_datetime_at(base.date(), base.hour(), 59, 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Minutely => {
+            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                base
+            } else {
+                period_datetime_at(base.date(), base.hour(), base.minute(), 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Secondly => {
+            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                base
+            } else {
+                period_datetime_at(
+                    base.date(),
+                    base.hour(),
+                    base.minute(),
+                    base.second(),
+                    999_999_999,
+                )?
+            }
+        }
+        PeriodFreq::Weekly | PeriodFreq::Business => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "to_timestamp: frequency '{freq}' is not supported yet"
+            )));
+        }
+    };
+
+    datetime64_label_from_naive(datetime)
+}
+
 fn parse_fixed_offset_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
     let trimmed = s.trim();
     let normalized = if let Some(stripped) = trimmed.strip_suffix('Z') {

@@ -6162,6 +6162,17 @@ impl RangeIndex {
         Some(first.max(last))
     }
 
+    /// Product of all values, matching `pd.RangeIndex.prod()`. Empty
+    /// returns 1; saturating to i64 on overflow.
+    #[must_use]
+    pub fn prod(&self) -> i64 {
+        let mut total: i128 = 1;
+        for v in self.values() {
+            total = total.saturating_mul(i128::from(v));
+        }
+        i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
+    }
+
     /// Sum of all values, matching `pd.RangeIndex.sum()`. Closed form via
     /// arithmetic-progression: `n * (first + last) / 2` when `n*(first+last)`
     /// is even; falls back to a precise i128 path otherwise.
@@ -15410,6 +15421,21 @@ mod tests {
 
         let zero_step = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(zero_step.sort_values().equals(&zero_step));
+    }
+
+    #[test]
+    fn range_index_prod_match_pandas_8yxw8() {
+        // 1..=5 prod = 120.
+        let r = super::RangeIndex::new(1, 6, 1).unwrap();
+        assert_eq!(r.prod(), 120);
+
+        // Empty prod = 1.
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.prod(), 1);
+
+        // Includes zero → prod = 0.
+        let with_zero = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert_eq!(with_zero.prod(), 0);
     }
 
     #[test]

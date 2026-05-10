@@ -23329,6 +23329,14 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, kept_in_order)
     }
 
+    /// pandas-named column rename alias.
+    ///
+    /// Matches `df.rename(columns={'old': 'new'})` for mapping-style
+    /// column renames.
+    pub fn rename(&self, mapping: &[(&str, &str)]) -> Result<Self, FrameError> {
+        self.rename_columns(mapping)
+    }
+
     /// Rename columns using a mapping.
     ///
     /// Matches `df.rename(columns={'old': 'new'})`.
@@ -43973,6 +43981,42 @@ mod tests {
         let result = df.rename_columns(&[("old_name", "new_name")]).unwrap();
         assert!(result.column("new_name").is_some());
         assert!(result.column("old_name").is_none());
+    }
+
+    #[test]
+    fn dataframe_rename_alias_delegates_to_rename_columns() {
+        let df = DataFrame::from_dict(
+            &["old_name", "kept"],
+            vec![
+                ("old_name", vec![Scalar::Int64(1)]),
+                ("kept", vec![Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.rename(&[("old_name", "new_name")]).unwrap();
+        let expected = df.rename_columns(&[("old_name", "new_name")]).unwrap();
+
+        assert_eq!(result, expected);
+        assert_eq!(result.column_names(), vec!["new_name", "kept"]);
+        assert!(result.column("new_name").is_some());
+        assert!(result.column("old_name").is_none());
+        assert_eq!(result.column("kept").unwrap().values(), &[Scalar::Int64(2)]);
+    }
+
+    #[test]
+    fn dataframe_rename_alias_rejects_duplicate_output_names() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![("a", vec![Scalar::Int64(1)]), ("b", vec![Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let err = df.rename(&[("a", "b")]).unwrap_err();
+
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column"))
+        );
     }
 
     #[test]

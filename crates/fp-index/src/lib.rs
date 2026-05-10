@@ -3227,6 +3227,12 @@ impl DatetimeIndex {
         self.to_flat_index().get_level_values(level)
     }
 
+    /// Group equal datetime labels into position buckets.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby()
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4341,6 +4347,12 @@ impl TimedeltaIndex {
     /// Get labels for a level. TimedeltaIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Group equal timedelta labels into position buckets.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby()
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5771,6 +5783,12 @@ impl PeriodIndex {
         self.to_flat_index().get_level_values(level)
     }
 
+    /// Group equal period labels into position buckets.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby()
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6528,6 +6546,12 @@ impl RangeIndex {
     /// Get labels for a level. RangeIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Group equal range labels into position buckets.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby()
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7484,6 +7508,12 @@ impl CategoricalIndex {
     /// Get labels for a level. CategoricalIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
         self.to_flat_index().get_level_values(level)
+    }
+
+    /// Group equal category labels into position buckets.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby()
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16289,6 +16319,40 @@ mod tests {
         ));
 
         Ok(())
+    }
+
+    #[test]
+    fn index_variants_groupby_forward_flat_buckets_vypi3() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 2 * NS, NS]);
+        assert_eq!(dt.groupby(), dt.to_flat_index().groupby());
+
+        let td = super::TimedeltaIndex::new(vec![5, 10, 5]);
+        assert_eq!(td.groupby(), td.to_flat_index().groupby());
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(1, PeriodFreq::Monthly),
+            Period::new(2, PeriodFreq::Monthly),
+            Period::new(1, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(pi.groupby(), pi.to_flat_index().groupby());
+
+        let range = super::RangeIndex::new(2, 8, 2).unwrap();
+        assert_eq!(range.groupby(), range.to_flat_index().groupby());
+
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
+            false,
+        );
+        assert_eq!(cat.groupby(), cat.to_flat_index().groupby());
+        assert_eq!(
+            cat.groupby()
+                .get(&super::IndexLabel::Utf8("a".to_owned()))
+                .cloned(),
+            Some(vec![0, 2])
+        );
     }
 
     #[test]

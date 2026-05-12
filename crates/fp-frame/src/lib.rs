@@ -24311,14 +24311,32 @@ impl DataFrame {
     /// - `like: Some(substr)`: keep columns whose names contain `substr`.
     /// - `regex: Some(pattern)`: keep columns whose names match the regex.
     ///
-    /// Row-axis filtering (axis=0) is deferred — fp-index doesn't yet
-    /// expose label-pattern matching for index labels (tracked under the
-    /// MultiIndex / DatetimeIndex epics).
+    /// Use [`DataFrame::filter_axis`] with `axis=0` for row-index label
+    /// matching.
     pub fn filter(
         &self,
         items: Option<&[&str]>,
         like: Option<&str>,
         regex: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        self.filter_axis(items, like, regex, 1)
+    }
+
+    /// Filter rows or columns by label.
+    ///
+    /// Matches `pd.DataFrame.filter(items=None, like=None, regex=None, axis=...)`.
+    /// - `axis=0`: filter rows by row-index label string form.
+    /// - `axis=1`: filter columns by column label.
+    ///
+    /// Exactly one of `items`, `like`, or `regex` must be provided. `items`
+    /// preserves the caller-provided item order and silently drops missing
+    /// labels.
+    pub fn filter_axis(
+        &self,
+        items: Option<&[&str]>,
+        like: Option<&str>,
+        regex: Option<&str>,
+        axis: usize,
     ) -> Result<Self, FrameError> {
         let arg_count = [items.is_some(), like.is_some(), regex.is_some()]
             .iter()
@@ -24329,11 +24347,22 @@ impl DataFrame {
                 "filter: exactly one of items, like, regex must be Some".to_owned(),
             ));
         }
+        if axis > 1 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "filter: axis must be 0 or 1, got {axis}"
+            )));
+        }
+
+        if axis == 0 {
+            let kept_positions = self.filter_row_positions_by_label(items, like, regex)?;
+            return self.take_rows_by_positions(&kept_positions);
+        }
 
         let kept_in_order: Vec<String> = if let Some(items) = items {
+            let mut seen = HashSet::new();
             items
                 .iter()
-                .filter(|name| self.columns.contains_key(**name))
+                .filter(|name| self.columns.contains_key(**name) && seen.insert(*name))
                 .map(|name| (*name).to_owned())
                 .collect()
         } else if let Some(like) = like {
@@ -24364,6 +24393,61 @@ impl DataFrame {
             }
         }
         Self::new_with_column_order(self.index.clone(), columns, kept_in_order)
+    }
+
+    fn filter_row_positions_by_label(
+        &self,
+        items: Option<&[&str]>,
+        like: Option<&str>,
+        regex: Option<&str>,
+    ) -> Result<Vec<usize>, FrameError> {
+        if let Some(items) = items {
+            if self.index.has_duplicates() {
+                return Err(FrameError::CompatibilityRejected(
+                    "filter: axis=0 items cannot reindex duplicate labels".to_owned(),
+                ));
+            }
+            let positions_by_label: HashMap<String, usize> = self
+                .index
+                .labels()
+                .iter()
+                .enumerate()
+                .map(|(position, label)| (label.to_string(), position))
+                .collect();
+            let mut seen = HashSet::new();
+            return Ok(items
+                .iter()
+                .filter_map(|label| {
+                    if !seen.insert(*label) {
+                        return None;
+                    }
+                    positions_by_label.get(*label).copied()
+                })
+                .collect());
+        }
+
+        if let Some(like) = like {
+            return Ok(self
+                .index
+                .labels()
+                .iter()
+                .enumerate()
+                .filter_map(|(position, label)| {
+                    label.to_string().contains(like).then_some(position)
+                })
+                .collect());
+        }
+
+        let pattern = regex.expect("regex Some checked above");
+        let re = Regex::new(pattern)
+            .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
+        Ok(self
+            .index
+            .labels()
+            .iter()
+            .enumerate()
+            .filter_map(|(position, label)| re.is_match(&label.to_string()).then_some(position))
+            .collect())
     }
 
     /// pandas-named column rename alias.
@@ -33528,89 +33612,7 @@ impl DataFrame {
         regex: Option<&str>,
         axis: usize,
     ) -> Result<Self, FrameError> {
-        let arg_count = [items.is_some(), like.is_some(), regex.is_some()]
-            .iter()
-            .filter(|x| **x)
-            .count();
-        if arg_count != 1 {
-            return Err(FrameError::CompatibilityRejected(
-                "filter: exactly one of items, like, regex must be Some".to_owned(),
-            ));
-        }
-        if axis > 1 {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "filter: axis must be 0 or 1, got {axis}"
-            )));
-        }
-        let re = regex
-            .map(|pat| {
-                Regex::new(pat)
-                    .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))
-            })
-            .transpose()?;
-
-        if axis == 1 {
-            // Filter columns
-            let selected: Vec<&str> = self
-                .column_order
-                .iter()
-                .filter(|name| {
-                    if let Some(items) = items {
-                        return items.contains(&name.as_str());
-                    }
-                    if let Some(like) = like {
-                        return name.contains(like);
-                    }
-                    if let Some(re) = &re {
-                        return re.is_match(name);
-                    }
-                    false
-                })
-                .map(String::as_str)
-                .collect();
-            if selected.is_empty() {
-                return Self::new(self.index.clone(), BTreeMap::new());
-            }
-            self.select_columns(&selected)
-        } else {
-            // Filter rows by index label
-            let mut keep_indices = Vec::new();
-            for (i, label) in self.index.labels().iter().enumerate() {
-                let label_str = match label {
-                    IndexLabel::Utf8(s) => s.clone(),
-                    IndexLabel::Int64(v) => v.to_string(),
-                    IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-                    IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                };
-                let matches = if let Some(items) = items {
-                    items.contains(&label_str.as_str())
-                } else if let Some(like) = like {
-                    label_str.contains(like)
-                } else if let Some(re) = &re {
-                    re.is_match(&label_str)
-                } else {
-                    true
-                };
-                if matches {
-                    keep_indices.push(i);
-                }
-            }
-
-            let new_labels: Vec<IndexLabel> = keep_indices
-                .iter()
-                .map(|&i| self.index.labels()[i].clone())
-                .collect();
-            let mut columns = BTreeMap::new();
-            for name in &self.column_order {
-                let col = &self.columns[name];
-                let vals: Vec<Scalar> = keep_indices
-                    .iter()
-                    .map(|&i| col.values()[i].clone())
-                    .collect();
-                columns.insert(name.clone(), Column::from_values(vals)?);
-            }
-            Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
-        }
+        self.filter_axis(items, like, regex, axis)
     }
 
     /// Helper for selecting columns by normalized non-negative positional indices.
@@ -56037,6 +56039,63 @@ mod tests {
             filtered.column("v").unwrap().values(),
             &[Scalar::Int64(20), Scalar::Int64(30)]
         );
+    }
+
+    #[test]
+    fn dataframe_filter_axis_zero_items_preserves_item_order_and_drops_missing() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
+            vec![
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let filtered = df
+            .filter_axis(Some(&["c", "missing", "b", "c"]), None, None, 0)
+            .unwrap();
+        assert_eq!(
+            filtered.index().labels(),
+            &[
+                IndexLabel::Utf8("c".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+            ]
+        );
+        assert_eq!(
+            filtered.column("v").unwrap().values(),
+            &[Scalar::Int64(30), Scalar::Int64(10)]
+        );
+    }
+
+    #[test]
+    fn dataframe_filter_axis_zero_like_and_regex_use_index_label_strings() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Int64(100), Scalar::Int64(210), Scalar::Int64(305)],
+            )],
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(21),
+                IndexLabel::Int64(305),
+            ],
+        )
+        .unwrap();
+
+        let like = df.filter_axis(None, Some("1"), None, 0).unwrap();
+        assert_eq!(
+            like.index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(21)]
+        );
+
+        let regex = df.filter_axis(None, None, Some(r"^3"), 0).unwrap();
+        assert_eq!(regex.index().labels(), &[IndexLabel::Int64(305)]);
+        assert_eq!(regex.column("v").unwrap().values(), &[Scalar::Int64(305)]);
     }
 
     #[test]

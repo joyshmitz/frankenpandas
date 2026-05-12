@@ -433,6 +433,9 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     if from == target {
         return Ok(value);
     }
+    if target == DType::Utf8 {
+        return Ok(Scalar::Utf8(scalar_to_string_for_astype(value)));
+    }
     if value.is_missing() {
         return Ok(Scalar::missing_for_dtype(target));
     }
@@ -476,7 +479,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
+        DType::Utf8 => Ok(Scalar::Utf8(scalar_to_string_for_astype(value))),
         DType::Categorical => Err(TypeError::InvalidCast { from, to: target }),
         DType::Timedelta64 => match &value {
             Scalar::Int64(v) => Ok(Scalar::Timedelta64(*v)),
@@ -487,6 +490,34 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         },
         DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
     }
+}
+
+fn scalar_to_string_for_astype(value: Scalar) -> String {
+    match value {
+        Scalar::Null(NullKind::Null) => "None".to_owned(),
+        Scalar::Null(NullKind::NaN) => "nan".to_owned(),
+        Scalar::Null(NullKind::NaT) => "NaT".to_owned(),
+        Scalar::Bool(true) => "True".to_owned(),
+        Scalar::Bool(false) => "False".to_owned(),
+        Scalar::Int64(v) => v.to_string(),
+        Scalar::Float64(v) => float_to_string_for_astype(v),
+        Scalar::Utf8(s) => s,
+        Scalar::Timedelta64(v) if v == Timedelta::NAT => "NaT".to_owned(),
+        Scalar::Timedelta64(v) => Timedelta::format(v),
+    }
+}
+
+fn float_to_string_for_astype(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value.is_infinite() {
+        return value.to_string();
+    }
+    if value.fract() == 0.0 {
+        return format!("{value:.1}");
+    }
+    value.to_string()
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -2060,6 +2091,28 @@ mod tests {
         let missing = Scalar::Null(NullKind::Null);
         let cast = cast_scalar(&missing, DType::Float64).expect("missing casts");
         assert_eq!(cast, Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn cast_scalar_to_utf8_uses_pandas_string_spellings() {
+        let cases = [
+            (Scalar::Bool(true), "True"),
+            (Scalar::Bool(false), "False"),
+            (Scalar::Int64(-7), "-7"),
+            (Scalar::Float64(1.0), "1.0"),
+            (Scalar::Float64(1.5), "1.5"),
+            (Scalar::Float64(f64::NAN), "nan"),
+            (Scalar::Null(NullKind::Null), "None"),
+            (Scalar::Null(NullKind::NaN), "nan"),
+            (Scalar::Null(NullKind::NaT), "NaT"),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(
+                cast_scalar(&value, DType::Utf8).expect("cast"),
+                Scalar::Utf8(expected.to_owned())
+            );
+        }
     }
 
     #[test]

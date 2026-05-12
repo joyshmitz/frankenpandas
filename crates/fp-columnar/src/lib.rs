@@ -8097,6 +8097,39 @@ mod tests {
         }
 
         #[test]
+        fn astype_to_utf8_uses_pandas_string_spellings() {
+            let bool_col = Column::new(DType::Bool, vec![Scalar::Bool(true), Scalar::Bool(false)])
+                .expect("bool col");
+            let int_col = Column::new(DType::Int64, vec![Scalar::Int64(-7)]).expect("int col");
+            let float_col = Column::new(
+                DType::Float64,
+                vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
+            )
+            .expect("float col");
+
+            let bool_out = bool_col.astype(DType::Utf8).expect("astype bool");
+            let int_out = int_col.astype(DType::Utf8).expect("astype int");
+            let float_out = float_col.astype(DType::Utf8).expect("astype float");
+
+            assert_eq!(bool_out.dtype(), DType::Utf8);
+            assert_eq!(
+                bool_out.values(),
+                &[
+                    Scalar::Utf8("True".to_owned()),
+                    Scalar::Utf8("False".to_owned()),
+                ]
+            );
+            assert_eq!(int_out.values(), &[Scalar::Utf8("-7".to_owned())]);
+            assert_eq!(
+                float_out.values(),
+                &[
+                    Scalar::Utf8("1.0".to_owned()),
+                    Scalar::Utf8("nan".to_owned()),
+                ]
+            );
+        }
+
+        #[test]
         fn astype_propagates_missing() {
             let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
                 .expect("col");

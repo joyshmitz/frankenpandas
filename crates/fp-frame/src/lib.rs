@@ -41847,6 +41847,31 @@ mod tests {
     }
 
     #[test]
+    fn series_astype_to_utf8_casts_values_and_missing_markers() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let casted = s.astype(DType::Utf8).unwrap();
+        assert_eq!(casted.column().dtype(), DType::Utf8);
+        assert_eq!(
+            casted.values(),
+            &[
+                Scalar::Utf8("True".to_owned()),
+                Scalar::Utf8("False".to_owned()),
+                Scalar::Utf8("None".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn series_astype_rejects_invalid_cast() {
         let s = Series::from_values(
             "vals",
@@ -45220,6 +45245,52 @@ mod tests {
         assert_eq!(
             casted.column("b").unwrap().values(),
             &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_astype_columns_to_utf8_casts_selected_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-4.25),
+                        Scalar::Float64(f64::INFINITY),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let casted = df
+            .astype_columns(&[("a", DType::Utf8), ("b", DType::Utf8)])
+            .unwrap();
+        assert_eq!(
+            casted.column("a").unwrap().values(),
+            &[
+                Scalar::Utf8("True".to_owned()),
+                Scalar::Utf8("False".to_owned()),
+                Scalar::Utf8("nan".to_owned()),
+            ]
+        );
+        assert_eq!(
+            casted.column("b").unwrap().values(),
+            &[
+                Scalar::Utf8("1.0".to_owned()),
+                Scalar::Utf8("-4.25".to_owned()),
+                Scalar::Utf8("inf".to_owned()),
+            ]
         );
     }
 
@@ -74790,6 +74861,30 @@ mod tests {
         let result = df.astype(DType::Float64).unwrap();
         assert_eq!(result.column("a").unwrap().dtype(), DType::Float64);
         assert_eq!(result.column("b").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn df_astype_all_columns_to_utf8() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+        let result = df.astype(DType::Utf8).unwrap();
+        assert_eq!(
+            result.column("a").unwrap().values(),
+            &[Scalar::Utf8("1".to_owned()), Scalar::Utf8("2".to_owned()),]
+        );
+        assert_eq!(
+            result.column("b").unwrap().values(),
+            &[
+                Scalar::Utf8("True".to_owned()),
+                Scalar::Utf8("False".to_owned()),
+            ]
+        );
     }
 
     #[test]

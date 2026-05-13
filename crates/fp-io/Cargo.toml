@@ -23,7 +23,7 @@ fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
-hdf5 = { workspace = true }
+hdf5 = { workspace = true, optional = true }
 orc-rust = { workspace = true }
 parquet = { workspace = true }
 quick-xml = { workspace = true }
@@ -40,7 +40,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
-default = ["sql-sqlite"]
+default = ["sql-sqlite", "hdf5"]
+hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
 sql-postgresql = []
 sql-mysql = []

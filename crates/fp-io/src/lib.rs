@@ -123,6 +123,7 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
+#[cfg(feature = "hdf5")]
 use hdf5::File as Hdf5File;
 use orc_rust::{
     ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
@@ -764,6 +765,7 @@ pub struct PickleReadOptions {
 /// Default HDF5 group key used by [`read_hdf`] and [`write_hdf`].
 pub const DEFAULT_HDF5_KEY: &str = "frame";
 
+#[cfg(feature = "hdf5")]
 const HDF5_PAYLOAD_DATASET: &str = "__frankenpandas_dataframe_pickle_v1";
 
 /// Options controlling HDF5 path reads.
@@ -3975,6 +3977,7 @@ pub fn read_hdf_key(path: &Path, key: &str) -> Result<DataFrame, IoError> {
 }
 
 /// Read a DataFrame from an HDF5 file with options.
+#[cfg(feature = "hdf5")]
 pub fn read_hdf_with_options(path: &Path, options: &HdfReadOptions) -> Result<DataFrame, IoError> {
     let key = normalize_hdf5_key(&options.key)?;
     let dataset_path = hdf5_payload_path(&key);
@@ -3990,6 +3993,15 @@ pub fn read_hdf_with_options(path: &Path, options: &HdfReadOptions) -> Result<Da
             "invalid FrankenPandas payload at key '{key}': {err}"
         ))
     })
+}
+
+/// Read a DataFrame from an HDF5 file with options.
+#[cfg(not(feature = "hdf5"))]
+pub fn read_hdf_with_options(
+    _path: &Path,
+    _options: &HdfReadOptions,
+) -> Result<DataFrame, IoError> {
+    hdf5_feature_disabled()
 }
 
 /// Write a DataFrame to the default HDF5 key.
@@ -4009,6 +4021,7 @@ pub fn write_hdf_key(frame: &DataFrame, path: &Path, key: &str) -> Result<(), Io
 }
 
 /// Write a DataFrame to an HDF5 file with options.
+#[cfg(feature = "hdf5")]
 pub fn write_hdf_with_options(
     frame: &DataFrame,
     path: &Path,
@@ -4027,6 +4040,17 @@ pub fn write_hdf_with_options(
     Ok(())
 }
 
+/// Write a DataFrame to an HDF5 file with options.
+#[cfg(not(feature = "hdf5"))]
+pub fn write_hdf_with_options(
+    _frame: &DataFrame,
+    _path: &Path,
+    _options: &HdfWriteOptions,
+) -> Result<(), IoError> {
+    hdf5_feature_disabled()
+}
+
+#[cfg(feature = "hdf5")]
 fn normalize_hdf5_key(key: &str) -> Result<String, IoError> {
     let trimmed = key.trim_matches('/');
     if trimmed.is_empty() {
@@ -4049,12 +4073,21 @@ fn normalize_hdf5_key(key: &str) -> Result<String, IoError> {
     Ok(trimmed.to_owned())
 }
 
+#[cfg(feature = "hdf5")]
 fn hdf5_payload_path(key: &str) -> String {
     format!("{key}/{HDF5_PAYLOAD_DATASET}")
 }
 
+#[cfg(feature = "hdf5")]
 fn hdf5_error(err: hdf5::Error) -> IoError {
     IoError::Hdf5(err.to_string())
+}
+
+#[cfg(not(feature = "hdf5"))]
+fn hdf5_feature_disabled<T>() -> Result<T, IoError> {
+    Err(IoError::Hdf5(
+        "hdf5 support is disabled; enable the fp-io `hdf5` feature".to_owned(),
+    ))
 }
 
 // ── File-based Stata ───────────────────────────────────────────────────

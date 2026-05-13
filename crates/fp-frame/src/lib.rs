@@ -4201,7 +4201,11 @@ impl Series {
                 new_values.push(self.column.values()[i].clone());
             }
         }
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        // Per br-frankenpandas-um15v: pandas preserves the index name
+        // through Series.drop. Mirror the lxot8 dropna fix here.
+        let index = Index::new(new_labels).rename_index(self.index.name());
+        let column = Column::from_values(new_values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Find the last non-NaN value at or before the given label.
@@ -41062,6 +41066,23 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(10));
         assert_eq!(result.values()[1], Scalar::Int64(30));
         assert_eq!(result.index().labels(), &[1_i64.into(), 3_i64.into()]);
+    }
+
+    #[test]
+    fn series_drop_preserves_index_name_um15v() {
+        // Per br-frankenpandas-um15v: pandas preserves the index name
+        // through Series.drop.
+        let s = Series::from_values(
+            "vals",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let dropped = s.drop(&["b".into()]).unwrap();
+        assert_eq!(dropped.index().name(), Some("myidx"));
+        assert_eq!(dropped.len(), 2);
     }
 
     #[test]

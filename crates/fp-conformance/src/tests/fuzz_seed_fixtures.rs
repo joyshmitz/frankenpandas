@@ -1726,10 +1726,11 @@ fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
             "null_to_float.bin",
             include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_float.bin"),
         ),
-        (
-            "null_to_utf8.bin",
-            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_utf8.bin"),
-        ),
+        // Per br-frankenpandas-je5o4: null_to_utf8.bin removed — its frozen
+        // expectation (Null(Null) → Null(Null)) contradicts the pandas-faithful
+        // contract locked in by cast_scalar_to_utf8_uses_pandas_string_spellings
+        // (Null(Null) → Utf8("None")). Pandas `pd.Series([None]).astype(str)`
+        // emits the literal string "None"; the corpus seed predated that fix.
         (
             "nan_to_float.bin",
             include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/nan_to_float.bin"),

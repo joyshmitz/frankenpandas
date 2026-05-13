@@ -1759,6 +1759,28 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
     if !(0.0..=1.0).contains(&q) {
         return Scalar::Null(NullKind::NaN);
     }
+    // Per br-frankenpandas-5djk7: pandas td_series.quantile(q) returns
+    // Timedelta64 with linear-interpolated ns. Was silently NaN before.
+    if let Some(mut td) = collect_timedelta_ns_f64(values) {
+        if td.is_empty() {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        td.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = td.len();
+        if n == 1 {
+            return float_ns_to_timedelta(td[0]);
+        }
+        let pos = q * (n - 1) as f64;
+        let lo = pos.floor() as usize;
+        let hi = pos.ceil() as usize;
+        let ns = if lo == hi {
+            td[lo]
+        } else {
+            let weight = pos - lo as f64;
+            td[lo] + (td[hi] - td[lo]) * weight
+        };
+        return float_ns_to_timedelta(ns);
+    }
     let mut nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
@@ -3110,6 +3132,34 @@ mod tests {
         assert!(super::nanquantile(&[], 0.5).is_missing());
         assert!(super::nanquantile(&[Scalar::Float64(1.0)], 1.5).is_missing());
         assert!(super::nanquantile(&[Scalar::Float64(1.0)], -0.1).is_missing());
+    }
+
+    #[test]
+    fn nanquantile_timedelta64_preserves_dtype_5djk7() {
+        // Per br-frankenpandas-5djk7: pandas td_series.quantile(q) returns
+        // Timedelta64 — was silently NaN before via collect_finite.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let vals = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+            Scalar::Timedelta64(4 * one_hour),
+            Scalar::Timedelta64(5 * one_hour),
+        ];
+        assert_eq!(super::nanquantile(&vals, 0.5), Scalar::Timedelta64(3 * one_hour));
+        assert_eq!(super::nanquantile(&vals, 0.0), Scalar::Timedelta64(one_hour));
+        assert_eq!(super::nanquantile(&vals, 1.0), Scalar::Timedelta64(5 * one_hour));
+    }
+
+    #[test]
+    fn nanquantile_timedelta64_linear_interpolation_5djk7() {
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let vals = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        // Linear interpolation: at q=0.5, midpoint = 2h
+        assert_eq!(super::nanquantile(&vals, 0.5), Scalar::Timedelta64(2 * one_hour));
     }
 
     #[test]

@@ -7451,6 +7451,21 @@ impl Series {
                 continue;
             }
 
+            // Per br-frankenpandas-naeja: Timedelta64 pct_change matches
+            // pandas, which divides ns deltas as dimensionless f64 ratios.
+            // NaT current/previous propagates as NaN.
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
+                (current, previous)
+            {
+                if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    let ratio = (*cur_ns as f64 - *prev_ns as f64) / (*prev_ns as f64);
+                    out.push(Scalar::Float64(ratio));
+                }
+                continue;
+            }
+
             match (current.to_f64(), previous.to_f64()) {
                 (Ok(cur), Ok(prev)) => {
                     out.push(Scalar::Float64((cur - prev) / prev));
@@ -46260,6 +46275,53 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn series_pct_change_timedelta64_matches_pandas_naeja() {
+        // Per br-frankenpandas-naeja: pct_change on Timedelta64 returns
+        // dimensionless f64 ratios; was silently NaN before via the
+        // to_f64-else-NaN catch-all.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let two_hours = 2 * one_hour;
+        let four_hours = 4 * one_hour;
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(two_hours),
+                Scalar::Timedelta64(four_hours),
+            ],
+        )
+        .unwrap();
+
+        let result = s.pct_change(1).unwrap();
+        assert!(result.values()[0].is_missing()); // first is NaN
+        let v1 = result.values()[1].to_f64().unwrap();
+        assert!((v1 - 1.0).abs() < 1e-10); // (2h-1h)/1h = 1.0
+        let v2 = result.values()[2].to_f64().unwrap();
+        assert!((v2 - 1.0).abs() < 1e-10); // (4h-2h)/2h = 1.0
+    }
+
+    #[test]
+    fn series_pct_change_timedelta64_nat_propagates_naeja() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                Scalar::Timedelta64(2 * one_hour),
+            ],
+        )
+        .unwrap();
+
+        let result = s.pct_change(1).unwrap();
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing()); // NaT current → NaN
+        assert!(result.values()[2].is_missing()); // NaT previous → NaN
     }
 
     #[test]

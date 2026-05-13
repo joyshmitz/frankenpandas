@@ -4421,7 +4421,17 @@ impl Series {
             values.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
         }
 
-        Self::from_values("count", labels, values)
+        // Per br-frankenpandas-nvglo: pandas sets the result's index name
+        // to the original Series's name (e.g. `s.name`). The result Series
+        // name itself is "count".
+        let index_name: Option<&str> = if self.name.is_empty() {
+            None
+        } else {
+            Some(self.name.as_str())
+        };
+        let index = Index::new(labels).rename_index(index_name);
+        let column = Column::from_values(values)?;
+        Self::new("count".to_string(), index, column)
     }
 
     /// Value counts with full pandas parameter support.
@@ -4490,7 +4500,15 @@ impl Series {
             }
         }
 
-        Self::from_values("count", labels, values)
+        // Per br-frankenpandas-nvglo: result index name = original Series name.
+        let index_name: Option<&str> = if self.name.is_empty() {
+            None
+        } else {
+            Some(self.name.as_str())
+        };
+        let index = Index::new(labels).rename_index(index_name);
+        let column = Column::from_values(values)?;
+        Self::new("count".to_string(), index, column)
     }
 
     /// Count values binned into equal-width intervals.
@@ -41538,6 +41556,27 @@ mod tests {
         let out = s.value_counts().unwrap();
         assert!(out.index().labels().is_empty());
         assert!(out.values().is_empty());
+    }
+
+    #[test]
+    fn series_value_counts_sets_index_name_to_series_name_nvglo() {
+        // Per br-frankenpandas-nvglo: pandas sets the result's index.name
+        // to the original Series's name.
+        let s = Series::from_values(
+            "myname",
+            vec![IndexLabel::from("a"), IndexLabel::from("b"), IndexLabel::from("c")],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let out = s.value_counts().unwrap();
+        assert_eq!(out.index().name(), Some("myname"));
+        assert_eq!(out.name(), "count");
+
+        // Same expectation via value_counts_with_options.
+        let out2 = s.value_counts_with_options(false, true, false, true).unwrap();
+        assert_eq!(out2.index().name(), Some("myname"));
+        assert_eq!(out2.name(), "count");
     }
 
     #[test]

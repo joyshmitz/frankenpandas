@@ -5453,6 +5453,7 @@ fn parse_live_oracle_report_output(
     let mut total_tests = 0usize;
     let mut passed = 0usize;
     let mut failed = 0usize;
+    let mut ignored = 0usize;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -5466,11 +5467,21 @@ fn parse_live_oracle_report_output(
         if trimmed.starts_with("test result:") {
             passed += parse_test_result_count(trimmed, "passed").unwrap_or(0);
             failed += parse_test_result_count(trimmed, "failed").unwrap_or(0);
+            // Per br-frankenpandas-atag8: also harvest cargo's `ignored` count.
+            // If a live-oracle test is #[ignore]d when pandas is unavailable
+            // (or otherwise reports as ignored), the SKIP_MARKER substring
+            // never appears and the test would silently count as passed.
+            ignored += parse_test_result_count(trimmed, "ignored").unwrap_or(0);
         }
     }
 
     let total_tests = total_tests.max(passed.saturating_add(failed));
-    let skipped = output.matches(LIVE_ORACLE_SKIP_MARKER).count().min(passed);
+    // Skipped count is the maximum of marker hits (legacy code path that
+    // emits the LIVE_ORACLE_SKIP_MARKER and treats those as passed) and
+    // cargo's structured ignored count. Both are clamped to `passed +
+    // ignored` so we never claim more skips than tests reached the harness.
+    let marker_hits = output.matches(LIVE_ORACLE_SKIP_MARKER).count();
+    let skipped = marker_hits.max(ignored).min(passed.saturating_add(ignored));
     let ran = total_tests.saturating_sub(skipped.saturating_add(failed));
 
     LiveOracleReport {
@@ -26208,6 +26219,50 @@ mod tests {
             written.gate_result_path.exists(),
             "missing gate result artifact"
         );
+    }
+
+    #[test]
+    fn parse_live_oracle_report_output_counts_marker_skips_atag8() {
+        // Per br-frankenpandas-atag8: legacy marker-based skip detection
+        // must still work — tests that report "passed" but printed the
+        // LIVE_ORACLE_SKIP_MARKER are counted as skipped.
+        let output = "\
+running 3 tests\n\
+test live_oracle_pct_change ... ok\n\
+live pandas unavailable; skipping\n\
+test live_oracle_diff ... ok\n\
+live pandas unavailable; skipping\n\
+test live_oracle_cumsum ... ok\n\
+\n\
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n\
+";
+        let report = super::parse_live_oracle_report_output(output, 3, true, Some(0));
+        assert_eq!(report.total_tests, 3);
+        assert_eq!(report.passed, 3);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.skipped, 2, "marker hits should be counted as skipped");
+        assert_eq!(report.ran, 1);
+    }
+
+    #[test]
+    fn parse_live_oracle_report_output_counts_ignored_as_skipped_atag8() {
+        // Per br-frankenpandas-atag8: cargo's structured `ignored` count is
+        // also harvested. Previously only the LIVE_ORACLE_SKIP_MARKER
+        // substring was scanned, so #[ignore]'d tests went undetected.
+        let output = "\
+running 4 tests\n\
+test live_oracle_pct_change ... ok\n\
+test live_oracle_diff ... ignored\n\
+test live_oracle_cumsum ... ignored\n\
+test live_oracle_mean ... ok\n\
+\n\
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.10s\n\
+";
+        let report = super::parse_live_oracle_report_output(output, 4, true, Some(0));
+        assert_eq!(report.total_tests, 4);
+        assert_eq!(report.passed, 2);
+        assert_eq!(report.skipped, 2, "cargo ignored should count as skipped");
+        assert_eq!(report.failed, 0);
     }
 
     #[test]

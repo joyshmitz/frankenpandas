@@ -13591,6 +13591,20 @@ impl SeriesGroupBy<'_> {
                     if value.is_missing() || previous.is_missing() {
                         return Scalar::Null(NullKind::NaN);
                     }
+                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
+                    // matches pandas — ns deltas divide as dimensionless f64.
+                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
+                        (value, previous)
+                    {
+                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        let prev_f = *prev_ns as f64;
+                        if prev_f.abs() < f64::EPSILON {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        return Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f);
+                    }
                     if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
                         if prev.abs() < f64::EPSILON {
                             Scalar::Null(NullKind::NaN)
@@ -31654,6 +31668,20 @@ impl DataFrame {
                         vals.push(Scalar::Null(NullKind::NaN));
                         continue;
                     }
+                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
+                    // ratio is dimensionless f64.
+                    if let (Scalar::Timedelta64(c_ns), Scalar::Timedelta64(p_ns)) =
+                        (curr_val, prev_val)
+                    {
+                        if *c_ns == Timedelta::NAT || *p_ns == Timedelta::NAT {
+                            vals.push(Scalar::Null(NullKind::NaN));
+                        } else {
+                            vals.push(Scalar::Float64(
+                                (*c_ns as f64 - *p_ns as f64) / (*p_ns as f64),
+                            ));
+                        }
+                        continue;
+                    }
                     match (curr_val.to_f64(), prev_val.to_f64()) {
                         (Ok(c), Ok(p)) => vals.push(Scalar::Float64((c - p) / p)),
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
@@ -36686,6 +36714,18 @@ impl DataFrameGroupBy<'_> {
                     let prev = &vals[i - periods];
                     if v.is_missing() || prev.is_missing() {
                         return Scalar::Null(NullKind::NaN);
+                    }
+                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
+                    // matches pandas — ns deltas divide as dimensionless f64.
+                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev) {
+                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        let prev_f = *prev_ns as f64;
+                        if prev_f.abs() < f64::EPSILON {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        return Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f);
                     }
                     if let (Ok(curr), Ok(prv)) = (v.to_f64(), prev.to_f64()) {
                         if prv.abs() < f64::EPSILON {
@@ -60987,6 +61027,44 @@ mod tests {
         // (121-110)/110 = 0.1
         let f2 = expect_float64(&v.values()[2]);
         assert!((f2 - 0.1).abs() < 1e-10);
+    }
+
+    #[test]
+    fn groupby_pct_change_timedelta64_matches_pandas_dj6rv() {
+        // Per br-frankenpandas-dj6rv: groupby pct_change on Timedelta64
+        // now computes f64 ratios; was silently NaN via the to_f64-else
+        // catch-all.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Timedelta64(one_hour),
+                        Scalar::Timedelta64(2 * one_hour),
+                        Scalar::Timedelta64(4 * one_hour),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.groupby(&["g"]).unwrap().pct_change(1).unwrap();
+        let v = result.column_as_series("v").unwrap();
+        assert!(v.values()[0].is_missing());
+        let f1 = expect_float64(&v.values()[1]);
+        assert!((f1 - 1.0).abs() < 1e-10); // (2h-1h)/1h = 1.0
+        let f2 = expect_float64(&v.values()[2]);
+        assert!((f2 - 1.0).abs() < 1e-10); // (4h-2h)/2h = 1.0
     }
 
     // ── GroupBy value_counts tests ──

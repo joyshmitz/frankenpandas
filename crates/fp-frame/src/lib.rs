@@ -22934,8 +22934,10 @@ impl DataFrame {
                 new_columns.insert(name.clone(), Column::new(col.dtype(), filtered_values)?);
             }
 
+            // Per br-frankenpandas-z5qu1: pandas preserves the index name
+            // through dropna / boolean-indexing.
             return Self::new_with_column_order(
-                Index::new(new_labels),
+                Index::new(new_labels).rename_index(self.index.name()),
                 new_columns,
                 self.column_order.clone(),
             );
@@ -22986,8 +22988,10 @@ impl DataFrame {
             new_columns.insert(name.clone(), Column::new(col.dtype(), filtered_values)?);
         }
 
+        // Per br-frankenpandas-z5qu1: pandas preserves the index name
+        // through dropna / boolean-indexing.
         Self::new_with_column_order(
-            Index::new(new_labels),
+            Index::new(new_labels).rename_index(self.index.name()),
             new_columns,
             self.column_order.clone(),
         )
@@ -41076,6 +41080,26 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(10));
         assert_eq!(result.values()[1], Scalar::Int64(30));
         assert_eq!(result.index().labels(), &[1_i64.into(), 3_i64.into()]);
+    }
+
+    #[test]
+    fn dataframe_filter_rows_preserves_index_name_z5qu1() {
+        // Per br-frankenpandas-z5qu1: DataFrame.dropna / boolean-indexing
+        // (both routed through filter_rows) preserve the index name.
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+            )],
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+
+        let out = df.dropna().unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

@@ -9868,6 +9868,21 @@ mod tests {
         assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "a"));
     }
 
+    #[test]
+    fn csv_ragged_row_returns_error_4hpid() {
+        // Per br-frankenpandas-4hpid: confirm pandas-faithful rejection on
+        // ragged rows. The underlying csv crate raises UnequalLengths
+        // (surfaced as IoError::Csv) — record.get(idx).unwrap_or_default()
+        // inside the loop is dead code because the `row?` upstream errors
+        // first. This locks in the rejection contract.
+        let short_row = "a,b,c\n1,2,3\n4,5\n7,8,9\n";
+        let err = read_csv_str(short_row).expect_err("short row must reject");
+        assert!(
+            matches!(err, IoError::Csv(_)),
+            "expected IoError::Csv (UnequalLengths from csv crate), got {err:?}"
+        );
+    }
+
     fn make_table_format_dataframe() -> DataFrame {
         let mut columns = BTreeMap::new();
         columns.insert(

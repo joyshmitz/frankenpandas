@@ -21841,8 +21841,11 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
+        // Per br-frankenpandas-lhzot: preserve the index name through
+        // every caller of take_rows_by_positions (iloc, take, sort_values,
+        // sort_index, head, tail, groupby row-selection paths).
         Self::new_with_axes(
-            Index::new(labels),
+            Index::new(labels).rename_index(self.index.name()),
             row_multiindex,
             columns,
             self.column_order.clone(),
@@ -23430,7 +23433,12 @@ impl DataFrame {
             let values = col.values()[..take].to_vec();
             columns.insert(name.clone(), Column::new(col.dtype(), values)?);
         }
-        Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
+        // Per br-frankenpandas-lhzot: preserve the index name.
+        Self::new_with_column_order(
+            Index::new(labels).rename_index(self.index.name()),
+            columns,
+            self.column_order.clone(),
+        )
     }
 
     /// Return the last `n` rows.
@@ -23449,7 +23457,12 @@ impl DataFrame {
             let values = col.values()[start..].to_vec();
             columns.insert(name.clone(), Column::new(col.dtype(), values)?);
         }
-        Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
+        // Per br-frankenpandas-lhzot: preserve the index name.
+        Self::new_with_column_order(
+            Index::new(labels).rename_index(self.index.name()),
+            columns,
+            self.column_order.clone(),
+        )
     }
 
     /// Set the DataFrame index from an existing column.
@@ -41080,6 +41093,27 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(10));
         assert_eq!(result.values()[1], Scalar::Int64(30));
         assert_eq!(result.index().labels(), &[1_i64.into(), 3_i64.into()]);
+    }
+
+    #[test]
+    fn dataframe_take_paths_preserve_index_name_lhzot() {
+        // Per br-frankenpandas-lhzot: DataFrame iloc/sort_values etc. route
+        // through take_rows_by_positions, which now preserves index name.
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+
+        // sort_values uses take_rows_by_positions
+        let sorted = df.sort_values("v", true).unwrap();
+        assert_eq!(sorted.index().name(), Some("myidx"));
+
+        // head also routes through take_rows_by_positions
+        let h = df.head(2).unwrap();
+        assert_eq!(h.index().name(), Some("myidx"));
     }
 
     #[test]

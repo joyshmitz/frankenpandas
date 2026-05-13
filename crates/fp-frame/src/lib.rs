@@ -4952,17 +4952,24 @@ impl Series {
         // input is Int64 and all bounds are integer-valued (or absent).
         // Detect that case to keep dtype contract; fall back to Float64
         // only when the input or bounds genuinely demand it.
+        // Per br-frankenpandas-s0rt1: pandas treats NaN bounds as "no
+        // clipping" (semantically equivalent to None). NaN bounds must
+        // not demote Int64 → Float64 and must not participate in
+        // comparison (NaN < x and NaN > x are both false).
         let is_integer_bound = |b: Option<f64>| -> bool {
             match b {
                 None => true,
                 Some(v) => {
-                    v.is_finite()
-                        && v.fract() == 0.0
-                        && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
+                    v.is_nan()
+                        || (v.is_finite()
+                            && v.fract() == 0.0
+                            && v >= i64::MIN as f64
+                            && v <= i64::MAX as f64)
                 }
             }
         };
+        let effective_lower = lower.filter(|v| !v.is_nan());
+        let effective_upper = upper.filter(|v| !v.is_nan());
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
             && is_integer_bound(lower)
             && is_integer_bound(upper);
@@ -4976,13 +4983,13 @@ impl Series {
 
             if preserve_int64 && let Scalar::Int64(x) = val {
                 let mut clamped = *x;
-                if let Some(lo) = lower {
+                if let Some(lo) = effective_lower {
                     let lo_i = lo as i64;
                     if clamped < lo_i {
                         clamped = lo_i;
                     }
                 }
-                if let Some(hi) = upper {
+                if let Some(hi) = effective_upper {
                     let hi_i = hi as i64;
                     if clamped > hi_i {
                         clamped = hi_i;
@@ -4994,12 +5001,12 @@ impl Series {
 
             let v = val.to_f64().map_err(ColumnError::from)?;
             let mut clamped = v;
-            if let Some(lo) = lower
+            if let Some(lo) = effective_lower
                 && clamped < lo
             {
                 clamped = lo;
             }
-            if let Some(hi) = upper
+            if let Some(hi) = effective_upper
                 && clamped > hi
             {
                 clamped = hi;
@@ -41831,6 +41838,31 @@ mod tests {
         assert_eq!(clipped.values()[0], Scalar::Float64(0.0));
         assert_eq!(clipped.values()[1], Scalar::Float64(3.0));
         assert_eq!(clipped.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_clip_nan_bound_preserves_int64_s0rt1() {
+        // Per br-frankenpandas-s0rt1: pandas treats NaN bounds as "no
+        // clipping" — they must NOT demote Int64 to Float64 and must
+        // NOT participate in comparison.
+        let s = Series::from_values(
+            "v",
+            vec![IndexLabel::from("a"), IndexLabel::from("b"), IndexLabel::from("c")],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        // NaN as lower → no clipping; dtype stays Int64
+        let clipped = s.clip(Some(f64::NAN), None).unwrap();
+        assert_eq!(clipped.values()[0], Scalar::Int64(1));
+        assert_eq!(clipped.values()[1], Scalar::Int64(2));
+        assert_eq!(clipped.values()[2], Scalar::Int64(3));
+
+        // Real lower bound 2 → 1 clipped to 2; dtype stays Int64
+        let clipped = s.clip(Some(2.0), Some(f64::NAN)).unwrap();
+        assert_eq!(clipped.values()[0], Scalar::Int64(2));
+        assert_eq!(clipped.values()[1], Scalar::Int64(2));
+        assert_eq!(clipped.values()[2], Scalar::Int64(3));
     }
 
     #[test]

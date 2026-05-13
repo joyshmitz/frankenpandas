@@ -8003,6 +8003,15 @@ fn fuzz_validate_rolling_result(
             Ok(())
         }
         Err(FrameError::CompatibilityRejected(_)) if window == 0 => Ok(()),
+        // Per br-frankenpandas-d6x4v: pandas raises ValueError when
+        // min_periods > window (locked in by br-7c962 as
+        // CompatibilityRejected). The fuzz harness must tolerate this
+        // rejection path the same way it tolerates window==0.
+        Err(FrameError::CompatibilityRejected(_))
+            if min_periods.is_some_and(|m| m > window) =>
+        {
+            Ok(())
+        }
         Err(err) => Err(format!(
             "rolling {aggfunc} unexpectedly failed: window={window} min_periods={min_periods:?} err={err:?}"
         )),

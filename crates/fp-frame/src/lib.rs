@@ -4175,7 +4175,13 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        // Per br-frankenpandas-lxot8: pandas preserves the index name through
+        // dropna even when the result is empty. Self::from_values builds a
+        // fresh unnamed Index, so call Self::new directly with a renamed
+        // Index instead.
+        let index = Index::new(new_labels).rename_index(self.index.name());
+        let column = Column::from_values(new_values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Drop entries by index label.
@@ -41056,6 +41062,36 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(10));
         assert_eq!(result.values()[1], Scalar::Int64(30));
         assert_eq!(result.index().labels(), &[1_i64.into(), 3_i64.into()]);
+    }
+
+    #[test]
+    fn series_dropna_preserves_index_name_lxot8() {
+        // Per br-frankenpandas-lxot8: pandas preserves the index name
+        // through dropna even when result is empty.
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .rename_axis("idx")
+        .unwrap();
+
+        let result = s.dropna().unwrap();
+        assert_eq!(result.index().name(), Some("idx"));
+
+        // Even when result is empty:
+        let all_null = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .rename_axis("idx")
+        .unwrap();
+        let empty_result = all_null.dropna().unwrap();
+        assert_eq!(empty_result.index().name(), Some("idx"));
+        assert_eq!(empty_result.len(), 0);
     }
 
     #[test]

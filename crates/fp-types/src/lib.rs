@@ -1170,7 +1170,38 @@ fn collect_finite(values: &[Scalar]) -> Vec<f64> {
         .collect()
 }
 
+/// Per br-frankenpandas-620mj: if a column is uniformly Timedelta64
+/// (with optional NAT/Null missing), sum/mean preserve Timedelta dtype
+/// matching pandas — instead of silently coercing to Float64(0.0) via
+/// the collect_finite path (which drops Timedelta64 because to_f64
+/// errors). Returns Some(sum_in_ns, observed_count) when applicable.
+fn collect_timedelta_ns(values: &[Scalar]) -> Option<(i128, usize)> {
+    let mut sum: i128 = 0;
+    let mut count: usize = 0;
+    let mut saw_timedelta = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Timedelta64(ns) => {
+                saw_timedelta = true;
+                sum += i128::from(*ns);
+                count += 1;
+            }
+            // Any non-Timedelta non-missing value bails out to the
+            // existing Float64 path, preserving cross-type behavior.
+            _ => return None,
+        }
+    }
+    if saw_timedelta { Some((sum, count)) } else { None }
+}
+
 pub fn nansum(values: &[Scalar]) -> Scalar {
+    if let Some((sum, _)) = collect_timedelta_ns(values) {
+        let clamped = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+        return Scalar::Timedelta64(clamped as i64);
+    }
     let nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Float64(0.0);
@@ -1179,6 +1210,14 @@ pub fn nansum(values: &[Scalar]) -> Scalar {
 }
 
 pub fn nanmean(values: &[Scalar]) -> Scalar {
+    if let Some((sum, count)) = collect_timedelta_ns(values) {
+        if count == 0 {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        let mean = sum / count as i128;
+        let clamped = mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+        return Scalar::Timedelta64(clamped as i64);
+    }
     let nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
@@ -2325,6 +2364,45 @@ mod tests {
     fn nanmean_all_null_returns_nan() {
         let vals = vec![Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
         assert!(super::nanmean(&vals).is_missing());
+    }
+
+    #[test]
+    fn nansum_nanmean_timedelta64_preserves_dtype_620mj() {
+        // Per br-frankenpandas-620mj: pandas td_series.sum()/mean() return
+        // Timedelta64, not Float64(0.0). Was silently zero before because
+        // collect_finite drops Timedelta64 (to_f64 errors).
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        assert_eq!(super::nansum(&vals), Scalar::Timedelta64(6 * one_hour));
+        assert_eq!(super::nanmean(&vals), Scalar::Timedelta64(2 * one_hour));
+    }
+
+    #[test]
+    fn nansum_nanmean_timedelta64_skips_nat_620mj() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(Timedelta::NAT),
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+            Scalar::Timedelta64(Timedelta::NAT),
+        ];
+        // NAT is missing → skipped. Sum: 1h+3h=4h; mean: 2h.
+        assert_eq!(super::nansum(&vals), Scalar::Timedelta64(4 * one_hour));
+        assert_eq!(super::nanmean(&vals), Scalar::Timedelta64(2 * one_hour));
+    }
+
+    #[test]
+    fn nansum_nanmean_mixed_timedelta_other_falls_back_620mj() {
+        // Mixed Timedelta64 + other type bails out of the Timedelta path
+        // and uses Float64 collect_finite (which drops Timedelta).
+        // Preserves existing cross-type behavior (effectively ignores TD).
+        let vals = vec![Scalar::Timedelta64(3600 * 1_000_000_000), Scalar::Int64(5)];
+        // Int64(5) makes it through to_f64 → 5.0; Timedelta is dropped.
+        assert_eq!(super::nansum(&vals), Scalar::Float64(5.0));
     }
 
     #[test]

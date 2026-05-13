@@ -727,26 +727,25 @@ pub fn groupby_agg(
                 Scalar::Int64(v) => Scalar::Float64(v as f64),
                 other => other,
             },
+            // Per br-frankenpandas-764ys: pandas groupby.first()/.last()
+            // preserve the source column dtype — Int64 stays Int64. The
+            // previous promotion to Float64 diverged from pandas (which
+            // only auto-promotes when the column already contains NaN).
+            // If the source column has mixed Int64+Null, our column model
+            // upcasts to Float64 at construction time, so `vals[0]` is
+            // already the correct dtype here.
             AggFunc::First => {
                 if vals.is_empty() {
                     Scalar::Null(NullKind::NaN)
                 } else {
-                    // Pandas promotes integer first() to Float64 for NaN compat.
-                    match &vals[0] {
-                        Scalar::Int64(v) => Scalar::Float64(*v as f64),
-                        other => other.clone(),
-                    }
+                    vals[0].clone()
                 }
             }
             AggFunc::Last => {
                 if vals.is_empty() {
                     Scalar::Null(NullKind::NaN)
                 } else {
-                    // Pandas promotes integer last() to Float64 for NaN compat.
-                    match &vals[vals.len() - 1] {
-                        Scalar::Int64(v) => Scalar::Float64(*v as f64),
-                        other => other.clone(),
-                    }
+                    vals[vals.len() - 1].clone()
                 }
             }
             AggFunc::Var => fp_types::nanvar(vals, 1),
@@ -2270,10 +2269,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
-        );
+        // Per br-frankenpandas-764ys: pandas groupby.first() preserves
+        // source Int64 dtype (no Float64 promotion).
+        assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
         assert_eq!(out.name(), "first");
     }
 
@@ -2291,10 +2289,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
-        );
+        // Per br-frankenpandas-764ys: pandas groupby.last() preserves
+        // source Int64 dtype (no Float64 promotion).
+        assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
         assert_eq!(out.name(), "last");
     }
 

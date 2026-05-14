@@ -5179,9 +5179,10 @@ impl Series {
             .iter()
             .map(|label| IndexLabel::Utf8(format!("{prefix}{label}")))
             .collect();
+        // Per br-frankenpandas-a1sfw: pandas preserves the index name.
         Self::new(
             self.name.clone(),
-            Index::new(new_labels),
+            Index::new(new_labels).rename_index(self.index.name()),
             self.column.clone(),
         )
     }
@@ -5197,9 +5198,10 @@ impl Series {
             .iter()
             .map(|label| IndexLabel::Utf8(format!("{label}{suffix}")))
             .collect();
+        // Per br-frankenpandas-a1sfw: pandas preserves the index name.
         Self::new(
             self.name.clone(),
-            Index::new(new_labels),
+            Index::new(new_labels).rename_index(self.index.name()),
             self.column.clone(),
         )
     }
@@ -41312,6 +41314,24 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_add_prefix_suffix_preserve_index_name_a1sfw() {
+        // Per br-frankenpandas-a1sfw: pandas preserves the index name
+        // through add_prefix and add_suffix.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let p = s.add_prefix("p_").unwrap();
+        assert_eq!(p.index().name(), Some("myidx"));
+        let q = s.add_suffix("_s").unwrap();
+        assert_eq!(q.index().name(), Some("myidx"));
     }
 
     #[test]

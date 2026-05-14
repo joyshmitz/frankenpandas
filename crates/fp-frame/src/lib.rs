@@ -33537,6 +33537,17 @@ impl DataFrame {
                 .iter()
                 .map(|&l| IndexLabel::Utf8(l.to_owned()))
                 .collect();
+            // Per br-frankenpandas-63dgc: pandas raises KeyError on missing
+            // row labels (axis=0), matching axis=1 behavior at line 33519.
+            // Was silently skipping missing labels.
+            let index_set: HashSet<&IndexLabel> = self.index.labels().iter().collect();
+            for label in &drop_set {
+                if !index_set.contains(label) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "drop: label {label:?} not found in index"
+                    )));
+                }
+            }
             let mut keep_indices = Vec::new();
             for (i, label) in self.index.labels().iter().enumerate() {
                 if !drop_set.contains(label) {
@@ -33556,7 +33567,12 @@ impl DataFrame {
                     .collect();
                 columns.insert(name.clone(), Column::from_values(vals)?);
             }
-            Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
+            // Per br-frankenpandas-63dgc: preserve index name through drop.
+            Self::new_with_column_order(
+                Index::new(new_labels).rename_index(self.index.name()),
+                columns,
+                self.column_order.clone(),
+            )
         }
     }
 
@@ -83501,6 +83517,22 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn dataframe_drop_rejects_missing_row_label_63dgc() {
+        // Per br-frankenpandas-63dgc: pandas raises KeyError on missing
+        // row labels (axis=0). Was silently no-op'd. (axis=1 already
+        // validated.)
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap();
+        assert!(df.drop(&["zzz"], 0).is_err());
+        // Valid drop still succeeds.
+        let out = df.drop(&["a"], 0).unwrap();
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

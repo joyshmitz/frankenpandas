@@ -3365,7 +3365,10 @@ impl DatetimeIndex {
             })
             .collect();
         let mut out = Self::new(nanos);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
+        // always preserves self.name (unlike union/intersection which use
+        // shared_name).
+        if let Some(name) = self.name() {
             out = out.set_name(name);
         }
         out
@@ -5661,7 +5664,9 @@ impl TimedeltaIndex {
             })
             .collect();
         let mut out = Self::new(nanos);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+        // Per br-frankenpandas-6r1lq: difference preserves self.name only
+        // (asymmetric op).
+        if let Some(name) = self.name() {
             out = out.set_name(name);
         }
         out
@@ -7949,13 +7954,22 @@ impl RangeIndex {
     /// `pd.RangeIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Index {
-        self.set_op_via_int(other, |left, right| {
-            let right_set: HashSet<i64> = right.into_iter().collect();
-            let mut seen = HashSet::<i64>::new();
-            left.into_iter()
-                .filter(|v| !right_set.contains(v) && seen.insert(*v))
-                .collect()
-        })
+        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
+        // shared_name like union/intersection). Build inline rather than
+        // routing through set_op_via_int's shared-name logic.
+        let right_set: HashSet<i64> = other.values().into_iter().collect();
+        let mut seen = HashSet::<i64>::new();
+        let labels: Vec<IndexLabel> = self
+            .values()
+            .into_iter()
+            .filter(|v| !right_set.contains(v) && seen.insert(*v))
+            .map(IndexLabel::Int64)
+            .collect();
+        let mut idx = Index::new(labels);
+        if let Some(name) = self.name() {
+            idx = idx.set_name(name);
+        }
+        idx
     }
 
     /// Values in either but not both, matching
@@ -8899,14 +8913,18 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        self.set_op_via_string(other, |left, right| {
+        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
+        // shared_name like set_op_via_string applies for union/intersection).
+        let mut out = self.set_op_via_string(other, |left, right| {
             let right_set: HashSet<&&String> = right.iter().collect();
             let mut seen = HashSet::<&String>::new();
             left.into_iter()
                 .filter(|label| !right_set.contains(label) && seen.insert(label))
                 .cloned()
                 .collect()
-        })
+        });
+        out.name = self.name.clone();
+        out
     }
 
     /// Sort labels ascending, matching `pd.CategoricalIndex.sort_values()`.
@@ -13583,6 +13601,16 @@ mod tests {
             result.labels(),
             &[IndexLabel::Int64(1), IndexLabel::Int64(3)]
         );
+    }
+
+    #[test]
+    fn difference_preserves_self_name_even_when_other_differs_6r1lq() {
+        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
+        // preserves self.name regardless of whether other has the same name.
+        let left = Index::from_i64(vec![1, 2, 3]).set_name("left_axis");
+        let right = Index::from_i64(vec![2, 3, 4]).set_name("right_axis");
+        let result = left.difference(&right);
+        assert_eq!(result.name(), Some("left_axis"));
     }
 
     #[test]

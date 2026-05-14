@@ -13069,15 +13069,85 @@ impl SeriesGroupBy<'_> {
 
     /// Sum of each group.
     pub fn sum(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c1bxu: agg_numeric drops Timedelta64 values
+        // via to_f64(). Pandas td_series.groupby(...).sum() returns
+        // Timedelta64 per group — preserve dtype here.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta(|sum, count| {
+                let _ = count;
+                sum
+            });
+        }
         self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
     }
 
     /// Mean of each group.
     pub fn mean(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c1bxu: Timedelta64-aware groupby mean.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta(|sum, count| {
+                if count == 0 {
+                    0
+                } else {
+                    (sum / count as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64 as i128
+                }
+            });
+        }
         self.agg_numeric(
             |nums| nums.iter().sum::<f64>() / nums.len() as f64,
             self.series.name(),
         )
+    }
+
+    /// Per br-frankenpandas-c1bxu: true when every non-missing value in the
+    /// column is Timedelta64 (and at least one is). Allows NaT/Null markers.
+    fn column_is_timedelta(&self) -> bool {
+        let mut saw_td = false;
+        for v in self.series.column.values() {
+            if v.is_missing() {
+                continue;
+            }
+            match v {
+                Scalar::Timedelta64(_) => saw_td = true,
+                _ => return false,
+            }
+        }
+        saw_td
+    }
+
+    /// Per br-frankenpandas-c1bxu: per-group accumulator over a uniformly-
+    /// Timedelta64 source column. `combine(sum_ns, count)` produces the
+    /// emitted ns value (used to express sum vs mean). NaT values skipped.
+    fn agg_timedelta<F>(&self, combine: F) -> Result<Series, FrameError>
+    where
+        F: Fn(i128, usize) -> i128,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
+            let indices = &groups[key];
+            let mut sum: i128 = 0;
+            let mut count: usize = 0;
+            for &idx in indices {
+                if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                    if *ns == fp_types::Timedelta::NAT {
+                        continue;
+                    }
+                    sum += i128::from(*ns);
+                    count += 1;
+                }
+            }
+            labels.push(order[i].clone());
+            if count == 0 {
+                values.push(Scalar::Timedelta64(fp_types::Timedelta::NAT));
+            } else {
+                let emitted = combine(sum, count);
+                let clamped = emitted.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                values.push(Scalar::Timedelta64(clamped as i64));
+            }
+        }
+        Series::from_values(self.series.name(), labels, values)
     }
 
     /// Count of non-null values in each group.
@@ -61577,6 +61647,51 @@ mod tests {
         match &v.values()[2] {
             Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
             other => panic!("expected Timedelta64(-1h), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn series_groupby_sum_mean_timedelta64_c1bxu() {
+        // Per br-frankenpandas-c1bxu: SeriesGroupBy::sum and mean on a
+        // Timedelta64 source column preserve Timedelta dtype per group.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let keys = Series::from_values(
+            "k",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let dur = Series::from_values(
+            "dur",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+                Scalar::Timedelta64(5 * one_hour),
+            ],
+        )
+        .unwrap();
+        let sums = dur.groupby(&keys).unwrap().sum().unwrap();
+        match sums.values()[0] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 3 * one_hour),
+            ref other => panic!("expected Timedelta64(3h), got {:?}", other),
+        }
+        match sums.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 5 * one_hour),
+            ref other => panic!("expected Timedelta64(5h), got {:?}", other),
+        }
+        let means = dur.groupby(&keys).unwrap().mean().unwrap();
+        match means.values()[0] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 3 * one_hour / 2),
+            ref other => panic!("expected Timedelta64(1.5h), got {:?}", other),
+        }
+        match means.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 5 * one_hour),
+            ref other => panic!("expected Timedelta64(5h), got {:?}", other),
         }
     }
 

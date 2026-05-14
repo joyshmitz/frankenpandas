@@ -13174,6 +13174,10 @@ impl SeriesGroupBy<'_> {
                 Self::utf8_extreme(values, false)
             });
         }
+        // Per br-frankenpandas-tgm2i: Timedelta64 min preserves dtype.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_extrema(|a, b| a.min(b));
+        }
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
             self.series.name(),
@@ -13187,10 +13191,47 @@ impl SeriesGroupBy<'_> {
                 Self::utf8_extreme(values, true)
             });
         }
+        // Per br-frankenpandas-tgm2i: Timedelta64 max preserves dtype.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_extrema(|a, b| a.max(b));
+        }
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             self.series.name(),
         )
+    }
+
+    /// Per br-frankenpandas-tgm2i: running min/max accumulator over a
+    /// uniformly-Timedelta64 source column. `combine(acc, value)` produces
+    /// the new accumulator (e.g. min/max). NaT values are skipped.
+    fn agg_timedelta_extrema<F>(&self, combine: F) -> Result<Series, FrameError>
+    where
+        F: Fn(i64, i64) -> i64,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
+            let indices = &groups[key];
+            let mut best: Option<i64> = None;
+            for &idx in indices {
+                if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                    if *ns == fp_types::Timedelta::NAT {
+                        continue;
+                    }
+                    best = Some(match best {
+                        Some(prev) => combine(prev, *ns),
+                        None => *ns,
+                    });
+                }
+            }
+            labels.push(order[i].clone());
+            match best {
+                Some(ns) => values.push(Scalar::Timedelta64(ns)),
+                None => values.push(Scalar::Timedelta64(fp_types::Timedelta::NAT)),
+            }
+        }
+        Series::from_values(self.series.name(), labels, values)
     }
 
     /// Whether any non-missing value is truthy in each group.
@@ -61647,6 +61688,53 @@ mod tests {
         match &v.values()[2] {
             Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
             other => panic!("expected Timedelta64(-1h), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn series_groupby_min_max_timedelta64_tgm2i() {
+        // Per br-frankenpandas-tgm2i: SeriesGroupBy::min/max on Timedelta64
+        // preserve dtype per group.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let keys = Series::from_values(
+            "k",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let dur = Series::from_values(
+            "dur",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Timedelta64(3 * one_hour),
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(5 * one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+            ],
+        )
+        .unwrap();
+        let mins = dur.groupby(&keys).unwrap().min().unwrap();
+        match mins.values()[0] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, one_hour),
+            ref other => panic!("expected Timedelta64(1h), got {:?}", other),
+        }
+        match mins.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 2 * one_hour),
+            ref other => panic!("expected Timedelta64(2h), got {:?}", other),
+        }
+        let maxes = dur.groupby(&keys).unwrap().max().unwrap();
+        match maxes.values()[0] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 3 * one_hour),
+            ref other => panic!("expected Timedelta64(3h), got {:?}", other),
+        }
+        match maxes.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(ns, 5 * one_hour),
+            ref other => panic!("expected Timedelta64(5h), got {:?}", other),
         }
     }
 

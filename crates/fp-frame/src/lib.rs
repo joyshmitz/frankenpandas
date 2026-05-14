@@ -34433,7 +34433,12 @@ impl DataFrame {
                     .iter()
                     .map(|s| IndexLabel::Utf8(s.clone()))
                     .collect();
-                return Series::from_values(labels[i].to_string(), new_labels, out_vals);
+                // Per br-frankenpandas-5hoh1: pandas asof returns a Series
+                // named by the SEARCHED label (the `where` argument), not
+                // the matched row's index label. The fallback path at the
+                // end of this function already uses `label.to_string()`;
+                // align the success path here.
+                return Series::from_values(label.to_string(), new_labels, out_vals);
             }
         }
 
@@ -83614,6 +83619,22 @@ mod tests {
 
         let mixed = super::concat_series(&[&s1, &s3]).unwrap();
         assert!(mixed.index().name().is_none());
+    }
+
+    #[test]
+    fn dataframe_asof_name_uses_searched_label_5hoh1() {
+        // Per br-frankenpandas-5hoh1: pandas asof returns a Series named
+        // by the searched `where` label, not the matched row label.
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+        )
+        .unwrap();
+        let searched: IndexLabel = 25_i64.into();
+        let result = df.asof(&searched, None).unwrap();
+        assert_eq!(result.name(), &searched.to_string());
     }
 
     #[test]

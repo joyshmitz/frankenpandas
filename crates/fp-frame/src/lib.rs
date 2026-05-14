@@ -30674,7 +30674,11 @@ impl DataFrame {
                 .iter()
                 .map(|n| self.columns[n].values()[0].clone())
                 .collect();
-            Ok(Series::from_values("0".to_owned(), labels, values).unwrap())
+            // Per br-frankenpandas-6xd34: pandas uses the row's index label
+            // as the resulting Series name when squeezing axis=0; we
+            // previously hardcoded "0".
+            let series_name = self.index.labels()[0].to_string();
+            Ok(Series::from_values(series_name, labels, values).unwrap())
         } else {
             Err(self.clone())
         }
@@ -59010,6 +59014,23 @@ mod tests {
         assert_eq!(series.len(), 2);
         assert_eq!(series.values()[0], Scalar::Float64(1.0));
         assert_eq!(series.values()[1], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn df_squeeze_axis_0_uses_row_label_as_series_name_6xd34() {
+        // Per br-frankenpandas-6xd34: pandas uses the row's index label as
+        // the resulting Series name when squeezing axis=0; we previously
+        // hardcoded "0".
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(2)]),
+            ],
+            vec!["row1".into()],
+        )
+        .unwrap();
+        let series = df.squeeze_to_series(0).unwrap();
+        assert_eq!(series.name(), "row1");
     }
 
     #[test]

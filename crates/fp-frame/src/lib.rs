@@ -33581,6 +33581,16 @@ impl DataFrame {
     /// Convenience for dropping rows with Int64 index labels.
     pub fn drop_rows_int(&self, labels: &[i64]) -> Result<Self, FrameError> {
         let drop_set: BTreeSet<IndexLabel> = labels.iter().map(|&l| IndexLabel::Int64(l)).collect();
+        // Per br-frankenpandas-372dn: sister to br-63dgc and br-dopex —
+        // pandas raises KeyError on missing labels.
+        let index_set: HashSet<&IndexLabel> = self.index.labels().iter().collect();
+        for label in &drop_set {
+            if !index_set.contains(label) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "drop_rows_int: label {label:?} not found in index"
+                )));
+            }
+        }
         let mut keep_indices = Vec::new();
         for (i, label) in self.index.labels().iter().enumerate() {
             if !drop_set.contains(label) {
@@ -33600,7 +33610,12 @@ impl DataFrame {
                 .collect();
             columns.insert(name.clone(), Column::from_values(vals)?);
         }
-        Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
+        // Per br-frankenpandas-372dn: preserve index name.
+        Self::new_with_column_order(
+            Index::new(new_labels).rename_index(self.index.name()),
+            columns,
+            self.column_order.clone(),
+        )
     }
 
     /// Truncate the DataFrame by index label range.

@@ -8380,12 +8380,17 @@ impl Series {
                 .unwrap_or(0),
             None => labels.len(),
         };
+        // Per br-frankenpandas-5cc2t: preserve index name through truncate.
         if start >= end {
-            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+            let index = Index::new(Vec::new()).rename_index(self.index.name());
+            let column = Column::from_values(Vec::new())?;
+            return Self::new(self.name.clone(), index, column);
         }
         let new_labels = labels[start..end].to_vec();
         let new_values = self.column.values()[start..end].to_vec();
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        let index = Index::new(new_labels).rename_index(self.index.name());
+        let column = Column::from_values(new_values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Select rows where the time component exactly matches the given time.
@@ -41365,6 +41370,27 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_truncate_preserves_index_name_5cc2t() {
+        // Per br-frankenpandas-5cc2t: pandas preserves index name through
+        // Series.truncate.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let out = s.truncate(Some(&"b".into()), Some(&"c".into())).unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
     }
 
     #[test]

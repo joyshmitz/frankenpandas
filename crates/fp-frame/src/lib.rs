@@ -3699,7 +3699,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        self.with_labels_and_values_preserving_name(out_labels, out_values)
     }
 
     /// Position-based selection for a list of integer positions.
@@ -3717,7 +3717,7 @@ impl Series {
             out_values.push(self.column.values()[normalized].clone());
         }
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        self.with_labels_and_values_preserving_name(out_labels, out_values)
     }
 
     /// Label-based boolean mask selection.
@@ -3744,7 +3744,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        self.with_labels_and_values_preserving_name(out_labels, out_values)
     }
 
     /// Position-based boolean mask selection.
@@ -3786,7 +3786,7 @@ impl Series {
     ) -> Result<Self, FrameError> {
         let labels = self.index.labels();
         if labels.is_empty() {
-            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
         }
 
         // Find the first occurrence of `start` (or begin at 0).
@@ -3812,13 +3812,13 @@ impl Series {
 
         if start_pos > end_pos {
             // Empty result when start is after stop.
-            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
         }
 
         let out_labels: Vec<_> = labels[start_pos..=end_pos].to_vec();
         let out_values: Vec<_> = self.column.values()[start_pos..=end_pos].to_vec();
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        self.with_labels_and_values_preserving_name(out_labels, out_values)
     }
 
     /// Position-based slice selection (exclusive end, like Python range).
@@ -3841,13 +3841,13 @@ impl Series {
         let end_pos = stop.map_or(len, resolve);
 
         if start_pos >= end_pos || start_pos >= len {
-            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
         }
 
         let out_labels: Vec<_> = self.index.labels()[start_pos..end_pos].to_vec();
         let out_values: Vec<_> = self.column.values()[start_pos..end_pos].to_vec();
 
-        Self::from_values(self.name.clone(), out_labels, out_values)
+        self.with_labels_and_values_preserving_name(out_labels, out_values)
     }
 
     /// Return a new Series sorted by index labels.
@@ -41388,6 +41388,34 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_loc_iloc_loc_bool_preserve_index_name_5fdjg() {
+        // Per br-frankenpandas-5fdjg: loc/iloc/loc_bool/loc_slice/iloc_slice
+        // are selection methods that route Self::from_values; now preserve
+        // the source index name.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        assert_eq!(s.iloc(&[0, 2]).unwrap().index().name(), Some("myidx"));
+        assert_eq!(s.loc(&["a".into(), "c".into()]).unwrap().index().name(), Some("myidx"));
+        assert_eq!(s.loc_bool(&[true, false, true, false]).unwrap().index().name(), Some("myidx"));
+        assert_eq!(
+            s.loc_slice(Some(&"b".into()), Some(&"c".into())).unwrap().index().name(),
+            Some("myidx")
+        );
+        assert_eq!(s.iloc_slice(Some(0), Some(2)).unwrap().index().name(), Some("myidx"));
     }
 
     #[test]

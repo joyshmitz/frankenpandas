@@ -1202,7 +1202,11 @@ fn collect_timedelta_ns(values: &[Scalar]) -> Option<(i128, usize)> {
             _ => return None,
         }
     }
-    if saw_timedelta { Some((sum, count)) } else { None }
+    if saw_timedelta {
+        Some((sum, count))
+    } else {
+        None
+    }
 }
 
 pub fn nansum(values: &[Scalar]) -> Scalar {
@@ -2859,8 +2863,10 @@ mod tests {
         match std {
             Scalar::Timedelta64(ns) => {
                 let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
-                assert!((ns as f64 - expected).abs() < 1e6,
-                    "expected ~{expected} ns, got {ns}");
+                assert!(
+                    (ns as f64 - expected).abs() < 1e6,
+                    "expected ~{expected} ns, got {ns}"
+                );
             }
             other => panic!("expected Timedelta64, got {other:?}"),
         }
@@ -3234,9 +3240,18 @@ mod tests {
             Scalar::Timedelta64(4 * one_hour),
             Scalar::Timedelta64(5 * one_hour),
         ];
-        assert_eq!(super::nanquantile(&vals, 0.5), Scalar::Timedelta64(3 * one_hour));
-        assert_eq!(super::nanquantile(&vals, 0.0), Scalar::Timedelta64(one_hour));
-        assert_eq!(super::nanquantile(&vals, 1.0), Scalar::Timedelta64(5 * one_hour));
+        assert_eq!(
+            super::nanquantile(&vals, 0.5),
+            Scalar::Timedelta64(3 * one_hour)
+        );
+        assert_eq!(
+            super::nanquantile(&vals, 0.0),
+            Scalar::Timedelta64(one_hour)
+        );
+        assert_eq!(
+            super::nanquantile(&vals, 1.0),
+            Scalar::Timedelta64(5 * one_hour)
+        );
     }
 
     #[test]
@@ -3247,7 +3262,10 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         // Linear interpolation: at q=0.5, midpoint = 2h
-        assert_eq!(super::nanquantile(&vals, 0.5), Scalar::Timedelta64(2 * one_hour));
+        assert_eq!(
+            super::nanquantile(&vals, 0.5),
+            Scalar::Timedelta64(2 * one_hour)
+        );
     }
 
     #[test]

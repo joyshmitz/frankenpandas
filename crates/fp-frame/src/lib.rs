@@ -6710,7 +6710,8 @@ impl Series {
                     ));
                 }
             }
-            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out_vals);
+            return self
+                .with_labels_and_values_preserving_name(self.index.labels().to_vec(), out_vals);
         }
         order.sort_by(|&a, &b| compare_scalars_with_na_last(&vals[a], &vals[b], ascending));
 
@@ -7592,8 +7593,7 @@ impl Series {
             // Per br-frankenpandas-naeja: Timedelta64 pct_change matches
             // pandas, which divides ns deltas as dimensionless f64 ratios.
             // NaT current/previous propagates as NaN.
-            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
-                (current, previous)
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (current, previous)
             {
                 if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                     out.push(Scalar::Null(NullKind::NaN));
@@ -9752,7 +9752,9 @@ impl Rolling<'_> {
                 {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
-                    out.push(Scalar::Float64(*nums.last().expect("non-empty checked above")));
+                    out.push(Scalar::Float64(
+                        *nums.last().expect("non-empty checked above"),
+                    ));
                 }
             }
         } else {
@@ -9764,7 +9766,9 @@ impl Rolling<'_> {
                 if nums.is_empty() || i + 1 < self.window || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
-                    out.push(Scalar::Float64(*nums.last().expect("non-empty checked above")));
+                    out.push(Scalar::Float64(
+                        *nums.last().expect("non-empty checked above"),
+                    ));
                 }
             }
         }
@@ -37001,8 +37005,7 @@ impl DataFrameGroupBy<'_> {
                     }
                     // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
                     // Timedelta dtype matching pandas. NaT propagates.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev)
-                    {
+                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev) {
                         if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                             return Scalar::Null(NullKind::NaT);
                         }
@@ -41415,7 +41418,10 @@ mod tests {
         // Per br-frankenpandas-lhzot: DataFrame iloc/sort_values etc. route
         // through take_rows_by_positions, which now preserves index name.
         let df = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![(
+                "v",
+                vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+            )],
             vec!["a".into(), "b".into(), "c".into()],
         )
         .unwrap()
@@ -41438,7 +41444,10 @@ mod tests {
         // direct construction path (sample_weights routes through
         // take_rows_by_positions which was fixed in lhzot).
         let df = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec![(
+                "v",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
             vec!["a".into(), "b".into(), "c".into()],
         )
         .unwrap()
@@ -41473,7 +41482,11 @@ mod tests {
         let df = DataFrame::from_dict_with_index(
             vec![(
                 "v",
-                vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
             )],
             vec!["a".into(), "b".into(), "c".into()],
         )
@@ -41575,13 +41588,28 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         assert_eq!(s.iloc(&[0, 2]).unwrap().index().name(), Some("myidx"));
-        assert_eq!(s.loc(&["a".into(), "c".into()]).unwrap().index().name(), Some("myidx"));
-        assert_eq!(s.loc_bool(&[true, false, true, false]).unwrap().index().name(), Some("myidx"));
         assert_eq!(
-            s.loc_slice(Some(&"b".into()), Some(&"c".into())).unwrap().index().name(),
+            s.loc(&["a".into(), "c".into()]).unwrap().index().name(),
             Some("myidx")
         );
-        assert_eq!(s.iloc_slice(Some(0), Some(2)).unwrap().index().name(), Some("myidx"));
+        assert_eq!(
+            s.loc_bool(&[true, false, true, false])
+                .unwrap()
+                .index()
+                .name(),
+            Some("myidx")
+        );
+        assert_eq!(
+            s.loc_slice(Some(&"b".into()), Some(&"c".into()))
+                .unwrap()
+                .index()
+                .name(),
+            Some("myidx")
+        );
+        assert_eq!(
+            s.iloc_slice(Some(0), Some(2)).unwrap().index().name(),
+            Some("myidx")
+        );
     }
 
     #[test]
@@ -42076,7 +42104,11 @@ mod tests {
         // to the original Series's name.
         let s = Series::from_values(
             "myname",
-            vec![IndexLabel::from("a"), IndexLabel::from("b"), IndexLabel::from("c")],
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
         )
         .unwrap();
@@ -42086,7 +42118,9 @@ mod tests {
         assert_eq!(out.name(), "count");
 
         // Same expectation via value_counts_with_options.
-        let out2 = s.value_counts_with_options(false, true, false, true).unwrap();
+        let out2 = s
+            .value_counts_with_options(false, true, false, true)
+            .unwrap();
         assert_eq!(out2.index().name(), Some("myname"));
         assert_eq!(out2.name(), "count");
     }
@@ -42559,7 +42593,11 @@ mod tests {
         // NOT participate in comparison.
         let s = Series::from_values(
             "v",
-            vec![IndexLabel::from("a"), IndexLabel::from("b"), IndexLabel::from("c")],
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
@@ -53419,7 +53457,10 @@ mod tests {
                 Ok(true)
             })
             .unwrap();
-        assert!(*saw_key.borrow(), "group DataFrame must include the groupby key column");
+        assert!(
+            *saw_key.borrow(),
+            "group DataFrame must include the groupby key column"
+        );
     }
 
     #[test]
@@ -55834,7 +55875,9 @@ mod tests {
 
         let col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
         // loc=5 is out of bounds for a 2-column frame.
-        let err = df.insert(5, "c", col.clone()).expect_err("loc=5 must reject");
+        let err = df
+            .insert(5, "c", col.clone())
+            .expect_err("loc=5 must reject");
         match err {
             FrameError::CompatibilityRejected(msg) => {
                 assert!(msg.contains("out of bounds"));
@@ -59447,10 +59490,7 @@ mod tests {
         // the resulting Series name when squeezing axis=0; we previously
         // hardcoded "0".
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(1)]),
-                ("b", vec![Scalar::Int64(2)]),
-            ],
+            vec![("a", vec![Scalar::Int64(1)]), ("b", vec![Scalar::Int64(2)])],
             vec!["row1".into()],
         )
         .unwrap();

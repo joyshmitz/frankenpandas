@@ -8018,9 +8018,7 @@ fn fuzz_validate_rolling_result(
         // min_periods > window (locked in by br-7c962 as
         // CompatibilityRejected). The fuzz harness must tolerate this
         // rejection path the same way it tolerates window==0.
-        Err(FrameError::CompatibilityRejected(_))
-            if min_periods.is_some_and(|m| m > window) =>
-        {
+        Err(FrameError::CompatibilityRejected(_)) if min_periods.is_some_and(|m| m > window) => {
             Ok(())
         }
         Err(err) => Err(format!(
@@ -26240,7 +26238,10 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(report.total_tests, 3);
         assert_eq!(report.passed, 3);
         assert_eq!(report.failed, 0);
-        assert_eq!(report.skipped, 2, "marker hits should be counted as skipped");
+        assert_eq!(
+            report.skipped, 2,
+            "marker hits should be counted as skipped"
+        );
         assert_eq!(report.ran, 1);
     }
 

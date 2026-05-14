@@ -9669,7 +9669,13 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let nums = Self::window_values(window_slice);
 
-                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                // Per br-frankenpandas-dvxj7: also bail when nums is empty
+                // (all-missing window) so the nums[0] access can't panic.
+                // Affects min_periods=0 case.
+                if nums.is_empty()
+                    || nums.len() < self.min_periods
+                    || window_slice.len() < self.window
+                {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(nums[0]));
@@ -9681,7 +9687,7 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let nums = Self::window_values(window_slice);
 
-                if i + 1 < self.window || nums.len() < self.min_periods {
+                if nums.is_empty() || i + 1 < self.window || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(nums[0]));
@@ -9711,12 +9717,15 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let nums = Self::window_values(window_slice);
 
-                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                // Per br-frankenpandas-dvxj7: bail on empty nums (all-missing
+                // window) so .last() can't panic on the min_periods=0 path.
+                if nums.is_empty()
+                    || nums.len() < self.min_periods
+                    || window_slice.len() < self.window
+                {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
-                    out.push(Scalar::Float64(
-                        *nums.last().expect("non-empty after min_periods"),
-                    ));
+                    out.push(Scalar::Float64(*nums.last().expect("non-empty checked above")));
                 }
             }
         } else {
@@ -9725,12 +9734,10 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let nums = Self::window_values(window_slice);
 
-                if i + 1 < self.window || nums.len() < self.min_periods {
+                if nums.is_empty() || i + 1 < self.window || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
-                    out.push(Scalar::Float64(
-                        *nums.last().expect("non-empty after min_periods"),
-                    ));
+                    out.push(Scalar::Float64(*nums.last().expect("non-empty checked above")));
                 }
             }
         }
@@ -83460,6 +83467,31 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_rolling_first_last_no_panic_on_empty_window_dvxj7() {
+        // Per br-frankenpandas-dvxj7: rolling first/last on an all-missing
+        // window with min_periods=0 previously panicked via nums[0] /
+        // nums.last() on an empty Vec. Now bails to NaN.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .unwrap();
+        let f = s.rolling(2, Some(0)).first().unwrap();
+        for v in f.column().values() {
+            assert!(v.is_missing());
+        }
+        let l = s.rolling(2, Some(0)).last().unwrap();
+        for v in l.column().values() {
+            assert!(v.is_missing());
+        }
     }
 
     #[test]

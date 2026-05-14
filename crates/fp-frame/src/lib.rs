@@ -20836,7 +20836,15 @@ pub fn concat_dataframes_with_ignore_index(
         for frame in frames {
             labels.extend_from_slice(frame.index().labels());
         }
-        Index::new(labels)
+        // Per br-frankenpandas-r0igc: pandas preserves index name when all
+        // concatenated frames share it; drops to None when names differ.
+        let first_name = frames.first().and_then(|f| f.index().name());
+        let shared_name = if frames.iter().all(|f| f.index().name() == first_name) {
+            first_name
+        } else {
+            None
+        };
+        Index::new(labels).rename_index(shared_name)
     };
 
     // Materialize union-column output with null fill for missing frame columns.
@@ -20993,7 +21001,14 @@ fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, Fra
     for frame in frames {
         labels.extend_from_slice(frame.index().labels());
     }
-    let index = Index::new(labels);
+    // Per br-frankenpandas-r0igc: preserve index name when shared across frames.
+    let first_name = frames.first().and_then(|f| f.index().name());
+    let shared_name = if frames.iter().all(|f| f.index().name() == first_name) {
+        first_name
+    } else {
+        None
+    };
+    let index = Index::new(labels).rename_index(shared_name);
 
     let mut columns = BTreeMap::new();
     for name in &shared_columns {
@@ -83532,6 +83547,39 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn dataframe_concat_preserves_shared_index_name_r0igc() {
+        // Per br-frankenpandas-r0igc: pandas preserves the index name
+        // through concat when all frames share it; drops when they differ.
+        let a = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1)])],
+            vec!["a".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let b = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(2)])],
+            vec!["b".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let c = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(3)])],
+            vec!["c".into()],
+        )
+        .unwrap()
+        .rename_axis("different")
+        .unwrap();
+
+        let same = super::concat_dataframes(&[&a, &b]).unwrap();
+        assert_eq!(same.index().name(), Some("myidx"));
+
+        let mixed = super::concat_dataframes(&[&a, &c]).unwrap();
+        assert!(mixed.index().name().is_none());
     }
 
     #[test]

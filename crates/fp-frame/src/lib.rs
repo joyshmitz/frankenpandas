@@ -4219,6 +4219,20 @@ impl Series {
         // membership; was O(n × |labels|) Vec::contains. IndexLabel
         // derives Hash + Eq.
         let drop_set: HashSet<&IndexLabel> = labels.iter().collect();
+        // Per br-frankenpandas-dopex: pandas raises KeyError when a
+        // requested drop label isn't present in the index. Validate up
+        // front instead of silently no-op'ing on missing labels.
+        let index_set: HashSet<&IndexLabel> = self.index.labels().iter().collect();
+        let missing: Vec<&IndexLabel> = labels
+            .iter()
+            .filter(|l| !index_set.contains(*l))
+            .collect();
+        if !missing.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "drop: labels {:?} not found in index",
+                missing
+            )));
+        }
         let mut new_labels = Vec::new();
         let mut new_values = Vec::new();
         for (i, lbl) in self.index.labels().iter().enumerate() {
@@ -68077,14 +68091,15 @@ mod tests {
 
     #[test]
     fn series_drop_nonexistent_label() {
+        // Per br-frankenpandas-dopex: pandas raises KeyError on missing
+        // drop labels. We now return CompatibilityRejected.
         let s = Series::from_values(
             "test",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
         )
         .unwrap();
-        let result = s.drop(&[99_i64.into()]).unwrap();
-        assert_eq!(result.len(), 2); // nothing dropped
+        assert!(s.drop(&[99_i64.into()]).is_err());
     }
 
     // ── Series.asof(where) ──
@@ -82409,20 +82424,16 @@ mod tests {
     }
 
     #[test]
-    fn series_drop_with_no_matching_labels_is_noop() {
+    fn series_drop_with_no_matching_labels_rejects() {
+        // Per br-frankenpandas-dopex: pandas raises KeyError on missing
+        // drop labels (was previously a silent no-op).
         let s = Series::from_values(
             "x",
             vec![10_i64.into(), 20_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
         )
         .unwrap();
-        // Drop label that isn't in the index — no-op.
-        let dropped = s.drop(&[99_i64.into()]).unwrap();
-        assert_eq!(dropped.len(), 2);
-        assert_eq!(
-            dropped.index().labels(),
-            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
-        );
+        assert!(s.drop(&[99_i64.into()]).is_err());
     }
 
     #[test]
@@ -83490,6 +83501,28 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_drop_rejects_missing_labels_dopex() {
+        // Per br-frankenpandas-dopex: pandas raises KeyError when a
+        // requested label isn't in the index. Was silently no-op'ing.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let err = s.drop(&["zzz".into()]).expect_err("missing label must reject");
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("not found"));
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+        // Valid drops still succeed.
+        let out = s.drop(&["b".into()]).unwrap();
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

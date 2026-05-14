@@ -4272,7 +4272,8 @@ impl Series {
             .iter()
             .map(|value| Scalar::Bool(value.is_missing()))
             .collect::<Vec<_>>();
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-48vkl: preserve index name.
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Alias for `isna`.
@@ -4293,7 +4294,8 @@ impl Series {
             .iter()
             .map(|value| Scalar::Bool(!value.is_missing()))
             .collect::<Vec<_>>();
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-48vkl: preserve index name.
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Alias for `notna`.
@@ -6319,7 +6321,7 @@ impl Series {
             .map(|value| Scalar::Bool(idx.contains(value)))
             .collect();
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), values)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), values)
     }
 
     /// Test whether each element falls within a range.
@@ -6380,7 +6382,7 @@ impl Series {
             })
             .collect::<Result<_, _>>()?;
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), values)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), values)
     }
 
     /// Return the label of the minimum value.
@@ -41386,6 +41388,22 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_isna_notna_preserve_index_name_48vkl() {
+        // Per br-frankenpandas-48vkl: isna/notna are same-index transforms;
+        // preserve index name.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        assert_eq!(s.isna().unwrap().index().name(), Some("myidx"));
+        assert_eq!(s.notna().unwrap().index().name(), Some("myidx"));
     }
 
     #[test]

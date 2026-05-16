@@ -11393,7 +11393,11 @@ impl Resample<'_> {
             out_vals.push(func(&group_vals)?);
         }
 
-        Series::from_values(self.series.name(), out_labels, out_vals)
+        // Per br-frankenpandas-4zl32: pandas SeriesGroupBy resampled aggregate
+        // preserves source axis name on the new bucket axis.
+        let index = Index::new(out_labels).rename_index(self.series.index().name());
+        let column = Column::from_values(out_vals)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Resample standard deviation (ddof=1).

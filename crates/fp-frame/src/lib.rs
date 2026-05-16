@@ -34787,10 +34787,12 @@ impl DataFrame {
             col_order.push(name.clone());
         }
 
+        // Per br-frankenpandas-imdlv: pandas explode preserves the original
+        // row-index name (the new repeated labels keep the source axis name).
         let out = DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(new_indices),
+            index: Index::new(new_indices).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,

@@ -9383,7 +9383,8 @@ impl Series {
         F: Fn(&Scalar) -> Scalar,
     {
         let new_vals: Vec<Scalar> = self.column().values().iter().map(func).collect();
-        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+        // Per br-frankenpandas-r0fya: pandas Series.apply preserves index name.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), new_vals)
     }
 
     /// Apply a function with `na_action='ignore'`.
@@ -9400,7 +9401,9 @@ impl Series {
             .iter()
             .map(|v| if v.is_missing() { v.clone() } else { func(v) })
             .collect();
-        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+        // Per br-frankenpandas-r0fya: pandas Series.apply(..., na_action='ignore')
+        // preserves index name. Sister fix to apply_fn above.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), new_vals)
     }
 
     /// Map values using a failable closure.

@@ -10992,11 +10992,12 @@ impl Ewm<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-xbddh: pandas Series.ewm(...).corr preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// EWM standard deviation (sample, ddof=1).
@@ -11011,11 +11012,12 @@ impl Ewm<'_> {
                 _ => out.push(v.clone()),
             }
         }
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-xbddh: pandas Series.ewm(...).std preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// EWM variance (sample, ddof=1).

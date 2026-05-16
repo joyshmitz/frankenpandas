@@ -2852,11 +2852,11 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(
-            format!("{}_ratio", self.name),
-            self.index.labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-nhqnl: pandas Timedelta ratio preserves
+        // self.index.name on the result.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(out)?;
+        Self::new(format!("{}_ratio", self.name), index, column)
     }
 
     /// Modulo of Timedelta64 Series by another Timedelta64.

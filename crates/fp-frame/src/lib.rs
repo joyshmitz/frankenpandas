@@ -23650,10 +23650,13 @@ impl DataFrame {
             }
         }
 
-        Series::from_values(
-            "__duplicated__",
-            self.index.labels().to_vec(),
-            duplicated.into_iter().map(Scalar::Bool).collect::<Vec<_>>(),
+        // Per br-frankenpandas-fgvu8: pandas df.duplicated() returns an
+        // unnamed bool Series whose index matches self.index (name and all).
+        let values: Vec<Scalar> = duplicated.into_iter().map(Scalar::Bool).collect();
+        Series::new(
+            "",
+            Index::new(self.index.labels().to_vec()).rename_index(self.index.name()),
+            Column::from_values(values)?,
         )
     }
 

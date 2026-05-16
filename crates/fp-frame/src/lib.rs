@@ -7073,7 +7073,9 @@ impl Series {
             .iter()
             .map(|&i| self.column.values()[i].clone())
             .collect();
-        Self::from_values(self.name(), labels, values)
+        // Per br-frankenpandas-w95fp: pandas Series.sample preserves index name
+        // (the sampled labels come from self.index, so the axis name carries over).
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     // ── Statistical methods ──────────────────────────────────────

@@ -4420,7 +4420,14 @@ impl Series {
             }
         }
 
-        Self::from_values("count", labels, values)
+        // Per br-frankenpandas-uuwb1: pandas Series.value_counts returns a
+        // Series named "count" whose index.name == self.name. Propagate the
+        // source name onto the new value-axis when non-empty.
+        let source_name = self.name();
+        let idx_name = if source_name.is_empty() { None } else { Some(source_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Self::new("count", index, column)
     }
 
     pub fn value_counts(&self) -> Result<Self, FrameError> {

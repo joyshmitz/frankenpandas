@@ -8553,8 +8553,9 @@ impl Series {
         {
             out.push(func(lv, rv));
         }
-        Self::from_values(
-            self.name.clone(),
+        // Per br-frankenpandas-g2u00: pandas Series.combine preserves
+        // self.index.name through the outer-aligned result.
+        self.with_labels_and_values_preserving_name(
             left_aligned.index().labels().to_vec(),
             out,
         )

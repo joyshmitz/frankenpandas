@@ -34587,10 +34587,16 @@ impl DataFrame {
             col_order.push(ck.clone());
         }
 
+        // Per br-frankenpandas-gq8fk: pandas crosstab propagates the index
+        // Series' name to result.index.name. Empty name means unnamed → None.
+        let idx_name = {
+            let n = index_series.name();
+            if n.is_empty() { None } else { Some(n) }
+        };
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(index_labels),
+            index: Index::new(index_labels).rename_index(idx_name),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: true,

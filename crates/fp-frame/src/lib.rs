@@ -8591,7 +8591,9 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name(), new_labels, new_values)
+        // Per br-frankenpandas-fc7na: pandas Series.explode preserves
+        // index name (repeated labels keep the source axis name).
+        self.with_labels_and_values_preserving_name(new_labels, new_values)
     }
 
     /// Create a rolling window view of this Series.

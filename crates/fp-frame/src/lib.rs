@@ -13779,7 +13779,12 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values("cumcount", self.series.index.labels().to_vec(), out)
+        // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.cumcount returns
+        // a Series whose index.name == source df.index.name.
+        let index = Index::new(self.series.index.labels().to_vec())
+            .rename_index(self.series.index.name());
+        let column = Column::from_values(out)?;
+        Series::new("cumcount", index, column)
     }
 
     /// Assign ordinal group number to each source row.
@@ -13804,7 +13809,12 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values("ngroup", self.series.index.labels().to_vec(), out)
+        // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.ngroup returns
+        // a Series whose index.name == source df.index.name.
+        let index = Index::new(self.series.index.labels().to_vec())
+            .rename_index(self.series.index.name());
+        let column = Column::from_values(out)?;
+        Series::new("ngroup", index, column)
     }
 
     /// GroupBy cumulative sum.

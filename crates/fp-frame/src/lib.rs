@@ -4682,7 +4682,8 @@ impl Series {
         F: Fn(&Scalar) -> Scalar,
     {
         let out: Vec<Scalar> = self.column.values().iter().map(func).collect();
-        Series::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        // Per br-frankenpandas-dp59b: pandas Series.apply preserves index name.
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Map values of a Series using an input mapping or function.

@@ -12922,7 +12922,13 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), out)
+        // Per br-frankenpandas-u2ogr: pandas groupby.transform preserves the
+        // source DataFrame's index name through cumsum/cumprod/cummin/cummax
+        // and any custom transform.
+        let index = Index::new(self.series.index.labels().to_vec())
+            .rename_index(self.series.index.name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     fn agg_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>

@@ -6295,11 +6295,9 @@ impl Series {
             })
             .collect();
 
-        Self::from_values(
-            self.name.clone(),
-            plan.union_index.labels().to_vec(),
-            values,
-        )
+        // Per br-frankenpandas-cnemo: pandas Series.mask with Series-typed
+        // other preserves self.index.name on the left-aligned result.
+        self.with_labels_and_values_preserving_name(plan.union_index.labels().to_vec(), values)
     }
 
     /// Replace values where `cond` is True with `other`.

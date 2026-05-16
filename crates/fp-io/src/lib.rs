@@ -4155,6 +4155,11 @@ pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
 ///
 /// Matches `pd.read_json(input, lines=True)`.
 /// Each line must be a valid JSON object with the same keys.
+/// Per br-frankenpandas-9l8gd: row cap to prevent DoS via hostile input.
+/// Hostile JSONL with billions of lines would otherwise grow `all_rows`
+/// unbounded before the column-build allocation.
+const READ_JSONL_MAX_ROWS: usize = 100_000_000;
+
 pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     let mut all_rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
 
@@ -4162,6 +4167,13 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        // Per br-frankenpandas-9l8gd: reject hostile inputs that would
+        // exhaust memory before the column-build allocation step.
+        if all_rows.len() >= READ_JSONL_MAX_ROWS {
+            return Err(IoError::JsonFormat(format!(
+                "JSONL input exceeds maximum of {READ_JSONL_MAX_ROWS} rows"
+            )));
         }
         let parsed = parse_json_value_allowing_pandas_nan(trimmed)?;
         let obj = parsed

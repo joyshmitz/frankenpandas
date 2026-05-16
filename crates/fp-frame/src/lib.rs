@@ -9949,11 +9949,12 @@ impl Rolling<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-yk50z: pandas rolling().corr preserves source
+        // axis name. Inline impl, not via apply_rolling.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Rolling pairwise covariance with another Series.
@@ -10009,11 +10010,12 @@ impl Rolling<'_> {
             out.push(Scalar::Float64(cov));
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-yk50z: pandas rolling().cov preserves source
+        // axis name. Sister to Rolling::corr above.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Rolling skewness (bias=False, Fisher's definition).

@@ -11556,7 +11556,11 @@ impl Resample<'_> {
             .iter()
             .map(|&idx| self.series.values()[idx].clone())
             .collect();
-        Series::from_values(self.series.name(), labels, values)
+        // Per br-frankenpandas-acluu: pandas resample get_group preserves
+        // source axis name on the subset.
+        let index = Index::new(labels).rename_index(self.series.index().name());
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Resample to bucket frequency without reduction.

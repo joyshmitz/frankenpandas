@@ -9550,7 +9550,13 @@ impl Rolling<'_> {
             }
         }
 
-        Series::from_values(name, self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-nbmaj: pandas Series.rolling().<agg>() preserves
+        // the source axis name. apply_rolling is the back-end for sum/mean/
+        // std/var/min/max etc.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
     }
 
     /// Rolling sum.

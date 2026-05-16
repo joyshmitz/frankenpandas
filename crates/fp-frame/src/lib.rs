@@ -30842,9 +30842,16 @@ impl DataFrame {
                 .map(|n| self.columns[n].values()[0].clone())
                 .collect();
             // Per br-frankenpandas-6xd34: pandas uses the row's index label
-            // as the resulting Series name when squeezing axis=0; we
-            // previously hardcoded "0".
-            let series_name = self.index.labels()[0].to_string();
+            // as the resulting Series name when squeezing axis=0.
+            // Per br-frankenpandas-g5168: guard the labels[0] access — len()
+            // checks the column length; if labels is shorter (corrupted
+            // state), surface a recoverable Err via the Result branch.
+            let series_name = self
+                .index
+                .labels()
+                .first()
+                .map(|l| l.to_string())
+                .unwrap_or_default();
             Ok(Series::from_values(series_name, labels, values).unwrap())
         } else {
             Err(self.clone())

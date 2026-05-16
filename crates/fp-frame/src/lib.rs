@@ -30403,10 +30403,14 @@ impl DataFrame {
         let mut cols = BTreeMap::new();
         cols.insert("value".to_string(), value_col);
 
+        // Per br-frankenpandas-ecl0a: preserve the source row-index name.
+        // pandas's stack returns a MultiIndex (level0 = original rows,
+        // level1 = original columns); our flat-composite model can still
+        // preserve the source axis name on the composite Index.
         Ok(Self {
             columns: cols,
             column_order: vec!["value".to_string()],
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,

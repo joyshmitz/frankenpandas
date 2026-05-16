@@ -14419,7 +14419,12 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), out)
+        // Per br-frankenpandas-2vgu0: pandas SeriesGroupBy.transform preserves
+        // source index name. Sister to transform_groups fix (u2ogr).
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Apply a Series-returning function to each group and concatenate results.

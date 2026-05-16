@@ -28973,6 +28973,14 @@ impl DataFrame {
             ));
         }
 
+        // Per br-frankenpandas-tm5xu: pandas raises ValueError when by is
+        // empty ("You have to supply one of by and level"). Was silently
+        // succeeding with an empty by-list before.
+        if by.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "groupby: must specify at least one column".to_owned(),
+            ));
+        }
         // Validate columns exist
         for col in by {
             if !self.columns.contains_key(*col) {

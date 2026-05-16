@@ -3125,7 +3125,11 @@ impl Series {
         labels.extend_from_slice(other.index.labels());
         let mut values = self.column.values().to_vec();
         values.extend_from_slice(other.column.values());
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-cgpm9: pandas Series.append preserves
+        // self.index.name when both operands share the same axis name.
+        // Approximation: propagate self's name (matches the common case
+        // where both operands carry the same source axis).
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Return the index label of the first non-null value.

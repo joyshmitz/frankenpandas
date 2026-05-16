@@ -2957,11 +2957,17 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(
-            format!("{}_{}", self.name, name),
-            self.index.labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-c5soe: pandas td binary ops preserve the
+        // shared axis name (preserved when both operands agree, None
+        // when they differ).
+        let shared_index_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index = Index::new(self.index.labels().to_vec()).rename_index(shared_index_name);
+        let column = Column::from_values(out)?;
+        Self::new(format!("{}_{}", self.name, name), index, column)
     }
 
     fn td_scalar_op<F>(&self, scalar: f64, op: F) -> Result<Self, FrameError>

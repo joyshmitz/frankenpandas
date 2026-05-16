@@ -8484,7 +8484,15 @@ impl Series {
         if self.is_empty() {
             return Ok(self.clone());
         }
-        let first_label = &self.index.labels()[0];
+        // Per br-frankenpandas-2xvmk: mirror of br-a79h9 last_offset fix.
+        // is_empty() checks column length; if the labels slice is somehow
+        // out of sync (construction bug, corrupted state), direct
+        // index [0] would panic. Surface a recoverable error instead.
+        let first_label = self.index.labels().first().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "first_offset: Series reports non-empty but index has no first label".to_owned(),
+            )
+        })?;
         let cutoff = add_offset_to_label(first_label, offset)?;
         let labels = self.index.labels();
         let end = labels
@@ -33758,7 +33766,12 @@ impl DataFrame {
         if self.is_empty() {
             return Ok(self.clone());
         }
-        let first_label = &self.index.labels()[0];
+        // Per br-frankenpandas-2xvmk: mirror of br-a79h9 last_offset fix.
+        let first_label = self.index.labels().first().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "first_offset: DataFrame reports non-empty but index has no first label".to_owned(),
+            )
+        })?;
         let cutoff = add_offset_to_label(first_label, offset)?;
         // Select rows where label <= cutoff
         let labels = self.index.labels();

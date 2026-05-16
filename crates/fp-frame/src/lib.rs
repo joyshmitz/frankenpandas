@@ -30493,10 +30493,11 @@ impl DataFrame {
             })
             .collect();
 
+        // Per br-frankenpandas-yh08x: preserve source index name through unstack.
         Ok(Self {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,

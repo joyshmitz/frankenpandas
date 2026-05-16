@@ -9419,7 +9419,8 @@ impl Series {
         for val in self.column().values() {
             new_vals.push(func(val)?);
         }
-        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+        // Per br-frankenpandas-0pgl0: pandas Series.map preserves index name.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), new_vals)
     }
 
     pub fn map_dict(&self, mapping: &BTreeMap<Scalar, Scalar>) -> Result<Self, FrameError> {
@@ -9431,7 +9432,8 @@ impl Series {
                 out.push(Scalar::Null(NullKind::NaN));
             }
         }
-        Self::from_values(self.name(), self.index().labels().to_vec(), out)
+        // Per br-frankenpandas-0pgl0: pandas Series.map(dict) preserves index name.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), out)
     }
 
     /// Map values using a dictionary (HashMap).

@@ -10904,11 +10904,12 @@ impl Ewm<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-074bp: pandas Series.ewm(...).cov preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// EWM Pearson correlation with another Series.

@@ -7545,7 +7545,9 @@ impl Series {
         let mut values = self.column.values().to_vec();
         labels.remove(pos);
         let value = values.remove(pos);
-        let remainder = Self::from_values(self.name.clone(), labels, values)?;
+        // Per br-frankenpandas-8xv7n: pandas Series.pop preserves the
+        // source index name on the remainder.
+        let remainder = self.with_labels_and_values_preserving_name(labels, values)?;
         Ok((value, remainder))
     }
 

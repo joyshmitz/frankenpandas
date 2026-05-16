@@ -23023,8 +23023,14 @@ impl DataFrame {
             .as_ref()
             .map(|multiindex| Self::project_column_multiindex(multiindex, &selected_positions))
             .transpose()?;
-        Self::new_with_column_order_and_multiindex(
+        // Per br-frankenpandas-wv2mi: select_columns only changes which
+        // columns are present; the row axis (and any row_multiindex) is
+        // untouched and should pass through. Was being silently dropped
+        // via new_with_column_order_and_multiindex which hardcodes
+        // row_multiindex to None.
+        Self::new_with_axes(
             self.index.clone(),
+            self.row_multiindex.clone(),
             columns,
             column_order,
             column_multiindex,

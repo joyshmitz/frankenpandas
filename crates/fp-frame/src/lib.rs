@@ -37152,10 +37152,12 @@ impl DataFrameGroupBy<'_> {
             out_cols.insert(col_name.clone(), Column::from_values(vals)?);
         }
 
+        // Per br-frankenpandas-tisw7: pandas groupby.filter preserves source
+        // row-axis name.
         Ok(DataFrame {
             columns: out_cols,
             column_order: self.df.column_order.clone(),
-            index: Index::new(out_labels),
+            index: Index::new(out_labels).rename_index(self.df.index.name()),
             column_multiindex: self.df.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,

@@ -148,7 +148,7 @@ Plus two auxiliary crates: fp-conformance (1,252 packets / 1,265 fixtures)
 and fp-frankentui (terminal UI dashboard, experimental).
 ```
 
-The diagram above shows the runtime/data-flow crates. The total workspace is **12 crates, 269,398 lines of Rust under `crates/`** (about 193,900 of those lines live under `src/` once embedded `tests_*.rs` modules are excluded; the remainder is in-source test code and out-of-`src/` fixture support).
+The diagram above shows the runtime/data-flow crates. The total workspace is **12 crates, 269,398 lines of Rust under `crates/`** (about 250,300 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the remaining ~19,000 lines are out-of-`src/` test, fixture, and bench scaffolding).
 
 ## Workspace Structure
 

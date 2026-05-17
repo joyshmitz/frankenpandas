@@ -820,7 +820,7 @@ Enforce recovery deadlines ([`c42920b1`](https://github.com/Dicklesworthstone/fr
 | Tags / releases | None (pre-release; 0.1.0 publish tracked by `br-frankenpandas-4clx`) |
 | Workspace crates | **12** |
 | Rust lines (all `.rs` in `crates/`, incl. test dirs) | **269,398** |
-| Rust lines, `src/` (excluding embedded `tests_*.rs` modules) | ~193,900 |
+| Rust lines under `src/` (all `.rs` incl. inline `#[cfg(test)]`) | **250,330** |
 | `#[test]` / `#[tokio::test]` markers in `src/` | **5,173** |
 | Public `fn` / `async fn` (top-level, `src/`) | 347 (counts free functions; total public-method surface is larger) |
 | Conformance fixture JSON files (all) | **1,265** |

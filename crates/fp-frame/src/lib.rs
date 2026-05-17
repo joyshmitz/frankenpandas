@@ -24533,7 +24533,9 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
-        Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
+        // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name.
+        let index = Index::new(out_labels).rename_index(self.index.name());
+        Self::new_with_column_order(index, columns, selected_columns)
     }
 
     /// Boolean mask row selection.

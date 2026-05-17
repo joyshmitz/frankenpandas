@@ -15822,7 +15822,12 @@ impl StructAccessor<'_> {
                     .unwrap_or(Scalar::Null(NullKind::Null))
             })
             .collect();
-        Series::from_values(name, self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-jj69e: pandas Series.struct.field preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
     }
 
     fn parsed_structs(&self) -> Result<(), FrameError> {

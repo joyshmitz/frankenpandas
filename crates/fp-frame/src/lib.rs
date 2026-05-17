@@ -13082,7 +13082,12 @@ impl SeriesGroupBy<'_> {
             values.push(func(&group_vals));
         }
 
-        Series::from_values(name, labels, values)
+        // Per br-frankenpandas-pz1ro: sister to agg_scalar fix (p6y8q).
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(name, index, column)
     }
 
     fn grouped_value_or_null(values: &[Scalar], index: Option<usize>) -> Scalar {

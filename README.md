@@ -2600,13 +2600,13 @@ The current single-threaded baseline still outperforms pandas on most operations
 
 A concrete checklist, based on the patterns the project has converged on:
 
-1. **Identify the method's home crate.** Series and DataFrame methods land in `fp-frame`. Index methods land in `fp-index`. IO formats land in `fp-io`. Aggregations land in `fp-types::nanops` if they're pure reductions or `fp-groupby` if they're group-level.
+1. **Identify the method's home crate.** Series and DataFrame methods land in `fp-frame`. Index methods land in `fp-index`. IO formats land in `fp-io`. Aggregations land at the crate root of `fp-types` (the `nan*` helpers are not in a submodule) if they're pure reductions, or in `fp-groupby` if they're group-level.
 2. **Look up the pandas signature.** Pin the doc to the same pandas version that `oracle/requirements.txt` pins for the live oracle. Read the pandas source if any edge cases are unclear.
 3. **Add a method stub** with the canonical pandas signature (renamed to Rust idiom). Add `Result<_, FrameError>` to anything that can fail at the type-system or domain level.
-4. **Write the happy-path implementation.** Use existing helpers wherever possible (`align_union` / `align_inner` / `align_non_unique`, `cast_scalar`, the nan-aware reductions in `fp-types::nanops`, the typed-array views in `fp-columnar::ColumnData`). Don't reimplement alignment.
+4. **Write the happy-path implementation.** Use existing helpers wherever possible (`align_union` / `align_inner` / `align_non_unique`, `cast_scalar`, the crate-root `fp_types::nan*` reductions, the typed-array views in `fp-columnar::ColumnData`). Don't reimplement alignment.
 5. **Propagate the index / axis name.** This was the focus of the 2026-05 sweep; every helper that produces a new Series/DataFrame should carry the source axis name through unchanged. Look at the existing rolling / expanding / ewm helpers in `fp-frame` to see the canonical pattern.
 6. **Add inline `#[cfg(test)]` unit tests** covering happy path, edge cases (empty input, all-null, NaN, infinities), and the pandas-error parity case (which inputs should raise vs return NaN).
-7. **Add a conformance packet.** See "Conformance Packet Authoring Guide" above. Both fixture-backed and live-oracle variants. The live-oracle variant lives in `live_oracle_tests.rs`.
+7. **Add a conformance packet.** See "Conformance Packet Authoring Guide" above. Both fixture-backed and live-oracle variants. Live-oracle tests live across multiple files under `crates/fp-conformance/src/tests/live_oracle_*.rs` (one file per topic area, e.g. `live_oracle_series_misc.rs`, `live_oracle_dataframe_merge.rs`); add yours to whichever topic matches or create a new file.
 8. **Add a property test** if the operation has invariants (commutativity, identity, monotonicity, idempotence). Use `proptest!` macros; seed the corpus with adversarial inputs.
 9. **Re-export through the facade.** Add the type / function to `crates/frankenpandas/src/lib.rs` if it should be reachable via `frankenpandas::prelude::*`.
 10. **Document any divergence.** If pandas' behavior is surprising or the FrankenPandas implementation differs intentionally, write up a `DISC-NNN` entry in `DISCREPANCIES.md`.

@@ -14739,7 +14739,13 @@ impl SeriesGroupBy<'_> {
             });
             values.push(Self::grouped_value_or_null(series_values, first_valid));
         }
-        Series::from_values(self.series.name(), labels, values)
+        // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).first preserves
+        // by-Series name on result index.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Last value of each group.
@@ -14758,7 +14764,13 @@ impl SeriesGroupBy<'_> {
             });
             values.push(Self::grouped_value_or_null(series_values, last_valid));
         }
-        Series::from_values(self.series.name(), labels, values)
+        // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).last preserves
+        // by-Series name on result index.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Number of elements in each group (including nulls).

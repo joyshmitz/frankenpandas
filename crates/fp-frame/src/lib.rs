@@ -8260,7 +8260,16 @@ impl Series {
             );
         }
 
-        DataFrame::from_dict_with_index(vec![("self", self_vals), ("other", other_vals)], labels)
+        // Per br-frankenpandas-lwzb3: pandas Series.compare returns a
+        // DataFrame whose .index.name == self.index.name (preserved through
+        // alignment). Build the Index directly with the shared name carried
+        // by the aligned left side.
+        let mut columns = std::collections::BTreeMap::new();
+        let column_order = vec!["self".to_owned(), "other".to_owned()];
+        columns.insert("self".to_owned(), Column::from_values(self_vals)?);
+        columns.insert("other".to_owned(), Column::from_values(other_vals)?);
+        let index = Index::new(labels).rename_index(left.index().name());
+        DataFrame::new_with_column_order(index, columns, column_order)
     }
 
     /// Pandas spelling alias for [`Self::compare_with`].

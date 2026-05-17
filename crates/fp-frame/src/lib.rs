@@ -10712,11 +10712,12 @@ impl Expanding<'_> {
             out.push(ranks[i].clone());
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-j5744: pandas Series.expanding().rank preserves
+        // source axis name. Sister to Rolling::rank fix (m7gh9).
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Aggregate with multiple functions, returning a DataFrame.

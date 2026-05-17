@@ -13056,7 +13056,13 @@ impl SeriesGroupBy<'_> {
             values.push(func(&groups[key]));
         }
 
-        Series::from_values(name, labels, values)
+        // Per br-frankenpandas-p6y8q: pandas Series.groupby(by).<agg>() returns
+        // a Series whose .index.name == by.name (the grouping Series' name).
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(name, index, column)
     }
 
     fn agg_values_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>

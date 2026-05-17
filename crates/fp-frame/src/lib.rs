@@ -12409,7 +12409,10 @@ impl DataFrameResample<'_> {
             col_order.push(col_name.clone());
         }
 
-        let index = result_index.unwrap_or_else(|| Index::new(Vec::new()));
+        // Per br-frankenpandas-pjjro: pandas resample preserves source axis
+        // name even when the result is empty (no numeric columns).
+        let index = result_index
+            .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,

@@ -27110,10 +27110,12 @@ impl DataFrame {
         let mut new_labels = base.index.labels().to_vec();
         new_labels.push(IndexLabel::Utf8(margins_name.to_owned()));
 
+        // Per br-frankenpandas-jhrer: pandas pivot_table with margins
+        // preserves the base index axis name.
         Ok(Self {
             columns: new_cols,
             column_order: new_col_order,
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(base.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,

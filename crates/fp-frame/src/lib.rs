@@ -17241,11 +17241,12 @@ impl StringAccessor<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-it749: pandas Series.str.cat preserves source
+        // axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Concatenate strings element-wise with multiple other Series.

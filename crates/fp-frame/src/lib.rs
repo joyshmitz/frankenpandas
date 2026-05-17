@@ -37451,10 +37451,12 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
+        // Per br-frankenpandas-9rwkk: pandas groupby.nth preserves source
+        // row-axis name.
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(out_labels),
+            index: Index::new(out_labels).rename_index(self.df.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,

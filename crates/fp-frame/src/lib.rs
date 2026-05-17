@@ -12442,10 +12442,13 @@ impl DataFrameResample<'_> {
             col_order.push(col_name.clone());
         }
 
+        // Per br-frankenpandas-hkcdn: pandas resample preserves source axis
+        // name even when the all-columns result is empty.
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: result_index.unwrap_or_else(|| Index::new(Vec::new())),
+            index: result_index
+                .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name())),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,

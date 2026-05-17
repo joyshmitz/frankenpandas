@@ -20738,11 +20738,12 @@ pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
         result.push(secs);
     }
 
-    Series::from_values(
-        series.name().to_owned(),
-        series.index().labels().to_vec(),
-        result,
-    )
+    // Per br-frankenpandas-k70jf: pandas Series.dt.total_seconds preserves
+    // source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(result)?;
+    Series::new(series.name().to_owned(), index, column)
 }
 
 /// Bin values into discrete intervals.

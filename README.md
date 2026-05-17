@@ -141,7 +141,7 @@ The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
                   │ Vectorized │      │ Timedelta     │
                   │ kernels    │      │ Period        │
                   └────────────┘      │ Interval      │
-                                      │ NanOps (24)   │
+                                      │ NanOps (23)   │
                                       └───────────────┘
 
 Plus two auxiliary crates: fp-conformance (1,252 packets / 1,265 fixtures)
@@ -1000,7 +1000,7 @@ The `ValidityMask` makes null checking O(1) per element (single bit test) and O(
 
 ## NanOps: Null-Aware Aggregation Library
 
-The `fp-types` crate provides 24 null-skipping aggregation primitives plus cumulative-transform helpers that underpin all statistical operations:
+The `fp-types` crate provides 19 null-skipping scalar reductions plus 4 cumulative-transform helpers (23 `pub fn nan*` functions total) that underpin every statistical operation in the codebase:
 
 ```rust
 // Scalar reductions (all skip Null/NaN automatically):
@@ -2440,7 +2440,7 @@ Concrete first reads for someone new to the codebase, by area of interest.
 - `crates/fp-frame/src/lib.rs`: search for `align_union` to see the call sites. Series arithmetic and DataFrame.add_df are the canonical examples.
 
 **If you're interested in the runtime decision layer:**
-- `crates/fp-runtime/src/lib.rs`: start at `RuntimePolicy`, then `DecisionAction`, `IssueKind`, `LossMatrix`, `decide`. Read `EvidenceLedger::record`.
+- `crates/fp-runtime/src/lib.rs`: start at `RuntimePolicy`, then `DecisionAction`, `IssueKind`, `LossMatrix`, and the (private) `decide` function. Read `EvidenceLedger::push` + `records()` for how decisions are persisted and replayed.
 
 **If you're interested in IO formats:**
 - `crates/fp-io/src/lib.rs`: start at the `DataFrameIoExt` trait. Each format has its own `read_*` + `write_*` pair. Search for `pub fn read_csv` and follow.

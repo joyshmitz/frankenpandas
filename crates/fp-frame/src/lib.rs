@@ -11474,10 +11474,13 @@ impl Resample<'_> {
             col_order.push(func.to_owned());
         }
 
+        // Per br-frankenpandas-xd57j: pandas Resampler.agg DataFrame preserves
+        // source axis name on the bucket-index.
+        let index = Index::new(labels).rename_index(self.series.index().name());
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(labels),
+            index,
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: true,

@@ -35500,9 +35500,18 @@ impl DataFrameGroupBy<'_> {
     ) -> Result<DataFrame, FrameError> {
         let n_groups = group_order.len();
         if self.as_index {
+            // Per br-frankenpandas-378zw: pandas df.groupby('col').<agg>()
+            // returns a DataFrame whose .index.name == 'col' for single-by
+            // groupings. Multi-by uses MultiIndex with named levels (already
+            // captured by group_keys_as_row_multiindex when applicable).
+            let by_name = if self.by.len() == 1 {
+                Some(self.by[0].as_str())
+            } else {
+                None
+            };
             let row_multiindex = self.group_keys_as_row_multiindex(group_order, groups)?;
             DataFrame::new_with_axes(
-                Index::new(labels),
+                Index::new(labels).rename_index(by_name),
                 row_multiindex,
                 result_cols,
                 col_order,

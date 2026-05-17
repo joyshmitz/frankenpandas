@@ -8418,7 +8418,10 @@ impl Series {
                 column_len: self.len(),
             });
         }
-        Self::new(self.name.clone(), Index::new(labels), self.column.clone())
+        // Per br-frankenpandas-5qzhr: pandas Series.set_axis preserves axis
+        // name (the name is metadata separate from the labels).
+        let index = Index::new(labels).rename_index(self.index.name());
+        Self::new(self.name.clone(), index, self.column.clone())
     }
 
     /// Truncate the Series to rows between `before` and `after` labels (inclusive).

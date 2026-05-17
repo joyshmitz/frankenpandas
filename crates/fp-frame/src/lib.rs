@@ -15484,11 +15484,12 @@ impl CategoricalAccessor<'_> {
             })
             .collect();
 
-        Series::from_values(
-            self.series.name.clone(),
-            self.series.index.labels().to_vec(),
-            values,
-        )
+        // Per br-frankenpandas-pkdl5: pandas Categorical materialize preserves
+        // source axis name.
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name.clone(), index, column)
     }
 }
 

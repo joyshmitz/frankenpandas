@@ -8266,11 +8266,16 @@ impl Series {
         }
 
         if labels.is_empty() {
-            // No differences - return empty DataFrame
-            return DataFrame::from_dict(
-                &["self", "other"],
-                vec![("self", vec![]), ("other", vec![])],
-            );
+            // No differences - return empty DataFrame.
+            // Per br-frankenpandas-qit12: even the empty-diff branch
+            // preserves the shared aligned index name (matching pandas
+            // Series.compare with no differences).
+            let mut columns = std::collections::BTreeMap::new();
+            let column_order = vec!["self".to_owned(), "other".to_owned()];
+            columns.insert("self".to_owned(), Column::from_values(Vec::new())?);
+            columns.insert("other".to_owned(), Column::from_values(Vec::new())?);
+            let index = Index::new(Vec::new()).rename_index(left.index().name());
+            return DataFrame::new_with_column_order(index, columns, column_order);
         }
 
         // Per br-frankenpandas-lwzb3: pandas Series.compare returns a

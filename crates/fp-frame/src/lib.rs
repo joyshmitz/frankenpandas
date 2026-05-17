@@ -2266,9 +2266,11 @@ impl Series {
             labels.push(IndexLabel::Utf8(format!("({reordered})")));
         }
 
+        // Per br-frankenpandas-v956y: pandas Series.reorder_levels preserves
+        // the index axis name (the levels reorder; the axis name is metadata).
         Ok(Self {
             name: self.name.clone(),
-            index: Index::new(labels),
+            index: Index::new(labels).rename_index(self.index.name()),
             column: self.column.clone(),
             categorical: self.categorical.clone(),
             sparse: self.sparse.clone(),

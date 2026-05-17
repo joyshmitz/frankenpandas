@@ -34180,11 +34180,11 @@ impl DataFrame {
             let vals: Vec<Scalar> = col.values()[start..end].to_vec();
             columns.insert(name.clone(), Column::from_values(vals)?);
         }
-        Self::new_with_column_order(
-            Index::new(labels.to_vec()),
-            columns,
-            self.column_order.clone(),
-        )
+        // Per br-frankenpandas-crqct: pandas df.iloc[start:end] preserves
+        // row-axis name. iloc_rows is the back-end for first_offset/
+        // last_offset and other position-range selectors.
+        let index = Index::new(labels.to_vec()).rename_index(self.index.name());
+        Self::new_with_column_order(index, columns, self.column_order.clone())
     }
 
     /// Insert a column at a specific position.

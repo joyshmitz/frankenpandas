@@ -18907,11 +18907,12 @@ impl DatetimeAccessor<'_> {
             Some(tz) => {
                 let tz_spec = parse_tz_spec(tz)?;
                 let localized = localize_series_values(self.series.values(), &tz_spec, &options)?;
-                Series::from_values(
-                    self.series.name().to_owned(),
-                    self.series.index().labels().to_vec(),
-                    localized,
-                )
+                // Per br-frankenpandas-00241: pandas Series.dt.tz_localize
+                // preserves source axis name.
+                let index = Index::new(self.series.index().labels().to_vec())
+                    .rename_index(self.series.index().name());
+                let column = Column::from_values(localized)?;
+                Series::new(self.series.name().to_owned(), index, column)
             }
             None => {
                 let values = self

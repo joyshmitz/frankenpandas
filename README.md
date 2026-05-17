@@ -2337,10 +2337,11 @@ The decision tree from `fp-groupby/src/lib.rs`, in plain English. (This isn't a 
 ```
 For each call to groupby_<sum|mean|min|max|...>_with_trace(input, by, exec_options):
 
-    if all by-columns have dtype Int64 AND
+    if (agg == "sum") AND                                       // dense path is sum-only today
+       all by-columns have dtype Int64 AND
        no by-column has nulls AND
        (max(key) - min(key)) <= DENSE_INT_KEY_RANGE_LIMIT       // const 65_536
-        : run try_groupby_<agg>_dense_int64() and return.
+        : run try_groupby_sum_dense_int64() and return.
 
     estimated_bytes = estimate_intermediates(input, by)
     if exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes
@@ -2450,7 +2451,7 @@ Concrete first reads for someone new to the codebase, by area of interest.
 - `crates/fp-types/src/lib.rs`: start at `DType`, `Scalar`, `NullKind`, `common_dtype`, `cast_scalar`. Read the `Timestamp` / `Timedelta` / `Period` / `Interval` struct definitions.
 
 **If you're interested in GroupBy:**
-- `crates/fp-groupby/src/lib.rs`: start at `GroupByExecutionOptions`, then the path-selection logic, then `dense_int64_path` / `arena_path` / `hashmap_path`.
+- `crates/fp-groupby/src/lib.rs`: start at `GroupByExecutionOptions`, then the per-aggregation `groupby_<agg>_with_trace` entry points (each carries the dense/arena/HashMap path selection inline), then the sum-only fast path `try_groupby_sum_dense_int64`.
 - `crates/fp-frame/src/lib.rs`: search for `pub fn groupby` to see how DataFrame and Series-level groupby dispatch.
 
 **If you're interested in the expression engine:**
@@ -2467,7 +2468,7 @@ Concrete first reads for someone new to the codebase, by area of interest.
 The arena-backed GroupBy / Join path is performant because *deallocation is free*. Conceptually:
 
 ```rust
-fn arena_path(input: &DataFrame, by: &[&str], exec: &ExecOptions) -> Result<DataFrame, _> {
+fn arena_path(input: &DataFrame, by: &[&str], exec: &GroupByExecutionOptions) -> Result<DataFrame, _> {
     let arena = Bump::new();                               // 1 mmap (or none, lazy)
     let estimated_groups = estimate_group_count(input, by);
 

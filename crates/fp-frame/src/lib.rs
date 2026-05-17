@@ -14782,7 +14782,13 @@ impl SeriesGroupBy<'_> {
             labels.push(order[i].clone());
             values.push(Scalar::Int64(groups[key].len() as i64));
         }
-        Series::from_values(self.series.name(), labels, values)
+        // Per br-frankenpandas-ju3rs: pandas Series.groupby(by).size preserves
+        // by-Series name on result index.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Aggregate with multiple functions, returning a DataFrame.

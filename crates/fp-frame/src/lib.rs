@@ -20936,7 +20936,11 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
         })
         .collect();
-    Series::from_values(series_name.to_string(), index.labels().to_vec(), values)
+    // Per br-frankenpandas-f1d52: pandas pd.Index.to_series sets
+    // result.index.name == index.name.
+    let new_index = Index::new(index.labels().to_vec()).rename_index(index.name());
+    let column = Column::from_values(values)?;
+    Series::new(series_name.to_string(), new_index, column)
 }
 
 /// Concatenate multiple Series along axis 0 (row-wise).

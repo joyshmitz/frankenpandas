@@ -34480,8 +34480,11 @@ impl DataFrame {
         }
 
         if diff_cols.is_empty() {
-            // No differences found - return empty DataFrame
-            return Self::new(Index::new(Vec::new()), BTreeMap::new());
+            // No differences found - return empty DataFrame.
+            // Per br-frankenpandas-mu31x: preserve self.index.name on the
+            // empty result, matching pandas df.compare.
+            let empty_index = Index::new(Vec::new()).rename_index(self.index.name());
+            return Self::new(empty_index, BTreeMap::new());
         }
 
         // Filter to only rows with differences
@@ -34504,7 +34507,10 @@ impl DataFrame {
             column_order.push(name.clone());
         }
 
-        Self::new_with_column_order(Index::new(new_labels), columns, column_order)
+        // Per br-frankenpandas-mu31x: pandas df.compare preserves
+        // self.index.name on the diff-row result.
+        let new_index = Index::new(new_labels).rename_index(self.index.name());
+        Self::new_with_column_order(new_index, columns, column_order)
     }
 
     /// Select columns by data type.

@@ -20841,12 +20841,12 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
 
     let mut valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
     if valid.is_empty() {
+        // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name.
         let nans = vec![Scalar::Null(NullKind::NaN); series.len()];
-        return Series::from_values(
-            series.name().to_string(),
-            series.index().labels().to_vec(),
-            nans,
-        );
+        let index =
+            Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+        let column = Column::from_values(nans)?;
+        return Series::new(series.name().to_string(), index, column);
     }
 
     valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -20890,11 +20890,11 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
         })
         .collect();
 
-    Series::from_values(
-        series.name().to_string(),
-        series.index().labels().to_vec(),
-        labels,
-    )
+    // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(labels)?;
+    Series::new(series.name().to_string(), index, column)
 }
 
 /// Convert an Index to a single-column DataFrame.

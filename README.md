@@ -10,7 +10,7 @@
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
   ![Tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
-  ![Conformance](https://img.shields.io/badge/conformance_packets-1254-blueviolet)
+  ![Conformance](https://img.shields.io/badge/conformance_packets-1252-blueviolet)
   ![IO Formats](https://img.shields.io/badge/IO_formats-14%2B-purple)
   ![Lines of Rust](https://img.shields.io/badge/Rust_LOC-270K-orange)
 </div>
@@ -88,7 +88,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 
 ## What's In The Box
 
-The 2026-05-16 capability surface (267k LOC of Rust across 12 crates):
+The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
 
 | Category | Coverage |
 |----------|----------|
@@ -121,7 +121,7 @@ The 2026-05-16 capability surface (267k LOC of Rust across 12 crates):
        │            │ Rolling/Expanding│      │  Parquet/Excel/│
        ▼            │ Ewm/Resample     │      │  Feather/IPC/  │
   ┌──────────┐      │ String/Datetime  │      │  SQL/HTML/XML/ │
-  │fp-runtime│      │ Sparse/List/Struct      │  LaTeX/Markdown│
+  │fp-runtime│      │ Sparse/List/Str. │      │  LaTeX/Markdown│
   │ Policy   │      └────────┬─────────┘      │  /Pickle/Stata/│
   │ Ledger   │               │                │  ORC/HDF5      │
   └──────────┘    ┌──────────┼──────────┐     └────────────────┘
@@ -148,7 +148,7 @@ Plus two auxiliary crates: fp-conformance (1,252 packets / 1,265 fixtures)
 and fp-frankentui (terminal UI dashboard, experimental).
 ```
 
-The diagram above shows the runtime/data-flow crates. The total workspace is **12 crates, ~270,000 lines of Rust** (193,958 lines under `src/`, ~75,400 lines of test/fixture support code outside `src/`).
+The diagram above shows the runtime/data-flow crates. The total workspace is **12 crates, 269,398 lines of Rust under `crates/`** (about 193,900 of those lines live under `src/` once embedded `tests_*.rs` modules are excluded; the remainder is in-source test code and out-of-`src/` fixture support).
 
 ## Workspace Structure
 
@@ -159,7 +159,7 @@ frankenpandas/
 │   ├── fp-types/         # Scalar, DType, NullKind, Timestamp, Timedelta, Period, Interval, NanOps (4,326 lines)
 │   ├── fp-columnar/      # Column, ValidityMask, vectorized kernels, full Column-API parity (8,714 lines)
 │   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (20,353 lines)
-│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (87,578 lines)
+│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (87,602 lines)
 │   ├── fp-expr/          # Expression parser, eval()/query(), @local + backtick (3,337 lines)
 │   ├── fp-groupby/       # GroupBy with 3 execution paths (3,314 lines)
 │   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins, merge_asof tolerance/by (5,349 lines)
@@ -169,7 +169,7 @@ frankenpandas/
 │   └── fp-frankentui/    # Terminal UI dashboard (experimental, 2,755 lines)
 ├── artifacts/perf/       # Optimization round baselines and proofs
 ├── artifacts/phase2c/    # Conformance packet artifacts and drift history
-└── .beads/               # Local-first issue tracker (1,980 closed, 2 open of 1,982 total)
+└── .beads/               # Local-first issue tracker (1,986 closed, 2 open of 1,988 total)
 ```
 
 ## IO Format Support
@@ -474,7 +474,7 @@ The GroupBy engine automatically selects the fastest execution path based on key
 
 **Path 2, Arena-backed (Bumpalo):** When estimated intermediate memory fits within the arena budget (default 256 MB), allocates all working memory from a Bumpalo bump allocator. Single `malloc` + pointer bumps; bulk deallocation when the arena drops. Zero fragmentation, cache-friendly.
 
-**Path 3, Global allocator HashMap with typed `ScalarKey`:** Fallback for arbitrary key types and unbounded cardinality. Stores `(source_index, accumulating_sum)` pairs and never clones the group key Scalar itself (AG-08 optimization). The original IndexLabel is reconstructed at output time from the source position. The `ScalarKey` infrastructure replaced an earlier debug-string formatting path that quietly miscomparing keys across dtypes; float zeros (`-0.0` vs `0.0`) are now normalized, and dtype-aware hashing means `Int64(1)` and `Float64(1.0)` no longer collide unexpectedly.
+**Path 3, Global allocator HashMap with typed `ScalarKey`:** Fallback for arbitrary key types and unbounded cardinality. Stores `(source_index, accumulating_sum)` pairs and never clones the group key Scalar itself (AG-08 optimization). The original IndexLabel is reconstructed at output time from the source position. The `ScalarKey` infrastructure replaced an earlier debug-string formatting path that quietly miscompared keys across dtypes; float zeros (`-0.0` vs `0.0`) are now normalized, and dtype-aware hashing means `Int64(1)` and `Float64(1.0)` no longer collide unexpectedly.
 
 All three paths produce identical output. This is verified by property-based tests that run the same inputs through arena and non-arena paths and assert bitwise equality.
 
@@ -1070,7 +1070,7 @@ All error types are re-exported through the `frankenpandas` facade crate.
 | Fuzz harnesses | **30 targets** under `fuzz/fuzz_targets/` | Parquet IO, Arrow IPC stream, scalar cast, Series arithmetic, groupby_sum, join, column arithmetic, Excel IO, index alignment, shift metamorphic, eval/query, semantic_eq, pivot_table dispatch, groupby agg dispatch, rolling window, parallel + TSan, SQL read, DataFrame constructor + merge |
 | Metamorphic tests | Several families | Null/NaN, join/reshape, value_counts, cumsum round-trip, quantile interpolation invariants, cov_with_options, GroupBy idxmin/idxmax Utf8, shift inner-overlap |
 
-**Total: 5,000+ `#[test]` markers in src/`, plus hundreds of live-pandas-oracle test cases, plus 1,252 packet JSON files with 1,265 fixtures.**
+**Total: 5,173 `#[test]` markers in `src/`, plus hundreds of live-pandas-oracle test cases, plus 1,252 packet JSON files with 1,265 fixtures.**
 
 ### Conformance Gate
 
@@ -1779,7 +1779,7 @@ A: A base `Index` holds heterogeneous `IndexLabel`s (Int64 / Utf8 / Datetime64 /
 A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (**5,000+ in-source tests** including adversarial inputs, property-based fuzzing, and a live pandas oracle in CI). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high. The known divergences are documented in `DISCREPANCIES.md`.
 
 **Q: Why are there so few open beads?**
-A: At the time of this writing, **only 2 of 1,982 tracked beads remain open** (`br-frankenpandas-ctmet` for dtype drift in 25 conformance packets, and `br-frankenpandas-qrn2w` for `groupby_sum` dropping Timedelta64). The project went through a 19-pass review-mode audit in 2026-04 that triaged the entire surface, and follow-up sessions through 2026-05 closed all but those two.
+A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`br-frankenpandas-ctmet` for dtype drift in 25 conformance packets, and `br-frankenpandas-qrn2w` for `groupby_sum` dropping Timedelta64). The project went through a 19-pass review-mode audit in 2026-04 that triaged the entire surface, and follow-up sessions through 2026-05 closed all but those two.
 
 ## Roadmap
 
@@ -1830,7 +1830,7 @@ A: At the time of this writing, **only 2 of 1,982 tracked beads remain open** (`
 | **ConformalGuard** | A statistical wrapper that produces calibrated prediction sets via split-conformal inference. Used by `fp-runtime` to flag operations whose inputs fall outside the calibration distribution, giving distribution-shift detection without distributional assumptions. |
 | **RaptorQ envelope** | A repair-symbol-protected wrapper around durable artifacts (conformance fixture bundles, benchmark baselines, migration manifests, reproducibility ledgers, long-lived state snapshots). Each envelope carries a manifest, an integrity scrub report, and a decode proof artifact per recovery event. |
 | **Galaxy-brain card** | A compact, human-auditable summary of an `EvidenceLedger` entry: action chosen, the prior/posterior pair, the top evidence terms, and the expected losses for each alternative action. `decision_to_card(record)` converts a ledger row to one. |
-| **Conformance packet** | A directory under `crates/fp-conformance/fixtures/packets/<FP-Pxx-NNN>/` containing input fixtures (`*.json`), the operation to run, the expected output (oracle-pinned via pandas subprocess), a `parity_report.json` post-run, and a RaptorQ sidecar for bit-rot detection. 1,254 of these are tracked today. |
+| **Conformance packet** | A single JSON file under `crates/fp-conformance/fixtures/packets/` (e.g. `fp_p2d_079_series_take_negative_indices_strict.json`) containing the input fixture, the operation to run, the oracle-pinned expected output, and `fixture_provenance` metadata. Parity reports and RaptorQ sidecars live in `artifacts/phase2c/`. 1,252 packet files are tracked today. |
 | **Parity gate** | A green/red CI check that runs every conformance packet against the live pandas oracle (or fixture replay when offline) and refuses to merge if any gate flips red. Aggregate counts (ran/skipped/failed) are surfaced through `fp-ci-gates`. |
 | **Phase 2C drift ledger** | `artifacts/phase2c/drift_history.jsonl`, an append-only log of parity-report deltas over time. Used to track regressions and confirm that fixes don't re-introduce earlier divergences. |
 | **Compat-closure attestation pack** | A bundle (RaptorQ-protected) of all compat-closure evidence packs for a release candidate. Refreshed on every conformance gate run. Lives under `artifacts/phase2c/compat_closure/`. |
@@ -2154,7 +2154,7 @@ let df = DataFrame::from_dict_mixed(
 
 | pandas | FrankenPandas |
 |--------|---------------|
-| `df.apply(lambda r: r.x + r.y, axis=1)` | `df.apply_row("sum", |row| { row[0].clone() })?` |
+| `df.apply(lambda r: r.x + r.y, axis=1)` | `df.apply_row("sum", \|row\| { row[0].clone() })?` |
 | `df.applymap(f)` | `df.applymap(f)?` |
 | `s.apply(f)` | `s.apply_fn(f)?` |
 | `s.map({"a": 1, "b": 2})` | `s.map_values(&map)?` |
@@ -2328,7 +2328,7 @@ Scalar::Null(kind) => ScalarKey::Null(*kind),           // NaN-bearing Floats go
 
 (`Datetime64` and `Period`/`Interval` Series store their codes as `Int64` or `Utf8` Scalars, so they round-trip through the existing variants without needing dedicated ScalarKey arms.)
 
-Replacing the older `format!("{val:?}")` string keys with `ScalarKey` (commit `1b52ae43` on 2026-04-15) closed a long tail of subtle parity bugs: `groupby` on a Float64 column with both `0.0` and `-0.0` had been creating two groups instead of one; `mode` on a column with NaNs occasionally returned different counts depending on debug-print formatting; and dtype-collision bugs where `Int64(1)` and `Float64(1.0)` should have been separate groups but weren't.
+Replacing the older `format!("{val:?}")` string keys with `ScalarKey` (commit `1b52ae43` on 2026-04-11) closed a long tail of subtle parity bugs: `groupby` on a Float64 column with both `0.0` and `-0.0` had been creating two groups instead of one; `mode` on a column with NaNs occasionally returned different counts depending on debug-print formatting; and dtype-collision bugs where `Int64(1)` and `Float64(1.0)` should have been separate groups but weren't.
 
 ## How GroupBy Picks Its Execution Path (Code Walkthrough)
 
@@ -2683,9 +2683,7 @@ Both accept an `Option<u64>` seed. When `None`, the implementation falls back to
 
 No operation in FrankenPandas reads from `/dev/urandom`, `getrandom()`, or any OS-level entropy source.
 
-## Glossary of Project-Specific Terms
-
-(Continued from the section above.)
+## Glossary (Continued)
 
 | Term | Definition |
 |------|-----------|

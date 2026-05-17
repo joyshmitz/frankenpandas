@@ -3,12 +3,12 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**12 workspace crates, ~270,000 lines of Rust, 5,000+ in-source tests, 1,254 conformance
-packets across 1,265 fixtures, zero `unsafe` code** (`#![forbid(unsafe_code)]` workspace-wide).
+**12 workspace crates, ~270,000 lines of Rust, 5,173 in-source tests, 1,252 conformance
+packet files across 1,265 fixtures, zero `unsafe` code** (`#![forbid(unsafe_code)]` workspace-wide).
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
-**No tagged releases or GitHub releases exist yet.** Development spans **2,778 commits** from
+**No tagged releases or GitHub releases exist yet.** Development spans **2,796 commits** from
 **2026-02-13 to 2026-05-16** on a single `main` branch. (A legacy compatibility branch
 diverges at [`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
 — MIT licensing, 2026-02-18 — and stays in sync with `main` after every push.)
@@ -566,7 +566,7 @@ quietly miscomparing keys across the codebase.
 
 #### Typed group-key infrastructure (`ScalarKey`)
 
-- **Replaces debug-string group keys** (`format!("{val:?}")`) with a typed `ScalarKey` across fp-frame groupby, `mode`, `describe`, `pivot`, `pivot_table`, and categorical APIs — fixes a long tail of subtle parity bugs from Debug-formatted hashing ([`1b52ae43`](https://github.com/Dicklesworthstone/frankenpandas/commit/1b52ae43) -- 2026-04-15)
+- **Replaces debug-string group keys** (`format!("{val:?}")`) with a typed `ScalarKey` across fp-frame groupby, `mode`, `describe`, `pivot`, `pivot_table`, and categorical APIs — fixes a long tail of subtle parity bugs from Debug-formatted hashing ([`1b52ae43`](https://github.com/Dicklesworthstone/frankenpandas/commit/1b52ae43) -- 2026-04-11)
 - Float zero (`-0.0` vs `0.0`) normalized in groupby keys, `nannunique`, and frame uniqueness paths ([`c0a94b44`](https://github.com/Dicklesworthstone/frankenpandas/commit/c0a94b44), [`8da6621e`](https://github.com/Dicklesworthstone/frankenpandas/commit/8da6621e), [`cfab29a3`](https://github.com/Dicklesworthstone/frankenpandas/commit/cfab29a3) -- 2026-04-15)
 
 #### Index alignment for non-unique / duplicate labels
@@ -815,18 +815,18 @@ Enforce recovery deadlines ([`c42920b1`](https://github.com/Dicklesworthstone/fr
 
 | Metric | Value |
 |--------|-------|
-| Total commits | **2,778** |
+| Total commits | **2,796** |
 | Date range | 2026-02-13 → 2026-05-16 |
 | Tags / releases | None (pre-release; 0.1.0 publish tracked by `br-frankenpandas-4clx`) |
 | Workspace crates | **12** |
-| Rust lines (all `.rs` in `crates/`, incl. test dirs) | **269,374** |
-| Rust lines, `src/` only (derived) | ~193,958 |
+| Rust lines (all `.rs` in `crates/`, incl. test dirs) | **269,398** |
+| Rust lines, `src/` (excluding embedded `tests_*.rs` modules) | ~193,900 |
 | `#[test]` / `#[tokio::test]` markers in `src/` | **5,173** |
 | Public `fn` / `async fn` (top-level, `src/`) | 347 (counts free functions; total public-method surface is larger) |
-| Conformance fixture JSON files | **1,265** |
-| Conformance packet directories | **1,254** |
+| Conformance fixture JSON files (all) | **1,265** |
+| Conformance packet JSON files (`fixtures/packets/`) | **1,252** |
 | Documented divergences (`DISCREPANCIES.md`) | 14 (2 RESOLVED — DISC-005 + DISC-013; 12 active / ACCEPTED / INVESTIGATING / WILL-FIX) |
-| Beads tracked | 1,982 lines (1,980 closed; 2 open) |
+| Beads tracked | 1,988 lines (1,986 closed; 2 open) |
 | IO formats supported | 14+ (CSV, TSV, FWF, JSON, JSONL, Parquet, Excel, Feather, IPC stream, SQL, HTML, XML, LaTeX, Markdown, Pickle, Stata, ORC, HDF5; plus deferred clipboard/gbq/sas) |
 | License | MIT + non-MIT AI-assistant rider |
 
@@ -869,9 +869,9 @@ Long-running umbrellas tracked but not blocking:
 - `git log --since="..." --until="..." --format="%h %s"` for chunked window research
 - `git for-each-ref refs/tags` — confirmed no tags exist yet
 - `gh release list` — confirmed no releases yet
-- `.beads/issues.jsonl` — 1,982 issues, 1,980 closed at audit time
+- `.beads/issues.jsonl` — 1,988 issues, 1,986 closed at audit time
 - `crates/fp-conformance/DISCREPANCIES.md` — 14 documented divergences (DISC-001 through DISC-014)
-- `crates/fp-conformance/fixtures/packets/` — 1,254 packet directories
+- `crates/fp-conformance/fixtures/packets/` — 1,252 packet JSON files
 - `find crates -name "*.rs" -type f | xargs wc -l` — line counts
 - `grep -rE '^pub (fn|async fn)' crates/*/src/ | wc -l` — public free-fn count
 - `grep -rE '#\[(test|tokio::test)\]' crates/*/src/ | wc -l` — test attribute count

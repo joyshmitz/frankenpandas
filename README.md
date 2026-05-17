@@ -2023,7 +2023,7 @@ crates/fp-conformance/fixtures/packets/
 └── …~1,252 packet files plus an adversarial / smoke / perf-budget side-set
 ```
 
-Each file's top-level keys are `packet_id`, `case_id`, `mode`, `fixture_provenance` (pandas version + checksum), `operation` (op kind + args), the inputs (`left`/`right`/`frame`/etc.), and `expected_*` (the pandas-oracle-pinned reference output). Per-run diagnostics (`parity_report.json`, `parity_gate_result.json`) and the RaptorQ sidecar are emitted to `artifacts/phase2c/` rather than rewritten into the packet file itself, keeping packet files diff-clean and review-friendly.
+Each file's top-level keys are `packet_id`, `case_id`, `mode` (`"strict"` / `"hardened"`), `operation` (a snake_case string naming the `FixtureOperation` variant, e.g. `"series_add"`, `"series_take"`, `"groupby_sum"`), `fixture_provenance` (pandas version + oracle script SHA + generated timestamp), the input fixture(s) under op-specific keys (most ops use `left` / `right`; some have op-specific keys like `take_indices` for `series_take`), and `expected_*` (the pandas-oracle-pinned reference output). Per-run diagnostics (`parity_report.json`, `parity_gate_result.json`) and the RaptorQ sidecar are emitted to `artifacts/phase2c/` rather than rewritten into the packet file itself, keeping packet files diff-clean and review-friendly.
 
 The 1,252 packet JSON files under `fixtures/packets/` exhaustively cover: alignment, join, concat, filter, CSV/JSON/Parquet/Excel/Feather/Arrow IPC round-trips, dtype invariants, null semantics, resample, rolling/expanding/ewm, groupby aggregates, datetime/string/timedelta accessors, MultiIndex round-trips, and IO error parity.
 
@@ -2408,20 +2408,24 @@ The implementation lives in `fp-index::multi_way_align`. `DataFrame::from_series
 Adding a new packet to the conformance corpus (1,252 and counting):
 
 1. **Pick a packet ID**: increment from the latest `fp_p2d_NNN_*.json` (DataFrame surface) or `fp_p2c_NNN_*.json` (Series surface) in `crates/fp-conformance/fixtures/packets/`. The `bv --robot-triage` and `br ready` workflows surface coverage gaps; the `scripts/gen_pandas_api_listing.py`, `scripts/gen_coverage_matrix.py`, and `scripts/gen_feature_parity_table.py` reports flag pandas APIs with no packet yet.
-2. **Create the single packet JSON file**, e.g. `crates/fp-conformance/fixtures/packets/fp_p2d_434_dataframe_my_new_op_strict.json`. The file's top-level keys include `packet_id`, `case_id`, `mode`, `fixture_provenance` (pandas version + sha for the oracle that generated the expectations), `operation` (op kind + args), the input fixture(s), and the expected output(s):
+2. **Create the single packet JSON file**, e.g. `crates/fp-conformance/fixtures/packets/fp_p2d_434_dataframe_my_new_op_strict.json`. The file's top-level keys are `packet_id`, `case_id`, `mode` (`"strict"` / `"hardened"`), `operation` (a snake_case string that deserializes into a `FixtureOperation` variant), `fixture_provenance` (pandas version + oracle script SHA + generated timestamp), the input fixture(s) keyed by role (typical: `left` / `right`; some ops carry op-specific top-level keys like `take_indices` for `series_take`), and `expected_*` (the pandas-oracle-pinned reference output). Example skeleton:
    ```json
    {
      "packet_id": "FP-P2D-434",
      "case_id": "dataframe_my_new_op_strict",
-     "mode": "Strict",
-     "fixture_provenance": {"pandas_version": "2.2.3", "source_sha": "…"},
-     "operation": {"kind": "DataFrameGroupBySum", "args": {"by": ["col_b"]}},
-     "left": { "rows": [{"col_a": 1, "col_b": "x"}, {"col_a": 2, "col_b": "y"}],
-               "index": [0, 1], "dtypes": {"col_a": "Int64", "col_b": "Utf8"} },
-     "expected_frame": { … }
+     "mode": "strict",
+     "operation": "dataframe_my_new_op",
+     "fixture_provenance": {
+       "pandas_version": "2.2.3",
+       "oracle_script_sha256": "…",
+       "generated_at": "2026-05-17T00:00:00Z"
+     },
+     "left": { "name": "lhs", "index": [{"kind":"int64","value":1}, {"kind":"int64","value":2}],
+               "values": [{"kind":"int64","value":10}, {"kind":"int64","value":20}] },
+     "expected_frame": { /* … */ }
    }
    ```
-   The set of valid `kind` values lives in `FixtureOperation` (in `crates/fp-conformance/src/lib.rs`); add a new variant there if you need a new op.
+   Valid `operation` strings are the snake_case forms of the `FixtureOperation` variants (in `crates/fp-conformance/src/lib.rs`); add a new variant there if you need a new op.
 3. **Generate the expected output** by running `crates/fp-conformance/oracle/pandas_oracle.py` against your input under the pinned pandas version (`crates/fp-conformance/oracle/requirements.txt`). The oracle script writes the expected output back into the packet JSON.
 4. **Run the gate**: `./scripts/phase2c_gate_check.sh`. Confirms the packet runs green against both the fixture-replay and live-oracle paths, and that the aggregated parity reports under `artifacts/phase2c/` pick up the new packet.
 5. **Verify fixture freshness**: `./scripts/check_fixture_freshness.sh`. Fails closed if the packet was regenerated against a pandas version that doesn't match the pin in `requirements.txt`.

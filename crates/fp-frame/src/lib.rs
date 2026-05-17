@@ -19870,11 +19870,11 @@ pub fn to_numeric(series: &Series) -> Result<Series, FrameError> {
         }
     }
 
-    Series::from_values(
-        series.name().to_string(),
-        series.index().labels().to_vec(),
-        converted,
-    )
+    // Per br-frankenpandas-cbipi: pandas pd.to_numeric preserves source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(converted)?;
+    Series::new(series.name().to_string(), index, column)
 }
 
 /// Convert a Series of strings or integers to normalized ISO 8601 datetime strings.

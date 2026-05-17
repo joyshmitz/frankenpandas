@@ -24397,7 +24397,10 @@ impl DataFrame {
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
-        Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
+        // Per br-frankenpandas-j5tsz: pandas df.loc preserves row index name
+        // on the selected subset.
+        let index = Index::new(out_labels).rename_index(self.index.name());
+        Self::new_with_column_order(index, columns, selected_columns)
     }
 
     fn require_row_multiindex(&self) -> Result<&fp_index::MultiIndex, FrameError> {

@@ -31770,7 +31770,12 @@ impl DataFrame {
                 values.push(Scalar::Float64(func(&row_vals)));
             }
         }
-        Series::from_values(name.to_owned(), self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-8no14: pandas df.<reducer>(axis=1) preserves
+        // df.index.name on the per-row result. Covers sum_axis1, mean_axis1,
+        // min_axis1, max_axis1, std_axis1, var_axis1, etc.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new(name.to_owned(), index, column)
     }
 
     fn row_sample_var(vals: &[f64]) -> f64 {

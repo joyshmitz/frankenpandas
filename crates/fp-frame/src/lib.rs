@@ -31019,7 +31019,11 @@ impl DataFrame {
                 .collect();
             values.push(func(&row_vals));
         }
-        Series::from_values(name, self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-82yra: pandas df row-wise apply preserves
+        // df.index.name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new(name, index, column)
     }
 
     /// Row-wise apply with failable closure returning a Series.

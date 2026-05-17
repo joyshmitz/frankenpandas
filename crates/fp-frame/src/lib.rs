@@ -16182,11 +16182,12 @@ impl StringAccessor<'_> {
                 _ => v.clone(),
             })
             .collect();
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-qbdmi: pandas Series.str.<is*> preserves source
+        // axis name. apply_pred backs many string predicate methods.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Get the length of each string (character count, not byte count).

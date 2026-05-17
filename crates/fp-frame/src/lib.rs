@@ -12732,8 +12732,11 @@ impl DataFrameResample<'_> {
             }
         }
 
+        // Per br-frankenpandas-imbo3: pandas resample.ohlc preserves source
+        // axis name even when there are no numeric columns.
         DataFrame::new_with_column_order_and_multiindex(
-            result_index.unwrap_or_else(|| Index::new(Vec::new())),
+            result_index
+                .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name())),
             result_cols,
             col_order,
             Some(self.ohlc_column_multiindex()?),

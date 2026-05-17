@@ -31953,7 +31953,10 @@ impl DataFrame {
                 .count();
             values.push(Scalar::Int64(cnt as i64));
         }
-        Series::from_values("count".to_owned(), self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-wgkw9: pandas df.count(axis=1) preserves row index name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("count".to_owned(), index, column)
     }
 
     /// Whether all non-null values are truthy across columns per row.

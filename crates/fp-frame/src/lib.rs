@@ -17643,8 +17643,11 @@ impl StringAccessor<'_> {
         }
         drop(all_tokens_seen);
 
+        // Per br-frankenpandas-ezqe5: pandas Series.str.get_dummies preserves
+        // source axis name on the result DataFrame.
         if all_tokens.is_empty() {
-            return DataFrame::new(Index::new(labels), BTreeMap::new());
+            let index = Index::new(labels).rename_index(self.series.index().name());
+            return DataFrame::new(index, BTreeMap::new());
         }
 
         let mut columns = BTreeMap::new();
@@ -17658,7 +17661,8 @@ impl StringAccessor<'_> {
             col_order.push(token.clone());
         }
 
-        DataFrame::new_with_column_order(Index::new(labels), columns, col_order)
+        let index = Index::new(labels).rename_index(self.series.index().name());
+        DataFrame::new_with_column_order(index, columns, col_order)
     }
 
     /// Encode strings to bytes (returns byte length as Int64).

@@ -9582,8 +9582,17 @@ pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
         .map(|label| right_positions_map.get(&label).copied())
         .collect();
 
+    // Per br-frankenpandas-r4k11: pandas outer alignment preserves the
+    // shared index name. Mirrors align_inner / align_non_unique handling.
+    let shared_name = if left.name() == right.name() {
+        left.name().map(str::to_owned)
+    } else {
+        None
+    };
+    let mut union_index = Index::new(union_labels);
+    union_index.name = shared_name;
     AlignmentPlan {
-        union_index: Index::new(union_labels),
+        union_index,
         left_positions,
         right_positions,
     }

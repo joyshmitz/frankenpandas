@@ -28465,7 +28465,19 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.reindex_like(other)` for row-index alignment.
     pub fn reindex_like(&self, other: &Self) -> Result<Self, FrameError> {
-        self.reindex(other.index.labels().to_vec())
+        // Per br-frankenpandas-yu31z: pandas reindex_like adopts OTHER's
+        // index — labels AND name. The inner reindex(labels) call preserves
+        // self.index.name, so apply rename_index(other.index.name()) after.
+        let result = self.reindex(other.index.labels().to_vec())?;
+        let new_index = result.index.clone().rename_index(other.index.name());
+        Ok(Self {
+            columns: result.columns,
+            column_order: result.column_order,
+            index: new_index,
+            column_multiindex: result.column_multiindex,
+            row_multiindex: result.row_multiindex,
+            allows_duplicate_labels: result.allows_duplicate_labels,
+        })
     }
 
     /// Conform DataFrame to new index or columns.

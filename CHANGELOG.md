@@ -3,14 +3,27 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-12 workspace crates, 84,000+ lines of Rust, 788 public functions, zero `unsafe` code.
+**12 workspace crates, ~270,000 lines of Rust, 5,000+ in-source tests, 1,254 conformance
+packets across 1,265 fixtures, zero `unsafe` code** (`#![forbid(unsafe_code)]` workspace-wide).
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
-**No tagged releases or GitHub releases exist.** Development spans 269 commits from
-2026-02-13 to 2026-03-17 on a single `main` branch. The legacy compatibility branch diverges at
-[`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
-(MIT licensing, 2026-02-18).
+**No tagged releases or GitHub releases exist yet.** Development spans **2,778 commits** from
+**2026-02-13 to 2026-05-16** on a single `main` branch. (A legacy compatibility branch
+diverges at [`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
+— MIT licensing, 2026-02-18 — and stays in sync with `main` after every push.)
+
+This changelog is organized in three layers:
+
+1. **Phase 1 (capability-foundation era, 2026-02-13 → 2026-03-17)** — the original
+   per-subsystem thematic sections below: Core Data Engine, DataFrame API, Series API,
+   GroupBy, Window Functions, Join / Merge / Concat, Expression Engine, Index /
+   MultiIndex, I/O, Datetime / Timezone, Conformance Testing, Runtime / Governance,
+   FrankenTUI, Performance, Licensing.
+2. **Phase 2 (pandas-parity completion era, 2026-03-18 → 2026-05-16)** — three
+   sub-phases at the end of this file (Phase 2a, Phase 2b, Phase 2c).
+3. **Commit Statistics + Open Workstreams** — current state of the tracker, the
+   conformance gate, and the small set of remaining divergences.
 
 ---
 
@@ -521,99 +534,346 @@ Evidence-driven optimization with formal isomorphism proofs and baseline/opportu
 
 ---
 
-## Commit Statistics
+## Phase 2: Pandas-Parity Completion Era (2026-03-18 → 2026-05-16)
 
-| Metric | Value |
-|--------|-------|
-| Total commits | 1,015 |
-| Date range | 2026-02-13 to 2026-04-23 |
-| Tags / releases | None (pre-release; 0.1.0 publish tracked by br-frankenpandas-4clx) |
-| Workspace crates | 12 |
-| Lines of Rust | 146,933 |
-| Public functions | 1,532 |
-| IO formats | 8 |
-| Conformance packets | 430 (across 1,249 fixtures, all green) |
-| License | MIT + OpenAI/Anthropic rider |
+The capability waves before this point built the foundation. Phase 2 is
+about closing the long tail of pandas semantics, finishing the IO
+surface, hardening every reduction and accessor against null/dtype/Utf8
+edge cases, and pushing the differential conformance harness from a few
+hundred packets to over a thousand fixture-backed packets plus a live
+pandas oracle running in CI on every PR. Roughly **2,500 commits** land
+in this window across three sub-phases below.
 
-*(Stats regenerated 2026-04-23 16:30 UTC by br-frankenpandas-60du
-re-catch-up. Numbers above come from: `git log --oneline | wc -l`
-for commits; `find crates -name '*.rs' | xargs wc -l` for LOC;
-`grep -rE '^pub (fn|async fn)' crates/*/src/` for public fn count;
-fixtures directory listing for packet/fixture totals.)*
+### Phase 2a: Conformance harness era (2026-03-18 → 2026-04-15)
+
+The expression engine grew real arithmetic. DataFrame finally became
+fully two-dimensional (axis=1 everywhere). The index alignment planner
+learned to handle duplicate labels correctly. And a typed group-key
+infrastructure replaced the Debug-string hashing path that had been
+quietly miscomparing keys across the codebase.
+
+#### Arithmetic operator expansion (mod / pow / floordiv)
+
+- **`fp-expr` learns Modulo / FloorDiv / Pow AST nodes** with correct precedence (`**` > unary > `*`/`/`/`//`/`%`), leading-dot floats, and bitwise shorthand `&|~` ([`0cc00cca`](https://github.com/Dicklesworthstone/frankenpandas/commit/0cc00cca) -- 2026-04-09)
+- **`fp-columnar`** gains vectorized `f64` execution for these ops; **`int64` preserved** when divisors are non-zero ([`d5c6bc81`](https://github.com/Dicklesworthstone/frankenpandas/commit/d5c6bc81) -- 2026-04-09)
+- Overflow guards land for `i64` mod/floordiv ([`a68f0757`](https://github.com/Dicklesworthstone/frankenpandas/commit/a68f0757) -- 2026-04-10)
+
+#### Axis-1 / row-wise DataFrame operations
+
+- **DataFrame `diff_axis1`, `pct_change_axis1`, `shift_axis1`, `rank` axis=1, `take_rows` / `take_columns`** ([`56055711`](https://github.com/Dicklesworthstone/frankenpandas/commit/56055711) -- 2026-04-11)
+- **`DataFrame::melt`** with mixed-type numeric promotion ([`eddec82d`](https://github.com/Dicklesworthstone/frankenpandas/commit/eddec82d) -- 2026-04-11)
+- Row-wise `apply_rows` and Series `apply`/`map_func` ([`af40a5db`](https://github.com/Dicklesworthstone/frankenpandas/commit/af40a5db) -- 2026-04-12)
+
+#### Typed group-key infrastructure (`ScalarKey`)
+
+- **Replaces debug-string group keys** (`format!("{val:?}")`) with a typed `ScalarKey` across fp-frame groupby, `mode`, `describe`, `pivot`, `pivot_table`, and categorical APIs — fixes a long tail of subtle parity bugs from Debug-formatted hashing ([`1b52ae43`](https://github.com/Dicklesworthstone/frankenpandas/commit/1b52ae43) -- 2026-04-15)
+- Float zero (`-0.0` vs `0.0`) normalized in groupby keys, `nannunique`, and frame uniqueness paths ([`c0a94b44`](https://github.com/Dicklesworthstone/frankenpandas/commit/c0a94b44), [`8da6621e`](https://github.com/Dicklesworthstone/frankenpandas/commit/8da6621e), [`cfab29a3`](https://github.com/Dicklesworthstone/frankenpandas/commit/cfab29a3) -- 2026-04-15)
+
+#### Index alignment for non-unique / duplicate labels
+
+- **`align_union` routed through `align_non_unique`** when either side has duplicates ([`ed3e3c79`](https://github.com/Dicklesworthstone/frankenpandas/commit/ed3e3c79) -- 2026-04-15)
+- `Series::align`, `DataFrame::align_on_index`, `filter_rows` all gain duplicate-label semantics ([`8b72c505`](https://github.com/Dicklesworthstone/frankenpandas/commit/8b72c505) -- 2026-04-15)
+
+#### `to_datetime` parity (units, origins, timezones)
+
+- Pandas-compatible **`to_datetime` unit handling, UTC + origin parity, julian and numeric origins** ([`911902c3`](https://github.com/Dicklesworthstone/frankenpandas/commit/911902c3), [`ef58de21`](https://github.com/Dicklesworthstone/frankenpandas/commit/ef58de21), [`da961836`](https://github.com/Dicklesworthstone/frankenpandas/commit/da961836) -- 2026-04-10)
+- Normalize timezone-aware to_datetime strings ([`8f8e3faa`](https://github.com/Dicklesworthstone/frankenpandas/commit/8f8e3faa) -- 2026-04-11)
+
+#### `merge_asof` feature completeness
+
+- **`tolerance`, `by`, `allow_exact_matches`** parameters ([`1ce16699`](https://github.com/Dicklesworthstone/frankenpandas/commit/1ce16699) -- 2026-04-10)
+- Direction validation, suffix handling, and right-side dtype preservation in output ([`19d7df69`](https://github.com/Dicklesworthstone/frankenpandas/commit/19d7df69), [`10fcf3e8`](https://github.com/Dicklesworthstone/frankenpandas/commit/10fcf3e8) -- 2026-04-12)
+
+#### IO hardening (CSV / JSON / Parquet / Excel)
+
+- **CSV `usecols`, `skiprows`, `dtype` coercion validation** + pandas-default NA value handling ([`a62f04b8`](https://github.com/Dicklesworthstone/frankenpandas/commit/a62f04b8), [`c6b2c93e`](https://github.com/Dicklesworthstone/frankenpandas/commit/c6b2c93e) -- 2026-04-13)
+- **Duplicate column rejection** in readers ([`fea96177`](https://github.com/Dicklesworthstone/frankenpandas/commit/fea96177) -- 2026-04-14)
+- JSON column/index order preservation ([`1f59cbe1`](https://github.com/Dicklesworthstone/frankenpandas/commit/1f59cbe1), [`c1e8bc0d`](https://github.com/Dicklesworthstone/frankenpandas/commit/c1e8bc0d) -- 2026-04-14)
+- CSV skiprows semantics fix ([`1f9db747`](https://github.com/Dicklesworthstone/frankenpandas/commit/1f9db747) -- 2026-04-14)
+
+### Phase 2b: Massive parity build-out (2026-04-16 → 2026-05-01)
+
+A 14-day, ~1,500-commit sprint. Twelve crates expand in parallel: the
+SQL backend gets a full `SqlConnection` + `SqlInspector` trait surface
+with 70+ sub-beads, the row MultiIndex epic ships, hundreds of live
+pandas-oracle conformance tests land, fuzz infrastructure grows by 90+
+targets, and a 19-pass review-mode audit drives 14 documented
+divergences plus dozens of dtype/null/Utf8/edge-case fixes.
+
+#### `fp-columnar` Column-API parity sweep (br-frankenpandas-w3ji → -dklr)
+
+- **~30 commits in 24 hours on 2026-04-21**: take/slice/concat/repeat, head/tail/cumulative/unique, abs/shift/clip/round/isin, value_counts, sort/argsort/diff/duplicated/between, aggregation helpers, where/mask, nlargest/nsmallest, astype, rank+searchsorted, quantile/mode/memory_usage, interpolate/drop_duplicates/compare/map, argmin/argmax/is_monotonic/combine_first/clip_lower/clip_upper, describe/combine/apply_float/hist_counts, nunique/any/all/is_unique/has_duplicates/pct_change, isnull/notnull/var/std/sem/skew/kurt/ptp, rolling_window_sum, diff_valid/sample/first_valid/last_valid, where_cond_series/mask_series/replace_values/nonzero, and the full `ValidityMask` surface ([`593b6792`](https://github.com/Dicklesworthstone/frankenpandas/commit/593b6792), [`1daf6f53`](https://github.com/Dicklesworthstone/frankenpandas/commit/1daf6f53), [`38d15b55`](https://github.com/Dicklesworthstone/frankenpandas/commit/38d15b55), [`81a68a91`](https://github.com/Dicklesworthstone/frankenpandas/commit/81a68a91), [`f6beeedb`](https://github.com/Dicklesworthstone/frankenpandas/commit/f6beeedb))
+
+#### `fp-types` — proper `Timestamp` / `Timedelta` / `Period` / `Interval` types
+
+- **`Timedelta`** nanosecond struct ([`c74eec7c`](https://github.com/Dicklesworthstone/frankenpandas/commit/c74eec7c)), **`TimedeltaIndex` + `timedelta_range`** ([`6c128046`](https://github.com/Dicklesworthstone/frankenpandas/commit/6c128046)), Timedelta arithmetic ([`68e2087c`](https://github.com/Dicklesworthstone/frankenpandas/commit/68e2087c))
+- **`Timestamp`** struct + Timedelta arithmetic ([`574b4b57`](https://github.com/Dicklesworthstone/frankenpandas/commit/574b4b57)); `floor_to`/`ceil_to`/`round_to` ([`e0851273`](https://github.com/Dicklesworthstone/frankenpandas/commit/e0851273)); string-unit rounding + `unit_to_nanos` ([`6f9d199d`](https://github.com/Dicklesworthstone/frankenpandas/commit/6f9d199d))
+- **`Interval` + `IntervalClosed`** scaffolding ([`6e8ec436`](https://github.com/Dicklesworthstone/frankenpandas/commit/6e8ec436)); `interval_range` builders ([`a01b0cad`](https://github.com/Dicklesworthstone/frankenpandas/commit/a01b0cad))
+- **`Period` + `PeriodFreq`** scaffolding ([`b646d880`](https://github.com/Dicklesworthstone/frankenpandas/commit/b646d880)); `period_range` builder ([`6417afe0`](https://github.com/Dicklesworthstone/frankenpandas/commit/6417afe0))
+- NanOps parity for `nancumsum`/`nancumprod`/`nancummax`/`nancummin`/`nanquantile`/`nanarg*` ([`84ce16ae`](https://github.com/Dicklesworthstone/frankenpandas/commit/84ce16ae), [`e2d43fac`](https://github.com/Dicklesworthstone/frankenpandas/commit/e2d43fac))
+
+#### SQL backend Phase 1 — generic `SqlConnection` + `SqlInspector` (frankenpandas-fd90, ~70 sub-beads)
+
+- **Generic SQL connection foundation** ([`65df0486`](https://github.com/Dicklesworthstone/frankenpandas/commit/65df0486)); sqlite backend gated behind `sql-sqlite` feature ([`bf14836f`](https://github.com/Dicklesworthstone/frankenpandas/commit/bf14836f))
+- `SqlConnection` capability + dialect probes ([`d87a3a66`](https://github.com/Dicklesworthstone/frankenpandas/commit/d87a3a66)); overridable `quote_identifier` ([`86fd5f1d`](https://github.com/Dicklesworthstone/frankenpandas/commit/86fd5f1d)); `SqlReadOptions::dtype` ([`5131382b`](https://github.com/Dicklesworthstone/frankenpandas/commit/5131382b))
+- **Schema introspection probes**, cross-schema read/write, schema-qualified DROP ([`006938b6`](https://github.com/Dicklesworthstone/frankenpandas/commit/006938b6), [`8ac537a1`](https://github.com/Dicklesworthstone/frankenpandas/commit/8ac537a1), [`4af093c7`](https://github.com/Dicklesworthstone/frankenpandas/commit/4af093c7))
+- **`SqlConnection::list_tables`/`table_schema`/`list_schemas`/`truncate_table`/`server_version`/`primary_key_columns`/`max_identifier_length`/`list_indexes`/`list_foreign_keys`/`list_views`/`list_unique_constraints`/`table_comment`** ([`2955c49e`](https://github.com/Dicklesworthstone/frankenpandas/commit/2955c49e), [`fbfd2d7e`](https://github.com/Dicklesworthstone/frankenpandas/commit/fbfd2d7e), [`92642d0f`](https://github.com/Dicklesworthstone/frankenpandas/commit/92642d0f), [`ca90ed6d`](https://github.com/Dicklesworthstone/frankenpandas/commit/ca90ed6d), [`87808946`](https://github.com/Dicklesworthstone/frankenpandas/commit/87808946), [`d10ecb7e`](https://github.com/Dicklesworthstone/frankenpandas/commit/d10ecb7e), [`6fd36a0f`](https://github.com/Dicklesworthstone/frankenpandas/commit/6fd36a0f), [`1ce78bdb`](https://github.com/Dicklesworthstone/frankenpandas/commit/1ce78bdb), [`eb343bf2`](https://github.com/Dicklesworthstone/frankenpandas/commit/eb343bf2), [`9800a117`](https://github.com/Dicklesworthstone/frankenpandas/commit/9800a117), [`8b2a763f`](https://github.com/Dicklesworthstone/frankenpandas/commit/8b2a763f), [`a300340e`](https://github.com/Dicklesworthstone/frankenpandas/commit/a300340e))
+- **Chunked SQL reads** + indexed SQL chunks ([`28c8d619`](https://github.com/Dicklesworthstone/frankenpandas/commit/28c8d619), [`90fd5498`](https://github.com/Dicklesworthstone/frankenpandas/commit/90fd5498)..[`48c06e18`](https://github.com/Dicklesworthstone/frankenpandas/commit/48c06e18))
+- **`SqlInspector` wrapper** for unified introspection (SQLAlchemy-shaped) ([`032c6aac`](https://github.com/Dicklesworthstone/frankenpandas/commit/032c6aac), [`1ea88759`](https://github.com/Dicklesworthstone/frankenpandas/commit/1ea88759), [`214cb795`](https://github.com/Dicklesworthstone/frankenpandas/commit/214cb795)); `reflect_all_tables`/`reflect_all_views` ([`99d39fee`](https://github.com/Dicklesworthstone/frankenpandas/commit/99d39fee), [`9c689557`](https://github.com/Dicklesworthstone/frankenpandas/commit/9c689557))
+
+#### Row MultiIndex epic (br-frankenpandas-1zzp + 6 child slices)
+
+- **Closed 2026-04-22**: long-running row-MultiIndex gap shipped via six cohesive slices
+- DataFrame `row_multiindex` field ([`8f63166e`](https://github.com/Dicklesworthstone/frankenpandas/commit/8f63166e)); groupby emits real row MultiIndex on multi-key ([`7a503aeb`](https://github.com/Dicklesworthstone/frankenpandas/commit/7a503aeb))
+- Tuple lookup + `xs` APIs ([`5295c03c`](https://github.com/Dicklesworthstone/frankenpandas/commit/5295c03c)); reshape round-trips ([`9c3e5eca`](https://github.com/Dicklesworthstone/frankenpandas/commit/9c3e5eca)); IO round-trip across formats ([`22c7c3f9`](https://github.com/Dicklesworthstone/frankenpandas/commit/22c7c3f9)); live-oracle conformance ([`d35ab20c`](https://github.com/Dicklesworthstone/frankenpandas/commit/d35ab20c)). Epic closed via [`ba2e61db`](https://github.com/Dicklesworthstone/frankenpandas/commit/ba2e61db)
+- **`MultiIndex.is_monotonic` + `is_lexsorted` predicates** ([`f4cf4e4c`](https://github.com/Dicklesworthstone/frankenpandas/commit/f4cf4e4c))
+
+#### Live pandas-oracle conformance tests (~290 commits)
+
+Hundreds of `test(fp-conformance): live pandas oracle for X` entries across Series, DataFrame, GroupBy, Index, str/dt accessors, rolling/expanding/ewm, IO, asof/at_time/between_time, compare, str.normalize/casefold (Unicode), `nan_*` primitives, categorical, etc. — drives the live-oracle suite from a handful into the **hundreds**. Reps: [`7d37afac`](https://github.com/Dicklesworthstone/frankenpandas/commit/7d37afac), [`f3b2e934`](https://github.com/Dicklesworthstone/frankenpandas/commit/f3b2e934), [`dd0b6e25`](https://github.com/Dicklesworthstone/frankenpandas/commit/dd0b6e25), [`ff2ca9b5`](https://github.com/Dicklesworthstone/frankenpandas/commit/ff2ca9b5), [`a76ca9f2`](https://github.com/Dicklesworthstone/frankenpandas/commit/a76ca9f2). **CI gate enforced**: `fix(conformance): require live oracle in CI` ([`9c118947`](https://github.com/Dicklesworthstone/frankenpandas/commit/9c118947)).
+
+#### Conformance fixture packets FP-P2D-064 → FP-P2D-433
+
+Massive expansion of the deterministic fixture-packet ledger: cumulative ops, str accessor lower/upper/title/swapcase/zfill/center/pad, dt accessor quarter/dayofyear/is_month_start/is_year_start/leap_year/strftime/floor/ceil/round/total_seconds/to_timestamp, rolling/expanding/ewm/resample, at_time/between_time/asof, DataFrame transpose/top-N/insert/assign/rename/reindex/drop/replace/where/mask/shift axis=1/describe/corr/cov/idxmin/idxmax/sem/skew/kurtosis/prod/sum/mean/std/var/min/max/median/any/all/nunique/quantile/value_counts/memory_usage. Null-hardened variants added across the board ([`b96d9e75`](https://github.com/Dicklesworthstone/frankenpandas/commit/b96d9e75)..[`8e818740`](https://github.com/Dicklesworthstone/frankenpandas/commit/8e818740)). Parity-gate manifests refreshed multiple times.
+
+#### IO format surface expansion
+
+- **CSV** options: `comment`, `on_bad_lines`, `decimal`, `true/false_values`, `parse_dates` (incl. dict-style rename), `thousands`, `quote/escape`, `skipfooter`, `lineterminator`, `index_label`, full write options struct ([`d47d3f5e`](https://github.com/Dicklesworthstone/frankenpandas/commit/d47d3f5e), [`44e779ee`](https://github.com/Dicklesworthstone/frankenpandas/commit/44e779ee), [`d29b2b93`](https://github.com/Dicklesworthstone/frankenpandas/commit/d29b2b93), [`eb456c9f`](https://github.com/Dicklesworthstone/frankenpandas/commit/eb456c9f), [`c19b622b`](https://github.com/Dicklesworthstone/frankenpandas/commit/c19b622b), [`4eb3e4e0`](https://github.com/Dicklesworthstone/frankenpandas/commit/4eb3e4e0), [`a28606f4`](https://github.com/Dicklesworthstone/frankenpandas/commit/a28606f4), [`483509bc`](https://github.com/Dicklesworthstone/frankenpandas/commit/483509bc), [`2d607c2a`](https://github.com/Dicklesworthstone/frankenpandas/commit/2d607c2a), [`9aa5cdb4`](https://github.com/Dicklesworthstone/frankenpandas/commit/9aa5cdb4), [`89603d45`](https://github.com/Dicklesworthstone/frankenpandas/commit/89603d45), [`9009ecaf`](https://github.com/Dicklesworthstone/frankenpandas/commit/9009ecaf))
+- **Excel** index-label preservation roundtrip ([`ff69357a`](https://github.com/Dicklesworthstone/frankenpandas/commit/ff69357a)), headerless reads ([`d071612c`](https://github.com/Dicklesworthstone/frankenpandas/commit/d071612c)), `sheets_ordered` preserving workbook order ([`0f795b47`](https://github.com/Dicklesworthstone/frankenpandas/commit/0f795b47)), full `to_excel` option parity ([`e5af6e52`](https://github.com/Dicklesworthstone/frankenpandas/commit/e5af6e52))
+- **Arrow IPC stream** surfaced as 8th IO format ([`7a1c9058`](https://github.com/Dicklesworthstone/frankenpandas/commit/7a1c9058))
+- **JSON** `to_json("table")` with Table Schema ([`3fe14241`](https://github.com/Dicklesworthstone/frankenpandas/commit/3fe14241)); `to_dict("series")` ([`091691d6`](https://github.com/Dicklesworthstone/frankenpandas/commit/091691d6))
+- Cross-format round-trip fuzz target ([`49f0cdf9`](https://github.com/Dicklesworthstone/frankenpandas/commit/49f0cdf9))
+
+#### Index API parity (fp-index)
+
+- `MultiIndex.get_indexer_non_unique` ([`67430d4c`](https://github.com/Dicklesworthstone/frankenpandas/commit/67430d4c)); `MultiIndex.isin` tuple/level parity ([`2f093294`](https://github.com/Dicklesworthstone/frankenpandas/commit/2f093294)); `MultiIndex.duplicated`/`is_unique` ([`057f28f4`](https://github.com/Dicklesworthstone/frankenpandas/commit/057f28f4))
+- Index `insert`/`delete`/`append`/`repeat`/`dropna` ([`b5dbaf56`](https://github.com/Dicklesworthstone/frankenpandas/commit/b5dbaf56)); `equals`/`identical`/`value_counts`/`shift`/`any`/`all` ([`1c24f63f`](https://github.com/Dicklesworthstone/frankenpandas/commit/1c24f63f))
+- `Index.to_list`/`format`/`putmask` ([`f68e2c03`](https://github.com/Dicklesworthstone/frankenpandas/commit/f68e2c03)); `Index.asof`/`searchsorted`/`memory_usage`/`nlevels` ([`b17e94ae`](https://github.com/Dicklesworthstone/frankenpandas/commit/b17e94ae))
+
+#### Major fixes in this window
+
+- **Pandas-error parity hardening**: reject empty separator in `str.split_expand`, `Column.combine` honors `fill_value=None`, `to_dict(orient='index')` rejects duplicate index, reject `table` JSON for MultiIndex columns, validate `Series.dt.to_timestamp` periods, `rolling min_periods=0` parity, `Expanding` empty-window NaN parity, `Series.unique` retains a single null marker, `Series.searchsorted` accepts non-numeric needles
+- **Dtype / null-promotion parity**: preserve Int64/Bool dtype in `DataFrame.mode` pad cells, `semantic_eq` bridges all Null kinds, preserve Series `abs`/cumulative/round dtypes, accept legacy `"str"`/`"string"` serde aliases for Utf8, honor categorical ordering semantics
+- **Numeric edge cases — infinity, modulo, divmod, rounding**: handle infinity in `python_mod_f64`, match pandas modulo signs, match pandas infinite-float divmod, reuse pandas divmod helpers, match pandas half-even rounding, prevent integer overflow in HyperLogLog estimate
+- **NA sentinel + skipna alignment**: match pandas `argsort`/`argmin`/`argmax` NA sentinels, missing `searchsorted` needle, normalize JSON/JSONL nullable numerics
+- **Tie-break / ordering**: preserve `value_counts` tie order, align `FP-P2C-005 groupby_sum_order` with pandas default sort, restore grouped-window fallback schema, align rolling-count null windows, harden Series top-k keep handling
+- **Expression parser hardening**: escape sequences in string literals + malformed float detection, chained-comparison pairwise AND, backtick column parsing
+- **Outer-join + concat parity** ([`0d99fd69`](https://github.com/Dicklesworthstone/frankenpandas/commit/0d99fd69), [`3bb41478`](https://github.com/Dicklesworthstone/frankenpandas/commit/3bb41478))
+- **Sparse + Interval + Period correctness** in the compatibility surface ([`04827359`](https://github.com/Dicklesworthstone/frankenpandas/commit/04827359), [`49100a25`](https://github.com/Dicklesworthstone/frankenpandas/commit/49100a25), [`affd37fe`](https://github.com/Dicklesworthstone/frankenpandas/commit/affd37fe))
+
+#### 19-pass cc-pandas review-mode session (2026-04-22 → 2026-04-23)
+
+- A bv-style "review-only" audit pass yielded **58 filed beads** and **14 shipped fixes** (handoff at [`f69dad0c`](https://github.com/Dicklesworthstone/frankenpandas/commit/f69dad0c))
+- 19 numbered triage passes (HIGH/MEDIUM/LOW gaps)
+- Three subsequent reality-check passes surfaced **14 documented divergences** in `DISCREPANCIES.md` (DISC-001 through DISC-014; 2 RESOLVED in the dedicated "Resolved Divergences" section (DISC-005 + DISC-013); 12 active/INVESTIGATING/WILL-FIX/ACCEPTED)
+
+#### Infrastructure (2026-04-22 → 2026-04-23 push)
+
+- **CI restructure**: split monolithic `checks` job into fmt/lint/test/conformance/gates ([`f6427657`](https://github.com/Dicklesworthstone/frankenpandas/commit/f6427657)); cross-platform matrix + feature matrix ([`6a157919`](https://github.com/Dicklesworthstone/frankenpandas/commit/6a157919)); windows-latest lint cell ([`e516ed34`](https://github.com/Dicklesworthstone/frankenpandas/commit/e516ed34)); concurrency cancel-in-progress ([`b3dda848`](https://github.com/Dicklesworthstone/frankenpandas/commit/b3dda848)); doctests in CI ([`128eec76`](https://github.com/Dicklesworthstone/frankenpandas/commit/128eec76)); GitHub Actions version bumps ([`20c46606`](https://github.com/Dicklesworthstone/frankenpandas/commit/20c46606)); dated nightly toolchain pin ([`af943cc6`](https://github.com/Dicklesworthstone/frankenpandas/commit/af943cc6)); cargo-audit + cargo-deny gates ([`6c1b4ce7`](https://github.com/Dicklesworthstone/frankenpandas/commit/6c1b4ce7)); perf-baseline gating ([`2c998520`](https://github.com/Dicklesworthstone/frankenpandas/commit/2c998520)); release-plz workflow ([`ee5d7837`](https://github.com/Dicklesworthstone/frankenpandas/commit/ee5d7837))
+- **Fuzz infrastructure (~90 commits)**: parquet IO, arrow IPC, scalar cast, Series::add, groupby_sum, join_series, column arithmetic, feather IO, common_dtype, excel IO, index alignment, shift metamorphic, abs/clip/round/between/cumulative-extrema/nlargest/sort_values/rank/diff/cum sum-prod/idxmax-idxmin/where-mask/fillna/dropna/replace/isin/duplicated/sort_index/reindex/take/set_axis/rename/truncate/drop/head-tail/isna-notna/count/sum/mean/std-var/median proptests ([`b9295ed7`](https://github.com/Dicklesworthstone/frankenpandas/commit/b9295ed7)..[`0598a632`](https://github.com/Dicklesworthstone/frankenpandas/commit/0598a632)). Later: cross-format round-trip, dataframe eval, semantic_eq, pivot_table dispatch, groupby agg dispatch, rolling window min_periods, stateful op-chain, parallel + TSan, SQL read, DataFrame constructor + merge. Hardening: libFuzzer memory/timeout bounds ([`588a0655`](https://github.com/Dicklesworthstone/frankenpandas/commit/588a0655)), structure-aware dictionaries ([`f4eed267`](https://github.com/Dicklesworthstone/frankenpandas/commit/f4eed267)), weekly corpus minimization ([`34ae9f6a`](https://github.com/Dicklesworthstone/frankenpandas/commit/34ae9f6a)), regression corpus in CI ([`0fa67a7e`](https://github.com/Dicklesworthstone/frankenpandas/commit/0fa67a7e))
+- **Release / supply-chain / docs hygiene**: SECURITY.md ([`fb455f88`](https://github.com/Dicklesworthstone/frankenpandas/commit/fb455f88)); `#[non_exhaustive]` on all public error enums ([`9b6374d4`](https://github.com/Dicklesworthstone/frankenpandas/commit/9b6374d4)); `.editorconfig` + `.gitattributes` ([`74361bf9`](https://github.com/Dicklesworthstone/frankenpandas/commit/74361bf9)); `.mailmap` + `CITATION.cff` ([`4b4170d7`](https://github.com/Dicklesworthstone/frankenpandas/commit/4b4170d7)); ISSUE/PR templates + FUNDING.yml ([`41bebe5b`](https://github.com/Dicklesworthstone/frankenpandas/commit/41bebe5b), [`d4b0d9f3`](https://github.com/Dicklesworthstone/frankenpandas/commit/d4b0d9f3), [`712028e6`](https://github.com/Dicklesworthstone/frankenpandas/commit/712028e6)); workspace.package inheritance + per-crate metadata ([`85c2854f`](https://github.com/Dicklesworthstone/frankenpandas/commit/85c2854f)); docs.rs metadata + rustfmt.toml ([`bd55f5ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/bd55f5ca)); AUTHORS.md + cargo-machete ([`15535a53`](https://github.com/Dicklesworthstone/frankenpandas/commit/15535a53)); per-crate README ([`87a6cace`](https://github.com/Dicklesworthstone/frankenpandas/commit/87a6cace)); committed githooks + gitleaks CI + CODEOWNERS ([`e3761f46`](https://github.com/Dicklesworthstone/frankenpandas/commit/e3761f46)); CONTRIBUTING.md + code of conduct ([`fb501bdc`](https://github.com/Dicklesworthstone/frankenpandas/commit/fb501bdc)); SSH commit-signing policy ([`ad0623ab`](https://github.com/Dicklesworthstone/frankenpandas/commit/ad0623ab))
+- **Dep bumps (library-updater sweep 2026-04-22)**: asupersync 0.2→0.3.1, libfuzzer-sys 0.4.10→0.4.12, bytes 1.10.1→1.11.1, bumpalo 3.16→3.20.2, regex 1.11.1→1.12.3, serde 1.0.219→1.0.228, serde_json 1.0.140→1.0.149, thiserror 2.0.12→2.0.18, raptorq 2.0→2.0.1, proptest 1.10→1.11, tempfile 3.14→3.27, sha2 0.10.9→0.11, calamine 0.26.1→0.34, arrow + parquet 54.3→58.1, criterion 0.5.1→0.8.2
+
+### Phase 2c: Index-name preservation + Index variants + format expansion (2026-05-02 → 2026-05-16)
+
+The post-mega-merge cleanup. A fork-wide audit found the alignment
+planner was almost-but-not-quite preserving axis names through helper
+methods. Hundreds of callsites were retrofitted to use a shared helper.
+The typed-Index variants gained dozens of pandas-parity methods. The IO
+layer learned ~10 additional formats. Algorithmic complexity got
+another optimization pass focused on accidental O(n²) loops.
+
+#### "Preserve index name" fork-wide sweep (~76 commits)
+
+Index/axis-name propagation through Series, DataFrame, groupby, rolling, expanding, ewm, resample, string, and datetime accessor pipelines:
+
+- **Single helper-conversion commit retrofitted 36 transform call sites**: [`fe61bbd3`](https://github.com/Dicklesworthstone/frankenpandas/commit/fe61bbd3) (Series helper preserves index name; convert 36 transform call sites — `frankenpandas-07yrq`)
+- **Rolling**: `min`/`count`/`first`/`last`/`corr`/`cov`/`rank`/`apply_rolling` ([`f41b3e44`](https://github.com/Dicklesworthstone/frankenpandas/commit/f41b3e44), [`85e99b22`](https://github.com/Dicklesworthstone/frankenpandas/commit/85e99b22), [`390836eb`](https://github.com/Dicklesworthstone/frankenpandas/commit/390836eb), [`22761a80`](https://github.com/Dicklesworthstone/frankenpandas/commit/22761a80), [`b68c7315`](https://github.com/Dicklesworthstone/frankenpandas/commit/b68c7315), [`7868a706`](https://github.com/Dicklesworthstone/frankenpandas/commit/7868a706), [`a5dcd589`](https://github.com/Dicklesworthstone/frankenpandas/commit/a5dcd589))
+- **Expanding**: `apply`/`count`/`corr`/`cov` ([`1528a3e1`](https://github.com/Dicklesworthstone/frankenpandas/commit/1528a3e1), [`078db704`](https://github.com/Dicklesworthstone/frankenpandas/commit/078db704), [`07d886f9`](https://github.com/Dicklesworthstone/frankenpandas/commit/07d886f9), [`d9b26480`](https://github.com/Dicklesworthstone/frankenpandas/commit/d9b26480))
+- **Ewm**: `mean`/`sum`/`cov`/`var`/`std`/`corr` ([`34257bcd`](https://github.com/Dicklesworthstone/frankenpandas/commit/34257bcd), [`6da08de9`](https://github.com/Dicklesworthstone/frankenpandas/commit/6da08de9), [`2b780959`](https://github.com/Dicklesworthstone/frankenpandas/commit/2b780959), [`55b6c3a1`](https://github.com/Dicklesworthstone/frankenpandas/commit/55b6c3a1), [`27f7ef53`](https://github.com/Dicklesworthstone/frankenpandas/commit/27f7ef53))
+- **Resample**: `aggregate_scalar`/`size`/`transform`/`get_group` ([`de8d7ad5`](https://github.com/Dicklesworthstone/frankenpandas/commit/de8d7ad5), [`10bc66d1`](https://github.com/Dicklesworthstone/frankenpandas/commit/10bc66d1), [`98ab2df3`](https://github.com/Dicklesworthstone/frankenpandas/commit/98ab2df3), [`d8151cfb`](https://github.com/Dicklesworthstone/frankenpandas/commit/d8151cfb))
+- **SeriesGroupBy**: `transform`/`cumcount`/`ngroup`/`apply` ([`894af1c3`](https://github.com/Dicklesworthstone/frankenpandas/commit/894af1c3), [`902ae06e`](https://github.com/Dicklesworthstone/frankenpandas/commit/902ae06e), [`4b90cb4d`](https://github.com/Dicklesworthstone/frankenpandas/commit/4b90cb4d), [`f4348c61`](https://github.com/Dicklesworthstone/frankenpandas/commit/f4348c61))
+- **DataFrame methods**: `filter_rows`/`take_rows`/`stack`/`unstack`/`pivot`/`pivot_table`/`explode`/`reindex`/`truncate`/`sample`/`rename_index*`/`select_columns`/`asof` ([`01e27f6c`](https://github.com/Dicklesworthstone/frankenpandas/commit/01e27f6c), [`c2cfa2df`](https://github.com/Dicklesworthstone/frankenpandas/commit/c2cfa2df), [`51a49570`](https://github.com/Dicklesworthstone/frankenpandas/commit/51a49570), [`5858df74`](https://github.com/Dicklesworthstone/frankenpandas/commit/5858df74), [`4b2a33af`](https://github.com/Dicklesworthstone/frankenpandas/commit/4b2a33af), [`0eb7352f`](https://github.com/Dicklesworthstone/frankenpandas/commit/0eb7352f), [`a73edf66`](https://github.com/Dicklesworthstone/frankenpandas/commit/a73edf66), [`45b91414`](https://github.com/Dicklesworthstone/frankenpandas/commit/45b91414), [`16789246`](https://github.com/Dicklesworthstone/frankenpandas/commit/16789246), [`98005696`](https://github.com/Dicklesworthstone/frankenpandas/commit/98005696), [`7b003084`](https://github.com/Dicklesworthstone/frankenpandas/commit/7b003084))
+- **Series methods**: `dropna`/`drop`/`head`/`tail`/`sort`/`sample`/`combine`/`explode`/`append`/`map_*`/`apply*`/`mask*`/`where_cond*`/`rank*`/`td_*`/arithmetic; **40+ callsites**
+- **StringMethods** (`partition`/`rpartition`/`cat_series`) and **DatetimeAccessor** (`extract_component`/`try_extract_component`) ([`5b7a0c06`](https://github.com/Dicklesworthstone/frankenpandas/commit/5b7a0c06), [`e1a907c6`](https://github.com/Dicklesworthstone/frankenpandas/commit/e1a907c6), [`44475630`](https://github.com/Dicklesworthstone/frankenpandas/commit/44475630), [`e097d558`](https://github.com/Dicklesworthstone/frankenpandas/commit/e097d558), [`4e699761`](https://github.com/Dicklesworthstone/frankenpandas/commit/4e699761))
+
+#### Typed Index variants — massive method-surface buildout (2026-05-09)
+
+Single-day burst adding pandas-parity methods to `DatetimeIndex`, `TimedeltaIndex`, `PeriodIndex`, `RangeIndex`, `CategoricalIndex` via per-variant typed forwarders. Method coverage now includes:
+
+- Time-of-day accessors (`hour`/`minute`/`second`/`microsecond`/`nanosecond`), day-of-X/quarter/leap, month/quarter/year start/end boundaries
+- `month_name`/`day_name`/`normalize`, `asi8`/`strftime`
+- `argmax`/`argmin`/`argsort`/`unique`/`factorize`/`value_counts`/`duplicated`/`drop_duplicates`/`dropna`
+- `take`/`repeat`/`isin`; `append`/`delete`/`insert`; set ops (`intersection`/`union`/`difference`/`symmetric_difference`)
+- `searchsorted`, `where`/`putmask`, `tz`/`freq`/`inferred_freq`
+- `to_pydatetime`/`to_pytimedelta`/`to_julian_date`, `tz_localize`/`tz_convert`
+- `slice_locs`/`slice_indexer`/`get_slice_bound`, `unit`/`resolution`/`as_unit`
+- `get_loc`/`get_indexer`/`get_indexer_non_unique`/`get_indexer_for`
+- `mean`/`median`/`std`/`var`/`sum`, `shift`, `fillna`/`isnull`/`notnull`
+- **Period-specific**: `is_full`, `from_ordinals`, `from_fields`, `to_flat_index`
+- **DatetimeIndex** → `to_period` ([`741ef1be`](https://github.com/Dicklesworthstone/frankenpandas/commit/741ef1be)); PeriodIndex `asfreq` ([`b3047da0`](https://github.com/Dicklesworthstone/frankenpandas/commit/b3047da0))
+
+Representative commits: [`190ae663`](https://github.com/Dicklesworthstone/frankenpandas/commit/190ae663), [`6b44c46d`](https://github.com/Dicklesworthstone/frankenpandas/commit/6b44c46d), [`69901939`](https://github.com/Dicklesworthstone/frankenpandas/commit/69901939), [`a4207b31`](https://github.com/Dicklesworthstone/frankenpandas/commit/a4207b31), [`a42cd4ea`](https://github.com/Dicklesworthstone/frankenpandas/commit/a42cd4ea), [`0fe22520`](https://github.com/Dicklesworthstone/frankenpandas/commit/0fe22520), [`61bf5192`](https://github.com/Dicklesworthstone/frankenpandas/commit/61bf5192), [`ee08d8ac`](https://github.com/Dicklesworthstone/frankenpandas/commit/ee08d8ac)
+
+#### MultiIndex parity epic (frankenpandas-d89fe + 18 sub-slices)
+
+- `get_indexer`/`get_indexer_for` ([`2c3db986`](https://github.com/Dicklesworthstone/frankenpandas/commit/2c3db986)); `get_slice_bound`/`slice_indexer` ([`df75b90b`](https://github.com/Dicklesworthstone/frankenpandas/commit/df75b90b))
+- `groupby`/`join` ([`4cf2c451`](https://github.com/Dicklesworthstone/frankenpandas/commit/4cf2c451)); `reindex` ([`85db047a`](https://github.com/Dicklesworthstone/frankenpandas/commit/85db047a)); `rename` ([`e1eb5aec`](https://github.com/Dicklesworthstone/frankenpandas/commit/e1eb5aec)); `searchsorted` ([`1f34c499`](https://github.com/Dicklesworthstone/frankenpandas/commit/1f34c499))
+- `all`/`any`/missing-mask/`shift` error parity ([`59257d19`](https://github.com/Dicklesworthstone/frankenpandas/commit/59257d19), [`5f373b5e`](https://github.com/Dicklesworthstone/frankenpandas/commit/5f373b5e), [`ddd42030`](https://github.com/Dicklesworthstone/frankenpandas/commit/ddd42030))
+- `get_locs` list-label parity ([`8ebb7e96`](https://github.com/Dicklesworthstone/frankenpandas/commit/8ebb7e96)); `truncate` ([`f435e6c7`](https://github.com/Dicklesworthstone/frankenpandas/commit/f435e6c7)); `from_frame` ([`f59e68d8`](https://github.com/Dicklesworthstone/frankenpandas/commit/f59e68d8))
+
+#### SeriesGroupBy / DataFrameGroupBy parity build (frankenpandas-nt65g + 12 slices)
+
+`transform`/`filter`/`pipe`, `take`, `sample`, `quantile`/`sem`/`skew`, missing-value handling, ranked selection, `value_counts`, `unique`, `ohlc`, monotonic/null parity, `first`/`last` null, string `min`/`max`, `apply` callbacks, rolling/expanding/ewm/resample reductions on SeriesGroupBy, `describe`, pairwise `corr`/`cov`, grouper introspection. Representative: [`1b89cb12`](https://github.com/Dicklesworthstone/frankenpandas/commit/1b89cb12), [`8431c3cc`](https://github.com/Dicklesworthstone/frankenpandas/commit/8431c3cc), [`d5005b6b`](https://github.com/Dicklesworthstone/frankenpandas/commit/d5005b6b), [`96a4dfce`](https://github.com/Dicklesworthstone/frankenpandas/commit/96a4dfce), [`eb51da63`](https://github.com/Dicklesworthstone/frankenpandas/commit/eb51da63), [`d2bff302`](https://github.com/Dicklesworthstone/frankenpandas/commit/d2bff302), [`24facdfe`](https://github.com/Dicklesworthstone/frankenpandas/commit/24facdfe)
+
+#### Algorithmic complexity sweep — O(n²) → O(n) (15+ commits)
+
+Hot-path rewrites using `HashMap`/`HashSet`/`IsinIndex`:
+
+- **`value_counts`** ([`b6f4943c`](https://github.com/Dicklesworthstone/frankenpandas/commit/b6f4943c)), `unique`/`nunique_with_dropna` ([`60856d44`](https://github.com/Dicklesworthstone/frankenpandas/commit/60856d44)), `duplicated`/`drop_duplicates` ([`e58fefea`](https://github.com/Dicklesworthstone/frankenpandas/commit/e58fefea))
+- `map`/`replace`/`map_with_default` ([`704f121d`](https://github.com/Dicklesworthstone/frankenpandas/commit/704f121d)); `isin` for Series and DataFrame ([`5fab8d79`](https://github.com/Dicklesworthstone/frankenpandas/commit/5fab8d79))
+- `cut()` O(1)-bucket ([`51eb3636`](https://github.com/Dicklesworthstone/frankenpandas/commit/51eb3636)); `qcut()` binary search ([`70c2ae8e`](https://github.com/Dicklesworthstone/frankenpandas/commit/70c2ae8e))
+- `mode_with_dropna` ([`9ec24cfc`](https://github.com/Dicklesworthstone/frankenpandas/commit/9ec24cfc)); `mode_values` cross-dtype ([`20a22970`](https://github.com/Dicklesworthstone/frankenpandas/commit/20a22970))
+- **DataFrame** `nunique` ([`b22e5eae`](https://github.com/Dicklesworthstone/frankenpandas/commit/b22e5eae)), `value_counts` ([`c3442b46`](https://github.com/Dicklesworthstone/frankenpandas/commit/c3442b46)), `append` column union ([`667a2a65`](https://github.com/Dicklesworthstone/frankenpandas/commit/667a2a65)); groupby `value_counts` ([`43aaa37a`](https://github.com/Dicklesworthstone/frankenpandas/commit/43aaa37a))
+- **Series** `drop` ([`929e155a`](https://github.com/Dicklesworthstone/frankenpandas/commit/929e155a)), `unstack` ([`8504bac5`](https://github.com/Dicklesworthstone/frankenpandas/commit/8504bac5)), `str.get_dummies` ([`fb3dd650`](https://github.com/Dicklesworthstone/frankenpandas/commit/fb3dd650)), `factorize` ([`44f14e70`](https://github.com/Dicklesworthstone/frankenpandas/commit/44f14e70))
+- **DataFrame** `get_dummies` ([`4319cb81`](https://github.com/Dicklesworthstone/frankenpandas/commit/4319cb81)); `fp-columnar` `factorize_with_options` ([`a8af1ed5`](https://github.com/Dicklesworthstone/frankenpandas/commit/a8af1ed5))
+- CSV NA HashSet ([`28bc8ff2`](https://github.com/Dicklesworthstone/frankenpandas/commit/28bc8ff2), [`824b9691`](https://github.com/Dicklesworthstone/frankenpandas/commit/824b9691)); Excel sheet HashSet ([`af8164c1`](https://github.com/Dicklesworthstone/frankenpandas/commit/af8164c1))
+
+#### IO format surface expansion — phase 2 (2026-05-08)
+
+Single-day burst adding 10+ new reader/writer surfaces:
+
+- **HTML writer** ([`738620d1`](https://github.com/Dicklesworthstone/frankenpandas/commit/738620d1)), **HTML reader** ([`52c6e304`](https://github.com/Dicklesworthstone/frankenpandas/commit/52c6e304)); **`to_xml` alias** ([`bc0cfc13`](https://github.com/Dicklesworthstone/frankenpandas/commit/bc0cfc13))
+- **XML writer** ([`d14eb7f9`](https://github.com/Dicklesworthstone/frankenpandas/commit/d14eb7f9)), **XML reader** ([`49cf2073`](https://github.com/Dicklesworthstone/frankenpandas/commit/49cf2073))
+- **Pickle roundtrip** ([`23e637ff`](https://github.com/Dicklesworthstone/frankenpandas/commit/23e637ff)); **Stata roundtrip** ([`87a2812e`](https://github.com/Dicklesworthstone/frankenpandas/commit/87a2812e))
+- **ORC roundtrip** ([`443db4a0`](https://github.com/Dicklesworthstone/frankenpandas/commit/443db4a0)); **HDF5 snapshot** ([`12bef71b`](https://github.com/Dicklesworthstone/frankenpandas/commit/12bef71b)) — HDF5 later gated optional ([`ec0b828e`](https://github.com/Dicklesworthstone/frankenpandas/commit/ec0b828e))
+- **Markdown / LaTeX file writers** ([`19fb3b6b`](https://github.com/Dicklesworthstone/frankenpandas/commit/19fb3b6b)); pure-string Markdown/LaTeX ([`8e675fe9`](https://github.com/Dicklesworthstone/frankenpandas/commit/8e675fe9))
+- **`read_table` TSV** ([`4c308492`](https://github.com/Dicklesworthstone/frankenpandas/commit/4c308492)); **`read_fwf`** ([`94f3a504`](https://github.com/Dicklesworthstone/frankenpandas/commit/94f3a504)) + colspec inference ([`486c0768`](https://github.com/Dicklesworthstone/frankenpandas/commit/486c0768))
+- Deferred-status hooks: `to_clipboard`/`to_gbq`/etc. ([`769f03b4`](https://github.com/Dicklesworthstone/frankenpandas/commit/769f03b4))
+
+#### Datetime / Timedelta accessor + component buildout
+
+- **`DatetimeAccessor` errors on non-datetimelike Series** instead of silent NaN ([`9c72f8c7`](https://github.com/Dicklesworthstone/frankenpandas/commit/9c72f8c7))
+- `td_*` family errors on non-Timedelta operands ([`b2d45778`](https://github.com/Dicklesworthstone/frankenpandas/commit/b2d45778))
+- **Datetime time indexers** ([`b5fb9940`](https://github.com/Dicklesworthstone/frankenpandas/commit/b5fb9940)); **`timetz` accessor** ([`4b95aea6`](https://github.com/Dicklesworthstone/frankenpandas/commit/4b95aea6)); **`isocalendar` accessor** ([`a1641863`](https://github.com/Dicklesworthstone/frankenpandas/commit/a1641863))
+- **Timedelta `components` accessor** ([`588948b0`](https://github.com/Dicklesworthstone/frankenpandas/commit/588948b0))
+- **Period → Timestamp helpers** ([`ea8587dd`](https://github.com/Dicklesworthstone/frankenpandas/commit/ea8587dd)); **DataFrame `to_timestamp`** ([`acce487d`](https://github.com/Dicklesworthstone/frankenpandas/commit/acce487d)); **DataFrame `to_period`** ([`6fce739d`](https://github.com/Dicklesworthstone/frankenpandas/commit/6fce739d))
+- ISO week/`weekofyear` ([`7ccd47be`](https://github.com/Dicklesworthstone/frankenpandas/commit/7ccd47be))
+
+#### Timedelta64 fast paths across reduction family (2026-05-13)
+
+Added Timedelta64 fast paths or fixes to: `nanmin`/`nanmax` ([`1a5685b0`](https://github.com/Dicklesworthstone/frankenpandas/commit/1a5685b0)), `nansum`/`nanmean` ([`5231c6ff`](https://github.com/Dicklesworthstone/frankenpandas/commit/5231c6ff)), `nancumsum`/`nancummin`/`nancummax` ([`4d52a33c`](https://github.com/Dicklesworthstone/frankenpandas/commit/4d52a33c)), `nanmedian`/`nanvar`/`nanstd`/`nansem` ([`42d1d211`](https://github.com/Dicklesworthstone/frankenpandas/commit/42d1d211)), `nanquantile` ([`11ad77b0`](https://github.com/Dicklesworthstone/frankenpandas/commit/11ad77b0)), `nanargmax`/`nanargmin`/`nanptp`/`nanprod` ([`7140bc35`](https://github.com/Dicklesworthstone/frankenpandas/commit/7140bc35)), Column `pct_change` ([`b8a81e1b`](https://github.com/Dicklesworthstone/frankenpandas/commit/b8a81e1b)), Column `diff` ([`360f2ad1`](https://github.com/Dicklesworthstone/frankenpandas/commit/360f2ad1)), Series/DataFrame `diff` family ([`0e48b304`](https://github.com/Dicklesworthstone/frankenpandas/commit/0e48b304)), Series `pct_change` ([`494fef01`](https://github.com/Dicklesworthstone/frankenpandas/commit/494fef01)), GroupBy `pct_change` ([`218a6d73`](https://github.com/Dicklesworthstone/frankenpandas/commit/218a6d73)), SeriesGroupBy `sum`/`mean` ([`fa376ad0`](https://github.com/Dicklesworthstone/frankenpandas/commit/fa376ad0)) and `min`/`max` ([`2505393b`](https://github.com/Dicklesworthstone/frankenpandas/commit/2505393b)). Closes a wave of silent-stub bugs on Timedelta64.
+
+#### DataFrame plotting / sparse / style / xarray / duplicate-label capabilities
+
+- Deferred plotting stubs ([`ce39f75e`](https://github.com/Dicklesworthstone/frankenpandas/commit/ce39f75e)) → returned **plotting specs** (`PlotSpec`/`BoxPlotSpec`) ([`889f0517`](https://github.com/Dicklesworthstone/frankenpandas/commit/889f0517))
+- **`DataFrame::to_xarray`** snapshot ([`497ce7c0`](https://github.com/Dicklesworthstone/frankenpandas/commit/497ce7c0))
+- **Sparse metrics** ([`c7992d94`](https://github.com/Dicklesworthstone/frankenpandas/commit/c7992d94)); **persisted duplicate-label flags** ([`8e57aabb`](https://github.com/Dicklesworthstone/frankenpandas/commit/8e57aabb))
+- **Styled DataFrame HTML rendering** (`StyledDataFrame` + `DataFrame::style()`) ([`1d26c1c1`](https://github.com/Dicklesworthstone/frankenpandas/commit/1d26c1c1))
+- **Series list accessor** ([`dd47e260`](https://github.com/Dicklesworthstone/frankenpandas/commit/dd47e260)); **Series struct accessor** ([`d9b6c8f3`](https://github.com/Dicklesworthstone/frankenpandas/commit/d9b6c8f3))
+
+#### Major fixes in this window
+
+**SQL reader correctness bundle (frankenpandas-fd90.*, 2026-05-02 / 03)**
+
+Honor SQL table columns in chunked reads ([`1d71f6ec`](https://github.com/Dicklesworthstone/frankenpandas/commit/1d71f6ec)), expose SQL inspector backend caps ([`7d416d1f`](https://github.com/Dicklesworthstone/frankenpandas/commit/7d416d1f)), include `index_col` in table projections ([`48a2f0bb`](https://github.com/Dicklesworthstone/frankenpandas/commit/48a2f0bb)), reject `options.index_col` on chunked entrypoints ([`5eb339a3`](https://github.com/Dicklesworthstone/frankenpandas/commit/5eb339a3)), auto-project `index_col` in column-list readers ([`ad56d0df`](https://github.com/Dicklesworthstone/frankenpandas/commit/ad56d0df)), bound SQL chunk reads ([`b75209ce`](https://github.com/Dicklesworthstone/frankenpandas/commit/b75209ce)), validate SQL builder identifier lengths ([`49bfd249`](https://github.com/Dicklesworthstone/frankenpandas/commit/49bfd249)), preserve SQL dtype hints for empty reads ([`1cdd7377`](https://github.com/Dicklesworthstone/frankenpandas/commit/1cdd7377)), reject unsupported SQL schema reads ([`c1b4e3b2`](https://github.com/Dicklesworthstone/frankenpandas/commit/c1b4e3b2)), rollback rusqlite panic transactions ([`4b224555`](https://github.com/Dicklesworthstone/frankenpandas/commit/4b224555)).
+
+**Pandas-faithful validation hardening**
+
+`ewm` validates inputs eagerly ([`2bf5da29`](https://github.com/Dicklesworthstone/frankenpandas/commit/2bf5da29)); rolling `min_periods <= window` validation ([`9735a0b2`](https://github.com/Dicklesworthstone/frankenpandas/commit/9735a0b2)); resample `freq` string validation ([`85541b58`](https://github.com/Dicklesworthstone/frankenpandas/commit/85541b58)); `Series::sample` frac validation ([`f5a6c62f`](https://github.com/Dicklesworthstone/frankenpandas/commit/f5a6c62f)) + DataFrame mirror ([`2e16683a`](https://github.com/Dicklesworthstone/frankenpandas/commit/2e16683a)) + groupby ([`4a1dd8de`](https://github.com/Dicklesworthstone/frankenpandas/commit/4a1dd8de)); `str.pad` side validation ([`3da82b64`](https://github.com/Dicklesworthstone/frankenpandas/commit/3da82b64)); `sort_values_na` `na_position` ([`10706b1a`](https://github.com/Dicklesworthstone/frankenpandas/commit/10706b1a)); `astype_safe` `errors` ([`2c6b2d62`](https://github.com/Dicklesworthstone/frankenpandas/commit/2c6b2d62)); `Series::drop` rejects missing labels ([`a4b2ffc8`](https://github.com/Dicklesworthstone/frankenpandas/commit/a4b2ffc8)); `DataFrame::drop(axis=0)` rejects missing rows ([`eea0a64f`](https://github.com/Dicklesworthstone/frankenpandas/commit/eea0a64f)); `DataFrame::insert` rejects out-of-bounds loc ([`e71c5063`](https://github.com/Dicklesworthstone/frankenpandas/commit/e71c5063)); reject `between_time`/`at_time` on non-DatetimeIndex ([`ecc60ef6`](https://github.com/Dicklesworthstone/frankenpandas/commit/ecc60ef6)); reject `Timedelta::parse` overflow ([`a960003a`](https://github.com/Dicklesworthstone/frankenpandas/commit/a960003a)); reject invalid `filter_labels` ([`1182ea49`](https://github.com/Dicklesworthstone/frankenpandas/commit/1182ea49)); reject empty `groupby` by-list ([`9a93748e`](https://github.com/Dicklesworthstone/frankenpandas/commit/9a93748e)); reject negative/NaN `sample_weights` ([`8f9026d1`](https://github.com/Dicklesworthstone/frankenpandas/commit/8f9026d1)); `read_jsonl_str` row cap ([`f1cc613d`](https://github.com/Dicklesworthstone/frankenpandas/commit/f1cc613d)); `date_range` overflow rejection ([`378a0663`](https://github.com/Dicklesworthstone/frankenpandas/commit/378a0663)) and over-specified ranges ([`829dc0dc`](https://github.com/Dicklesworthstone/frankenpandas/commit/829dc0dc)).
+
+**Utf8 semantic-compare sweep**
+
+`cummin`/`cummax` Utf8 lexicographic ([`bf0935a9`](https://github.com/Dicklesworthstone/frankenpandas/commit/bf0935a9)); `min`/`max` Utf8 ([`ef3f6165`](https://github.com/Dicklesworthstone/frankenpandas/commit/ef3f6165)); `idxmin`/`idxmax` Utf8 ([`1a8567ba`](https://github.com/Dicklesworthstone/frankenpandas/commit/1a8567ba)); `nlargest`/`nsmallest` Utf8 ([`6eb918de`](https://github.com/Dicklesworthstone/frankenpandas/commit/6eb918de)); `rank` Utf8 ([`455a3d5a`](https://github.com/Dicklesworthstone/frankenpandas/commit/455a3d5a), [`d8b8301a`](https://github.com/Dicklesworthstone/frankenpandas/commit/d8b8301a)); `cumsum` Utf8 concat ([`a41619dc`](https://github.com/Dicklesworthstone/frankenpandas/commit/a41619dc)); `sum` Utf8 concat ([`3e18f7e7`](https://github.com/Dicklesworthstone/frankenpandas/commit/3e18f7e7)); `clip_with_series` Utf8 ([`d6425a99`](https://github.com/Dicklesworthstone/frankenpandas/commit/d6425a99)); `GroupBy::idxmin/idxmax` Utf8 ([`d61545fa`](https://github.com/Dicklesworthstone/frankenpandas/commit/d61545fa)); `is_monotonic_increasing` Utf8/Bool ([`559a9f2c`](https://github.com/Dicklesworthstone/frankenpandas/commit/559a9f2c)).
+
+**Numeric dtype preservation**
+
+`Series::clip` Int64 preservation ([`85a7a45e`](https://github.com/Dicklesworthstone/frankenpandas/commit/85a7a45e)); `min`/`max` Int64/Bool preservation ([`f76bc051`](https://github.com/Dicklesworthstone/frankenpandas/commit/f76bc051)); `sum`/`prod` Int64/Bool with numpy-wrap ([`bf860c7a`](https://github.com/Dicklesworthstone/frankenpandas/commit/bf860c7a)); `DataFrame.cumsum`/`cumprod`/`diff`/`shift` on Bool columns ([`f88e97e4`](https://github.com/Dicklesworthstone/frankenpandas/commit/f88e97e4)); `skew`/`kurtosis` NaN-on-too-few ([`37980128`](https://github.com/Dicklesworthstone/frankenpandas/commit/37980128)); `sem` NaN on undersized ([`ed74fef8`](https://github.com/Dicklesworthstone/frankenpandas/commit/ed74fef8)); `is_unique` single-null fix ([`ea0407a9`](https://github.com/Dicklesworthstone/frankenpandas/commit/ea0407a9)); promote int `FloorDiv`/`Mod` when right has zero ([`cb412d42`](https://github.com/Dicklesworthstone/frankenpandas/commit/cb412d42)); coerce_scalar Float64→Int64 range check ([`ef87da6f`](https://github.com/Dicklesworthstone/frankenpandas/commit/ef87da6f)); stop promoting Int64→Float64 in groupby `first`/`last` ([`aa3e464c`](https://github.com/Dicklesworthstone/frankenpandas/commit/aa3e464c)); NaN clip bounds treated as no-clipping ([`ca783d52`](https://github.com/Dicklesworthstone/frankenpandas/commit/ca783d52)).
+
+**String method char-position fix**
+
+`str.find`/`rfind`/`index_of`/`rindex_of` returned BYTE positions instead of CHAR ([`9de63cdf`](https://github.com/Dicklesworthstone/frankenpandas/commit/9de63cdf)) + matching live-oracle and proptest coverage. Plus string-split expansion-limit overflow guard ([`26142ac7`](https://github.com/Dicklesworthstone/frankenpandas/commit/26142ac7)).
+
+**Rolling / window panic hardening**
+
+`ewm.sum` Utf8 panic guard ([`8afc13be`](https://github.com/Dicklesworthstone/frankenpandas/commit/8afc13be)); `Rolling::first`/`last` all-missing window guard ([`81869934`](https://github.com/Dicklesworthstone/frankenpandas/commit/81869934)); `Rolling::max`/`prod` empty-window returns NaN ([`44b012c7`](https://github.com/Dicklesworthstone/frankenpandas/commit/44b012c7)); pandas-canonical `.0` suffix for whole-number Float64 in `to_csv` ([`673dfc07`](https://github.com/Dicklesworthstone/frankenpandas/commit/673dfc07)).
+
+**Asupersync recovery & evidence**
+
+Enforce recovery deadlines ([`c42920b1`](https://github.com/Dicklesworthstone/frankenpandas/commit/c42920b1)); fail-closed on unchecked asupersync evidence ([`691f0a53`](https://github.com/Dicklesworthstone/frankenpandas/commit/691f0a53)); replace recovery `StubCodec` ([`f030cd6c`](https://github.com/Dicklesworthstone/frankenpandas/commit/f030cd6c)); bound `recover_once` retry loop under buggy policy ([`454b3b60`](https://github.com/Dicklesworthstone/frankenpandas/commit/454b3b60)); reject zero repair-symbol decodes ([`138a54ea`](https://github.com/Dicklesworthstone/frankenpandas/commit/138a54ea)).
+
+#### Infrastructure / tooling
+
+- **Beads hygiene infrastructure**: bead-hygiene verifier ([`b0c4ad59`](https://github.com/Dicklesworthstone/frankenpandas/commit/b0c4ad59)); API coverage drift gate ([`49d840e1`](https://github.com/Dicklesworthstone/frankenpandas/commit/49d840e1)); cross-db scipy contamination sweep ([`a1929a95`](https://github.com/Dicklesworthstone/frankenpandas/commit/a1929a95)); JSONL race resolution + close-wins collapse ([`a5f69167`](https://github.com/Dicklesworthstone/frankenpandas/commit/a5f69167), [`baaf3aa4`](https://github.com/Dicklesworthstone/frankenpandas/commit/baaf3aa4)); DB repair + 31-bead flush ([`531b2683`](https://github.com/Dicklesworthstone/frankenpandas/commit/531b2683)); no-db JSONL malformed-row repair ([`c4eacf4d`](https://github.com/Dicklesworthstone/frankenpandas/commit/c4eacf4d))
+- **Phase2c attestation artifacts** refreshed multiple times; 7 new fp-conformance failure-surface JSONLs captured
+- **CI**: cargo-audit ignores RUSTSEC-2024-0436 paste-unmaintained ([`1e5121e5`](https://github.com/Dicklesworthstone/frankenpandas/commit/1e5121e5)); SPDX MIT license workspace-wide with asupersync MIT-with-rider clarification ([`1e5be685`](https://github.com/Dicklesworthstone/frankenpandas/commit/1e5be685)); CI requires system pandas live oracle fallback ([`ec36ff1d`](https://github.com/Dicklesworthstone/frankenpandas/commit/ec36ff1d))
+- **Test infra**: pandas error compatibility catalog ([`240cdb7e`](https://github.com/Dicklesworthstone/frankenpandas/commit/240cdb7e)); generated fixture pilot sidecars ([`69130a3a`](https://github.com/Dicklesworthstone/frankenpandas/commit/69130a3a)); AACE alignment witness ledger ([`0b9005bc`](https://github.com/Dicklesworthstone/frankenpandas/commit/0b9005bc)); high-RAM perf baseline telemetry ([`a3c7a99f`](https://github.com/Dicklesworthstone/frankenpandas/commit/a3c7a99f)); metamorphic test families for null/NaN/join/reshape/value_counts; right-join perf-budget coverage ([`d13568b9`](https://github.com/Dicklesworthstone/frankenpandas/commit/d13568b9)); `fuzz_column_arith` crash regression artifact ([`48941941`](https://github.com/Dicklesworthstone/frankenpandas/commit/48941941))
 
 ---
 
-## Unreleased
+## Commit Statistics (regenerated 2026-05-16)
 
-### Added (highlights since 2026-03-17)
+| Metric | Value |
+|--------|-------|
+| Total commits | **2,778** |
+| Date range | 2026-02-13 → 2026-05-16 |
+| Tags / releases | None (pre-release; 0.1.0 publish tracked by `br-frankenpandas-4clx`) |
+| Workspace crates | **12** |
+| Rust lines (all `.rs` in `crates/`, incl. test dirs) | **269,374** |
+| Rust lines, `src/` only (derived) | ~193,958 |
+| `#[test]` / `#[tokio::test]` markers in `src/` | **5,173** |
+| Public `fn` / `async fn` (top-level, `src/`) | 347 (counts free functions; total public-method surface is larger) |
+| Conformance fixture JSON files | **1,265** |
+| Conformance packet directories | **1,254** |
+| Documented divergences (`DISCREPANCIES.md`) | 14 (2 RESOLVED — DISC-005 + DISC-013; 12 active / ACCEPTED / INVESTIGATING / WILL-FIX) |
+| Beads tracked | 1,982 lines (1,980 closed; 2 open) |
+| IO formats supported | 14+ (CSV, TSV, FWF, JSON, JSONL, Parquet, Excel, Feather, IPC stream, SQL, HTML, XML, LaTeX, Markdown, Pickle, Stata, ORC, HDF5; plus deferred clipboard/gbq/sas) |
+| License | MIT + non-MIT AI-assistant rider |
 
-- **Row MultiIndex epic (br-frankenpandas-1zzp, closed 2026-04-22):**
-  six-slice umbrella shipped — DataFrame row_multiindex field,
-  GroupBy multi-key emit, tuple .loc/.xs/.get_loc, reshape
-  round-trips, IO n-level multi-index, live-oracle conformance.
-- **SQL backend foundation (br-frankenpandas-fd90 slice 1):**
-  generic SqlConnection trait added (sqlite today; postgres/mysql
-  planned under fd90 slices 2-3).
-- **Live-oracle CI enforcement (br-frankenpandas-d6xa):** 89
-  live_oracle_* tests now actually run in CI against pinned pandas
-  (previously skipped silently when legacy_pandas_code/ absent).
-- **Fuzz regression corpus in CI (br-frankenpandas-zjme):** new
-  fuzz-regression job runs the fuzz corpus on every PR.
-- **Fixture provenance + staleness gate (br-frankenpandas-boyr):**
-  pandas version pinned in oracle/requirements.txt; fixture
-  regeneration tracked.
-- **Live-oracle aggregate counter (br-frankenpandas-qi6y):**
-  ran/skipped/failed counters surfaced through fp-ci-gates.
-- **Supply-chain gates (br-frankenpandas-36qc):** cargo-audit +
-  cargo-deny jobs + dependabot.yml; cargo-machete added 2026-04-23
-  via br-frankenpandas-npki.
-- **Perf regression gate (br-frankenpandas-ing6):** perf_baselines
-  activated in CI with budgets.
-- **Rustdoc + # Panics: contract (br-frankenpandas-7cfm):**
-  cargo doc gated in CI with -D warnings.
-- **Nightly date pin (br-frankenpandas-1d9y):**
-  rust-toolchain.toml carries a dated nightly; CI reads it.
-- **#[non_exhaustive] on all 5 pub error enums (br-frankenpandas-tne4,
-  2026-04-23):** FrameError / IoError / ExprError / IndexError /
-  HarnessError — future variant additions stop being semver-major.
-- **Release-day metadata (br-frankenpandas-h8a8 + br-frankenpandas-lz1e,
-  2026-04-23):** workspace.package inheritance + per-crate
-  descriptions + keywords / categories / repository / authors +
-  license-file path via workspace root.
-- **Docs.rs metadata per crate (br-frankenpandas-wskz, 2026-04-23):**
-  [package.metadata.docs.rs] with all-features=true + docsrs cfg
-  + x86_64-linux target across all 12 crates.
-- **rustfmt.toml (br-frankenpandas-thty, 2026-04-23):** style
-  opinions captured (edition 2024, max_width 100, imports_granularity
-  Crate, group_imports StdExternalCrate, nightly-gated unstable
-  features enabled).
-- **Security + community infrastructure (2026-04-23):**
-  SECURITY.md (br-8k1i), AUTHORS.md (br-3d5q partial),
-  .github/FUNDING.yml (br-weh1), .github/PULL_REQUEST_TEMPLATE.md
-  (br-6d5s partial), .github/ISSUE_TEMPLATE/ 5 YAML forms
-  (br-3xtv), .mailmap (br-29lw), CITATION.cff (br-8opp),
-  .editorconfig + .gitattributes (br-xgsf).
-- **CI polish:** concurrency cancel-in-progress group
-  (br-frankenpandas-0iyb, 2026-04-23); removed dead cargo-llvm-cov
-  install step (br-frankenpandas-0a83, 2026-04-23).
-- **Monolith split progress (br-frankenpandas-lxhr, open):**
-  fp-conformance/src/lib.rs reduced from 63,391 → 27,937 lines
-  via 13 test-module extractions under src/tests/. Ongoing —
-  319 inline tests remain for future sessions.
+*(Numbers come from: `git log --oneline | wc -l` for commits; `find crates -name '*.rs' | xargs wc -l` for LOC; `grep -rE '^pub (fn|async fn)' crates/*/src/ | wc -l` for free-fn count; `grep -rE '#\[(test|tokio::test)\]' crates/*/src/ | wc -l` for test markers; `find crates/fp-conformance/fixtures -name '*.json' | wc -l` and `ls crates/fp-conformance/fixtures/packets | wc -l` for fixture/packet totals; `wc -l .beads/issues.jsonl` and `jq -r .status .beads/issues.jsonl | sort | uniq -c` for bead state.)*
 
-### Session metadata
+---
 
-- **2026-04-22** cc-pandas review-mode session (19 passes, 58 beads
-  filed honest-rated). Handoff committed at `REVIEW_SESSION_HANDOFF.md`.
-- **2026-04-22** PANDAS COMPLETE declaration recorded in `UPGRADE_LOG.md`.
-- **2026-04-23** cc-pandas solo implementation session (COD agents
-  hit Codex quota until 2026-04-28). ~16 beads shipped across
-  supply-chain, release-day metadata, CI polish, community
-  infrastructure, and monolith-split cohesive-slice extraction.
+## Open Workstreams (as of 2026-05-16)
 
-### Automation status
+Only **2 open beads** remain in the tracker:
 
-- **CHANGELOG catch-up** (br-frankenpandas-60du, this commit): one-shot
-  backfill — stats table accurate as of 2026-04-23. Further
-  automation via git-cliff or release-plz is the next release-bead
-  slice (br-frankenpandas-4clx).
+- **`br-frankenpandas-ctmet`** — 25 conformance packets expect Float64 where code returns Int64/Bool (`cumsum`/`cumprod`/`describe`/`round` dtype drift).
+- **`br-frankenpandas-qrn2w`** — `fp-groupby::groupby_sum` silently drops Timedelta64 values.
+
+Three packet families are still red in `cargo test -p fp-conformance` and documented in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md):
+
+- **DISC-011 / DISC-014** — Int64 → Float64 promotion on null introduction (pandas nullable-extension behavior we are not yet emulating).
+- **DISC-012** — Mixed naive/tz-aware CSV `parse_dates` falls back to raw strings.
+- **DISC-013** — Resolved, but its fixture still routes red via DISC-011.
+
+Long-running umbrellas tracked but not blocking:
+
+- **`br-frankenpandas-fd90`** (SQL): SQLite-only today; PostgreSQL/MySQL adapter slices planned. Trait surface is feature-complete.
+- **`br-frankenpandas-1zzp`** (Row MultiIndex): closed 2026-04-22; small follow-ups land case-by-case.
+- **`br-frankenpandas-4clx`** (Release): 0.1.0 publish to crates.io with signed tag + release-plz automation.
+- **`br-frankenpandas-lxhr`** (Monolith split): `fp-conformance/src/lib.rs` reduced from 63,391 → 27,937 lines via 13 test-module extractions; 319 inline tests remain.
+
+## Session metadata (chronicled)
+
+- **2026-04-22** cc-pandas review-mode session (19 passes, 58 beads filed honest-rated). Handoff at [`REVIEW_SESSION_HANDOFF.md`](REVIEW_SESSION_HANDOFF.md).
+- **2026-04-22** PANDAS COMPLETE declaration recorded in [`UPGRADE_LOG.md`](UPGRADE_LOG.md).
+- **2026-04-23** cc-pandas solo implementation session — supply-chain, release-day metadata, CI polish, community infrastructure, monolith-split cohesive-slice extraction.
+- **2026-05-02 → 2026-05-13** distributed agent-swarm sessions (cc-pandas + ntm-orchestrated worker panes) shipped the index-name preservation sweep, typed Index variants, format expansion, and Timedelta64 fast paths.
+
+---
+
+## Evidence sources
+
+- `git log --reverse --format="%h|%ad|%s" --date=short` for chronological history
+- `git log --since="..." --until="..." --format="%h %s"` for chunked window research
+- `git for-each-ref refs/tags` — confirmed no tags exist yet
+- `gh release list` — confirmed no releases yet
+- `.beads/issues.jsonl` — 1,982 issues, 1,980 closed at audit time
+- `crates/fp-conformance/DISCREPANCIES.md` — 14 documented divergences (DISC-001 through DISC-014)
+- `crates/fp-conformance/fixtures/packets/` — 1,254 packet directories
+- `find crates -name "*.rs" -type f | xargs wc -l` — line counts
+- `grep -rE '^pub (fn|async fn)' crates/*/src/ | wc -l` — public free-fn count
+- `grep -rE '#\[(test|tokio::test)\]' crates/*/src/ | wc -l` — test attribute count
+
+CHANGELOG last refreshed **2026-05-16** by a combined research pass (one main agent + four parallel sub-agents covering three commit windows: 2026-03-18 → 2026-04-15 / 2026-04-16 → 2026-05-01 / 2026-05-02 → 2026-05-16; plus a state-audit agent). Source-of-truth links use full SHA hashes that resolve via GitHub redirects.

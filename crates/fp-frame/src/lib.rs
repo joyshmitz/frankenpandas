@@ -27890,7 +27890,9 @@ impl DataFrame {
                         column_len: self.index.labels().len(),
                     });
                 }
-                let new_index = Index::new(labels);
+                // Per br-frankenpandas-gyej0: pandas df.set_axis(labels, axis=0)
+                // preserves index name (metadata separate from labels).
+                let new_index = Index::new(labels).rename_index(self.index.name());
                 Self::validate_duplicate_label_policy(
                     self.allows_duplicate_labels,
                     &new_index,

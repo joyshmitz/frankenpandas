@@ -31978,7 +31978,10 @@ impl DataFrame {
             });
             values.push(Scalar::Bool(result));
         }
-        Series::from_values("all".to_owned(), self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-tpwlx: pandas df.all(axis=1) preserves row index name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("all".to_owned(), index, column)
     }
 
     /// Whether any non-null value is truthy across columns per row.

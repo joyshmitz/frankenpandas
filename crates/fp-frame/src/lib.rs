@@ -32003,7 +32003,10 @@ impl DataFrame {
             });
             values.push(Scalar::Bool(result));
         }
-        Series::from_values("any".to_owned(), self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-29wua: pandas df.any(axis=1) preserves row index name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("any".to_owned(), index, column)
     }
 
     /// Median across columns per row.

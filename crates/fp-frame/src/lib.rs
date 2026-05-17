@@ -32134,7 +32134,11 @@ impl DataFrame {
             }
         }
         let label = if largest { "idxmax" } else { "idxmin" };
-        Series::from_values(label, self.index.labels().to_vec(), out)
+        // Per br-frankenpandas-nbpsb: pandas df.idxmin(axis=1)/idxmax(axis=1)
+        // preserve row-axis name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(out)?;
+        Series::new(label, index, column)
     }
 
     pub fn median_axis1(&self) -> Result<Series, FrameError> {

@@ -28713,10 +28713,17 @@ impl DataFrame {
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
         }
 
+        // Per br-frankenpandas-25zlp: pandas combine_first preserves shared
+        // index name (preserved when both operands agree, None otherwise).
+        let shared_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
         Ok(Self {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(union_labels),
+            index: Index::new(union_labels).rename_index(shared_name),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,

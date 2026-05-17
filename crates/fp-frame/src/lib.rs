@@ -25798,7 +25798,11 @@ impl DataFrame {
                 };
                 values.push(result);
             }
-            Series::from_values(func, self.index.labels().to_vec(), values)
+            // Per br-frankenpandas-8y2ns: pandas df.apply(func, axis=1)
+            // preserves df.index.name on the row-wise result.
+            let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+            let column = Column::from_values(values)?;
+            Series::new(func, index, column)
         } else {
             Err(FrameError::CompatibilityRejected(format!(
                 "axis must be 0 or 1, got {axis}"

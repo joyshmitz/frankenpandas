@@ -9516,8 +9516,18 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
         }
     }
 
+    // Per br-frankenpandas-m2i5n: pandas inner alignment preserves the
+    // shared index name (preserved when both operands agree, None when
+    // they differ). Mirrors align_non_unique handling.
+    let shared_name = if left.name() == right.name() {
+        left.name().map(str::to_owned)
+    } else {
+        None
+    };
+    let mut union_index = Index::new(output_labels);
+    union_index.name = shared_name;
     AlignmentPlan {
-        union_index: Index::new(output_labels),
+        union_index,
         left_positions,
         right_positions,
     }

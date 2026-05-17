@@ -20090,11 +20090,11 @@ pub fn to_datetime_with_options(
         converted.push(result);
     }
 
-    Series::from_values(
-        series.name().to_owned(),
-        series.index().labels().to_vec(),
-        converted,
-    )
+    // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(converted)?;
+    Series::new(series.name().to_owned(), index, column)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

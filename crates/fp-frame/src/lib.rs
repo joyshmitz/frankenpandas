@@ -13171,7 +13171,13 @@ impl SeriesGroupBy<'_> {
             values.push(Scalar::Float64(stat(&left, &right)?));
         }
 
-        Series::from_values(name, order, values)
+        // Per br-frankenpandas-lanwk: pandas SeriesGroupBy corr/cov returns
+        // group-keyed Series whose .index.name == by.name. Sister to p6y8q.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(order).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(name, index, column)
     }
 
     /// Group labels in first-seen order.

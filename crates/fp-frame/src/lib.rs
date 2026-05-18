@@ -14604,7 +14604,19 @@ impl SeriesGroupBy<'_> {
             values.push(func(&group)?);
         }
 
-        self.series_from_groupby_apply_parts(name, order, values)
+        // Per br-frankenpandas-usxgp: apply_scalar's result is group-keyed
+        // (one row per group), so the index axis name is self.by.name(),
+        // not source-axis name. Bypass series_from_groupby_apply_parts
+        // (which uses source-axis name for same-shape transforms).
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(order).rename_index(idx_name);
+        let column = if values.is_empty() {
+            Column::new(self.series.dtype(), values)?
+        } else {
+            Column::from_values(values)?
+        };
+        Series::new(name, index, column)
     }
 
     /// Keep or discard whole groups with a caller-supplied predicate.

@@ -14355,7 +14355,14 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values("count", out_labels, out_counts)
+        // Per br-frankenpandas-6snf4: pandas SeriesGroupBy.value_counts result
+        // is MultiIndex with [by-name, source-name]. Our flat-composite axis
+        // preserves at least the by-name.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(out_labels).rename_index(idx_name);
+        let column = Column::from_values(out_counts)?;
+        Series::new("count", index, column)
     }
 
     /// Summary statistics per group.

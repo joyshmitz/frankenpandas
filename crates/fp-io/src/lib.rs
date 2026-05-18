@@ -129,7 +129,7 @@ use orc_rust::{
     ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
 };
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
-use quick_xml::{Reader as XmlReader, events::Event};
+use quick_xml::{Reader as XmlReader, XmlVersion, events::Event};
 use scraper::{ElementRef, Html, Selector};
 use thiserror::Error;
 
@@ -1638,6 +1638,7 @@ pub fn read_xml_str_with_options(
     let mut current_row: Option<BTreeMap<String, Scalar>> = None;
     let mut current_field: Option<String> = None;
     let mut field_text = String::new();
+    let mut xml_version = XmlVersion::Implicit1_0;
 
     loop {
         match reader
@@ -1681,7 +1682,7 @@ pub fn read_xml_str_with_options(
             Event::Text(event) => {
                 if current_field.is_some() {
                     let decoded = event
-                        .xml_content()
+                        .xml_content(xml_version)
                         .map_err(|err| IoError::Xml(err.to_string()))?;
                     field_text.push_str(&decoded);
                 }
@@ -1689,7 +1690,7 @@ pub fn read_xml_str_with_options(
             Event::CData(event) => {
                 if current_field.is_some() {
                     let decoded = event
-                        .xml_content()
+                        .xml_content(xml_version)
                         .map_err(|err| IoError::Xml(err.to_string()))?;
                     field_text.push_str(&decoded);
                 }
@@ -1722,7 +1723,16 @@ pub fn read_xml_str_with_options(
                 }
             }
             Event::Eof => break,
-            Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) => {}
+            Event::Decl(decl) => {
+                if let Ok(v) = decl.version() {
+                    xml_version = match v.as_ref() {
+                        b"1.0" => XmlVersion::Explicit1_0,
+                        b"1.1" => XmlVersion::Explicit1_1,
+                        _ => xml_version,
+                    };
+                }
+            }
+            Event::PI(_) | Event::DocType(_) | Event::Comment(_) => {}
         }
         buf.clear();
     }

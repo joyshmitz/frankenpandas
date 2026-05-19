@@ -14223,6 +14223,24 @@ impl SeriesGroupBy<'_> {
 
     /// Standard deviation of each group (ddof=1).
     pub fn std(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-pwt7r: Timedelta64 std preserves dtype
+        // (mirror fp-types nanstd j8ntk path).
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_values(|ns_vals| {
+                if ns_vals.len() < 2 {
+                    return fp_types::Timedelta::NAT;
+                }
+                let n = ns_vals.len() as f64;
+                let mean = ns_vals.iter().map(|v| *v as f64).sum::<f64>() / n;
+                let var =
+                    ns_vals.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let std_ns = var.sqrt();
+                if !std_ns.is_finite() {
+                    return fp_types::Timedelta::NAT;
+                }
+                std_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            });
+        }
         self.agg_numeric(
             |nums| {
                 if nums.len() < 2 {
@@ -14239,6 +14257,23 @@ impl SeriesGroupBy<'_> {
 
     /// Variance of each group (ddof=1).
     pub fn var(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-pwt7r: Timedelta64 var preserves dtype
+        // (mirror fp-types nanvar j8ntk path).
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_values(|ns_vals| {
+                if ns_vals.len() < 2 {
+                    return fp_types::Timedelta::NAT;
+                }
+                let n = ns_vals.len() as f64;
+                let mean = ns_vals.iter().map(|v| *v as f64).sum::<f64>() / n;
+                let var_ns =
+                    ns_vals.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                if !var_ns.is_finite() {
+                    return fp_types::Timedelta::NAT;
+                }
+                var_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            });
+        }
         self.agg_numeric(
             |nums| {
                 if nums.len() < 2 {
@@ -14253,6 +14288,26 @@ impl SeriesGroupBy<'_> {
 
     /// Median of each group.
     pub fn median(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-pwt7r: Timedelta64 median preserves dtype.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_values(|ns_vals| {
+                if ns_vals.is_empty() {
+                    return fp_types::Timedelta::NAT;
+                }
+                let mut sorted: Vec<f64> = ns_vals.iter().map(|v| *v as f64).collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                let median_ns = if n.is_multiple_of(2) {
+                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+                } else {
+                    sorted[n / 2]
+                };
+                if !median_ns.is_finite() {
+                    return fp_types::Timedelta::NAT;
+                }
+                median_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            });
+        }
         self.agg_numeric(
             |nums| {
                 let mut sorted = nums.to_vec();
@@ -14266,6 +14321,40 @@ impl SeriesGroupBy<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// Per br-frankenpandas-pwt7r: per-group Timedelta accumulator that
+    /// passes the ns slice into a closure producing the emitted ns value.
+    /// Used by std/var/median where the reduction needs the full set of
+    /// values (not just sum/count).
+    fn agg_timedelta_values<F>(&self, reducer: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[i64]) -> i64,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+        for (i, key) in order_keys.iter().enumerate() {
+            let indices = &groups[key];
+            let ns_vals: Vec<i64> = indices
+                .iter()
+                .filter_map(|&idx| match &self.series.column.values()[idx] {
+                    Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => Some(*ns),
+                    _ => None,
+                })
+                .collect();
+            labels.push(order[i].clone());
+            values.push(Scalar::Timedelta64(reducer(&ns_vals)));
+        }
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::new(DType::Timedelta64, values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Product of each group.

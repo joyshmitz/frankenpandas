@@ -9594,6 +9594,16 @@ impl Series {
         let b_vals = other.column().values();
         let len = a_vals.len().min(b_vals.len());
 
+        // Per br-frankenpandas-of7v2: extract ns for Timedelta64 so cov/
+        // corr on td_series.cov(td_series) returns f64 statistics rather
+        // than silently dropping every pair.
+        let extract_f64 = |v: &Scalar| -> Option<f64> {
+            match v {
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
+            }
+        };
+
         let mut sum_x = 0.0_f64;
         let mut sum_y = 0.0_f64;
         let mut sum_xy = 0.0_f64;
@@ -9602,10 +9612,7 @@ impl Series {
         let mut count = 0_usize;
 
         for i in 0..len {
-            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
-                && !x.is_nan()
-                && !y.is_nan()
-            {
+            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
                 sum_x += x;
                 sum_y += y;
                 sum_xy += x * y;

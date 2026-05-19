@@ -11804,19 +11804,11 @@ impl Resample<'_> {
 
     /// Resample variance.
     pub fn var(&self) -> Result<Series, FrameError> {
-        self.aggregate_scalar(|vals| {
-            let non_null: Vec<f64> = vals.iter().filter_map(|v| v.to_f64().ok()).collect();
-            if non_null.is_empty() {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let n = non_null.len() as f64;
-            if n < 2.0 {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mean = non_null.iter().sum::<f64>() / n;
-            let variance = non_null.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-            Scalar::Float64(variance)
-        })
+        // Per br-frankenpandas-x3lk4: mirror Resample::std above by routing
+        // through fp_types::nanvar, which preserves Timedelta64 dtype
+        // (br-j8ntk). The previous inline f64 closure silently dropped
+        // Timedelta values via to_f64().ok() filter.
+        self.aggregate_scalar(|vals| fp_types::nanvar(vals, 1))
     }
 
     /// Resample median.

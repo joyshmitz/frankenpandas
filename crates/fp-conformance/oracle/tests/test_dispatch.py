@@ -26,6 +26,19 @@ def _utf8_series_payload(values):
     }
 
 
+def _frame_payload(columns):
+    first_column = next(iter(columns.values()))
+    return {
+        "index": [
+            {"kind": "int64", "value": i} for i, _ in enumerate(first_column)
+        ],
+        "columns": {
+            name: [{"kind": "int64", "value": int(v)} for v in values]
+            for name, values in columns.items()
+        },
+    }
+
+
 def _expected_values(response):
     return [item["value"] for item in response["expected_series"]["values"]]
 
@@ -61,6 +74,17 @@ def test_series_nunique_counts_distinct(oracle, pd):
     response = oracle.dispatch(pd, payload)
     assert response["expected_scalar"]["kind"] == "int64"
     assert response["expected_scalar"]["value"] == 3
+
+
+def test_dataframe_cumsum_preserves_integer_dtype(oracle, pd):
+    payload = {
+        "operation": "dataframe_cumsum",
+        "frame": _frame_payload({"value": [1, 2, 3]}),
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_frame"]["columns"]["value"]
+    assert [item["kind"] for item in values] == ["int64", "int64", "int64"]
+    assert [item["value"] for item in values] == [1, 3, 6]
 
 
 @pytest.mark.parametrize(

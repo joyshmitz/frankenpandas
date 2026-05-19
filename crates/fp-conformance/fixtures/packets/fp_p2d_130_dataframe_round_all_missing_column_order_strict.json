@@ -5,48 +5,108 @@
   "operation": "dataframe_round",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "5379d0689062e1c438c3dae03fa6073c1ab15a162b8245d820a74c674ea68c3a",
+    "generated_at": "2026-05-19T22:26:55Z"
   },
   "round_decimals": 2,
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" },
-      { "kind": "utf8", "value": "r3" }
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r2"
+      },
+      {
+        "kind": "utf8",
+        "value": "r3"
+      }
     ],
-    "column_order": ["z", "a"],
+    "column_order": [
+      "z",
+      "a"
+    ],
     "columns": {
       "a": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_t" }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_t"
+        }
       ],
       "z": [
-        { "kind": "null", "value": "na_t" },
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "na_n" }
+        {
+          "kind": "null",
+          "value": "na_t"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" },
-      { "kind": "utf8", "value": "r3" }
+      {
+        "kind": "utf8",
+        "value": "r1"
+      },
+      {
+        "kind": "utf8",
+        "value": "r2"
+      },
+      {
+        "kind": "utf8",
+        "value": "r3"
+      }
     ],
-    "column_order": ["z", "a"],
     "columns": {
       "z": [
-        { "kind": "null", "value": "na_t" },
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "na_n" }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ],
       "a": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_t" }
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
       ]
-    }
+    },
+    "column_order": [
+      "z",
+      "a"
+    ]
   }
 }

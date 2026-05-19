@@ -2674,6 +2674,37 @@ def op_dataframe_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_cumulative(
+    pd, payload: dict[str, Any], method: str, op_name: str
+) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = getattr(frame, method)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_cumsum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_cumulative(pd, payload, "cumsum", "dataframe_cumsum")
+
+
+def op_dataframe_cumprod(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_cumulative(pd, payload, "cumprod", "dataframe_cumprod")
+
+
+def op_dataframe_cummax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_cumulative(pd, payload, "cummax", "dataframe_cummax")
+
+
+def op_dataframe_cummin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_cumulative(pd, payload, "cummin", "dataframe_cummin")
+
+
 def op_dataframe_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -6381,6 +6412,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_clip(pd, payload)
     if op in {"dataframe_abs", "data_frame_abs"}:
         return op_dataframe_abs(pd, payload)
+    if op in {"dataframe_cumsum", "data_frame_cumsum"}:
+        return op_dataframe_cumsum(pd, payload)
+    if op in {"dataframe_cumprod", "data_frame_cumprod"}:
+        return op_dataframe_cumprod(pd, payload)
+    if op in {"dataframe_cummax", "data_frame_cummax"}:
+        return op_dataframe_cummax(pd, payload)
+    if op in {"dataframe_cummin", "data_frame_cummin"}:
+        return op_dataframe_cummin(pd, payload)
     if op in {"dataframe_describe", "data_frame_describe"}:
         return op_dataframe_describe(pd, payload)
     if op in {"dataframe_corr", "data_frame_corr"}:

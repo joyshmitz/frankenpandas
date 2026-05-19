@@ -5,48 +5,108 @@
   "operation": "dataframe_round",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "5379d0689062e1c438c3dae03fa6073c1ab15a162b8245d820a74c674ea68c3a",
+    "generated_at": "2026-05-19T22:26:56Z"
   },
   "round_decimals": 1,
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "dup" },
-      { "kind": "utf8", "value": "dup" },
-      { "kind": "utf8", "value": "z" }
+      {
+        "kind": "utf8",
+        "value": "dup"
+      },
+      {
+        "kind": "utf8",
+        "value": "dup"
+      },
+      {
+        "kind": "utf8",
+        "value": "z"
+      }
     ],
-    "column_order": ["a", "b"],
+    "column_order": [
+      "a",
+      "b"
+    ],
     "columns": {
       "a": [
-        { "kind": "float64", "value": 1.24 },
-        { "kind": "float64", "value": 5.66 },
-        { "kind": "float64", "value": -2.24 }
+        {
+          "kind": "float64",
+          "value": 1.24
+        },
+        {
+          "kind": "float64",
+          "value": 5.66
+        },
+        {
+          "kind": "float64",
+          "value": -2.24
+        }
       ],
       "b": [
-        { "kind": "float64", "value": -2.66 },
-        { "kind": "float64", "value": 3.04 },
-        { "kind": "float64", "value": 0.05 }
+        {
+          "kind": "float64",
+          "value": -2.66
+        },
+        {
+          "kind": "float64",
+          "value": 3.04
+        },
+        {
+          "kind": "float64",
+          "value": 0.05
+        }
       ]
     }
   },
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "dup" },
-      { "kind": "utf8", "value": "dup" },
-      { "kind": "utf8", "value": "z" }
+      {
+        "kind": "utf8",
+        "value": "dup"
+      },
+      {
+        "kind": "utf8",
+        "value": "dup"
+      },
+      {
+        "kind": "utf8",
+        "value": "z"
+      }
     ],
-    "column_order": ["a", "b"],
     "columns": {
       "a": [
-        { "kind": "float64", "value": 1.2 },
-        { "kind": "float64", "value": 5.7 },
-        { "kind": "float64", "value": -2.2 }
+        {
+          "kind": "float64",
+          "value": 1.2
+        },
+        {
+          "kind": "float64",
+          "value": 5.7
+        },
+        {
+          "kind": "float64",
+          "value": -2.2
+        }
       ],
       "b": [
-        { "kind": "float64", "value": -2.7 },
-        { "kind": "float64", "value": 3.0 },
-        { "kind": "float64", "value": 0.1 }
+        {
+          "kind": "float64",
+          "value": -2.7
+        },
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 0.0
+        }
       ]
-    }
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }

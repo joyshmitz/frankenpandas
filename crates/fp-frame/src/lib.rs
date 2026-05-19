@@ -6966,6 +6966,31 @@ impl Series {
                     )
                 });
         }
+        // Per br-frankenpandas-9kt88: pandas Timedelta64 idxmin compares ns
+        // directly. f64 path below errored via to_f64() on every Timedelta
+        // value, propagating the failure.
+        if matches!(self.column.dtype(), DType::Timedelta64) {
+            let mut best_idx: Option<usize> = None;
+            let mut best_ns: i64 = i64::MAX;
+            for (i, val) in self.column.values().iter().enumerate() {
+                if let Scalar::Timedelta64(ns) = val {
+                    if *ns == Timedelta::NAT {
+                        continue;
+                    }
+                    if best_idx.is_none() || *ns < best_ns {
+                        best_ns = *ns;
+                        best_idx = Some(i);
+                    }
+                }
+            }
+            return best_idx
+                .map(|i| self.index.labels()[i].clone())
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmin of empty or all-null series".to_owned(),
+                    )
+                });
+        }
 
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::INFINITY;
@@ -7005,6 +7030,29 @@ impl Series {
                     let s_ref = s.as_str();
                     if best_idx.is_none() || s_ref > best.unwrap() {
                         best = Some(s_ref);
+                        best_idx = Some(i);
+                    }
+                }
+            }
+            return best_idx
+                .map(|i| self.index.labels()[i].clone())
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmax of empty or all-null series".to_owned(),
+                    )
+                });
+        }
+        // Per br-frankenpandas-9kt88: sister to idxmin Timedelta branch.
+        if matches!(self.column.dtype(), DType::Timedelta64) {
+            let mut best_idx: Option<usize> = None;
+            let mut best_ns: i64 = i64::MIN;
+            for (i, val) in self.column.values().iter().enumerate() {
+                if let Scalar::Timedelta64(ns) = val {
+                    if *ns == Timedelta::NAT {
+                        continue;
+                    }
+                    if best_idx.is_none() || *ns > best_ns {
+                        best_ns = *ns;
                         best_idx = Some(i);
                     }
                 }

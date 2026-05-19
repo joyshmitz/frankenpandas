@@ -28604,9 +28604,12 @@ impl DataFrame {
             };
             let dt_s = sc.dtype();
             let dt_o = oc.dtype();
-            if (dt_s != DType::Int64 && dt_s != DType::Float64)
-                || (dt_o != DType::Int64 && dt_o != DType::Float64)
-            {
+            // Per br-frankenpandas-ncuvp: include Timedelta64. Series::corr
+            // now handles Timedelta pairs via br-of7v2.
+            let numeric_or_td = |dt: DType| {
+                matches!(dt, DType::Int64 | DType::Float64 | DType::Timedelta64)
+            };
+            if !numeric_or_td(dt_s) || !numeric_or_td(dt_o) {
                 continue;
             }
 
@@ -28632,6 +28635,8 @@ impl DataFrame {
             1 => {
                 // Row-wise correlation: for each row index present in both,
                 // compute correlation across numeric columns
+                // Per br-frankenpandas-ncuvp: include Timedelta64 columns
+                // — Series::corr handles Timedelta pairs via br-of7v2.
                 let shared_cols: Vec<String> = self
                     .column_order
                     .iter()
@@ -28639,11 +28644,11 @@ impl DataFrame {
                         other.columns.contains_key(name.as_str())
                             && matches!(
                                 self.columns[name.as_str()].dtype(),
-                                DType::Int64 | DType::Float64
+                                DType::Int64 | DType::Float64 | DType::Timedelta64
                             )
                             && matches!(
                                 other.columns[name.as_str()].dtype(),
-                                DType::Int64 | DType::Float64
+                                DType::Int64 | DType::Float64 | DType::Timedelta64
                             )
                     })
                     .cloned()

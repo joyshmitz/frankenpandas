@@ -87,6 +87,51 @@ def test_dataframe_cumsum_preserves_integer_dtype(oracle, pd):
     assert [item["value"] for item in values] == [1, 3, 6]
 
 
+def test_groupby_min_preserves_integer_dtype(oracle, pd):
+    payload = {
+        "operation": "groupby_min",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(4)],
+            "values": [
+                {"kind": "utf8", "value": value}
+                for value in ["a", "b", "a", "b"]
+            ],
+        },
+        "right": _series_payload([10, 20, 30, 15], [0, 1, 2, 3]),
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+    assert [item["kind"] for item in values] == ["int64", "int64"]
+    assert [item["value"] for item in values] == [10, 15]
+
+
+def test_groupby_first_encodes_nullable_integer_missing_values(oracle, pd):
+    payload = {
+        "operation": "groupby_first",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "utf8", "value": value} for value in ["x", "y", "z"]
+            ],
+        },
+        "right": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "null", "value": "null"},
+                {"kind": "int64", "value": 2},
+                {"kind": "null", "value": "null"},
+            ],
+        },
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+    assert values == [
+        {"kind": "null", "value": "null"},
+        {"kind": "int64", "value": 2},
+        {"kind": "null", "value": "null"},
+    ]
+
+
 @pytest.mark.parametrize(
     ("operation", "expected"),
     [

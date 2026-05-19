@@ -178,12 +178,18 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
     raise OracleError(f"unsupported scalar kind: {kind!r}")
 
 
+def scalar_is_pandas_extension_missing(value: Any) -> bool:
+    return type(value).__name__ in {"NAType", "NaTType"}
+
+
 def scalar_to_json(value: Any) -> dict[str, Any]:
     if hasattr(value, "item") and callable(value.item):
         try:
             value = value.item()
         except Exception:
             pass
+    if scalar_is_pandas_extension_missing(value):
+        return {"kind": "null", "value": "null"}
     if value is None:
         return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
@@ -239,7 +245,35 @@ def multiindex_to_json(index) -> dict[str, Any]:
 
 
 def scalar_is_missing(value: Any) -> bool:
-    return value is None or (isinstance(value, float) and math.isnan(value))
+    return (
+        value is None
+        or (isinstance(value, float) and math.isnan(value))
+        or scalar_is_pandas_extension_missing(value)
+    )
+
+
+def series_dtype_for_payload_values(values: list[dict[str, Any]]) -> str | None:
+    kinds = {item.get("kind") for item in values if item.get("kind") != "null"}
+    if not kinds:
+        return None
+
+    null_markers = [
+        str(item.get("value")) for item in values if item.get("kind") == "null"
+    ]
+    has_null = bool(null_markers)
+    has_nan_marker = any(marker in {"nan", "na_n"} for marker in null_markers)
+
+    if kinds == {"int64"}:
+        if has_null:
+            return "float64" if has_nan_marker else "Int64"
+        return "int64"
+    if kinds == {"bool"}:
+        if has_null:
+            return "object" if has_nan_marker else "boolean"
+        return "bool"
+    if kinds <= {"bool", "int64", "float64"}:
+        return "float64"
+    return None
 
 
 def encode_groupby_key_component(value: Any) -> str:
@@ -437,7 +471,11 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
 
     value_index = [label_from_json(item) for item in right["index"]]
     values = [scalar_from_json(item) for item in right["values"]]
-    value_series = pd.Series(values, index=value_index, dtype="float64")
+    if agg in {"min", "max", "first", "last"}:
+        value_dtype = series_dtype_for_payload_values(right["values"])
+    else:
+        value_dtype = "float64"
+    value_series = pd.Series(values, index=value_index, dtype=value_dtype)
     groupby_keys = payload.get("groupby_keys")
 
     if isinstance(groupby_keys, list) and groupby_keys:

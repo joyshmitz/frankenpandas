@@ -6398,6 +6398,30 @@ impl Series {
             }
             return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
+        // Per br-frankenpandas-v7spg: pandas td_series.cummin() returns
+        // Timedelta64. Sister to br-gqrmf (cumsum Timedelta) and fp-types
+        // nancummin (br-x0x91).
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing())
+            && values
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+        {
+            let mut acc: Option<i64> = None;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                        acc = Some(acc.map_or(*ns, |a| a.min(*ns)));
+                        out.push(Scalar::Timedelta64(acc.unwrap()));
+                    }
+                    _ => out.push(Scalar::Timedelta64(Timedelta::NAT)),
+                }
+            }
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+        }
 
         let mut acc = f64::INFINITY;
         let mut out = Vec::with_capacity(self.len());
@@ -6465,6 +6489,30 @@ impl Series {
                         out.push(Scalar::Utf8(acc.unwrap().to_string()));
                     }
                     _ => out.push(Scalar::Null(NullKind::NaN)),
+                }
+            }
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+        }
+        // Per br-frankenpandas-v7spg: pandas td_series.cummax() returns
+        // Timedelta64. Sister to cummin Timedelta branch above and fp-types
+        // nancummax (br-x0x91).
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing())
+            && values
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+        {
+            let mut acc: Option<i64> = None;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                        acc = Some(acc.map_or(*ns, |a| a.max(*ns)));
+                        out.push(Scalar::Timedelta64(acc.unwrap()));
+                    }
+                    _ => out.push(Scalar::Timedelta64(Timedelta::NAT)),
                 }
             }
             return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);

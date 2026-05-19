@@ -9565,49 +9565,21 @@ impl Series {
     /// Internal: walk paired non-null values once and accumulate the
     /// (sum_x, sum_y, sum_xy, count) used by both cov + corr.
     fn cov_pair_sums(&self, other: &Self) -> Result<(f64, f64, f64, usize), FrameError> {
-        let a_vals = self.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len().min(b_vals.len());
-
-        let extract_f64 = |value: &Scalar| -> Option<f64> {
-            match value {
-                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
-                Scalar::Timedelta64(_) => None,
-                other => other.to_f64().ok().filter(|v| !v.is_nan()),
-            }
-        };
-
         let mut sum_x = 0.0_f64;
         let mut sum_y = 0.0_f64;
         let mut sum_xy = 0.0_f64;
         let mut count = 0_usize;
-        for i in 0..len {
-            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
-                sum_x += x;
-                sum_y += y;
-                sum_xy += x * y;
-                count += 1;
-            }
+        for (x, y) in self.aligned_numeric_pairs(other)? {
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            count += 1;
         }
         Ok((sum_x, sum_y, sum_xy, count))
     }
 
     /// Internal: compute covariance, var_x, var_y, count between two Series.
     fn cov_components(&self, other: &Self) -> Result<(f64, f64, f64, usize), FrameError> {
-        let a_vals = self.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len().min(b_vals.len());
-
-        // Per br-frankenpandas-of7v2: extract ns for Timedelta64 so cov/
-        // corr on td_series.cov(td_series) returns f64 statistics rather
-        // than silently dropping every pair.
-        let extract_f64 = |v: &Scalar| -> Option<f64> {
-            match v {
-                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
-                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
-            }
-        };
-
         let mut sum_x = 0.0_f64;
         let mut sum_y = 0.0_f64;
         let mut sum_xy = 0.0_f64;
@@ -9615,15 +9587,13 @@ impl Series {
         let mut sum_y2 = 0.0_f64;
         let mut count = 0_usize;
 
-        for i in 0..len {
-            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
-                sum_x += x;
-                sum_y += y;
-                sum_xy += x * y;
-                sum_x2 += x * x;
-                sum_y2 += y * y;
-                count += 1;
-            }
+        for (x, y) in self.aligned_numeric_pairs(other)? {
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+            sum_y2 += y * y;
+            count += 1;
         }
 
         if count < 2 {
@@ -9640,32 +9610,36 @@ impl Series {
         Ok((cov, var_x, var_y, count))
     }
 
+    fn aligned_numeric_pairs(&self, other: &Self) -> Result<Vec<(f64, f64)>, FrameError> {
+        let (left, right) = self.align(other, AlignMode::Inner)?;
+        Ok(left
+            .values()
+            .iter()
+            .zip(right.values().iter())
+            .filter_map(|(left, right)| {
+                Some((
+                    Self::pairwise_numeric_value(left)?,
+                    Self::pairwise_numeric_value(right)?,
+                ))
+            })
+            .collect())
+    }
+
+    // pandas Series.corr/cov align on index first, then drop pairs where
+    // either side is missing/non-numeric. Timedelta64 participates by ns.
+    fn pairwise_numeric_value(value: &Scalar) -> Option<f64> {
+        match value {
+            Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+            Scalar::Timedelta64(_) => None,
+            other => other.to_f64().ok().filter(|value| !value.is_nan()),
+        }
+    }
+
     /// Compute the Spearman rank correlation with another Series.
     ///
     /// Ranks both Series and then computes Pearson correlation on the ranks.
     pub fn corr_spearman(&self, other: &Self) -> Result<f64, FrameError> {
-        let a_vals = self.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len().min(b_vals.len());
-
-        // Per br-frankenpandas-xekug: pandas Spearman/Kendall on Timedelta
-        // ranks by ns order and returns f64. Extract ns for Timedelta64
-        // values; to_f64() errors on them so the fallback silently drops
-        // every Timedelta pair.
-        let extract_f64 = |v: &Scalar| -> Option<f64> {
-            match v {
-                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
-                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
-            }
-        };
-
-        // Collect valid pairs
-        let mut pairs: Vec<(f64, f64)> = Vec::new();
-        for i in 0..len {
-            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
-                pairs.push((x, y));
-            }
-        }
+        let pairs = self.aligned_numeric_pairs(other)?;
 
         let n = pairs.len();
         if n < 2 {
@@ -9682,25 +9656,7 @@ impl Series {
 
     /// Compute the Kendall tau-b correlation with another Series.
     pub fn corr_kendall(&self, other: &Self) -> Result<f64, FrameError> {
-        let a_vals = self.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len().min(b_vals.len());
-
-        // Per br-frankenpandas-xekug: extract ns for Timedelta64 so Kendall
-        // ranks pairs by ns order rather than silently dropping them.
-        let extract_f64 = |v: &Scalar| -> Option<f64> {
-            match v {
-                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
-                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
-            }
-        };
-
-        let mut pairs: Vec<(f64, f64)> = Vec::new();
-        for i in 0..len {
-            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
-                pairs.push((x, y));
-            }
-        }
+        let pairs = self.aligned_numeric_pairs(other)?;
 
         let n = pairs.len();
         if n < 2 {
@@ -51534,6 +51490,33 @@ mod tests {
     }
 
     #[test]
+    fn series_corr_and_cov_align_by_index_before_pairing() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![2_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        assert!((a.corr(&b).unwrap() + 1.0).abs() < 1e-10);
+        assert!((a.cov(&b).unwrap() + 10.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn dataframe_corr_basic() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -53995,6 +53978,33 @@ mod tests {
 
         let r = a.corr_spearman(&b).unwrap();
         assert!((r - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_rank_correlations_align_by_index_before_pairing() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![2_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        assert!((a.corr_spearman(&b).unwrap() + 1.0).abs() < 1e-10);
+        assert!((a.corr_kendall(&b).unwrap() + 1.0).abs() < 1e-10);
     }
 
     #[test]

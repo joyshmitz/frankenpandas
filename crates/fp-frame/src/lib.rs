@@ -32494,6 +32494,25 @@ impl DataFrame {
         let n_rows = self.len();
         let mut out_cols = BTreeMap::new();
 
+        // Per br-frankenpandas-r82bc: detect uniformly-Timedelta64 column and
+        // preserve dtype. Sister surgery to pct_change_axis1's
+        // br-frankenpandas-dj6rv Timedelta64 branch — but for diff the result
+        // is Timedelta64 (delta of deltas), not f64 (dimensionless ratio).
+        let all_timedelta = self.column_order.iter().all(|name| {
+            let col = &self.columns[name];
+            matches!(col.dtype(), DType::Timedelta64)
+                || col.values().iter().all(|v| {
+                    matches!(v, Scalar::Timedelta64(_))
+                        || matches!(v, Scalar::Null(NullKind::NaT))
+                        || v.is_missing()
+                })
+        }) && self.column_order.iter().any(|name| {
+            self.columns[name]
+                .values()
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+        });
+
         for (j, name) in self.column_order.iter().enumerate() {
             let mut vals = Vec::with_capacity(n_rows);
             let prev_idx = if periods >= 0 {
@@ -32515,7 +32534,17 @@ impl DataFrame {
                     let curr_val = &current_col.values()[i];
                     let prev_val = &prev_col.values()[i];
                     if curr_val.is_missing() || prev_val.is_missing() {
-                        vals.push(Scalar::Null(NullKind::NaN));
+                        if all_timedelta {
+                            vals.push(Scalar::Timedelta64(Timedelta::NAT));
+                        } else {
+                            vals.push(Scalar::Null(NullKind::NaN));
+                        }
+                        continue;
+                    }
+                    if let (Scalar::Timedelta64(c_ns), Scalar::Timedelta64(p_ns)) =
+                        (curr_val, prev_val)
+                    {
+                        vals.push(Scalar::Timedelta64(Timedelta::sub(*c_ns, *p_ns)));
                         continue;
                     }
                     match (curr_val.to_f64(), prev_val.to_f64()) {
@@ -32523,10 +32552,17 @@ impl DataFrame {
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
                     }
                 }
+            } else if all_timedelta {
+                vals.resize(n_rows, Scalar::Timedelta64(Timedelta::NAT));
             } else {
                 vals.resize(n_rows, Scalar::Null(NullKind::NaN));
             }
-            out_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+            let out_dtype = if all_timedelta {
+                DType::Timedelta64
+            } else {
+                DType::Float64
+            };
+            out_cols.insert(name.clone(), Column::new(out_dtype, vals)?);
         }
         Self::new_with_column_order(self.index.clone(), out_cols, self.column_order.clone())
     }

@@ -5681,6 +5681,21 @@ impl Series {
     pub fn std(&self) -> Result<Scalar, FrameError> {
         match self.var()? {
             Scalar::Float64(v) => Ok(Scalar::Float64(v.sqrt())),
+            // Per br-frankenpandas-j0ilf: var() returns Scalar::Timedelta64
+            // for Timedelta input (br-yy0ks); std must take sqrt rather than
+            // returning the variance unchanged. Mirror fp-types nanstd
+            // (br-j8ntk): sqrt in ns-f64 space, clamp back into i64 ns.
+            Scalar::Timedelta64(ns_var) => {
+                if ns_var == Timedelta::NAT {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let std_ns = (ns_var as f64).sqrt();
+                if !std_ns.is_finite() {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let clamped = std_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+                Ok(Scalar::Timedelta64(clamped as i64))
+            }
             other => Ok(other),
         }
     }

@@ -9307,6 +9307,11 @@ impl Series {
             for (i, v) in vals.iter().enumerate() {
                 if v.is_missing() {
                     null_positions.push(i);
+                // Per br-frankenpandas-5pxmt: rank Timedelta64 by ns count.
+                // pandas ranks td values as ordered numerics; the f64
+                // fallback below silently dropped them via to_f64().
+                } else if let Scalar::Timedelta64(ns) = v {
+                    sortable.push((i, *ns as f64));
                 } else if let Ok(f) = v.to_f64() {
                     sortable.push((i, f));
                 } else {

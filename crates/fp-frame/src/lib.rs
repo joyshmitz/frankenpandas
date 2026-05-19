@@ -930,6 +930,24 @@ fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
     }
 }
 
+/// Per br-frankenpandas-ccf67: true when every non-missing scalar in
+/// `vals` is Timedelta64 (and at least one is). Used by DataFrameGroupBy
+/// cumulative transforms to detect per-column Timedelta input from
+/// inside the dtype-agnostic transform_groups closure.
+fn vals_are_timedelta(vals: &[Scalar]) -> bool {
+    let mut saw = false;
+    for v in vals {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Timedelta64(_) => saw = true,
+            _ => return false,
+        }
+    }
+    saw
+}
+
 fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
     if let Some(dtype) = mode_output_dtype(&values) {
         Ok(Column::new(dtype, values)?)
@@ -38113,7 +38131,29 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).cumsum()`.
     pub fn cumsum(&self) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-ccf67: per-column Timedelta detection — the
+        // transform closure sees all-Timedelta vals when its source column
+        // is Timedelta64. Sister to SeriesGroupBy::cumsum br-v6j38.
         self.transform_groups(|vals| {
+            if vals_are_timedelta(vals) {
+                let mut acc: i64 = 0;
+                let mut started = false;
+                return vals
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = if started {
+                                fp_types::Timedelta::add(acc, *ns)
+                            } else {
+                                *ns
+                            };
+                            started = true;
+                            Scalar::Timedelta64(acc)
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect();
+            }
             let mut acc = 0.0_f64;
             vals.iter()
                 .map(|v| {
@@ -38134,7 +38174,15 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).cumprod()`.
     pub fn cumprod(&self) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-ccf67: Timedelta² is dimensionless; emit NaT
+        // per position to mirror Series::cumprod br-v36qy.
         self.transform_groups(|vals| {
+            if vals_are_timedelta(vals) {
+                return vals
+                    .iter()
+                    .map(|_| Scalar::Timedelta64(fp_types::Timedelta::NAT))
+                    .collect();
+            }
             let mut acc = 1.0_f64;
             vals.iter()
                 .map(|v| {
@@ -38155,7 +38203,21 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).cummax()`.
     pub fn cummax(&self) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype.
         self.transform_groups(|vals| {
+            if vals_are_timedelta(vals) {
+                let mut acc: Option<i64> = None;
+                return vals
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = Some(acc.map_or(*ns, |a| a.max(*ns)));
+                            Scalar::Timedelta64(acc.unwrap())
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect();
+            }
             let mut acc = f64::NEG_INFINITY;
             vals.iter()
                 .map(|v| {
@@ -38178,7 +38240,21 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).cummin()`.
     pub fn cummin(&self) -> Result<DataFrame, FrameError> {
+        // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype.
         self.transform_groups(|vals| {
+            if vals_are_timedelta(vals) {
+                let mut acc: Option<i64> = None;
+                return vals
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = Some(acc.map_or(*ns, |a| a.min(*ns)));
+                            Scalar::Timedelta64(acc.unwrap())
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect();
+            }
             let mut acc = f64::INFINITY;
             vals.iter()
                 .map(|v| {

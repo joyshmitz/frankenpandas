@@ -5435,6 +5435,20 @@ impl Series {
         let sum_val = match self.sum()? {
             Scalar::Float64(v) => v,
             Scalar::Int64(v) => v as f64,
+            // Per br-frankenpandas-edmsd: pandas pd.Series([td1, td2]).mean()
+            // returns a Timedelta scalar. Divide sum ns by count and clamp
+            // back into i64 ns. Sister to br-28lgk/erobu/7iz85/rbt10/ppc2r.
+            Scalar::Timedelta64(ns) => {
+                if ns == Timedelta::NAT {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let mean_ns = (ns as f64) / count as f64;
+                if !mean_ns.is_finite() {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let clamped = mean_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+                return Ok(Scalar::Timedelta64(clamped as i64));
+            }
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
         Ok(Scalar::Float64(sum_val / count as f64))

@@ -72,7 +72,7 @@ use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
-use fp_types::TypeError;
+use fp_types::{Scalar, TypeError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1474,6 +1474,19 @@ impl MergeAsofOptions {
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
     let mut out = Vec::with_capacity(column.len());
     for value in column.values() {
+        // pandas merge_asof accepts Timedelta64 (and datetime) `on` columns
+        // and orders them by ns count. Scalar::Timedelta64.to_f64() returns
+        // NonNumericValue, so the default branch would reject the join.
+        // Extract ns directly for non-NaT Timedelta values; treat NaT as NaN
+        // (matches the ValueIsMissing arm below).
+        if let Scalar::Timedelta64(ns) = value {
+            if *ns == fp_types::Timedelta::NAT {
+                out.push(f64::NAN);
+            } else {
+                out.push(*ns as f64);
+            }
+            continue;
+        }
         match value.to_f64() {
             Ok(v) => out.push(v),
             Err(TypeError::ValueIsMissing { .. }) => out.push(f64::NAN),

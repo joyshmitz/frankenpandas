@@ -32457,6 +32457,25 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.sum(axis=1)`.
     pub fn sum_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c0g3x: reduce_rows filters out Timedelta64
+        // columns. For uniformly-Timedelta DataFrames, route to a
+        // Timedelta-typed row reducer.
+        if self.all_columns_timedelta() {
+            return self.reduce_rows_timedelta(
+                |ns_vals| {
+                    let mut acc: i64 = 0;
+                    for v in ns_vals {
+                        acc = Timedelta::add(acc, *v);
+                    }
+                    if ns_vals.is_empty() {
+                        Timedelta::NAT
+                    } else {
+                        acc
+                    }
+                },
+                "sum",
+            );
+        }
         self.reduce_rows(|vals| vals.iter().sum(), "sum")
     }
 
@@ -32464,6 +32483,24 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.mean(axis=1)`.
     pub fn mean_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.reduce_rows_timedelta(
+                |ns_vals| {
+                    if ns_vals.is_empty() {
+                        return Timedelta::NAT;
+                    }
+                    let sum: f64 = ns_vals.iter().map(|v| *v as f64).sum();
+                    let mean = sum / ns_vals.len() as f64;
+                    if !mean.is_finite() {
+                        Timedelta::NAT
+                    } else {
+                        mean.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+                    }
+                },
+                "mean",
+            );
+        }
         self.reduce_rows(|vals| vals.iter().sum::<f64>() / vals.len() as f64, "mean")
     }
 
@@ -32471,6 +32508,13 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.min(axis=1)`.
     pub fn min_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.reduce_rows_timedelta(
+                |ns_vals| ns_vals.iter().copied().min().unwrap_or(Timedelta::NAT),
+                "min",
+            );
+        }
         self.reduce_rows(
             |vals| vals.iter().copied().fold(f64::INFINITY, f64::min),
             "min",
@@ -32506,10 +32550,41 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.max(axis=1)`.
     pub fn max_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.reduce_rows_timedelta(
+                |ns_vals| ns_vals.iter().copied().max().unwrap_or(Timedelta::NAT),
+                "max",
+            );
+        }
         self.reduce_rows(
             |vals| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             "max",
         )
+    }
+
+    /// Per br-frankenpandas-c0g3x: Timedelta-typed row reducer for axis=1
+    /// sum/mean/min/max. Collects ns from Timedelta64 columns per row
+    /// (skipping NaT), applies the op, emits Scalar::Timedelta64.
+    fn reduce_rows_timedelta<F>(&self, op: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[i64]) -> i64,
+    {
+        let mut values = Vec::with_capacity(self.len());
+        for row_idx in 0..self.len() {
+            let mut ns_vals: Vec<i64> = Vec::with_capacity(self.column_order.len());
+            for col_name in &self.column_order {
+                if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
+                    if *ns != Timedelta::NAT {
+                        ns_vals.push(*ns);
+                    }
+                }
+            }
+            values.push(Scalar::Timedelta64(op(&ns_vals)));
+        }
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::new(DType::Timedelta64, values)?;
+        Series::new(name.to_owned(), index, column)
     }
 
     /// Standard deviation across columns per row.

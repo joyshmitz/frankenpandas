@@ -36812,34 +36812,15 @@ impl DataFrameGroupBy<'_> {
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
-                let mut group_vals: Vec<f64> = row_indices
+                // Per br-frankenpandas-v61uo: route through fp_types::
+                // nanquantile so Timedelta64 columns preserve dtype
+                // (br-5djk7). The previous inline f64 path filtered out
+                // Timedelta values via to_f64().ok().
+                let group_scalars: Vec<Scalar> = row_indices
                     .iter()
-                    .filter_map(|&i| {
-                        let v = &col.values()[i];
-                        if v.is_missing() {
-                            None
-                        } else {
-                            v.to_f64().ok()
-                        }
-                    })
+                    .map(|&i| col.values()[i].clone())
                     .collect();
-
-                let agg_val = if group_vals.is_empty() {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    group_vals
-                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let pos = q * (group_vals.len() - 1) as f64;
-                    let lo = pos.floor() as usize;
-                    let hi = pos.ceil() as usize;
-                    let q_val = if lo == hi || hi >= group_vals.len() {
-                        group_vals[lo]
-                    } else {
-                        group_vals[lo] + (group_vals[hi] - group_vals[lo]) * (pos - lo as f64)
-                    };
-                    Scalar::Float64(q_val)
-                };
-                agg_vals.push(agg_val);
+                agg_vals.push(fp_types::nanquantile(&group_scalars, q));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);

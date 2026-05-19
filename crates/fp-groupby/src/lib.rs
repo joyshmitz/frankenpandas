@@ -815,14 +815,13 @@ pub fn groupby_agg(
             AggFunc::Sum => fp_types::nansum(vals),
             AggFunc::Mean => fp_types::nanmean(vals),
             AggFunc::Count => fp_types::nancount(vals),
-            AggFunc::Min => match fp_types::nanmin(vals) {
-                Scalar::Int64(v) => Scalar::Float64(v as f64),
-                other => other,
-            },
-            AggFunc::Max => match fp_types::nanmax(vals) {
-                Scalar::Int64(v) => Scalar::Float64(v as f64),
-                other => other,
-            },
+            // pandas groupby.min()/.max() preserve the source column dtype
+            // — Int64 stays Int64 (and Timedelta64 stays Timedelta64 via
+            // fp_types::nanmin/nanmax). The earlier promotion to Float64
+            // here diverged from pandas, mirroring the same regression that
+            // br-frankenpandas-764ys fixed for first/last.
+            AggFunc::Min => fp_types::nanmin(vals),
+            AggFunc::Max => fp_types::nanmax(vals),
             // Per br-frankenpandas-764ys: pandas groupby.first()/.last()
             // preserve the source column dtype — Int64 stays Int64. The
             // previous promotion to Float64 diverged from pandas (which
@@ -2323,10 +2322,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
-        );
+        // pandas groupby.min() preserves source Int64 dtype (no Float64
+        // promotion), matching the br-764ys first/last surgery.
+        assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
         assert_eq!(out.name(), "min");
     }
 
@@ -2344,10 +2342,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
-        );
+        // pandas groupby.max() preserves source Int64 dtype.
+        assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
         assert_eq!(out.name(), "max");
     }
 

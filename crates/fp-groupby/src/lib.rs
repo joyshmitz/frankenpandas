@@ -69,7 +69,7 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{NullKind, Scalar, Timedelta};
+use fp_types::{DType, NullKind, Scalar, Timedelta};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +220,14 @@ fn groupby_sum_with_global_allocator(
     aligned_values_values: &[Scalar],
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
+    // Per br-frankenpandas-qrn2w: detect uniformly-Timedelta64 input and
+    // route to a typed i64-ns accumulator path. The f64 paths below call
+    // value.to_f64() which fails on Timedelta64, silently dropping every
+    // value and producing all-zero Float64 output. pandas
+    // df.groupby(k)["dur"].sum() on Timedelta64 returns Timedelta64.
+    if is_timedelta_values(aligned_values_values) {
+        return groupby_sum_timedelta64(aligned_keys_values, aligned_values_values, options);
+    }
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64(
         aligned_keys_values,
         aligned_values_values,
@@ -275,6 +283,13 @@ fn groupby_sum_with_arena(
     aligned_values_values: &[Scalar],
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
+    // Per br-frankenpandas-qrn2w: Timedelta64 dispatch — see global-allocator
+    // path for full justification. Arena-allocated intermediates aren't
+    // beneficial for the relatively-uncommon Timedelta64 surface, so reuse
+    // the global-allocator typed path here.
+    if is_timedelta_values(aligned_values_values) {
+        return groupby_sum_timedelta64(aligned_keys_values, aligned_values_values, options);
+    }
     // AG-06: Arena-backed dense path intermediates.
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64_arena(
         aligned_keys_values,
@@ -417,6 +432,87 @@ fn sort_group_ordering_by<'a, F>(
             &source_keys[source_idx_for(right)],
         )
     });
+}
+
+/// Detect uniformly-Timedelta64 value input (allowing Null/NaT missing
+/// markers). Mirrors `fp-types::is_timedelta_input` — returns true only
+/// when at least one non-missing value is `Timedelta64` and no other
+/// dtype appears. Used by `groupby_sum` to route Timedelta64 sums to a
+/// dtype-preserving path instead of silently dropping via the f64 path.
+fn is_timedelta_values(values: &[Scalar]) -> bool {
+    let mut saw_td = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Timedelta64(_) => saw_td = true,
+            _ => return false,
+        }
+    }
+    saw_td
+}
+
+/// Per br-frankenpandas-qrn2w: Timedelta64-aware groupby sum. Accumulates
+/// in i64 nanoseconds with saturation on overflow (matches `fp-types`
+/// Timedelta arithmetic) and emits `Scalar::Timedelta64` per group so
+/// the output Series retains Timedelta64 dtype. Matches pandas
+/// `df.groupby(k)["dur"].sum()` which returns a Timedelta64 Series.
+fn groupby_sum_timedelta64(
+    keys: &[Scalar],
+    values: &[Scalar],
+    options: GroupByOptions,
+) -> Result<Series, GroupByError> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut slot = HashMap::<GroupKeyRef<'_>, (usize, i64)>::new();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if options.dropna && key.is_missing() {
+            continue;
+        }
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = slot.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0_i64)
+        });
+        if value.is_missing() {
+            continue;
+        }
+        if let Scalar::Timedelta64(ns) = value {
+            entry.1 = Timedelta::add(entry.1, *ns);
+        }
+    }
+
+    if options.sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            slot.get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, sum) = slot
+            .remove(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Null(NullKind::NaN)
+            | Scalar::Null(NullKind::NaT)
+            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+        });
+        out_values.push(Scalar::Timedelta64(sum));
+    }
+
+    let out_column = Column::new(DType::Timedelta64, out_values)?;
+    Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
 const DENSE_INT_KEY_RANGE_LIMIT: i128 = 65_536;

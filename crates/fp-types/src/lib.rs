@@ -1248,6 +1248,9 @@ pub fn nanany(values: &[Scalar]) -> Scalar {
             Scalar::Int64(val) if *val != 0 => return Scalar::Bool(true),
             Scalar::Float64(val) if !val.is_nan() && *val != 0.0 => return Scalar::Bool(true),
             Scalar::Utf8(val) if !val.is_empty() => return Scalar::Bool(true),
+            // pandas Series([td]).any() returns True for any non-zero
+            // Timedelta. NaT is already filtered by is_missing() above.
+            Scalar::Timedelta64(ns) if *ns != 0 => return Scalar::Bool(true),
             _ => continue,
         }
     }
@@ -1264,6 +1267,9 @@ pub fn nanall(values: &[Scalar]) -> Scalar {
             Scalar::Int64(val) if *val == 0 => return Scalar::Bool(false),
             Scalar::Float64(val) if val.is_nan() || *val == 0.0 => return Scalar::Bool(false),
             Scalar::Utf8(val) if val.is_empty() => return Scalar::Bool(false),
+            // pandas Series([td(0)]).all() returns False; any non-zero
+            // Timedelta is truthy. NaT is already filtered by is_missing.
+            Scalar::Timedelta64(ns) if *ns == 0 => return Scalar::Bool(false),
             _ => continue,
         }
     }

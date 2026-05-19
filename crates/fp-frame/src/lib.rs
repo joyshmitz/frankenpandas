@@ -6330,6 +6330,24 @@ impl Series {
             return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
 
+        // Per br-frankenpandas-v36qy: pandas raises TypeError on
+        // td_series.cumprod() because Timedelta² has no dimension. Mirror
+        // fp-types nanprod (br-szq6a) and Series::prod (br-mpw1f) by
+        // emitting NaT at every position rather than erroring.
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing())
+            && values.iter().any(|v| matches!(v, Scalar::Timedelta64(_)))
+        {
+            let nat_out: Vec<Scalar> = values
+                .iter()
+                .map(|_| Scalar::Timedelta64(Timedelta::NAT))
+                .collect();
+            return self
+                .with_labels_and_values_preserving_name(self.index.labels().to_vec(), nat_out);
+        }
+
         let mut acc = 1.0_f64;
         let mut out = Vec::with_capacity(self.len());
         for val in values {

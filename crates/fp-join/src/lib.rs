@@ -1624,6 +1624,9 @@ fn merge_asof_grouped(
     let left_vals = asof_numeric_values(left_key, "left", on)?;
     let right_vals = asof_numeric_values(right_key, "right", on)?;
 
+    ensure_sorted_non_decreasing(&left_vals, "left", on)?;
+    ensure_sorted_non_decreasing(&right_vals, "right", on)?;
+
     // Build group keys for left and right
     let left_group_keys = build_group_keys(left, by_cols)?;
     let right_group_keys = build_group_keys(right, by_cols)?;
@@ -4953,8 +4956,8 @@ mod tests {
                     "time",
                     vec![
                         Scalar::Int64(1),
-                        Scalar::Int64(3),
                         Scalar::Int64(2),
+                        Scalar::Int64(3),
                         Scalar::Int64(4),
                     ],
                 ),
@@ -4979,13 +4982,13 @@ mod tests {
                     "group",
                     vec![
                         Scalar::Utf8("A".into()),
-                        Scalar::Utf8("A".into()),
                         Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
                     ],
                 ),
                 (
                     "time",
-                    vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(3)],
+                    vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
                 ),
                 (
                     "quote",
@@ -5012,12 +5015,146 @@ mod tests {
         let quote_col = result.columns.get("quote").unwrap();
         // Row 0: group=A, time=1, no right A with time <= 1 -> null
         assert!(matches!(quote_col.values()[0], Scalar::Null(_)));
-        // Row 1: group=A, time=3, right A has time=2 <= 3 -> 200.0
-        assert_eq!(quote_col.values()[1], Scalar::Float64(200.0));
-        // Row 2: group=B, time=2, no right B with time <= 2 -> null
-        assert!(matches!(quote_col.values()[2], Scalar::Null(_)));
+        // Row 1: group=B, time=2, no right B with time <= 2 -> null
+        assert!(matches!(quote_col.values()[1], Scalar::Null(_)));
+        // Row 2: group=A, time=3, right A has time=2 <= 3 -> 200.0
+        assert_eq!(quote_col.values()[2], Scalar::Float64(200.0));
         // Row 3: group=B, time=4, right B has time=3 <= 4 -> 300.0
         assert_eq!(quote_col.values()[3], Scalar::Float64(300.0));
+    }
+
+    #[test]
+    fn merge_asof_by_column_requires_globally_sorted_left_keys() {
+        use super::{AsofDirection, MergeAsofOptions, merge_asof_with_options};
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["group", "time"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["group", "time", "quote"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "quote",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().by(vec!["group".to_string()]),
+        )
+        .expect_err("pandas requires globally sorted left keys even with by=");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message.contains("left") && message.contains("sorted")
+        ));
+    }
+
+    #[test]
+    fn merge_asof_by_column_requires_globally_sorted_right_keys() {
+        use super::{AsofDirection, MergeAsofOptions, merge_asof_with_options};
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["group", "time"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["group", "time", "quote"],
+            vec![
+                (
+                    "group",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)],
+                ),
+                (
+                    "quote",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = merge_asof_with_options(
+            &left,
+            &right,
+            "time",
+            AsofDirection::Backward,
+            MergeAsofOptions::new().by(vec!["group".to_string()]),
+        )
+        .expect_err("pandas requires globally sorted right keys even with by=");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message.contains("right") && message.contains("sorted")
+        ));
     }
 
     #[test]

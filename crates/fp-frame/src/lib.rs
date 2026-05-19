@@ -6263,6 +6263,31 @@ impl Series {
             }
             return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
+        // Per br-frankenpandas-gqrmf: pandas td_series.cumsum() returns
+        // Timedelta64. Sister to fp-types nancumsum (br-x0x91) and the
+        // br-28lgk Timedelta Series-aggregate family. Skipna=True default:
+        // missing positions don't advance the accumulator, emit NaT.
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing())
+            && values
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+        {
+            let mut acc: i64 = 0;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                        acc = Timedelta::add(acc, *ns);
+                        out.push(Scalar::Timedelta64(acc));
+                    }
+                    _ => out.push(Scalar::Timedelta64(Timedelta::NAT)),
+                }
+            }
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+        }
 
         let mut acc = 0.0_f64;
         let mut out = Vec::with_capacity(self.len());

@@ -32502,6 +32502,9 @@ impl DataFrame {
     }
 
     fn mode_axis0(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only.
+        // pandas df.mode(numeric_only=True) covers Timedelta — it's a
+        // numeric-style dtype, not object.
         let selected_columns = self
             .column_order
             .iter()
@@ -32509,7 +32512,7 @@ impl DataFrame {
                 !numeric_only
                     || matches!(
                         self.columns[name.as_str()].dtype(),
-                        DType::Bool | DType::Int64 | DType::Float64
+                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
                     )
             })
             .cloned()
@@ -32551,6 +32554,7 @@ impl DataFrame {
     }
 
     fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only.
         let selected_columns = self
             .column_order
             .iter()
@@ -32558,7 +32562,7 @@ impl DataFrame {
                 !numeric_only
                     || matches!(
                         self.columns[name.as_str()].dtype(),
-                        DType::Bool | DType::Int64 | DType::Float64
+                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
                     )
             })
             .cloned()

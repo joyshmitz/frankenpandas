@@ -33160,8 +33160,46 @@ impl DataFrame {
             )));
         }
         let len = self.index.labels().len();
+        // pandas df.quantile(q, axis=1) on a uniformly-Timedelta DataFrame
+        // returns Timedelta per row. The numeric-only Int64/Float64 filter
+        // silently drops Timedelta columns, leaving each row's nums empty
+        // and emitting Null(NaN). Sister to the cum*_axis1 (br-bktp1) and
+        // sum/mean/min/max_axis1 (br-c0g3x) Timedelta surgeries.
+        let all_td = self.all_columns_timedelta();
         let mut out = Vec::with_capacity(len);
         for row_idx in 0..len {
+            if all_td {
+                let mut td_vals: Vec<f64> = Vec::new();
+                for name in &self.column_order {
+                    if let Scalar::Timedelta64(ns) = &self.columns[name].values()[row_idx] {
+                        if *ns != Timedelta::NAT {
+                            td_vals.push(*ns as f64);
+                        }
+                    }
+                }
+                if td_vals.is_empty() {
+                    out.push(Scalar::Timedelta64(Timedelta::NAT));
+                    continue;
+                }
+                td_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = td_vals.len();
+                let qns = if n == 1 {
+                    td_vals[0]
+                } else {
+                    let pos = q * (n - 1) as f64;
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    if lo == hi {
+                        td_vals[lo]
+                    } else {
+                        let weight = pos - lo as f64;
+                        td_vals[lo] + (td_vals[hi] - td_vals[lo]) * weight
+                    }
+                };
+                let clamped = qns.clamp(i64::MIN as f64, i64::MAX as f64);
+                out.push(Scalar::Timedelta64(clamped as i64));
+                continue;
+            }
             let mut nums: Vec<f64> = Vec::new();
             for name in &self.column_order {
                 let col = &self.columns[name];

@@ -4544,6 +4544,70 @@ mod tests {
     }
 
     #[test]
+    fn merge_asof_nan_in_right_key() {
+        use super::AsofDirection;
+
+        // Symmetric to merge_asof_nan_in_key: NaN keys on the right side
+        // also get treated as no-candidate (pandas does NOT raise). Other
+        // left rows still match to non-NaN right rows.
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                (
+                    "time",
+                    vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(5)],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "quote",
+                    vec![
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(999.0),
+                        Scalar::Float64(400.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        // left time=1 → no right ≤ 1 → null
+        assert!(result.columns.get("quote").unwrap().values()[0].is_missing());
+        // left time=3 → right time=2 → 200.0 (NaN right row never matches)
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[1],
+            Scalar::Float64(200.0)
+        );
+        // left time=5 → right time=4 → 400.0
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[2],
+            Scalar::Float64(400.0)
+        );
+    }
+
+    #[test]
     fn merge_asof_overlapping_columns_apply_suffixes() {
         use super::AsofDirection;
 

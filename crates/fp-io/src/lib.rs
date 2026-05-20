@@ -2513,10 +2513,19 @@ fn apply_one_parse_date_combination(
 }
 
 fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError> {
+    // pandas pd.read_csv(parse_dates=[col]) parses each value on its own —
+    // a column with mixed naive ("2024-01-15 10:30:00") and aware
+    // ("2024-01-15T10:30:00Z") entries normalizes each value
+    // independently. The ToDatetimeOptions default `infer_mixed_timezone:
+    // true` locks the column to the FIRST inferred pattern and rejects
+    // any value that doesn't match it, which causes parse_failed=true and
+    // leaves the column as raw strings even though every individual value
+    // is parseable. Set it explicitly to false so each value goes through
+    // parse_datetime_string, which already handles both naive and aware.
     let parsed = to_datetime_with_options(
         series,
         ToDatetimeOptions {
-            infer_mixed_timezone: true,
+            infer_mixed_timezone: false,
             ..ToDatetimeOptions::default()
         },
     )?;
@@ -17431,7 +17440,15 @@ mod tests {
     }
 
     #[test]
-    fn csv_parse_dates_mixed_naive_and_aware_strings_preserves_object_like_values() {
+    fn csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value() {
+        // pandas pd.read_csv(parse_dates=["ts"]) normalizes each value
+        // independently when the column has mixed naive + aware timestamps:
+        // the naive entry stays naive ("YYYY-MM-DD HH:MM:SS"), and the
+        // aware entry is rewritten to the offset form ("...+00:00").
+        // The previous "preserves object" behavior locked the entire
+        // column to the first inferred timezone pattern and silently
+        // rejected mismatched values; conformance fixture FP-P2D-429
+        // documents the pandas-2.2.3 expectation.
         let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
         let opts = CsvReadOptions {
             parse_dates: Some(vec!["ts".to_owned()]),
@@ -17442,7 +17459,7 @@ mod tests {
             frame.column("ts").unwrap().values(),
             &[
                 Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-15T10:30:00Z".to_owned()),
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
             ]
         );
         assert_eq!(

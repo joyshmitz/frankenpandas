@@ -5085,14 +5085,16 @@ mod tests {
         .unwrap();
 
         let quote_col = result.columns.get("quote").unwrap();
-        // Row 0: group=A, time=1, no right A with time <= 1 -> null
+        // Left after 2d3338b1's reorder is (A,1), (A,2), (B,3), (B,4) — globally
+        // sorted by time. Right is (A,2), (B,3), (A,4). Backward grouped asof:
+        // Row 0: (A,1) → no right A with time <= 1 → null
         assert!(matches!(quote_col.values()[0], Scalar::Null(_)));
-        // Row 1: group=B, time=2, no right B with time <= 2 -> null
-        assert!(matches!(quote_col.values()[1], Scalar::Null(_)));
-        // Row 2: group=A, time=3, right A has time=2 <= 3 -> 200.0
-        assert_eq!(quote_col.values()[2], Scalar::Float64(200.0));
-        // Row 3: group=B, time=4, right B has time=3 <= 4 -> 300.0
-        assert_eq!(quote_col.values()[3], Scalar::Float64(300.0));
+        // Row 1: (A,2) → right A time=2 → 200.0
+        assert_eq!(quote_col.values()[1], Scalar::Float64(200.0));
+        // Row 2: (B,3) → right B time=3 → 400.0
+        assert_eq!(quote_col.values()[2], Scalar::Float64(400.0));
+        // Row 3: (B,4) → right B time=3 (latest <= 4) → 400.0
+        assert_eq!(quote_col.values()[3], Scalar::Float64(400.0));
     }
 
     #[test]

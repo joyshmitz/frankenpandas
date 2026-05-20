@@ -10660,6 +10660,12 @@ impl Rolling<'_> {
         )
     }
 
+    /// Alias for `kurt()` — pandas exposes both spellings on
+    /// Series.rolling aggregations.
+    pub fn kurtosis(&self) -> Result<Series, FrameError> {
+        self.kurt()
+    }
+
     /// Aggregate with multiple functions, returning a DataFrame.
     ///
     /// Matches `series.rolling(window).agg(['sum', 'mean'])`. Returns a
@@ -11072,6 +11078,12 @@ impl Expanding<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// Alias for `kurt()` — pandas exposes both spellings on
+    /// Series.expanding aggregations.
+    pub fn kurtosis(&self) -> Result<Series, FrameError> {
+        self.kurt()
     }
 
     /// Expanding Pearson correlation with another Series.
@@ -12794,6 +12806,11 @@ impl DataFrameExpanding<'_> {
     /// Matches `pd.DataFrame.expanding().kurt()`.
     pub fn kurt(&self) -> Result<DataFrame, FrameError> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).kurt())
+    }
+
+    /// Alias for `kurt()` — pandas exposes both spellings.
+    pub fn kurtosis(&self) -> Result<DataFrame, FrameError> {
+        self.kurt()
     }
 
     /// Apply a custom function over the expanding window for each numeric column.

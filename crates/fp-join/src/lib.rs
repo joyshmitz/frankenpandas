@@ -1518,15 +1518,6 @@ fn ensure_sorted_non_decreasing(values: &[f64], side: &str, on: &str) -> Result<
     Ok(())
 }
 
-fn ensure_asof_keys_present(values: &[f64], side: &str, on: &str) -> Result<(), JoinError> {
-    if values.iter().any(|value| value.is_nan()) {
-        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-            format!("merge_asof: {side} column '{on}' contains null values"),
-        )));
-    }
-    Ok(())
-}
-
 /// Perform an asof merge between two DataFrames.
 pub fn merge_asof(
     left: &fp_frame::DataFrame,
@@ -1582,8 +1573,9 @@ fn merge_asof_simple(
     let left_vals = asof_numeric_values(left_key, "left", on)?;
     let right_vals = asof_numeric_values(right_key, "right", on)?;
 
-    ensure_asof_keys_present(&left_vals, "left", on)?;
-    ensure_asof_keys_present(&right_vals, "right", on)?;
+    // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
+    // the joined columns (no match). The strict "reject null keys" check
+    // previously enforced here diverged from the FP-P2D-056 oracle.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
@@ -1635,8 +1627,9 @@ fn merge_asof_grouped(
     let left_vals = asof_numeric_values(left_key, "left", on)?;
     let right_vals = asof_numeric_values(right_key, "right", on)?;
 
-    ensure_asof_keys_present(&left_vals, "left", on)?;
-    ensure_asof_keys_present(&right_vals, "right", on)?;
+    // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
+    // the joined columns (no match). The strict "reject null keys" check
+    // previously enforced here diverged from the FP-P2D-056 oracle.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
@@ -4500,7 +4493,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_asof_null_left_key_errors() {
+    fn merge_asof_nan_in_key() {
         use super::AsofDirection;
 
         let left = fp_frame::DataFrame::from_dict(
@@ -4538,58 +4531,16 @@ mod tests {
         )
         .unwrap();
 
-        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
-            .expect_err("pandas rejects null merge_asof keys on the left side");
-        assert!(matches!(
-            err,
-            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
-                if message.contains("left") && message.contains("null")
-        ));
-    }
-
-    #[test]
-    fn merge_asof_null_right_key_errors() {
-        use super::AsofDirection;
-
-        let left = fp_frame::DataFrame::from_dict(
-            &["time", "val"],
-            vec![
-                ("time", vec![Scalar::Int64(1), Scalar::Int64(5)]),
-                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(30.0)]),
-            ],
-        )
-        .unwrap();
-
-        let right = fp_frame::DataFrame::from_dict(
-            &["time", "quote"],
-            vec![
-                (
-                    "time",
-                    vec![
-                        Scalar::Int64(2),
-                        Scalar::Null(NullKind::NaN),
-                        Scalar::Int64(4),
-                    ],
-                ),
-                (
-                    "quote",
-                    vec![
-                        Scalar::Float64(200.0),
-                        Scalar::Float64(999.0),
-                        Scalar::Float64(400.0),
-                    ],
-                ),
-            ],
-        )
-        .unwrap();
-
-        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
-            .expect_err("pandas rejects null merge_asof keys on the right side");
-        assert!(matches!(
-            err,
-            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
-                if message.contains("right") && message.contains("null")
-        ));
+        // pandas merge_asof accepts NaN keys: the NaN row gets no match
+        // (null in joined columns) — verified against FP-P2D-056
+        // backward_nan_left_key_strict (pandas 2.2.3 oracle).
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        assert!(result.columns.get("quote").unwrap().values()[1].is_missing());
+        // time=5 → backward match to time=4 → quote=400
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[2],
+            Scalar::Float64(400.0)
+        );
     }
 
     #[test]

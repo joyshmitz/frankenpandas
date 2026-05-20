@@ -33215,6 +33215,12 @@ impl DataFrame {
         self.reduce_rows(Self::row_kurtosis, "kurtosis")
     }
 
+    /// Alias for `kurtosis_axis1()` — pandas exposes
+    /// `df.kurt(axis=1)` and `df.kurtosis(axis=1)` as equivalents.
+    pub fn kurt_axis1(&self) -> Result<Series, FrameError> {
+        self.kurtosis_axis1()
+    }
+
     /// Count of non-null values across columns per row.
     ///
     /// Matches `pd.DataFrame.count(axis=1)`.

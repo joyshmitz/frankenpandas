@@ -12447,6 +12447,48 @@ impl DataFrameRolling<'_> {
         self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).median())
     }
 
+    /// Rolling skewness across all numeric columns.
+    ///
+    /// Matches `df.rolling(window).skew()`. Closes parity gap — the
+    /// Series-level Rolling has skew()/kurt()/first()/last()/prod() but
+    /// DataFrameRolling was missing all of them.
+    pub fn skew(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).skew())
+    }
+
+    /// Rolling excess kurtosis across all numeric columns.
+    ///
+    /// Matches `df.rolling(window).kurt()`.
+    pub fn kurt(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).kurt())
+    }
+
+    /// Alias for `kurt()` — pandas exposes both spellings.
+    pub fn kurtosis(&self) -> Result<DataFrame, FrameError> {
+        self.kurt()
+    }
+
+    /// Rolling first non-null value across all numeric columns.
+    ///
+    /// Matches `df.rolling(window).first()`.
+    pub fn first(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).first())
+    }
+
+    /// Rolling last non-null value across all numeric columns.
+    ///
+    /// Matches `df.rolling(window).last()`.
+    pub fn last(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).last())
+    }
+
+    /// Rolling product across all numeric columns.
+    ///
+    /// Matches `df.rolling(window).prod()`.
+    pub fn prod(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).prod())
+    }
+
     /// Rolling quantile across all numeric columns.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
         self.apply_rolling(move |s, w, mp| s.rolling(w, Some(mp)).quantile(q))

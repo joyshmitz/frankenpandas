@@ -57125,6 +57125,54 @@ mod tests {
         assert_eq!(idxmax.values()[0], Scalar::Int64(0));
     }
 
+    #[test]
+    fn dataframe_idxmin_idxmax_skip_non_numeric() {
+        // pandas DataFrame.idxmin/idxmax returns NaN for non-numeric
+        // columns even though Series::idxmin handles Utf8 via lex
+        // comparison (br-7db78). Matches FP-P2D-148.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "num",
+                vec![
+                    IndexLabel::Utf8("r0".into()),
+                    IndexLabel::Utf8("r1".into()),
+                    IndexLabel::Utf8("r2".into()),
+                ],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(2.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "txt",
+                vec![
+                    IndexLabel::Utf8("r0".into()),
+                    IndexLabel::Utf8("r1".into()),
+                    IndexLabel::Utf8("r2".into()),
+                ],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("z".into()),
+                    Scalar::Utf8("y".into()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let idxmax = df.idxmax().unwrap();
+        assert_eq!(idxmax.len(), 2);
+        // num column → "r1" (max=5.0 at index r1)
+        assert_eq!(idxmax.values()[0], Scalar::Utf8("r1".to_string()));
+        // txt column → NaN (non-numeric, skipped at DataFrame level)
+        assert!(idxmax.values()[1].is_missing());
+
+        let idxmin = df.idxmin().unwrap();
+        assert_eq!(idxmin.values()[0], Scalar::Utf8("r0".to_string()));
+        assert!(idxmin.values()[1].is_missing());
+    }
+
     // ── DataFrame element-wise ops preserve non-numeric columns ──
 
     #[test]

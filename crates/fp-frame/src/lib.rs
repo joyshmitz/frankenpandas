@@ -2623,8 +2623,7 @@ impl Series {
         } else {
             None
         };
-        let index =
-            Index::new(plan.union_index.labels().to_vec()).rename_index(shared_index_name);
+        let index = Index::new(plan.union_index.labels().to_vec()).rename_index(shared_index_name);
         let column = Column::from_values(out)?;
         Self::new(out_name, index, column)
     }
@@ -4130,7 +4129,9 @@ impl Series {
         // Timedelta so left/right are always None, leaving every NaT gap
         // unfilled. Detect uniformly-Timedelta column and use a typed path.
         let is_timedelta = matches!(self.column.dtype(), DType::Timedelta64)
-            || (vals.iter().any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+            || (vals
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
                 && vals
                     .iter()
                     .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing()));
@@ -4406,10 +4407,7 @@ impl Series {
         // requested drop label isn't present in the index. Validate up
         // front instead of silently no-op'ing on missing labels.
         let index_set: HashSet<&IndexLabel> = self.index.labels().iter().collect();
-        let missing: Vec<&IndexLabel> = labels
-            .iter()
-            .filter(|l| !index_set.contains(*l))
-            .collect();
+        let missing: Vec<&IndexLabel> = labels.iter().filter(|l| !index_set.contains(*l)).collect();
         if !missing.is_empty() {
             return Err(FrameError::CompatibilityRejected(format!(
                 "drop: labels {:?} not found in index",
@@ -4599,7 +4597,11 @@ impl Series {
         // Series named "count" whose index.name == self.name. Propagate the
         // source name onto the new value-axis when non-empty.
         let source_name = self.name();
-        let idx_name = if source_name.is_empty() { None } else { Some(source_name) };
+        let idx_name = if source_name.is_empty() {
+            None
+        } else {
+            Some(source_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Self::new("count", index, column)
@@ -5408,30 +5410,26 @@ impl Series {
             // bound values are integers; matches FP-P2D-025
             // series_clip_array_bounds_strict oracle output.
             if let Scalar::Int64(iv) = val {
-                let lo_val = lower
-                    .as_ref()
-                    .filter(|lo| i < lo.len())
-                    .and_then(|lo| match &lo.column.values()[i] {
+                let lo_val = lower.as_ref().filter(|lo| i < lo.len()).and_then(|lo| {
+                    match &lo.column.values()[i] {
                         Scalar::Int64(x) => Some(*x),
                         _ => None,
-                    });
-                let hi_val = upper
-                    .as_ref()
-                    .filter(|hi| i < hi.len())
-                    .and_then(|hi| match &hi.column.values()[i] {
+                    }
+                });
+                let hi_val = upper.as_ref().filter(|hi| i < hi.len()).and_then(|hi| {
+                    match &hi.column.values()[i] {
                         Scalar::Int64(x) => Some(*x),
                         _ => None,
-                    });
+                    }
+                });
                 // Float bounds (or any non-Int64 bound dtype) demote the
                 // output to Float64 — fall through to the f64 path.
-                let lower_is_int = lower
-                    .as_ref()
-                    .filter(|lo| i < lo.len())
-                    .is_none_or(|lo| matches!(&lo.column.values()[i], Scalar::Int64(_) | Scalar::Null(_)));
-                let upper_is_int = upper
-                    .as_ref()
-                    .filter(|hi| i < hi.len())
-                    .is_none_or(|hi| matches!(&hi.column.values()[i], Scalar::Int64(_) | Scalar::Null(_)));
+                let lower_is_int = lower.as_ref().filter(|lo| i < lo.len()).is_none_or(|lo| {
+                    matches!(&lo.column.values()[i], Scalar::Int64(_) | Scalar::Null(_))
+                });
+                let upper_is_int = upper.as_ref().filter(|hi| i < hi.len()).is_none_or(|hi| {
+                    matches!(&hi.column.values()[i], Scalar::Int64(_) | Scalar::Null(_))
+                });
                 if lower_is_int && upper_is_int {
                     let mut result = *iv;
                     if let Some(lo) = lo_val {
@@ -9213,10 +9211,7 @@ impl Series {
         }
         // Per br-frankenpandas-g2u00: pandas Series.combine preserves
         // self.index.name through the outer-aligned result.
-        self.with_labels_and_values_preserving_name(
-            left_aligned.index().labels().to_vec(),
-            out,
-        )
+        self.with_labels_and_values_preserving_name(left_aligned.index().labels().to_vec(), out)
     }
 
     /// Explode a Series of string values by splitting on a separator.
@@ -13706,8 +13701,8 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-u2ogr: pandas groupby.transform preserves the
         // source DataFrame's index name through cumsum/cumprod/cummin/cummax
         // and any custom transform.
-        let index = Index::new(self.series.index.labels().to_vec())
-            .rename_index(self.series.index.name());
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
         let column = Column::from_values(out)?;
         Series::new(self.series.name(), index, column)
     }
@@ -13728,7 +13723,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-p6y8q: pandas Series.groupby(by).<agg>() returns
         // a Series whose .index.name == by.name (the grouping Series' name).
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(name, index, column)
@@ -13753,7 +13752,11 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-pz1ro: sister to agg_scalar fix (p6y8q).
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(name, index, column)
@@ -13843,7 +13846,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-lanwk: pandas SeriesGroupBy corr/cov returns
         // group-keyed Series whose .index.name == by.name. Sister to p6y8q.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(order).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(name, index, column)
@@ -13985,7 +13992,11 @@ impl SeriesGroupBy<'_> {
         }
         // Per br-frankenpandas-b5ijf: sister to agg_scalar fix (p6y8q).
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(name, index, column)
@@ -14097,7 +14108,11 @@ impl SeriesGroupBy<'_> {
         }
         // Per br-frankenpandas-1iqhe: sister to p6y8q. Apply by-Series name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -14119,7 +14134,11 @@ impl SeriesGroupBy<'_> {
         }
         // Per br-frankenpandas-hdoih: sister to p6y8q. Apply by-Series name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -14191,7 +14210,11 @@ impl SeriesGroupBy<'_> {
         }
         // Per br-frankenpandas-a2m7y: sister to p6y8q. Apply by-Series name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -14265,7 +14288,11 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-99iel: sister to p6y8q. Apply by-Series name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(out_labels).rename_index(idx_name);
         let column = Column::from_values(out_values)?;
         Series::new(self.series.name(), index, column)
@@ -14322,7 +14349,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-midpz: pandas Series.groupby(by).ohlc() returns
         // a DataFrame whose .index.name == by.name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         DataFrame::new_with_column_order(
             Index::new(order).rename_index(idx_name),
             columns,
@@ -14600,8 +14631,11 @@ impl SeriesGroupBy<'_> {
                 }
                 let n = ns_vals.len() as f64;
                 let mean = ns_vals.iter().map(|v| *v as f64).sum::<f64>() / n;
-                let var =
-                    ns_vals.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let var = ns_vals
+                    .iter()
+                    .map(|v| (*v as f64 - mean).powi(2))
+                    .sum::<f64>()
+                    / (n - 1.0);
                 let std_ns = var.sqrt();
                 if !std_ns.is_finite() {
                     return fp_types::Timedelta::NAT;
@@ -14634,8 +14668,11 @@ impl SeriesGroupBy<'_> {
                 }
                 let n = ns_vals.len() as f64;
                 let mean = ns_vals.iter().map(|v| *v as f64).sum::<f64>() / n;
-                let var_ns =
-                    ns_vals.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let var_ns = ns_vals
+                    .iter()
+                    .map(|v| (*v as f64 - mean).powi(2))
+                    .sum::<f64>()
+                    / (n - 1.0);
                 if !var_ns.is_finite() {
                     return fp_types::Timedelta::NAT;
                 }
@@ -14762,8 +14799,8 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.cumcount returns
         // a Series whose index.name == source df.index.name.
-        let index = Index::new(self.series.index.labels().to_vec())
-            .rename_index(self.series.index.name());
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
         let column = Column::from_values(out)?;
         Series::new("cumcount", index, column)
     }
@@ -14792,8 +14829,8 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.ngroup returns
         // a Series whose index.name == source df.index.name.
-        let index = Index::new(self.series.index.labels().to_vec())
-            .rename_index(self.series.index.name());
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
         let column = Column::from_values(out)?;
         Series::new("ngroup", index, column)
     }
@@ -15239,7 +15276,11 @@ impl SeriesGroupBy<'_> {
         // is MultiIndex with [by-name, source-name]. Our flat-composite axis
         // preserves at least the by-name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(out_labels).rename_index(idx_name);
         let column = Column::from_values(out_counts)?;
         Series::new("count", index, column)
@@ -15331,7 +15372,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-e1xcz: pandas SeriesGroupBy.describe result
         // DataFrame's row index is named after by-Series.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         DataFrame::new_with_column_order(
             Index::new(order).rename_index(idx_name),
             columns,
@@ -15489,7 +15534,11 @@ impl SeriesGroupBy<'_> {
         // not source-axis name. Bypass series_from_groupby_apply_parts
         // (which uses source-axis name for same-shape transforms).
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(order).rename_index(idx_name);
         let column = if values.is_empty() {
             Column::new(self.series.dtype(), values)?
@@ -15670,7 +15719,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).first preserves
         // by-Series name on result index.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -15695,7 +15748,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).last preserves
         // by-Series name on result index.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -15713,7 +15770,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-ju3rs: pandas Series.groupby(by).size preserves
         // by-Series name on result index.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
         Series::new(self.series.name(), index, column)
@@ -15762,7 +15823,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-0dc6p: pandas Series.groupby(by).agg([...])
         // returns DataFrame whose .index.name == by.name.
         let by_name = self.by.name();
-        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
         let index = Index::new(order).rename_index(idx_name);
         Ok(DataFrame {
             columns: result_cols,
@@ -16095,7 +16160,8 @@ impl SeriesGroupByExpanding<'_, '_> {
 
         // Per br-frankenpandas-o1i9m: pandas groupby().expanding().<agg>()
         // preserves source axis name.
-        let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+        let index =
+            Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
         let column = Column::from_values(out)?;
         Series::new(series.name(), index, column)
     }
@@ -18520,9 +18586,8 @@ impl StringAccessor<'_> {
         // source axis name on each of the three result Series.
         let name_owner = self.series.index().name().map(str::to_owned);
         let idx_name = name_owner.as_deref();
-        let build = |vals: Vec<Scalar>| -> Result<Column, FrameError> {
-            Ok(Column::from_values(vals)?)
-        };
+        let build =
+            |vals: Vec<Scalar>| -> Result<Column, FrameError> { Ok(Column::from_values(vals)?) };
         let s1 = Series::new(
             format!("{}_0", self.series.name()),
             Index::new(labels.clone()).rename_index(idx_name),
@@ -20911,8 +20976,7 @@ pub fn to_numeric(series: &Series) -> Result<Series, FrameError> {
     }
 
     // Per br-frankenpandas-cbipi: pandas pd.to_numeric preserves source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(converted)?;
     Series::new(series.name().to_string(), index, column)
 }
@@ -21057,8 +21121,7 @@ pub fn to_datetime_with_options(
     }
 
     // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(converted)?;
     Series::new(series.name().to_owned(), index, column)
 }
@@ -21587,8 +21650,7 @@ pub fn to_timedelta_with_options(
     }
 
     // Per br-frankenpandas-zkbqo: pandas pd.to_timedelta preserves source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(converted)?;
     Series::new(series.name().to_owned(), index, column)
 }
@@ -21780,8 +21842,7 @@ pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
 
     // Per br-frankenpandas-k70jf: pandas Series.dt.total_seconds preserves
     // source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(result)?;
     Series::new(series.name().to_owned(), index, column)
 }
@@ -21860,8 +21921,7 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
         .collect();
 
     // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(labels)?;
     Series::new(series.name().to_string(), index, column)
 }
@@ -21931,8 +21991,7 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
         .collect();
 
     // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name.
-    let index =
-        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
     let column = Column::from_values(labels)?;
     Series::new(series.name().to_string(), index, column)
 }
@@ -22037,18 +22096,12 @@ pub fn concat_series_with_ignore_index(
         return Ok(result);
     }
     let first_name = series_list.first().and_then(|s| s.index().name());
-    let shared_name: Option<&str> = if series_list
-        .iter()
-        .all(|s| s.index().name() == first_name)
-    {
+    let shared_name: Option<&str> = if series_list.iter().all(|s| s.index().name() == first_name) {
         first_name
     } else {
         None
     };
-    let index = result
-        .index()
-        .clone()
-        .rename_index(shared_name);
+    let index = result.index().clone().rename_index(shared_name);
     Series::new(result.name().to_owned(), index, result.column().clone())
 }
 
@@ -39322,8 +39375,8 @@ impl DataFrameGroupBy<'_> {
 
         // Per br-frankenpandas-pqvd2: pandas groupby.cumcount preserves
         // source row-axis name. Sister to br-i72df SeriesGroupBy fix.
-        let index = Index::new(self.df.index().labels().to_vec())
-            .rename_index(self.df.index().name());
+        let index =
+            Index::new(self.df.index().labels().to_vec()).rename_index(self.df.index().name());
         let column = Column::from_values(out)?;
         Series::new("cumcount".to_owned(), index, column)
     }
@@ -39360,8 +39413,8 @@ impl DataFrameGroupBy<'_> {
 
         // Per br-frankenpandas-pqvd2: pandas groupby.ngroup preserves source
         // row-axis name. Sister to cumcount fix above.
-        let index = Index::new(self.df.index().labels().to_vec())
-            .rename_index(self.df.index().name());
+        let index =
+            Index::new(self.df.index().labels().to_vec()).rename_index(self.df.index().name());
         let column = Column::from_values(out)?;
         Series::new("ngroup".to_owned(), index, column)
     }
@@ -85804,14 +85857,10 @@ mod tests {
         .unwrap()
         .rename_axis("myidx")
         .unwrap();
-        let s3 = Series::from_values(
-            "v",
-            vec!["e".into()],
-            vec![Scalar::Int64(5)],
-        )
-        .unwrap()
-        .rename_axis("other")
-        .unwrap();
+        let s3 = Series::from_values("v", vec!["e".into()], vec![Scalar::Int64(5)])
+            .unwrap()
+            .rename_axis("other")
+            .unwrap();
 
         let same = super::concat_series(&[&s1, &s2]).unwrap();
         assert_eq!(same.index().name(), Some("myidx"));
@@ -85825,9 +85874,10 @@ mod tests {
         // Per br-frankenpandas-5hoh1: pandas asof returns a Series named
         // by the searched `where` label, not the matched row label.
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-            ],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
             vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
         )
         .unwrap();
@@ -85841,7 +85891,10 @@ mod tests {
         // Per br-frankenpandas-oygjj: pandas preserves index name through
         // DataFrame.truncate (sister to br-5cc2t for Series).
         let df = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec![(
+                "v",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
             vec!["a".into(), "b".into(), "c".into()],
         )
         .unwrap()
@@ -85882,27 +85935,21 @@ mod tests {
     fn dataframe_concat_preserves_shared_index_name_r0igc() {
         // Per br-frankenpandas-r0igc: pandas preserves the index name
         // through concat when all frames share it; drops when they differ.
-        let a = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(1)])],
-            vec!["a".into()],
-        )
-        .unwrap()
-        .rename_axis("myidx")
-        .unwrap();
-        let b = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(2)])],
-            vec!["b".into()],
-        )
-        .unwrap()
-        .rename_axis("myidx")
-        .unwrap();
-        let c = DataFrame::from_dict_with_index(
-            vec![("v", vec![Scalar::Int64(3)])],
-            vec!["c".into()],
-        )
-        .unwrap()
-        .rename_axis("different")
-        .unwrap();
+        let a =
+            DataFrame::from_dict_with_index(vec![("v", vec![Scalar::Int64(1)])], vec!["a".into()])
+                .unwrap()
+                .rename_axis("myidx")
+                .unwrap();
+        let b =
+            DataFrame::from_dict_with_index(vec![("v", vec![Scalar::Int64(2)])], vec!["b".into()])
+                .unwrap()
+                .rename_axis("myidx")
+                .unwrap();
+        let c =
+            DataFrame::from_dict_with_index(vec![("v", vec![Scalar::Int64(3)])], vec!["c".into()])
+                .unwrap()
+                .rename_axis("different")
+                .unwrap();
 
         let same = super::concat_dataframes(&[&a, &b]).unwrap();
         assert_eq!(same.index().name(), Some("myidx"));
@@ -85937,7 +85984,9 @@ mod tests {
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
-        let err = s.drop(&["zzz".into()]).expect_err("missing label must reject");
+        let err = s
+            .drop(&["zzz".into()])
+            .expect_err("missing label must reject");
         match err {
             FrameError::CompatibilityRejected(msg) => {
                 assert!(msg.contains("not found"));

@@ -9778,8 +9778,14 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     }
     // Per br-frankenpandas-nrhjq: pandas multi-index union sets name to
     // the shared name across all inputs (= None if any differ).
-    let first_name = indexes.first().and_then(|idx| idx.name()).map(str::to_owned);
-    let shared_name = if indexes.iter().all(|idx| idx.name() == first_name.as_deref()) {
+    let first_name = indexes
+        .first()
+        .and_then(|idx| idx.name())
+        .map(str::to_owned);
+    let shared_name = if indexes
+        .iter()
+        .all(|idx| idx.name() == first_name.as_deref())
+    {
         first_name
     } else {
         None

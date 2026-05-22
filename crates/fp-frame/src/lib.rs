@@ -7659,6 +7659,43 @@ impl Series {
         )
     }
 
+    /// Alias for argmin, matching np.nanargmin.
+    pub fn nanargmin(&self) -> Result<i64, FrameError> {
+        self.argmin()
+    }
+
+    /// Alias for argmax, matching np.nanargmax.
+    pub fn nanargmax(&self) -> Result<i64, FrameError> {
+        self.argmax()
+    }
+
+    /// Replace NaN and infinity with specified values.
+    ///
+    /// Matches `np.nan_to_num(x, nan=nan, posinf=posinf, neginf=neginf)`.
+    pub fn nan_to_num_with_values(
+        &self,
+        nan: f64,
+        posinf: f64,
+        neginf: f64,
+    ) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.nan_to_num_with_values(nan, posinf, neginf)?,
+        )
+    }
+
+    /// Element-wise comparison for approximate equality.
+    ///
+    /// Matches `np.isclose()`. Returns True where `|a - b| <= atol + rtol * |b|`.
+    pub fn isclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.isclose(other.column(), rtol, atol)?,
+        )
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing

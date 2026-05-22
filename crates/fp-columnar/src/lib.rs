@@ -3004,6 +3004,12 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Alias for [`interpolate_linear`](Self::interpolate_linear), matching
+    /// the default `pd.Series.interpolate()` behavior.
+    pub fn interpolate(&self) -> Result<Self, ColumnError> {
+        self.interpolate_linear()
+    }
+
     /// Linear-interpolation quantile at `q ∈ [0.0, 1.0]`.
     ///
     /// Matches `pd.Series.quantile(q, interpolation='linear')`.
@@ -7589,6 +7595,21 @@ mod tests {
             let r = col.interpolate_linear().expect("interpolate");
             assert!(r.is_empty());
             assert_eq!(r.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn interpolate_alias_matches_default_linear_interpolation() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+
+            assert_eq!(
+                col.interpolate().expect("interpolate"),
+                col.interpolate_linear().expect("interpolate_linear")
+            );
         }
 
         #[test]

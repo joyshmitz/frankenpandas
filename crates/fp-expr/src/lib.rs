@@ -144,6 +144,11 @@ pub enum Expr {
         expr: Box<Expr>,
         negated: bool,
     },
+    Between {
+        expr: Box<Expr>,
+        left: Scalar,
+        right: Scalar,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -348,6 +353,10 @@ pub fn evaluate(
             } else {
                 input.isna().map_err(ExprError::from)
             }
+        }
+        Expr::Between { expr, left, right } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.between(left, right, "both").map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -726,6 +735,7 @@ impl MaterializedView {
             Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
             Expr::Not { expr } | Expr::Abs { expr } => Self::extract_series(expr, series_set),
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -844,6 +854,10 @@ fn evaluate_delta(
                 input.isna().map_err(ExprError::from)
             }
         }
+        Expr::Between { expr, left, right } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.between(left, right, "both").map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -908,7 +922,7 @@ fn evaluate_delta_comparison(
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
-//   - Series method calls: .isin([...]), .isna(), .notna(), .isnull(), .notnull()
+//   - Series method calls: .isin([...]), .between(left, right), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1448,6 +1462,40 @@ fn parse_list_literal(tokens: &[Token], pos: &mut usize) -> Result<Vec<Scalar>, 
     }
 }
 
+fn parse_scalar_literal(tokens: &[Token], pos: &mut usize) -> Result<Scalar, ExprError> {
+    if *pos >= tokens.len() {
+        return Err(ExprError::ParseError("expected scalar literal".into()));
+    }
+    let scalar = match &tokens[*pos] {
+        Token::Int(value) => Scalar::Int64(*value),
+        Token::Float(value) => Scalar::Float64(*value),
+        Token::Str(value) => Scalar::Utf8(value.clone()),
+        Token::Bool(value) => Scalar::Bool(*value),
+        Token::Minus => match tokens.get(*pos + 1) {
+            Some(Token::Int(value)) => {
+                *pos += 1;
+                Scalar::Int64(value.saturating_neg())
+            }
+            Some(Token::Float(value)) => {
+                *pos += 1;
+                Scalar::Float64(-value)
+            }
+            other => {
+                return Err(ExprError::ParseError(format!(
+                    "expected numeric literal after '-', got {other:?}"
+                )));
+            }
+        },
+        other => {
+            return Err(ExprError::ParseError(format!(
+                "expected scalar literal, got {other:?}"
+            )));
+        }
+    };
+    *pos += 1;
+    Ok(scalar)
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -1667,6 +1715,28 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     left: Box::new(expr),
                     values,
                     negated: false,
+                };
+                *pos = arg_pos + 1;
+            }
+            "between" => {
+                let mut arg_pos = *pos + 3;
+                let left = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::Comma) {
+                    return Err(ExprError::ParseError(
+                        "expected ',' between between() bounds".into(),
+                    ));
+                }
+                arg_pos += 1;
+                let right = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after between() bounds".into(),
+                    ));
+                }
+                expr = Expr::Between {
+                    expr: Box::new(expr),
+                    left,
+                    right,
                 };
                 *pos = arg_pos + 1;
             }
@@ -3127,6 +3197,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_between_method_call_scalar_bounds() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.between(2, 8)")?;
+        let Expr::Between {
+            expr: inner,
+            left,
+            right,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(left, Scalar::Int64(2));
+        assert_eq!(right, Scalar::Int64(8));
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3705,6 +3797,46 @@ mod tests {
         assert_eq!(
             filtered.columns()["a"].values(),
             &[Scalar::Int64(1), Scalar::Int64(9)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_between_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(8),
+                    Scalar::Int64(9),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mask = super::eval_str("a.between(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let filtered = super::query_str("a.between(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(8)]
         );
         Ok(())
     }

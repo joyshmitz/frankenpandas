@@ -6032,6 +6032,12 @@ impl PeriodIndex {
         self.values.first().map(|period| period.freq)
     }
 
+    /// Raw period ordinals, matching `pd.PeriodIndex.asi8`.
+    #[must_use]
+    pub fn asi8(&self) -> Vec<i64> {
+        self.values.iter().map(|period| period.ordinal).collect()
+    }
+
     #[must_use]
     pub fn to_list(&self) -> Vec<Period> {
         self.values.clone()
@@ -17342,12 +17348,14 @@ mod tests {
         assert_eq!(pi.values().len(), 3);
         assert_eq!(pi.values()[0].ordinal, 10);
         assert_eq!(pi.values()[2].ordinal, 12);
+        assert_eq!(pi.asi8(), vec![10, 11, 12]);
         for period in pi.values() {
             assert_eq!(period.freq, PeriodFreq::Monthly);
         }
 
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
+        assert!(empty.asi8().is_empty());
     }
 
     #[test]

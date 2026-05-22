@@ -8525,6 +8525,13 @@ impl Series {
         Self::from_values(self.name.clone(), labels, values)
     }
 
+    /// Alias for [`agg`](Self::agg).
+    ///
+    /// Matches `pd.Series.aggregate(...)`.
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<Self, FrameError> {
+        self.agg(funcs)
+    }
+
     /// Select rows matching the given index key.
     ///
     /// Matches `s.xs(key)`. Returns all rows whose index matches `key`.
@@ -75295,6 +75302,8 @@ mod tests {
         )
         .unwrap();
         let result = s.agg(&["sum", "mean", "count"]).unwrap();
+        let aggregate = s.aggregate(&["sum", "mean", "count"]).unwrap();
+        assert_eq!(aggregate, result);
         assert_eq!(result.len(), 3);
         assert_eq!(result.column().values()[0], Scalar::Float64(6.0)); // sum
         assert_eq!(result.column().values()[1], Scalar::Float64(2.0)); // mean

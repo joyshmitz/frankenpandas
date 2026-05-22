@@ -4253,6 +4253,141 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Negate numeric values. Matches numpy's negative ufunc.
+    pub fn neg(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(v.clone());
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Int64(x.wrapping_neg())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(-x)),
+                Scalar::Timedelta64(x) if *x != Timedelta::NAT => {
+                    out.push(Scalar::Timedelta64(x.wrapping_neg()))
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Square root of numeric values. Matches numpy's sqrt ufunc.
+    pub fn sqrt(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).sqrt())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.sqrt())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Exponential (e^x) of numeric values. Matches numpy's exp ufunc.
+    pub fn exp(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).exp())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.exp())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Natural logarithm of numeric values. Matches numpy's log ufunc.
+    pub fn log(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).ln())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.ln())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Base-10 logarithm of numeric values. Matches numpy's log10 ufunc.
+    pub fn log10(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).log10())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.log10())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Base-2 logarithm of numeric values. Matches numpy's log2 ufunc.
+    pub fn log2(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).log2())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.log2())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Shift column values by `periods` positions, filling vacated slots
     /// with `fill`.
     ///

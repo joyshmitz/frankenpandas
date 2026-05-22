@@ -1050,6 +1050,21 @@ impl Timestamp {
         self.nanos == Self::NAT
     }
 
+    /// Nanoseconds since Unix epoch, matching `pd.Timestamp.value`.
+    #[must_use]
+    pub const fn value(&self) -> i64 {
+        self.nanos
+    }
+
+    /// Stored resolution unit, matching `pd.Timestamp.unit`.
+    ///
+    /// FrankenPandas `Timestamp` stores nanoseconds internally, so non-NaT
+    /// values report `ns`. `NaT` has no unit.
+    #[must_use]
+    pub const fn unit(&self) -> Option<&'static str> {
+        if self.is_nat() { None } else { Some("ns") }
+    }
+
     /// Add a Timedelta. NaT in either operand → NaT; saturates on overflow.
     /// TZ is preserved from `self`.
     #[must_use]
@@ -4307,6 +4322,17 @@ mod tests {
             "Timestamp[42, US/Eastern]"
         );
         assert_eq!(Timestamp::nat().to_string(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_value_and_unit_match_pandas_l0edr() {
+        let ts = Timestamp::from_nanos(1_000_000_123);
+        assert_eq!(ts.value(), 1_000_000_123);
+        assert_eq!(ts.unit(), Some("ns"));
+
+        let nat = Timestamp::nat();
+        assert_eq!(nat.value(), Timestamp::NAT);
+        assert_eq!(nat.unit(), None);
     }
 
     #[test]

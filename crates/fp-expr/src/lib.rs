@@ -89,6 +89,38 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SeriesRef(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BetweenInclusive {
+    Both,
+    Left,
+    Right,
+    Neither,
+}
+
+impl BetweenInclusive {
+    fn parse(value: &str) -> Result<Self, ExprError> {
+        match value {
+            "both" => Ok(Self::Both),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "neither" => Ok(Self::Neither),
+            other => Err(ExprError::ParseError(format!(
+                "between() inclusive must be one of 'both', 'left', 'right', or 'neither', got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Neither => "neither",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expr {
@@ -148,6 +180,7 @@ pub enum Expr {
         expr: Box<Expr>,
         left: Scalar,
         right: Scalar,
+        inclusive: BetweenInclusive,
     },
     Clip {
         expr: Box<Expr>,
@@ -359,9 +392,16 @@ pub fn evaluate(
                 input.isna().map_err(ExprError::from)
             }
         }
-        Expr::Between { expr, left, right } => {
+        Expr::Between {
+            expr,
+            left,
+            right,
+            inclusive,
+        } => {
             let input = evaluate(expr, context, policy, ledger)?;
-            input.between(left, right, "both").map_err(ExprError::from)
+            input
+                .between(left, right, inclusive.as_str())
+                .map_err(ExprError::from)
         }
         Expr::Clip { expr, lower, upper } => {
             let input = evaluate(expr, context, policy, ledger)?;
@@ -866,9 +906,16 @@ fn evaluate_delta(
                 input.isna().map_err(ExprError::from)
             }
         }
-        Expr::Between { expr, left, right } => {
+        Expr::Between {
+            expr,
+            left,
+            right,
+            inclusive,
+        } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.between(left, right, "both").map_err(ExprError::from)
+            input
+                .between(left, right, inclusive.as_str())
+                .map_err(ExprError::from)
         }
         Expr::Clip { expr, lower, upper } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
@@ -940,8 +987,8 @@ fn evaluate_delta_comparison(
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
-//   - Series method calls: .isin([...]), .between(left, right), .clip(lower, upper),
-//     .isna(), .notna(), .isnull(), .notnull()
+//   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
+//     .clip(lower, upper), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -987,6 +1034,7 @@ enum Token {
     Ge,
     Lt,
     Le,
+    Assign,
     // Arithmetic
     Plus,
     Minus,
@@ -1034,6 +1082,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                             Some(
                                 Token::LParen
                                     | Token::EqEq
+                                    | Token::Assign
                                     | Token::NotEq
                                     | Token::Gt
                                     | Token::Ge
@@ -1166,9 +1215,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     tokens.push(Token::EqEq);
                     i += 2;
                 } else {
-                    return Err(ExprError::ParseError(
-                        "expected '==' but found single '='".into(),
-                    ));
+                    tokens.push(Token::Assign);
+                    i += 1;
                 }
             }
             '!' => {
@@ -1757,15 +1805,37 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 }
                 arg_pos += 1;
                 let right = parse_scalar_literal(tokens, &mut arg_pos)?;
+                let mut inclusive = BetweenInclusive::Both;
+                if tokens.get(arg_pos) == Some(&Token::Comma) {
+                    arg_pos += 1;
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "inclusive" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected between() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    let inclusive_arg = parse_scalar_literal(tokens, &mut arg_pos)?;
+                    let Scalar::Utf8(value) = inclusive_arg else {
+                        return Err(ExprError::ParseError(format!(
+                            "between() inclusive must be a string literal, got {inclusive_arg:?}"
+                        )));
+                    };
+                    inclusive = BetweenInclusive::parse(&value)?;
+                }
                 if tokens.get(arg_pos) != Some(&Token::RParen) {
                     return Err(ExprError::ParseError(
-                        "expected ')' after between() bounds".into(),
+                        "expected ')' after between() arguments".into(),
                     ));
                 }
                 expr = Expr::Between {
                     expr: Box::new(expr),
                     left,
                     right,
+                    inclusive,
                 };
                 *pos = arg_pos + 1;
             }
@@ -1810,7 +1880,10 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::Scalar;
 
-    use super::{Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, evaluate};
+    use super::{
+        BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
+        evaluate,
+    };
 
     #[test]
     fn expression_add_works_through_series_refs() {
@@ -3254,6 +3327,7 @@ mod tests {
             expr: inner,
             left,
             right,
+            inclusive,
         } = expr
         else {
             return Err(ExprError::ParseError("expected Between expression".into()));
@@ -3266,6 +3340,23 @@ mod tests {
         );
         assert_eq!(left, Scalar::Int64(2));
         assert_eq!(right, Scalar::Int64(8));
+        assert_eq!(inclusive, BetweenInclusive::Both);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_between_method_call_inclusive_argument() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.between(2, 8, inclusive=\"left\")")?;
+        let Expr::Between { inclusive, .. } = expr else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(inclusive, BetweenInclusive::Left);
+
+        let positional = super::parse_expr("a.between(2, 8, \"right\")")?;
+        let Expr::Between { inclusive, .. } = positional else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(inclusive, BetweenInclusive::Right);
         Ok(())
     }
 
@@ -3911,6 +4002,42 @@ mod tests {
             filtered.columns()["a"].values(),
             &[Scalar::Int64(2), Scalar::Int64(8)]
         );
+
+        let left_inclusive = super::eval_str(
+            "a.between(2, 8, inclusive=\"left\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            left_inclusive.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let right_inclusive =
+            super::eval_str("a.between(2, 8, \"right\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            right_inclusive.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let neither = super::query_str(
+            "a.between(2, 8, inclusive=\"neither\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert!(neither.is_empty());
         Ok(())
     }
 

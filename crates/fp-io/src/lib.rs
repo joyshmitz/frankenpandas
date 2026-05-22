@@ -10230,8 +10230,9 @@ impl DataFrameIoExt for DataFrame {
 ///
 /// Import this trait to call `series.to_pickle(path)`,
 /// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
-/// `series.to_csv_string()`, `series.to_json_string("records")`,
-/// `series.to_hdf(path)`, `series.to_excel(path)`,
+/// `series.to_csv_string()`, `series.to_markdown_string()`,
+/// `series.to_json_string("records")`, `series.to_hdf(path)`,
+/// `series.to_excel(path)`,
 /// `series.to_sql(conn, table, if_exists)`, or `series.to_clipboard()`
 /// directly on Series values.
 pub trait SeriesIoExt {
@@ -10283,6 +10284,31 @@ pub trait SeriesIoExt {
 
     /// Serialize this Series to a CSV string with explicit write options.
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError>;
+
+    /// Serialize this Series to a Markdown table string.
+    ///
+    /// Matches `pd.Series.to_markdown()` with no buffer for the supported
+    /// table formatter surface.
+    fn to_markdown_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this Series to a Markdown table string with explicit options.
+    fn to_markdown_string_with_options(
+        &self,
+        options: &MarkdownWriteOptions,
+    ) -> Result<String, IoError>;
+
+    /// Write this Series to a Markdown table file.
+    ///
+    /// Uses a file-suffixed name to avoid colliding with
+    /// `Series::to_markdown(include_index, tablefmt)`.
+    fn to_markdown_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to a Markdown table file with explicit options.
+    fn to_markdown_file_with_options(
+        &self,
+        path: &Path,
+        options: &MarkdownWriteOptions,
+    ) -> Result<(), IoError>;
 
     /// Write this Series to a JSON file.
     ///
@@ -10419,6 +10445,29 @@ impl SeriesIoExt for Series {
 
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
         write_csv_string_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_markdown_string(&self) -> Result<String, IoError> {
+        self.to_markdown_string_with_options(&MarkdownWriteOptions::default())
+    }
+
+    fn to_markdown_string_with_options(
+        &self,
+        options: &MarkdownWriteOptions,
+    ) -> Result<String, IoError> {
+        write_markdown_string_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_markdown_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_markdown_file_with_options(path, &MarkdownWriteOptions::default())
+    }
+
+    fn to_markdown_file_with_options(
+        &self,
+        path: &Path,
+        options: &MarkdownWriteOptions,
+    ) -> Result<(), IoError> {
+        write_markdown_with_options(&self.to_frame(None)?, path, options)
     }
 
     fn to_json_file(&self, path: &Path, orient: &str) -> Result<(), IoError> {
@@ -11269,6 +11318,56 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("read series json file"),
             source.to_json("index").expect("series index json")
+        );
+    }
+
+    #[test]
+    fn series_markdown_extension_aliases_forward_options() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Null(NullKind::NaN)],
+        )
+        .expect("source series");
+        let options = MarkdownWriteOptions {
+            include_index: false,
+            na_rep: "NA".to_owned(),
+            index_label: Some("ignored".to_owned()),
+        };
+
+        assert_eq!(
+            source
+                .to_markdown_string()
+                .expect("series markdown string"),
+            write_markdown_string(&source.to_frame(None).expect("series frame"))
+                .expect("frame markdown string")
+        );
+        assert_eq!(
+            source
+                .to_markdown_string_with_options(&options)
+                .expect("series markdown options"),
+            write_markdown_string_with_options(
+                &source.to_frame(None).expect("series options frame"),
+                &options,
+            )
+            .expect("frame markdown options")
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_series_markdown_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_markdown_file_with_options(&path, &options)
+            .expect("series markdown file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read series markdown file"),
+            source
+                .to_markdown_string_with_options(&options)
+                .expect("series markdown options string")
         );
     }
 

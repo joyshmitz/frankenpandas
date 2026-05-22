@@ -5767,7 +5767,8 @@ def resolve_merge_validate(payload: dict[str, Any], op_name: str) -> str | None:
 def resolve_merge_suffixes(payload: dict[str, Any], op_name: str) -> tuple[str | None, str | None]:
     suffixes_raw = payload.get("merge_suffixes")
     if suffixes_raw is None:
-        return ("_left", "_right")
+        # Match pandas default: ('_x', '_y')
+        return ("_x", "_y")
     if not isinstance(suffixes_raw, (list, tuple)) or len(suffixes_raw) != 2:
         raise OracleError(f"{op_name} merge_suffixes must be a two-item array when provided")
 

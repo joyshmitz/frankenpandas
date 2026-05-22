@@ -100,7 +100,10 @@ use fp_index::{
 use fp_runtime::{
     DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
 };
-use fp_types::{DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
+use fp_types::{
+    DType, Interval, IntervalClosed, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta,
+    common_dtype,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -1654,6 +1657,129 @@ fn days_in_month(year: i32, month: i32) -> i32 {
     }
 }
 
+fn datetime_to_nanos(value: DateTime<FixedOffset>) -> Result<i64, FrameError> {
+    let nanos = i128::from(value.timestamp())
+        .checked_mul(1_000_000_000)
+        .and_then(|base| base.checked_add(i128::from(value.timestamp_subsec_nanos())))
+        .ok_or_else(|| {
+            FrameError::CompatibilityRejected("datetime64 value is out of range".to_owned())
+        })?;
+    i64::try_from(nanos).map_err(|_| {
+        FrameError::CompatibilityRejected("datetime64 value is out of range".to_owned())
+    })
+}
+
+fn parse_datetime64_nanos(value: &str) -> Result<i64, FrameError> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("nat") {
+        return Ok(Timedelta::NAT);
+    }
+    if let Some(aware) = parse_fixed_offset_datetime(trimmed) {
+        return datetime_to_nanos(aware);
+    }
+    let normalized = match parse_datetime_string(trimmed, None) {
+        Scalar::Utf8(rendered) => rendered,
+        _ => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot parse datetime value '{value}'"
+            )));
+        }
+    };
+    let naive = parse_naive_datetime_value(&normalized)?;
+    naive.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+        FrameError::CompatibilityRejected(format!("datetime64 value '{value}' is out of range"))
+    })
+}
+
+fn parse_year_month_period_label(label: &str) -> Option<(i32, u32)> {
+    let (year, month) = label.split_once('-')?;
+    if month.contains('-') {
+        return None;
+    }
+    let year = year.parse::<i32>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    if (1..=12).contains(&month) {
+        Some((year, month))
+    } else {
+        None
+    }
+}
+
+fn parse_period_display_ordinal(label: &str) -> Option<i64> {
+    let inner = label.strip_prefix("Period[")?.strip_suffix(']')?;
+    inner.rsplit(',').next()?.trim().parse::<i64>().ok()
+}
+
+fn parse_period_ordinal(value: &str) -> Result<i64, FrameError> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("nat") {
+        return Ok(i64::MIN);
+    }
+    if let Some(ordinal) = parse_period_display_ordinal(trimmed) {
+        return Ok(ordinal);
+    }
+    if let Some((year, quarter)) = parse_quarter_period_label(trimmed) {
+        return Ok(i64::from(year - 1970) * 4 + i64::from(quarter - 1));
+    }
+    if let Some((year, month)) = parse_year_month_period_label(trimmed) {
+        return Ok(i64::from(year - 1970) * 12 + i64::from(month - 1));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let epoch = date_to_jdn(1970, 1, 1);
+        let month = i32::try_from(date.month()).map_err(|_| {
+            FrameError::CompatibilityRejected(format!("cannot parse period value '{value}'"))
+        })?;
+        let day = i32::try_from(date.day()).map_err(|_| {
+            FrameError::CompatibilityRejected(format!("cannot parse period value '{value}'"))
+        })?;
+        return Ok(i64::from(date_to_jdn(date.year(), month, day) - epoch));
+    }
+    if let Ok(datetime) = parse_naive_datetime_value(trimmed) {
+        return Ok(datetime.and_utc().timestamp());
+    }
+    if trimmed.len() == 4 && trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        let year = trimmed.parse::<i32>().map_err(|_| {
+            FrameError::CompatibilityRejected(format!("cannot parse period value '{value}'"))
+        })?;
+        return Ok(i64::from(year - 1970));
+    }
+    Err(FrameError::CompatibilityRejected(format!(
+        "cannot parse period value '{value}'"
+    )))
+}
+
+fn parse_interval_value(value: &str) -> Result<Interval, FrameError> {
+    let trimmed = value.trim();
+    let left_bracket = trimmed.chars().next().ok_or_else(|| {
+        FrameError::CompatibilityRejected("cannot parse empty interval value".to_owned())
+    })?;
+    let right_bracket = trimmed.chars().last().ok_or_else(|| {
+        FrameError::CompatibilityRejected("cannot parse empty interval value".to_owned())
+    })?;
+    let closed = match (left_bracket, right_bracket) {
+        ('[', ']') => IntervalClosed::Both,
+        ('[', ')') => IntervalClosed::Left,
+        ('(', ']') => IntervalClosed::Right,
+        ('(', ')') => IntervalClosed::Neither,
+        _ => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot parse interval value '{value}'"
+            )));
+        }
+    };
+    let inner = &trimmed[left_bracket.len_utf8()..trimmed.len() - right_bracket.len_utf8()];
+    let (left, right) = inner.split_once(',').ok_or_else(|| {
+        FrameError::CompatibilityRejected(format!("cannot parse interval value '{value}'"))
+    })?;
+    let left = left.trim().parse::<f64>().map_err(|_| {
+        FrameError::CompatibilityRejected(format!("cannot parse interval value '{value}'"))
+    })?;
+    let right = right.trim().parse::<f64>().map_err(|_| {
+        FrameError::CompatibilityRejected(format!("cannot parse interval value '{value}'"))
+    })?;
+    Ok(Interval::new(left, right, closed))
+}
+
 /// Coerce a single scalar to a target dtype, falling back to NaN on failure.
 fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
     if val.is_missing() {
@@ -1713,19 +1839,24 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
         DType::Datetime64 => match val {
             Scalar::Datetime64(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Datetime64(*n),
-            Scalar::Utf8(_s) => {
-                // TODO: parse datetime string
-                Scalar::Datetime64(Timedelta::NAT)
-            }
+            Scalar::Utf8(s) => parse_datetime64_nanos(s)
+                .map(Scalar::Datetime64)
+                .unwrap_or(Scalar::Datetime64(Timedelta::NAT)),
             _ => Scalar::Datetime64(Timedelta::NAT),
         },
         DType::Period => match val {
             Scalar::Period(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Period(*n),
+            Scalar::Utf8(s) => parse_period_ordinal(s)
+                .map(Scalar::Period)
+                .unwrap_or(Scalar::Period(i64::MIN)),
             _ => Scalar::Period(i64::MIN),
         },
         DType::Interval => match val {
             Scalar::Interval(_) => val.clone(),
+            Scalar::Utf8(s) => parse_interval_value(s)
+                .map(Scalar::Interval)
+                .unwrap_or(Scalar::Null(NullKind::NaN)),
             _ => Scalar::Null(NullKind::NaN),
         },
     }
@@ -25556,27 +25687,30 @@ impl DataFrame {
                                         col_names[idx]
                                     ))
                                 })?,
-                            DType::Datetime64 => {
-                                // TODO: parse datetime string
-                                return Err(FrameError::CompatibilityRejected(format!(
-                                    "cannot parse datetime value '{raw}' in column '{}'",
-                                    col_names[idx]
-                                )));
-                            }
+                            DType::Datetime64 => parse_datetime64_nanos(raw)
+                                .map(Scalar::Datetime64)
+                                .map_err(|_| {
+                                    FrameError::CompatibilityRejected(format!(
+                                        "cannot parse datetime value '{raw}' in column '{}'",
+                                        col_names[idx]
+                                    ))
+                                })?,
                             DType::Period => {
-                                // TODO: parse period string
-                                return Err(FrameError::CompatibilityRejected(format!(
-                                    "cannot parse period value '{raw}' in column '{}'",
-                                    col_names[idx]
-                                )));
+                                parse_period_ordinal(raw).map(Scalar::Period).map_err(|_| {
+                                    FrameError::CompatibilityRejected(format!(
+                                        "cannot parse period value '{raw}' in column '{}'",
+                                        col_names[idx]
+                                    ))
+                                })?
                             }
-                            DType::Interval => {
-                                // TODO: parse interval string
-                                return Err(FrameError::CompatibilityRejected(format!(
-                                    "cannot parse interval value '{raw}' in column '{}'",
-                                    col_names[idx]
-                                )));
-                            }
+                            DType::Interval => parse_interval_value(raw)
+                                .map(Scalar::Interval)
+                                .map_err(|_| {
+                                    FrameError::CompatibilityRejected(format!(
+                                        "cannot parse interval value '{raw}' in column '{}'",
+                                        col_names[idx]
+                                    ))
+                                })?,
                         }
                     }
                 } else if is_na {
@@ -42341,14 +42475,14 @@ mod tests {
     use fp_columnar::Column;
     use fp_index::{AlignMode, Index};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{DType, NullKind, Scalar, Timedelta};
+    use fp_types::{DType, IntervalClosed, NullKind, Scalar, Timedelta};
     use serde_json::Value;
 
     use super::{
         DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DataFrameDictAxisLabels,
         DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, cut, datetime64_label_from_naive, index_to_frame,
-        index_to_series, parse_naive_datetime_value, qcut, to_numeric,
+        index_to_series, parse_datetime64_nanos, parse_naive_datetime_value, qcut, to_numeric,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -71486,6 +71620,42 @@ mod tests {
         assert!(df.columns()["val"].values()[1].is_missing());
         assert_eq!(df.columns()["flag"].values()[0], Scalar::Bool(true));
         assert_eq!(df.columns()["flag"].values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn df_from_csv_with_options_parses_temporal_extension_dtypes() {
+        let csv = "dt;period;interval\n2024-01-15 10:30:45;2024Q1;(0, 1]\nNaT;2024-01;[2.5, 3.5)";
+        let mut dtypes = BTreeMap::new();
+        dtypes.insert("dt".to_owned(), DType::Datetime64);
+        dtypes.insert("period".to_owned(), DType::Period);
+        dtypes.insert("interval".to_owned(), DType::Interval);
+        let options = DataFrameCsvReadOptions {
+            sep: ';',
+            dtypes,
+            ..DataFrameCsvReadOptions::default()
+        };
+
+        let df = DataFrame::from_csv_with_options(csv, &options).unwrap();
+
+        assert_eq!(df.columns()["dt"].dtype(), DType::Datetime64);
+        assert_eq!(
+            df.columns()["dt"].values(),
+            &[
+                Scalar::Datetime64(parse_datetime64_nanos("2024-01-15 10:30:45").unwrap()),
+                Scalar::Datetime64(Timedelta::NAT),
+            ]
+        );
+        assert_eq!(
+            df.columns()["period"].values(),
+            &[Scalar::Period(216), Scalar::Period(648)]
+        );
+        assert_eq!(
+            df.columns()["interval"].values(),
+            &[
+                Scalar::Interval(fp_types::Interval::new(0.0, 1.0, IntervalClosed::Right)),
+                Scalar::Interval(fp_types::Interval::new(2.5, 3.5, IntervalClosed::Left)),
+            ]
+        );
     }
 
     #[test]

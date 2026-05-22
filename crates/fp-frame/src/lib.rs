@@ -19357,6 +19357,44 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Extract timezone info from datetime strings.
+    ///
+    /// Returns the timezone suffix (e.g., "+00:00", "Z", "-05:00") or None
+    /// for naive (timezone-unaware) datetimes.
+    ///
+    /// Matches `pd.Series.dt.tz` inspection pattern.
+    pub fn tz(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                let s = s.trim();
+                // Check for Z suffix
+                if s.ends_with('Z') {
+                    return Scalar::Utf8("UTC".to_string());
+                }
+                // Check for +HH:MM or -HH:MM suffix
+                if let Some(plus_idx) = s.rfind('+') {
+                    let tz_part = &s[plus_idx..];
+                    if tz_part.len() >= 5 && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit()) {
+                        return Scalar::Utf8(tz_part.to_string());
+                    }
+                }
+                if let Some(minus_idx) = s.rfind('-') {
+                    // Make sure it's not the date separator (YYYY-MM-DD)
+                    let tz_part = &s[minus_idx..];
+                    if tz_part.len() >= 5
+                        && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit())
+                        && minus_idx > 10
+                    {
+                        return Scalar::Utf8(tz_part.to_string());
+                    }
+                }
+                // Naive datetime - no timezone
+                Scalar::Null(NullKind::Null)
+            },
+            self.series.name(),
+        )
+    }
+
     /// Internal: parse a datetime string and extract a specific component.
     ///
     /// Components: 0=year, 1=month, 2=day, 3=hour, 4=minute, 5=second
@@ -76847,6 +76885,32 @@ mod tests {
         assert_eq!(year_col.column().values()[0], Scalar::Int64(2023));
         assert_eq!(week_col.column().values()[0], Scalar::Int64(1));
         assert_eq!(day_col.column().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn test_dt_tz() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15T14:35:22Z".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00-08:00".to_string()),
+                Scalar::Utf8("2023-03-15 12:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().tz().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("UTC".to_string()));
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("+05:30".to_string())
+        );
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("-08:00".to_string())
+        );
+        assert_eq!(result.column().values()[3], Scalar::Null(NullKind::Null));
     }
 
     #[test]

@@ -9260,6 +9260,55 @@ impl Series {
         self.reorder_by_positions(&keep)
     }
 
+    /// Convert a datetime-like row index to period-style labels.
+    ///
+    /// Matches `pd.Series.to_period(freq)` for the supported row-index
+    /// frequencies shared with [`DataFrame::to_period`].
+    pub fn to_period(&self, freq: &str) -> Result<Self, FrameError> {
+        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("to_period: unsupported frequency '{freq}'"))
+        })?;
+        let labels = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| period_index_label(label, period_freq))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name: self.name.clone(),
+            index: Index::new(labels).set_names(self.index.name()),
+            column: self.column.clone(),
+            categorical: self.categorical.clone(),
+            sparse: self.sparse.clone(),
+        })
+    }
+
+    /// Convert period-style row index labels to timestamp labels.
+    ///
+    /// Matches `pd.Series.to_timestamp(freq, how)` for canonical period
+    /// labels emitted by [`Self::to_period`].
+    pub fn to_timestamp(&self, freq: &str, how: &str) -> Result<Self, FrameError> {
+        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "to_timestamp: unsupported frequency '{freq}'"
+            ))
+        })?;
+        let how = normalize_period_timestamp_how(how)?;
+        let labels = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| period_label_to_timestamp(label, period_freq, how))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name: self.name.clone(),
+            index: Index::new(labels).set_names(self.index.name()),
+            column: self.column.clone(),
+            categorical: self.categorical.clone(),
+            sparse: self.sparse.clone(),
+        })
+    }
+
     /// Select initial rows from a DatetimeIndex up to an offset.
     ///
     /// Matches `pd.Series.first(offset)`.
@@ -84997,11 +85046,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn series_to_period_converts_datetime_index_and_preserves_values() {
+        let s = Series::new(
+            "value",
+            Index::from_utf8(vec![
+                "2001-03-31 00:00:00".to_owned(),
+                "2002-05-31T12:30:00".to_owned(),
+                "NaT".to_owned(),
+            ])
+            .set_names(Some("when")),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let out = s.to_period("Q").unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("2001Q1".into()),
+                IndexLabel::Utf8("2002Q2".into()),
+                IndexLabel::Utf8("NaT".into()),
+            ]
+        );
+        assert_eq!(out.index().name(), Some("when"));
+        assert_eq!(out.values(), s.values());
+        assert_eq!(out.name(), "value");
+    }
+
     // -- DataFrame.to_timestamp period index conversion (br-frankenpandas-4zwu2) --
 
     fn dataframe_4zwu2_timestamp_label(value: &str) -> Result<IndexLabel, FrameError> {
         let datetime = parse_naive_datetime_value(value)?;
         datetime64_label_from_naive(datetime)
+    }
+
+    #[test]
+    fn series_to_timestamp_converts_period_index_and_preserves_values() {
+        let s = Series::new(
+            "value",
+            Index::from_utf8(vec![
+                "2001-03".to_owned(),
+                "2001-04".to_owned(),
+                "NaT".to_owned(),
+            ])
+            .set_names(Some("period")),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let out = s.to_timestamp("M", "start").unwrap();
+        let expected = vec![
+            dataframe_4zwu2_timestamp_label("2001-03-01 00:00:00").unwrap(),
+            dataframe_4zwu2_timestamp_label("2001-04-01 00:00:00").unwrap(),
+            IndexLabel::Datetime64(i64::MIN),
+        ];
+        assert_eq!(out.index().labels(), expected.as_slice());
+        assert_eq!(out.index().name(), Some("period"));
+        assert_eq!(out.values(), s.values());
+        assert_eq!(out.name(), "value");
     }
 
     #[test]

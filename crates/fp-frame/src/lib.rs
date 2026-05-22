@@ -9263,6 +9263,11 @@ impl Series {
     /// Select initial rows from a DatetimeIndex up to an offset.
     ///
     /// Matches `pd.Series.first(offset)`.
+    pub fn first(&self, offset: &str) -> Result<Self, FrameError> {
+        self.first_offset(offset)
+    }
+
+    /// Explicit alias for [`Self::first`].
     pub fn first_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -9295,6 +9300,11 @@ impl Series {
     /// Per br-frankenpandas-a79h9: the missing-last-label case is reported
     /// as a CompatibilityRejected error rather than a panic, so callers
     /// can recover from inconsistent series state instead of crashing.
+    pub fn last(&self, offset: &str) -> Result<Self, FrameError> {
+        self.last_offset(offset)
+    }
+
+    /// Explicit alias for [`Self::last`].
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -80726,6 +80736,27 @@ mod tests {
         let result = s.last_offset("5D").unwrap();
         // 2024-01-10 - 5D = 2024-01-05, so include 01-05 and 01-10
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn series_first_last_aliases_match_offset_methods() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01".into(),
+                "2024-01-05".into(),
+                "2024-01-15".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.first("7D").unwrap(), s.first_offset("7D").unwrap());
+        assert_eq!(s.last("10D").unwrap(), s.last_offset("10D").unwrap());
     }
 
     #[test]

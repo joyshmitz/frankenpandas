@@ -4803,6 +4803,102 @@ impl Column {
         Self::new(DType::Int64, out)
     }
 
+    /// Compute histogram using provided bin edges.
+    ///
+    /// Matches np.histogram(a, bins=edges). Returns counts for each bin.
+    /// Bins are [edges[i], edges[i+1]) except the last which is [edges[n-1], edges[n]].
+    pub fn histogram(&self, bin_edges: &[f64]) -> Result<Self, ColumnError> {
+        if bin_edges.len() < 2 {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: "histogram requires at least 2 bin edges".to_owned(),
+                dtype: self.dtype,
+            }));
+        }
+        let n_bins = bin_edges.len() - 1;
+        let mut counts = vec![0i64; n_bins];
+
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            let x = match v.to_f64() {
+                Ok(f) if f.is_finite() => f,
+                _ => continue,
+            };
+            // Binary search for the appropriate bin
+            let mut found = false;
+            for i in 0..n_bins {
+                let in_bin = if i == n_bins - 1 {
+                    // Last bin is inclusive on right
+                    x >= bin_edges[i] && x <= bin_edges[i + 1]
+                } else {
+                    x >= bin_edges[i] && x < bin_edges[i + 1]
+                };
+                if in_bin {
+                    counts[i] += 1;
+                    found = true;
+                    break;
+                }
+            }
+            // Values outside all bins are not counted (matches numpy)
+            let _ = found;
+        }
+
+        let out: Vec<Scalar> = counts.into_iter().map(Scalar::Int64).collect();
+        Self::new(DType::Int64, out)
+    }
+
+    /// Compute histogram with auto-generated bins.
+    ///
+    /// Matches np.histogram(a, bins=n_bins). Returns (counts, bin_edges).
+    /// Bins are evenly spaced between min and max of the data.
+    pub fn histogram_auto(&self, n_bins: usize) -> Result<(Self, Vec<f64>), ColumnError> {
+        if n_bins == 0 {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: "histogram requires at least 1 bin".to_owned(),
+                dtype: self.dtype,
+            }));
+        }
+
+        // Find min and max
+        let mut min_val = f64::INFINITY;
+        let mut max_val = f64::NEG_INFINITY;
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            if let Ok(x) = v.to_f64() {
+                if x.is_finite() {
+                    min_val = min_val.min(x);
+                    max_val = max_val.max(x);
+                }
+            }
+        }
+
+        if !min_val.is_finite() || !max_val.is_finite() || min_val > max_val {
+            // No valid data
+            let counts: Vec<Scalar> = vec![Scalar::Int64(0); n_bins];
+            let edges = vec![0.0; n_bins + 1];
+            return Ok((Self::new(DType::Int64, counts)?, edges));
+        }
+
+        // Generate bin edges
+        let range = max_val - min_val;
+        let step = if range == 0.0 {
+            1.0
+        } else {
+            range / n_bins as f64
+        };
+        let mut bin_edges: Vec<f64> = (0..=n_bins)
+            .map(|i| min_val + step * i as f64)
+            .collect();
+        // Ensure max is exactly the last edge
+        bin_edges[n_bins] = max_val;
+
+        let counts = self.histogram(&bin_edges)?;
+        Ok((counts, bin_edges))
+    }
+
     /// Cast the column to a target dtype.
     ///
     /// Matches `pd.Series.astype(dtype)`. Each value is routed through

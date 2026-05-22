@@ -60498,6 +60498,36 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_html_mixed_dtypes_golden() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "name",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("Alice".to_string()),
+                    Scalar::Utf8("<Bob>".to_string()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "score",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(95.5), Scalar::Null(NullKind::NaN)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "active",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Bool(true), Scalar::Bool(false)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let output = df.to_html(true);
+        assert_text_golden("dataframe_to_html_mixed.txt", &output);
+    }
+
+    #[test]
     fn dataframe_display() {
         let df = DataFrame::from_series(vec![
             Series::from_values(

@@ -2753,6 +2753,19 @@ impl Series {
 
         let column = left.binary_numeric(&right, op)?;
 
+        // DISC-014: Duplicate-label alignment CAN introduce NaN via cross-product
+        // mismatches. Pandas promotes Int64 to Float64 unconditionally when duplicate
+        // labels exist (even if this specific operation happens to avoid NaN). Match
+        // that behavior for conformance.
+        let column = if has_duplicate_labels
+            && !exact_index_fast_path
+            && column.dtype() == DType::Int64
+        {
+            column.astype(DType::Float64)?
+        } else {
+            column
+        };
+
         let op_symbol = match op {
             ArithmeticOp::Add => "+",
             ArithmeticOp::Sub => "-",
@@ -43527,7 +43540,8 @@ mod tests {
             out.index().labels(),
             &[IndexLabel::from("a"), IndexLabel::from("a")]
         );
-        assert_eq!(out.values(), &[Scalar::Int64(4), Scalar::Int64(5)]);
+        // DISC-014: duplicate-label alignment promotes Int64 to Float64
+        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(5.0)]);
     }
 
     #[test]
@@ -44026,7 +44040,8 @@ mod tests {
 
         let out = left.sub(&right).expect("strict should align");
         assert_eq!(out.index().labels(), &["x".into(), "x".into()]);
-        assert_eq!(out.values(), &[Scalar::Int64(-2), Scalar::Int64(-1)]);
+        // DISC-014: duplicate-label alignment promotes Int64 to Float64
+        assert_eq!(out.values(), &[Scalar::Float64(-2.0), Scalar::Float64(-1.0)]);
     }
 
     #[test]
@@ -44056,15 +44071,16 @@ mod tests {
                 IndexLabel::from("c")
             ]
         );
+        // DISC-014: duplicate-label alignment promotes Int64 to Float64
         assert_eq!(
             out.values(),
             &[
-                Scalar::Int64(11),
-                Scalar::Int64(21),
-                Scalar::Int64(12),
-                Scalar::Int64(22),
-                Scalar::Null(NullKind::Null),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(11.0),
+                Scalar::Float64(21.0),
+                Scalar::Float64(12.0),
+                Scalar::Float64(22.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN)
             ]
         );
     }

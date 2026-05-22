@@ -3673,6 +3673,34 @@ impl Column {
     /// Missing values map to false. Non-numeric inputs return a type
     /// error.
     pub fn between(&self, lower: f64, upper: f64, inclusive: bool) -> Result<Self, ColumnError> {
+        let policy = if inclusive { "both" } else { "neither" };
+        self.between_inclusive(lower, upper, policy)
+    }
+
+    /// Bool column indicating whether each value lies between bounds
+    /// with pandas string-valued side-inclusion semantics.
+    ///
+    /// Matches `pd.Series.between(inclusive=...)` for `"both"`,
+    /// `"left"`, `"right"`, and `"neither"`.
+    pub fn between_inclusive(
+        &self,
+        lower: f64,
+        upper: f64,
+        inclusive: &str,
+    ) -> Result<Self, ColumnError> {
+        let (include_left, include_right) = match inclusive {
+            "both" => (true, true),
+            "left" => (true, false),
+            "right" => (false, true),
+            "neither" => (false, false),
+            other => {
+                return Err(ColumnError::Type(TypeError::NonNumericValue {
+                    value: other.to_string(),
+                    dtype: self.dtype,
+                }));
+            }
+        };
+
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -3681,12 +3709,9 @@ impl Column {
             }
             match v.to_f64() {
                 Ok(x) => {
-                    let in_range = if inclusive {
-                        x >= lower && x <= upper
-                    } else {
-                        x > lower && x < upper
-                    };
-                    out.push(Scalar::Bool(in_range));
+                    let lower_ok = if include_left { x >= lower } else { x > lower };
+                    let upper_ok = if include_right { x <= upper } else { x < upper };
+                    out.push(Scalar::Bool(lower_ok && upper_ok));
                 }
                 Err(err) => return Err(ColumnError::Type(err)),
             }
@@ -6624,6 +6649,32 @@ mod tests {
             assert_eq!(b.values()[0], Scalar::Bool(false));
             assert_eq!(b.values()[1], Scalar::Bool(true));
             assert_eq!(b.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn between_left_and_right_inclusive_edges() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+
+            let left = col
+                .between_inclusive(1.0, 5.0, "left")
+                .expect("between left");
+            assert_eq!(
+                left.values(),
+                &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false),]
+            );
+
+            let right = col
+                .between_inclusive(1.0, 5.0, "right")
+                .expect("between right");
+            assert_eq!(
+                right.values(),
+                &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true),]
+            );
         }
 
         #[test]

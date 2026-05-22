@@ -10224,6 +10224,70 @@ impl DataFrameIoExt for DataFrame {
     }
 }
 
+// ── Extension trait for Series IO convenience methods ─────────────────
+
+/// Extension trait that adds IO convenience methods to `Series`.
+///
+/// Import this trait to call `series.to_pickle(path)` /
+/// `series.to_pickle_bytes()` directly on Series values.
+pub trait SeriesIoExt {
+    /// Write this Series to a Pickle file.
+    ///
+    /// Matches `pd.Series.to_pickle(path)` for the supported
+    /// FrankenPandas pickle envelope.
+    fn to_pickle(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to a Pickle file.
+    ///
+    /// Explicit file-suffixed form of [`SeriesIoExt::to_pickle`].
+    fn to_pickle_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to a Pickle file with explicit options.
+    fn to_pickle_with_options(
+        &self,
+        path: &Path,
+        options: &PickleWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this Series to Pickle bytes.
+    fn to_pickle_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Serialize this Series to Pickle bytes with explicit options.
+    fn to_pickle_bytes_with_options(
+        &self,
+        options: &PickleWriteOptions,
+    ) -> Result<Vec<u8>, IoError>;
+}
+
+impl SeriesIoExt for Series {
+    fn to_pickle(&self, path: &Path) -> Result<(), IoError> {
+        write_pickle(&self.to_frame(None)?, path)
+    }
+
+    fn to_pickle_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_pickle(path)
+    }
+
+    fn to_pickle_with_options(
+        &self,
+        path: &Path,
+        options: &PickleWriteOptions,
+    ) -> Result<(), IoError> {
+        write_pickle_with_options(&self.to_frame(None)?, path, options)
+    }
+
+    fn to_pickle_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_pickle_bytes(&self.to_frame(None)?)
+    }
+
+    fn to_pickle_bytes_with_options(
+        &self,
+        options: &PickleWriteOptions,
+    ) -> Result<Vec<u8>, IoError> {
+        write_pickle_bytes_with_options(&self.to_frame(None)?, options)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -10868,6 +10932,46 @@ mod tests {
             source.to_pickle_bytes().expect("trait pickle bytes"),
             write_pickle_bytes(&source).expect("free pickle bytes")
         );
+    }
+
+    #[test]
+    fn series_pickle_extension_aliases_roundtrip_to_single_column_frame() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+
+        let bytes = source.to_pickle_bytes().expect("series pickle bytes");
+        let roundtrip = read_pickle_bytes(&bytes).expect("read series pickle frame");
+        let names = roundtrip
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["sales"]);
+        assert_eq!(roundtrip.index().labels(), source.index().labels());
+        assert_eq!(
+            roundtrip.column("sales").expect("sales column").values(),
+            source.values()
+        );
+
+        let frame = source.to_frame(None).expect("series frame");
+        assert_eq!(
+            source.to_pickle_bytes().expect("trait pickle bytes"),
+            write_pickle_bytes(&frame).expect("frame pickle bytes")
+        );
+
+        let options = PickleWriteOptions {
+            protocol: PickleProtocol::V2,
+        };
+        assert!(!source
+            .to_pickle_bytes_with_options(&options)
+            .expect("series pickle protocol v2")
+            .is_empty());
     }
 
     #[test]

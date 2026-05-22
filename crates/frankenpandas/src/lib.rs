@@ -123,6 +123,7 @@ pub use fp_io::{
     DEFAULT_HDF5_KEY,
     // Extension trait
     DataFrameIoExt,
+    SeriesIoExt,
     // Excel
     ExcelReadOptions,
     ExcelWriteOptions,
@@ -495,6 +496,7 @@ pub mod prelude {
         Scalar,
         Series,
         SeriesGroupBy,
+        SeriesIoExt,
         SeriesResetIndexResult,
         SparseAccessor,
         // fd90.15: SparseDType pairs with SparseAccessor (in prelude)

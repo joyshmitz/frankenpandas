@@ -6342,6 +6342,17 @@ impl PeriodIndex {
         Ok(self.start_time()?.second())
     }
 
+    /// ISO week number for each period's ending date, matching
+    /// `pd.PeriodIndex.week`.
+    pub fn week(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.week())
+    }
+
+    /// Alias for [`week`](Self::week), matching `pd.PeriodIndex.weekofyear`.
+    pub fn weekofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.week()
+    }
+
     /// Day of year for each period's ending date, matching
     /// `pd.PeriodIndex.dayofyear`.
     pub fn dayofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
@@ -18699,6 +18710,8 @@ mod tests {
         assert_eq!(periods.year()?, end.year());
         assert_eq!(periods.month()?, end.month());
         assert_eq!(periods.day()?, end.day());
+        assert_eq!(periods.week()?, end.week());
+        assert_eq!(periods.weekofyear()?, periods.week()?);
         assert_eq!(periods.dayofyear()?, end.dayofyear());
         assert_eq!(periods.day_of_year()?, periods.dayofyear()?);
         assert_eq!(periods.dayofweek()?, end.dayofweek());

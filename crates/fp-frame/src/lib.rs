@@ -17497,6 +17497,44 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Check if all boolean elements in each list are true.
+    pub fn all(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let result = list.iter().all(|v| matches!(v, Scalar::Bool(true)));
+                        Scalar::Bool(result)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
+    /// Check if any boolean element in each list is true.
+    pub fn any(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let result = list.iter().any(|v| matches!(v, Scalar::Bool(true)));
+                        Scalar::Bool(result)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91297,5 +91335,24 @@ mod test_select_columns_perf_76e1fd {
             _ => panic!("expected Utf8"),
         };
         assert!(v.contains("1") && v.contains("2") && v.contains("3"));
+    }
+
+    #[test]
+    fn series_list_accessor_all_any() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[true, true, true]".into()),
+                Scalar::Utf8("[true, false, true]".into()),
+            ],
+        )
+        .unwrap();
+        let all_result = s.list().all().unwrap();
+        assert_eq!(all_result.column().values()[0], Scalar::Bool(true));
+        assert_eq!(all_result.column().values()[1], Scalar::Bool(false));
+        let any_result = s.list().any().unwrap();
+        assert_eq!(any_result.column().values()[0], Scalar::Bool(true));
+        assert_eq!(any_result.column().values()[1], Scalar::Bool(true));
     }
 }

@@ -1303,6 +1303,33 @@ impl Column {
         Self::new(DType::Float64, values)
     }
 
+    /// Create values evenly spaced on a log scale (geometric progression).
+    ///
+    /// Matches np.geomspace(start, stop, num). Unlike logspace, start and stop
+    /// are the actual boundary values (not exponents).
+    pub fn geomspace(start: f64, stop: f64, num: usize) -> Result<Self, ColumnError> {
+        if num == 0 {
+            return Self::new(DType::Float64, vec![]);
+        }
+        if start == 0.0 || stop == 0.0 {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: "geomspace endpoints cannot be zero".to_owned(),
+                dtype: DType::Float64,
+            }));
+        }
+        if num == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(start)]);
+        }
+
+        let log_start = start.ln();
+        let log_stop = stop.ln();
+        let step = (log_stop - log_start) / (num - 1) as f64;
+        let values: Vec<Scalar> = (0..num)
+            .map(|i| Scalar::Float64((log_start + step * i as f64).exp()))
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
     /// Generate a Hann (Hanning) window.
     ///
     /// Matches np.hanning(M). Returns a raised cosine window of length M.

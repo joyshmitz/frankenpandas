@@ -2827,6 +2827,13 @@ impl Column {
         nanargmin(&self.values)
     }
 
+    /// Alias for [`argmin`](Self::argmin), matching `pd.Series.idxmin()`
+    /// for positional indices.
+    #[must_use]
+    pub fn idxmin(&self) -> Option<usize> {
+        self.argmin()
+    }
+
     /// Position of the largest non-missing value, or None when every
     /// value is missing.
     ///
@@ -2834,6 +2841,13 @@ impl Column {
     #[must_use]
     pub fn argmax(&self) -> Option<usize> {
         nanargmax(&self.values)
+    }
+
+    /// Alias for [`argmax`](Self::argmax), matching `pd.Series.idxmax()`
+    /// for positional indices.
+    #[must_use]
+    pub fn idxmax(&self) -> Option<usize> {
+        self.argmax()
     }
 
     /// Whether non-missing values are non-decreasing.
@@ -7755,6 +7769,8 @@ mod tests {
             .expect("col");
             assert_eq!(col.argmin(), Some(2));
             assert_eq!(col.argmax(), Some(3));
+            assert_eq!(col.idxmin(), Some(2));
+            assert_eq!(col.idxmax(), Some(3));
         }
 
         #[test]
@@ -7766,6 +7782,8 @@ mod tests {
             .expect("col");
             assert!(col.argmin().is_none());
             assert!(col.argmax().is_none());
+            assert!(col.idxmin().is_none());
+            assert!(col.idxmax().is_none());
         }
 
         #[test]

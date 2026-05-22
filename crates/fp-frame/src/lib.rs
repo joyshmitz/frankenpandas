@@ -29170,17 +29170,26 @@ impl DataFrame {
     /// first element is the index label (converted to Scalar) followed by
     /// each column value in column order.
     pub fn to_records(&self) -> Vec<Vec<Scalar>> {
+        self.to_records_with_index(true)
+    }
+
+    /// Matches `df.to_records(index=...)`.
+    ///
+    /// When `include_index` is false, records contain only column values in
+    /// column order.
+    pub fn to_records_with_index(&self, include_index: bool) -> Vec<Vec<Scalar>> {
         let mut records = Vec::with_capacity(self.len());
         for i in 0..self.len() {
-            let mut row = Vec::with_capacity(self.column_order.len() + 1);
-            // Index label as first element
-            let lbl = &self.index.labels()[i];
-            row.push(match lbl {
-                IndexLabel::Int64(n) => Scalar::Int64(*n),
-                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-            });
+            let mut row = Vec::with_capacity(self.column_order.len() + usize::from(include_index));
+            if include_index {
+                let lbl = &self.index.labels()[i];
+                row.push(match lbl {
+                    IndexLabel::Int64(n) => Scalar::Int64(*n),
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+                    IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+                });
+            }
             for col_name in &self.column_order {
                 row.push(
                     self.columns
@@ -75771,6 +75780,30 @@ mod tests {
         // Second record: [index=1, a=2, b="y"]
         assert_eq!(records[1][0], Scalar::Int64(1));
         assert_eq!(records[1][1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn dataframe_to_records_with_index_false_omits_index_values() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let records = df.to_records_with_index(false);
+        assert_eq!(
+            records,
+            vec![
+                vec![Scalar::Int64(1), Scalar::Utf8("x".into())],
+                vec![Scalar::Int64(2), Scalar::Utf8("y".into())],
+            ]
+        );
     }
 
     #[test]

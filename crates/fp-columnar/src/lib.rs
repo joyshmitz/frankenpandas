@@ -1993,6 +1993,106 @@ impl Column {
         self.bitwise_not()
     }
 
+    /// Element-wise maximum, NaN propagates.
+    pub fn maximum(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let af = a.to_f64().map_err(ColumnError::Type)?;
+            let bf = b.to_f64().map_err(ColumnError::Type)?;
+            if af.is_nan() || bf.is_nan() {
+                out.push(Scalar::Float64(f64::NAN));
+            } else {
+                out.push(Scalar::Float64(af.max(bf)));
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise minimum, NaN propagates.
+    pub fn minimum(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let af = a.to_f64().map_err(ColumnError::Type)?;
+            let bf = b.to_f64().map_err(ColumnError::Type)?;
+            if af.is_nan() || bf.is_nan() {
+                out.push(Scalar::Float64(f64::NAN));
+            } else {
+                out.push(Scalar::Float64(af.min(bf)));
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise maximum, ignoring NaN.
+    pub fn fmax(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            let af = a.to_f64().ok();
+            let bf = b.to_f64().ok();
+            let result = match (af, bf) {
+                (Some(x), Some(y)) if x.is_nan() => y,
+                (Some(x), Some(y)) if y.is_nan() => x,
+                (Some(x), Some(y)) => x.max(y),
+                (Some(x), None) => x,
+                (None, Some(y)) => y,
+                (None, None) => f64::NAN,
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise minimum, ignoring NaN.
+    pub fn fmin(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            let af = a.to_f64().ok();
+            let bf = b.to_f64().ok();
+            let result = match (af, bf) {
+                (Some(x), Some(y)) if x.is_nan() => y,
+                (Some(x), Some(y)) if y.is_nan() => x,
+                (Some(x), Some(y)) => x.min(y),
+                (Some(x), None) => x,
+                (None, Some(y)) => y,
+                (None, None) => f64::NAN,
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Element-wise comparison producing a `Bool`-typed column.
     ///
     /// Both columns must have the same length. Missing values (Null or NaN)

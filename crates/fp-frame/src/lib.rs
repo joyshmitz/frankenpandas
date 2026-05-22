@@ -7551,6 +7551,68 @@ impl Series {
         self.with_labels_and_values_preserving_name(labels, out_vals)
     }
 
+    /// Return indices that would partition the Series around kth position.
+    ///
+    /// Analogous to `pandas.Series.argpartition(kth)`. Elements at positions
+    /// `0..kth` are guaranteed to be less than or equal to elements at position
+    /// `kth`, and elements at positions `kth+1..n` are greater than or equal.
+    /// Missing values are placed at the end.
+    pub fn argpartition(&self, kth: usize) -> Result<Self, FrameError> {
+        self.argpartition_kind(kth, "introselect")
+    }
+
+    /// Return indices that would partition the Series around kth position with algorithm choice.
+    ///
+    /// The `kind` parameter is accepted for pandas compatibility but currently
+    /// all algorithms use the same stable partitioning implementation.
+    pub fn argpartition_kind(&self, kth: usize, _kind: &str) -> Result<Self, FrameError> {
+        let vals = self.column.values();
+        if kth >= vals.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "kth ({kth}) out of bounds for size {}",
+                vals.len()
+            )));
+        }
+
+        let mut non_missing: Vec<(usize, &Scalar)> = vals
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_missing())
+            .collect();
+
+        let missing_indices: Vec<usize> = vals
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_missing())
+            .map(|(i, _)| i)
+            .collect();
+
+        if kth >= non_missing.len() && !non_missing.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "kth ({kth}) out of bounds for {} non-missing values",
+                non_missing.len()
+            )));
+        }
+
+        if !non_missing.is_empty() {
+            let effective_kth = kth.min(non_missing.len() - 1);
+            non_missing.select_nth_unstable_by(effective_kth, |(_, a), (_, b)| {
+                compare_scalars_with_na_last(a, b, true)
+            });
+        }
+
+        let mut out_vals: Vec<Scalar> = non_missing
+            .iter()
+            .map(|(i, _)| Scalar::Int64(*i as i64))
+            .collect();
+        for idx in missing_indices {
+            out_vals.push(Scalar::Int64(idx as i64));
+        }
+
+        let labels = self.index.labels().to_vec();
+        self.with_labels_and_values_preserving_name(labels, out_vals)
+    }
+
     /// Return the integer position of the minimum value.
     ///
     /// Matches `pd.Series.argmin()`. Skips missing values.
@@ -64117,6 +64179,74 @@ mod tests {
                 Scalar::Int64(0),
             ]
         );
+    }
+
+    #[test]
+    fn series_argpartition_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.argpartition(2).unwrap();
+        let indices: Vec<i64> = result
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Int64(i) => *i,
+                _ => panic!("expected Int64"),
+            })
+            .collect();
+        let vals = s.values();
+        let pivot_val = match &vals[indices[2] as usize] {
+            Scalar::Float64(v) => *v,
+            _ => panic!("expected Float64"),
+        };
+        for &idx in &indices[..2] {
+            if let Scalar::Float64(v) = &vals[idx as usize] {
+                assert!(*v <= pivot_val, "left partition element {} > pivot {}", *v, pivot_val);
+            }
+        }
+        for &idx in &indices[3..] {
+            if let Scalar::Float64(v) = &vals[idx as usize] {
+                assert!(*v >= pivot_val, "right partition element {} < pivot {}", *v, pivot_val);
+            }
+        }
+    }
+
+    #[test]
+    fn series_argpartition_with_missing() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.argpartition(1).unwrap();
+        let indices: Vec<i64> = result
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Int64(i) => *i,
+                _ => panic!("expected Int64"),
+            })
+            .collect();
+        assert_eq!(indices.len(), 4);
+        assert_eq!(indices[3], 1, "missing value should be at end");
     }
 
     #[test]

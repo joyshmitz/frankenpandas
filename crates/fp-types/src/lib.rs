@@ -2442,6 +2442,25 @@ impl Period {
         Self { ordinal, freq }
     }
 
+    /// Integer position on this period's frequency axis, matching
+    /// `pd.Period.ordinal`.
+    #[must_use]
+    pub const fn ordinal(&self) -> i64 {
+        self.ordinal
+    }
+
+    /// Frequency code for this period, matching `pd.Period.freq`.
+    #[must_use]
+    pub const fn freq(&self) -> PeriodFreq {
+        self.freq
+    }
+
+    /// Canonical pandas frequency alias, matching `pd.Period.freqstr`.
+    #[must_use]
+    pub const fn freqstr(&self) -> &'static str {
+        self.freq.alias()
+    }
+
     /// Same-freq ordinal comparison. Returns `None` if `freq` differs —
     /// caller decides whether that's an error or a panic site.
     #[must_use]
@@ -3800,6 +3819,15 @@ mod tests {
         ] {
             assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
         }
+    }
+
+    #[test]
+    fn period_scalar_accessors_match_pandas_star8() {
+        let period = Period::new(600, PeriodFreq::Monthly);
+
+        assert_eq!(period.ordinal(), 600);
+        assert_eq!(period.freq(), PeriodFreq::Monthly);
+        assert_eq!(period.freqstr(), "M");
     }
 
     #[test]

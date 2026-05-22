@@ -311,6 +311,60 @@ impl Scalar {
         matches!(self, Self::Null(NullKind::NaN)) || matches!(self, Self::Float64(v) if v.is_nan())
     }
 
+    /// Returns true if this is a Bool scalar.
+    #[must_use]
+    pub const fn is_bool(&self) -> bool {
+        matches!(self, Self::Bool(_))
+    }
+
+    /// Returns true if this is an Int64 scalar.
+    #[must_use]
+    pub const fn is_integer(&self) -> bool {
+        matches!(self, Self::Int64(_))
+    }
+
+    /// Returns true if this is a Float64 scalar.
+    #[must_use]
+    pub const fn is_float(&self) -> bool {
+        matches!(self, Self::Float64(_))
+    }
+
+    /// Returns true if this is a numeric scalar (Int64 or Float64).
+    #[must_use]
+    pub const fn is_numeric(&self) -> bool {
+        matches!(self, Self::Int64(_) | Self::Float64(_))
+    }
+
+    /// Returns true if this is a Utf8 (string) scalar.
+    #[must_use]
+    pub const fn is_string(&self) -> bool {
+        matches!(self, Self::Utf8(_))
+    }
+
+    /// Returns true if this is a Datetime64 scalar.
+    #[must_use]
+    pub const fn is_datetime(&self) -> bool {
+        matches!(self, Self::Datetime64(_))
+    }
+
+    /// Returns true if this is a Timedelta64 scalar.
+    #[must_use]
+    pub const fn is_timedelta(&self) -> bool {
+        matches!(self, Self::Timedelta64(_))
+    }
+
+    /// Returns true if this is a Period scalar.
+    #[must_use]
+    pub const fn is_period(&self) -> bool {
+        matches!(self, Self::Period(_))
+    }
+
+    /// Returns true if this is an Interval scalar.
+    #[must_use]
+    pub const fn is_interval(&self) -> bool {
+        matches!(self, Self::Interval(_))
+    }
+
     #[must_use]
     pub fn missing_for_dtype(dtype: DType) -> Self {
         match dtype {

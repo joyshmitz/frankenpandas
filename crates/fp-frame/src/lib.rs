@@ -17929,6 +17929,27 @@ impl StructAccessor<'_> {
         }
         DataFrame::from_series(series_list)
     }
+
+    /// Return a Series mapping field names to their inferred dtypes.
+    ///
+    /// Matches `pd.Series.struct.dtypes`. For each field, the dtype is inferred
+    /// from the first non-null value encountered across all struct rows.
+    pub fn dtypes(&self) -> Result<Series, FrameError> {
+        let field_names = self.field_names()?;
+        if field_names.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "Series.struct.dtypes: no fields found in struct values".to_owned(),
+            ));
+        }
+        let mut dtype_strings = Vec::with_capacity(field_names.len());
+        for name in &field_names {
+            let field_series = self.field(name)?;
+            let dtype_str = format!("{:?}", field_series.dtype());
+            dtype_strings.push(Scalar::Utf8(dtype_str));
+        }
+        let labels: Vec<IndexLabel> = field_names.into_iter().map(IndexLabel::Utf8).collect();
+        Series::from_values("dtypes", labels, dtype_strings)
+    }
 }
 
 // ── StringAccessor ──────────────────────────────────────────────────────
@@ -91520,5 +91541,22 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(col_b.column().values()[0], Scalar::Utf8("x".into()));
         assert_eq!(col_b.column().values()[1], Scalar::Utf8("y".into()));
         assert_eq!(col_b.column().values()[2], Scalar::Utf8("z".into()));
+    }
+
+    #[test]
+    fn series_struct_accessor_dtypes() {
+        let s = Series::from_values(
+            "structs",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8(r#"{"num": 42, "text": "hello"}"#.into()),
+                Scalar::Utf8(r#"{"num": 99, "text": "world"}"#.into()),
+            ],
+        )
+        .unwrap();
+        let dtypes = s.r#struct().dtypes().unwrap();
+        assert_eq!(dtypes.len(), 2);
+        assert_eq!(dtypes.index().labels()[0], IndexLabel::Utf8("num".into()));
+        assert_eq!(dtypes.index().labels()[1], IndexLabel::Utf8("text".into()));
     }
 }

@@ -17259,6 +17259,43 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Product of elements within each list.
+    pub fn prod(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut product = 1.0_f64;
+                        let mut has_value = false;
+                        for val in list {
+                            match val {
+                                Scalar::Int64(n) => {
+                                    product *= n as f64;
+                                    has_value = true;
+                                }
+                                Scalar::Float64(f) if !f.is_nan() => {
+                                    product *= f;
+                                    has_value = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if has_value {
+                            Scalar::Float64(product)
+                        } else {
+                            Scalar::Null(NullKind::NaN)
+                        }
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -90912,5 +90949,21 @@ mod test_select_columns_perf_76e1fd {
         let max_val = cat.max().unwrap();
         assert_eq!(min_val, Scalar::Utf8("b".into()));
         assert_eq!(max_val, Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn series_list_accessor_prod() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[2, 3, 4]".into()),
+                Scalar::Utf8("[1, 5, 2]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().prod().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(24.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(10.0));
     }
 }

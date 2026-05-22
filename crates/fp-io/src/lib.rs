@@ -10229,8 +10229,8 @@ impl DataFrameIoExt for DataFrame {
 /// Extension trait that adds IO convenience methods to `Series`.
 ///
 /// Import this trait to call `series.to_pickle(path)`,
-/// `series.to_pickle_bytes()`, or `series.to_excel(path)` directly on
-/// Series values.
+/// `series.to_pickle_bytes()`, `series.to_excel(path)`, or
+/// `series.to_sql(conn, table, if_exists)` directly on Series values.
 pub trait SeriesIoExt {
     /// Write this Series to a Pickle file.
     ///
@@ -10285,6 +10285,25 @@ pub trait SeriesIoExt {
         &self,
         options: &ExcelWriteOptions,
     ) -> Result<Vec<u8>, IoError>;
+
+    /// Write this Series to a SQL table.
+    ///
+    /// Matches `pd.Series.to_sql(name, con)` for the supported SQL writer
+    /// surface, including pandas' default index materialization.
+    fn to_sql<C: SqlConnection>(
+        &self,
+        conn: &C,
+        table_name: &str,
+        if_exists: SqlIfExists,
+    ) -> Result<(), IoError>;
+
+    /// Write this Series to a SQL table with pandas-style SQL write options.
+    fn to_sql_with_options<C: SqlConnection>(
+        &self,
+        conn: &C,
+        table_name: &str,
+        options: &SqlWriteOptions,
+    ) -> Result<(), IoError>;
 }
 
 impl SeriesIoExt for Series {
@@ -10340,6 +10359,37 @@ impl SeriesIoExt for Series {
         options: &ExcelWriteOptions,
     ) -> Result<Vec<u8>, IoError> {
         write_excel_bytes_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_sql<C: SqlConnection>(
+        &self,
+        conn: &C,
+        table_name: &str,
+        if_exists: SqlIfExists,
+    ) -> Result<(), IoError> {
+        write_sql_with_options(
+            &self.to_frame(None)?,
+            conn,
+            table_name,
+            &SqlWriteOptions {
+                if_exists,
+                index: true,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
+            },
+        )
+    }
+
+    fn to_sql_with_options<C: SqlConnection>(
+        &self,
+        conn: &C,
+        table_name: &str,
+        options: &SqlWriteOptions,
+    ) -> Result<(), IoError> {
+        write_sql_with_options(&self.to_frame(None)?, conn, table_name, options)
     }
 }
 
@@ -17601,6 +17651,57 @@ mod tests {
         assert_eq!(frame2.index().len(), 3);
         let frame3 = read_sql_table(&conn, "ext_test_options").unwrap();
         assert_eq!(frame3.index().len(), 3);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn series_sql_extension_aliases_roundtrip_to_single_column_table() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+
+        let conn = make_sql_test_conn();
+        source
+            .to_sql(&conn, "series_ext", SqlIfExists::Fail)
+            .expect("series to_sql");
+        let roundtrip = read_sql_table(&conn, "series_ext").expect("read series table");
+        assert_eq!(roundtrip.column_names(), vec!["index", "sales"]);
+        assert_eq!(
+            roundtrip.column("index").expect("index column").values(),
+            &[Scalar::Utf8("r1".into()), Scalar::Utf8("r2".into())]
+        );
+        assert_eq!(
+            roundtrip.column("sales").expect("sales column").values(),
+            source.values()
+        );
+
+        source
+            .to_sql_with_options(
+                &conn,
+                "series_ext_no_index",
+                &SqlWriteOptions {
+                    if_exists: SqlIfExists::Fail,
+                    index: false,
+                    index_label: None,
+                    schema: None,
+                    dtype: None,
+                    method: SqlInsertMethod::Single,
+                    chunksize: None,
+                },
+            )
+            .expect("series to_sql index false");
+        let no_index =
+            read_sql_table(&conn, "series_ext_no_index").expect("read no-index series table");
+        assert_eq!(no_index.column_names(), vec!["sales"]);
+        assert_eq!(
+            no_index.column("sales").expect("sales column").values(),
+            source.values()
+        );
     }
 
     // ── Arrow IPC / Feather tests ────────────────────────────────────

@@ -1244,6 +1244,65 @@ impl Column {
         Self::new(self.dtype, Vec::new())
     }
 
+    /// Create a column with evenly spaced values in [start, stop).
+    ///
+    /// Matches np.arange().
+    pub fn arange(start: f64, stop: f64, step: f64) -> Result<Self, ColumnError> {
+        if step == 0.0 {
+            return Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: "step cannot be zero".to_string(),
+                dtype: DType::Float64,
+            }));
+        }
+        let mut values = Vec::new();
+        let mut x = start;
+        if step > 0.0 {
+            while x < stop {
+                values.push(Scalar::Float64(x));
+                x += step;
+            }
+        } else {
+            while x > stop {
+                values.push(Scalar::Float64(x));
+                x += step;
+            }
+        }
+        Self::new(DType::Float64, values)
+    }
+
+    /// Create a column with evenly spaced values over [start, stop].
+    ///
+    /// Matches np.linspace().
+    pub fn linspace(start: f64, stop: f64, num: usize) -> Result<Self, ColumnError> {
+        if num == 0 {
+            return Self::new(DType::Float64, Vec::new());
+        }
+        if num == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(start)]);
+        }
+        let step = (stop - start) / (num - 1) as f64;
+        let values: Vec<Scalar> = (0..num)
+            .map(|i| Scalar::Float64(start + step * i as f64))
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
+    /// Create a column with evenly spaced values on a log scale.
+    ///
+    /// Matches np.logspace().
+    pub fn logspace(start: f64, stop: f64, num: usize) -> Result<Self, ColumnError> {
+        let lin = Self::linspace(start, stop, num)?;
+        let values: Vec<Scalar> = lin
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(x) => Scalar::Float64(10.0_f64.powf(*x)),
+                _ => v.clone(),
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype

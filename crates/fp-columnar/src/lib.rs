@@ -2339,6 +2339,13 @@ impl Column {
         self.values.iter().position(|v| !v.is_missing())
     }
 
+    /// Alias for [`first_valid`](Self::first_valid), matching
+    /// `pd.Series.first_valid_index()` for positional indices.
+    #[must_use]
+    pub fn first_valid_index(&self) -> Option<usize> {
+        self.first_valid()
+    }
+
     /// Position of the last non-missing value, or None when every
     /// value is missing.
     ///
@@ -2346,6 +2353,13 @@ impl Column {
     #[must_use]
     pub fn last_valid(&self) -> Option<usize> {
         self.values.iter().rposition(|v| !v.is_missing())
+    }
+
+    /// Alias for [`last_valid`](Self::last_valid), matching
+    /// `pd.Series.last_valid_index()` for positional indices.
+    #[must_use]
+    pub fn last_valid_index(&self) -> Option<usize> {
+        self.last_valid()
     }
 
     /// Sliding-window sum over `window` consecutive positions.
@@ -8622,6 +8636,8 @@ mod tests {
             .expect("col");
             assert_eq!(col.first_valid(), Some(2));
             assert_eq!(col.last_valid(), Some(3));
+            assert_eq!(col.first_valid_index(), Some(2));
+            assert_eq!(col.last_valid_index(), Some(3));
         }
 
         #[test]
@@ -8714,6 +8730,8 @@ mod tests {
             .expect("col");
             assert_eq!(col.first_valid(), None);
             assert_eq!(col.last_valid(), None);
+            assert_eq!(col.first_valid_index(), None);
+            assert_eq!(col.last_valid_index(), None);
         }
 
         #[test]

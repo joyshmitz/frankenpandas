@@ -6352,7 +6352,8 @@ impl Column {
 
     /// Compute spacing between this value and the next representable float.
     ///
-    /// Matches np.spacing(x). Returns the distance to the next larger float.
+    /// Matches np.spacing(x). Returns the ULP (unit in last place) - the
+    /// distance to the next representable float away from zero.
     pub fn spacing(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -6362,16 +6363,27 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => {
-                    let f = *x as f64;
-                    let next = f64::from_bits(f.to_bits().wrapping_add(1));
-                    out.push(Scalar::Float64((next - f).abs()));
+                    let f = (*x as f64).abs();
+                    if f == 0.0 {
+                        out.push(Scalar::Float64(f64::MIN_POSITIVE));
+                    } else {
+                        let bits = f.to_bits();
+                        let next = f64::from_bits(bits + 1);
+                        out.push(Scalar::Float64(next - f));
+                    }
                 }
                 Scalar::Float64(x) => {
                     if x.is_nan() || x.is_infinite() {
                         out.push(Scalar::Float64(f64::NAN));
                     } else {
-                        let next = f64::from_bits(x.to_bits().wrapping_add(1));
-                        out.push(Scalar::Float64((next - x).abs()));
+                        let f = x.abs();
+                        if f == 0.0 {
+                            out.push(Scalar::Float64(f64::MIN_POSITIVE));
+                        } else {
+                            let bits = f.to_bits();
+                            let next = f64::from_bits(bits + 1);
+                            out.push(Scalar::Float64(next - f));
+                        }
                     }
                 }
                 _ => {

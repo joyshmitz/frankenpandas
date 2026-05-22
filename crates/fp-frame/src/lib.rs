@@ -17910,6 +17910,25 @@ impl StructAccessor<'_> {
             ))),
         }
     }
+
+    /// Expand struct fields into a DataFrame with one column per field.
+    ///
+    /// Matches `pd.Series.struct.explode()`. Returns a DataFrame where each
+    /// column corresponds to a field name found across all non-missing struct
+    /// values. Missing fields in a row produce null values.
+    pub fn explode(&self) -> Result<DataFrame, FrameError> {
+        let field_names = self.field_names()?;
+        if field_names.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "Series.struct.explode: no fields found in struct values".to_owned(),
+            ));
+        }
+        let mut series_list = Vec::with_capacity(field_names.len());
+        for name in &field_names {
+            series_list.push(self.field(name)?);
+        }
+        DataFrame::from_series(series_list)
+    }
 }
 
 // ── StringAccessor ──────────────────────────────────────────────────────
@@ -91477,5 +91496,29 @@ mod test_select_columns_perf_76e1fd {
         let argmax = s.list().argmax().unwrap();
         assert_eq!(argmax.column().values()[0], Scalar::Int64(4));
         assert_eq!(argmax.column().values()[1], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn series_struct_accessor_explode() {
+        let s = Series::from_values(
+            "structs",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            vec![
+                Scalar::Utf8(r#"{"a": 1, "b": "x"}"#.into()),
+                Scalar::Utf8(r#"{"a": 2, "b": "y"}"#.into()),
+                Scalar::Utf8(r#"{"a": 3, "b": "z"}"#.into()),
+            ],
+        )
+        .unwrap();
+        let df = s.r#struct().explode().unwrap();
+        assert_eq!(df.shape(), (3, 2));
+        let col_a = df.get_column("a");
+        assert_eq!(col_a.column().values()[0], Scalar::Int64(1));
+        assert_eq!(col_a.column().values()[1], Scalar::Int64(2));
+        assert_eq!(col_a.column().values()[2], Scalar::Int64(3));
+        let col_b = df.get_column("b");
+        assert_eq!(col_b.column().values()[0], Scalar::Utf8("x".into()));
+        assert_eq!(col_b.column().values()[1], Scalar::Utf8("y".into()));
+        assert_eq!(col_b.column().values()[2], Scalar::Utf8("z".into()));
     }
 }

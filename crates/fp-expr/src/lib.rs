@@ -339,12 +339,30 @@ pub fn evaluate_on_dataframe_with_locals(
     evaluate(expr, &context, policy, ledger)
 }
 
+fn is_pure_boolean_literal_filter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal {
+            value: Scalar::Bool(_),
+        } => true,
+        Expr::And { left, right } | Expr::Or { left, right } => {
+            is_pure_boolean_literal_filter(left) && is_pure_boolean_literal_filter(right)
+        }
+        Expr::Not { expr } => is_pure_boolean_literal_filter(expr),
+        _ => false,
+    }
+}
+
 pub fn filter_dataframe_on_expr(
     expr: &Expr,
     frame: &fp_frame::DataFrame,
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<fp_frame::DataFrame, ExprError> {
+    if is_pure_boolean_literal_filter(expr) {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            "scalar boolean query expressions are not valid row filters".to_string(),
+        )));
+    }
     let mask = evaluate_on_dataframe(expr, frame, policy, ledger)?;
     if let Some(offending) = mask
         .values()
@@ -368,6 +386,11 @@ pub fn filter_dataframe_on_expr_with_locals(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<fp_frame::DataFrame, ExprError> {
+    if is_pure_boolean_literal_filter(expr) {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            "scalar boolean query expressions are not valid row filters".to_string(),
+        )));
+    }
     let mask = evaluate_on_dataframe_with_locals(expr, frame, locals, policy, ledger)?;
     if let Some(offending) = mask
         .values()
@@ -793,6 +816,7 @@ fn evaluate_delta_comparison(
 //   - Column references (identifiers)
 //   - Numeric literals (integer and float)
 //   - String literals ('...' or "...")
+//   - Boolean literals (`True` / `False`)
 //   - Comparison operators: ==, !=, >, >=, <, <=
 //   - Logical operators: and, or, not
 //   - Arithmetic operators: +, -, *, /, //, %, **
@@ -810,7 +834,7 @@ fn evaluate_delta_comparison(
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
 ///   pow_expr   → atom ( "**" unary_expr )?
-///   atom       → NUMBER | STRING | IDENT | LOCAL | "(" expr ")"
+///   atom       → NUMBER | STRING | BOOL | IDENT | LOCAL | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -831,6 +855,7 @@ enum Token {
     Int(i64),
     Float(f64),
     Str(String),
+    Bool(bool),
     // Comparison
     EqEq,
     NotEq,
@@ -1139,6 +1164,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
                     "not" => tokens.push(Token::Not),
+                    "True" => tokens.push(Token::Bool(true)),
+                    "False" => tokens.push(Token::Bool(false)),
                     _ => tokens.push(Token::Ident(word)),
                 }
             }
@@ -1354,6 +1381,13 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             *pos += 1;
             Ok(Expr::Literal {
                 value: Scalar::Utf8(val),
+            })
+        }
+        Token::Bool(value) => {
+            let val = *value;
+            *pos += 1;
+            Ok(Expr::Literal {
+                value: Scalar::Bool(val),
             })
         }
         Token::Ident(name) => {
@@ -2616,6 +2650,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_pandas_boolean_literals() {
+        let true_expr = super::parse_expr("flag == True").unwrap();
+        let true_right = match &true_expr {
+            Expr::Compare { right, .. } => Some(right.as_ref()),
+            _ => None,
+        };
+        assert_eq!(
+            true_right,
+            Some(&Expr::Literal {
+                value: Scalar::Bool(true)
+            })
+        );
+
+        let false_expr = super::parse_expr("flag != False").unwrap();
+        let false_right = match &false_expr {
+            Expr::Compare { right, .. } => Some(right.as_ref()),
+            _ => None,
+        };
+        assert_eq!(
+            false_right,
+            Some(&Expr::Literal {
+                value: Scalar::Bool(false)
+            })
+        );
+    }
+
+    #[test]
     fn parse_float_literal() {
         let expr = super::parse_expr("x > 4.56").unwrap();
         assert!(
@@ -3271,6 +3332,71 @@ mod tests {
         // x < 2 or x > 7 → rows where x=1 or x=8
         let result = super::query_str("x < 2 or x > 7", &frame, &policy, &mut ledger).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn query_str_accepts_pandas_boolean_literals_in_compound_filters() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "flag",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let true_rows = super::query_str("flag == True", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(true_rows.len(), 2);
+        assert_eq!(
+            true_rows.column("x").expect("x").values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+
+        let gated = super::query_str("x > 1 and True", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(gated.len(), 2);
+        assert_eq!(
+            gated.column("x").expect("x").values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let false_or = super::query_str("False or x > 1", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            false_or.column("x").expect("x").values(),
+            gated.column("x").expect("x").values()
+        );
+    }
+
+    #[test]
+    fn query_str_rejects_scalar_boolean_literal_filters() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("True", &frame, &policy, &mut ledger);
+        assert!(matches!(
+            result,
+            Err(ExprError::Frame(FrameError::CompatibilityRejected(message)))
+                if message.contains("scalar boolean query")
+        ));
     }
 
     #[test]

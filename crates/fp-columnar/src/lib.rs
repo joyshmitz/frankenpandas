@@ -3459,6 +3459,12 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Alias for [`where_cond`](Self::where_cond), matching
+    /// `pd.Series.where(cond, other)` for scalar `other` values.
+    pub fn r#where(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
+        self.where_cond(cond, other)
+    }
+
     /// Rank the values of the column.
     ///
     /// Matches `pd.Series.rank(method=..., ascending=..., na_option='keep')`.
@@ -8805,6 +8811,7 @@ mod tests {
             .expect("cond");
             let fill = Scalar::Int64(-1);
             let out = col.where_cond(&cond, &fill).expect("where");
+            assert_eq!(col.r#where(&cond, &fill).expect("where"), out);
             assert_eq!(out.values()[0], Scalar::Int64(1));
             assert_eq!(out.values()[1], Scalar::Int64(-1));
             assert_eq!(out.values()[2], Scalar::Int64(3));

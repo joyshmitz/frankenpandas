@@ -229,6 +229,18 @@ pub enum Expr {
         expr: Box<Expr>,
         periods: i64,
     },
+    CumSum {
+        expr: Box<Expr>,
+    },
+    CumProd {
+        expr: Box<Expr>,
+    },
+    CumMin {
+        expr: Box<Expr>,
+    },
+    CumMax {
+        expr: Box<Expr>,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -534,6 +546,22 @@ pub fn evaluate(
         Expr::Diff { expr, periods } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.diff(*periods).map_err(ExprError::from)
+        }
+        Expr::CumSum { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cumsum().map_err(ExprError::from)
+        }
+        Expr::CumProd { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cumprod().map_err(ExprError::from)
+        }
+        Expr::CumMin { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cummin().map_err(ExprError::from)
+        }
+        Expr::CumMax { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cummax().map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -931,9 +959,13 @@ impl MaterializedView {
                 }
             }
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Clip { expr, .. } | Expr::Shift { expr, .. } | Expr::Diff { expr, .. } => {
-                Self::extract_series(expr, series_set)
-            }
+            Expr::Clip { expr, .. }
+            | Expr::Shift { expr, .. }
+            | Expr::Diff { expr, .. }
+            | Expr::CumSum { expr }
+            | Expr::CumProd { expr }
+            | Expr::CumMin { expr }
+            | Expr::CumMax { expr } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -1153,6 +1185,22 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.diff(*periods).map_err(ExprError::from)
         }
+        Expr::CumSum { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cumsum().map_err(ExprError::from)
+        }
+        Expr::CumProd { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cumprod().map_err(ExprError::from)
+        }
+        Expr::CumMin { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cummin().map_err(ExprError::from)
+        }
+        Expr::CumMax { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cummax().map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -1222,7 +1270,8 @@ fn evaluate_delta_comparison(
 //     .div(other), .truediv(other), .floordiv(other), .mod(other),
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
-//     .shift(periods), .diff(periods), .round(decimals), .replace(to_replace, value), .astype(dtype),
+//     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
+//     .cummax(), .round(decimals), .replace(to_replace, value), .astype(dtype),
 //     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
 //     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
 //     .notnull()
@@ -2633,6 +2682,62 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     lower,
                     upper,
+                };
+                *pos = arg_pos + 1;
+            }
+            "cumsum" | "cumprod" | "cummin" | "cummax" => {
+                let mut arg_pos = *pos + 3;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "skipna" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                        let skipna = parse_bool_literal_argument(
+                            tokens,
+                            &mut arg_pos,
+                            &format!("{method}() skipna"),
+                        )?;
+                        if !skipna {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() skipna=False is not supported in expressions"
+                            )));
+                        }
+                    } else {
+                        return Err(ExprError::ParseError(format!(
+                            "{method}() only accepts skipna=True in expressions"
+                        )));
+                    }
+
+                    if tokens.get(arg_pos) != Some(&Token::RParen) {
+                        return Err(ExprError::ParseError(format!(
+                            "expected ')' after {method}() arguments"
+                        )));
+                    }
+                }
+
+                expr = match method.as_str() {
+                    "cumsum" => Expr::CumSum {
+                        expr: Box::new(expr),
+                    },
+                    "cumprod" => Expr::CumProd {
+                        expr: Box::new(expr),
+                    },
+                    "cummin" => Expr::CumMin {
+                        expr: Box::new(expr),
+                    },
+                    "cummax" => Expr::CumMax {
+                        expr: Box::new(expr),
+                    },
+                    other => {
+                        return Err(ExprError::ParseError(format!(
+                            "unsupported cumulative method: {other}"
+                        )));
+                    }
                 };
                 *pos = arg_pos + 1;
             }
@@ -4390,6 +4495,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_cumulative_method_calls() -> Result<(), ExprError> {
+        let cumsum = super::parse_expr("a.cumsum()")?;
+        let Expr::CumSum { expr: inner } = cumsum else {
+            return Err(ExprError::ParseError("expected CumSum expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+
+        assert!(matches!(
+            super::parse_expr("a.cumprod(skipna=True)")?,
+            Expr::CumProd { .. }
+        ));
+        assert!(matches!(
+            super::parse_expr("a.cummin()")?,
+            Expr::CumMin { .. }
+        ));
+        assert!(matches!(
+            super::parse_expr("a.cummax()")?,
+            Expr::CumMax { .. }
+        ));
+        assert!(super::parse_expr("a.cumsum(skipna=False)").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn parse_round_method_call_optional_decimals() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.round()")?;
         let Expr::Round {
@@ -5607,6 +5741,50 @@ mod tests {
 
         let diff_filtered = super::query_str("a.diff().gt(4)", &frame, &policy, &mut ledger)?;
         assert_eq!(diff_filtered.index().labels(), &[2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_cumulative_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let cumsum = super::eval_str("a.cumsum()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cumsum.values(),
+            &[Scalar::Int64(2), Scalar::Int64(5), Scalar::Int64(6)]
+        );
+
+        let cumprod = super::eval_str("a.cumprod(skipna=True)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cumprod.values(),
+            &[Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(6)]
+        );
+
+        let cummin = super::eval_str("a.cummin()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cummin.values(),
+            &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+
+        let cummax = super::eval_str("a.cummax()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cummax.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.cumsum().gt(4)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
         Ok(())
     }
 

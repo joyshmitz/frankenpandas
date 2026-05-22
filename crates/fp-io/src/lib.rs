@@ -10229,8 +10229,9 @@ impl DataFrameIoExt for DataFrame {
 /// Extension trait that adds IO convenience methods to `Series`.
 ///
 /// Import this trait to call `series.to_pickle(path)`,
-/// `series.to_pickle_bytes()`, `series.to_excel(path)`, or
-/// `series.to_sql(conn, table, if_exists)` directly on Series values.
+/// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
+/// `series.to_excel(path)`, or `series.to_sql(conn, table, if_exists)`
+/// directly on Series values.
 pub trait SeriesIoExt {
     /// Write this Series to a Pickle file.
     ///
@@ -10258,6 +10259,23 @@ pub trait SeriesIoExt {
         &self,
         options: &PickleWriteOptions,
     ) -> Result<Vec<u8>, IoError>;
+
+    /// Write this Series to an HDF5 file at the default key.
+    ///
+    /// Matches `pd.Series.to_hdf(path)` for the supported HDF5 snapshot
+    /// surface.
+    fn to_hdf(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to an HDF5 file at the default key.
+    ///
+    /// Explicit file-suffixed form of [`SeriesIoExt::to_hdf`].
+    fn to_hdf_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to an HDF5 file at an explicit key.
+    fn to_hdf_key(&self, path: &Path, key: &str) -> Result<(), IoError>;
+
+    /// Write this Series to an HDF5 file with explicit options.
+    fn to_hdf_with_options(&self, path: &Path, options: &HdfWriteOptions) -> Result<(), IoError>;
 
     /// Write this Series to an Excel file.
     ///
@@ -10332,6 +10350,22 @@ impl SeriesIoExt for Series {
         options: &PickleWriteOptions,
     ) -> Result<Vec<u8>, IoError> {
         write_pickle_bytes_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_hdf(&self, path: &Path) -> Result<(), IoError> {
+        write_hdf(&self.to_frame(None)?, path)
+    }
+
+    fn to_hdf_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_hdf(path)
+    }
+
+    fn to_hdf_key(&self, path: &Path, key: &str) -> Result<(), IoError> {
+        write_hdf_key(&self.to_frame(None)?, path, key)
+    }
+
+    fn to_hdf_with_options(&self, path: &Path, options: &HdfWriteOptions) -> Result<(), IoError> {
+        write_hdf_with_options(&self.to_frame(None)?, path, options)
     }
 
     fn to_excel(&self, path: &Path) -> Result<(), IoError> {
@@ -11077,6 +11111,66 @@ mod tests {
             .to_pickle_bytes_with_options(&options)
             .expect("series pickle protocol v2")
             .is_empty());
+    }
+
+    #[test]
+    fn series_hdf5_extension_aliases_roundtrip_to_single_column_frame() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+        let expected = source.to_frame(None).expect("series frame");
+
+        let key_path = std::env::temp_dir().join(format!(
+            "fp_io_series_hdf5_key_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_hdf_key(&key_path, "series/data")
+            .expect("series hdf key");
+        assert!(
+            read_hdf_key(&key_path, "series/data")
+                .expect("read series hdf key")
+                .equals(&expected)
+        );
+
+        let default_path = std::env::temp_dir().join(format!(
+            "fp_io_series_hdf5_default_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_hdf_file(&default_path)
+            .expect("series hdf default key");
+        assert!(
+            read_hdf(&default_path)
+                .expect("read series hdf default")
+                .equals(&expected)
+        );
+
+        let options_path = std::env::temp_dir().join(format!(
+            "fp_io_series_hdf5_options_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_hdf_with_options(
+                &options_path,
+                &HdfWriteOptions {
+                    key: "series/options".to_owned(),
+                },
+            )
+            .expect("series hdf options");
+        assert!(
+            read_hdf_key(&options_path, "series/options")
+                .expect("read series hdf options")
+                .equals(&expected)
+        );
     }
 
     #[test]

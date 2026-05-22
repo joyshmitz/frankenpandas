@@ -80,14 +80,81 @@ use std::collections::BTreeMap;
 
 use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
-use fp_index::Index;
+use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::Scalar;
+use fp_types::{DType, Scalar};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SeriesRef(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BetweenInclusive {
+    Both,
+    Left,
+    Right,
+    Neither,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExprDuplicateKeep {
+    First,
+    Last,
+    None,
+}
+
+impl ExprDuplicateKeep {
+    fn parse(value: Scalar, context: &str) -> Result<Self, ExprError> {
+        match value {
+            Scalar::Utf8(value) => match value.as_str() {
+                "first" => Ok(Self::First),
+                "last" => Ok(Self::Last),
+                other => Err(ExprError::ParseError(format!(
+                    "{context} keep must be 'first', 'last', or False, got {other:?}"
+                ))),
+            },
+            Scalar::Bool(false) | Scalar::Int64(0) => Ok(Self::None),
+            Scalar::Float64(0.0) => Ok(Self::None),
+            other => Err(ExprError::ParseError(format!(
+                "{context} keep must be 'first', 'last', or False, got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_frame_keep(self) -> DuplicateKeep {
+        match self {
+            Self::First => DuplicateKeep::First,
+            Self::Last => DuplicateKeep::Last,
+            Self::None => DuplicateKeep::None,
+        }
+    }
+}
+
+impl BetweenInclusive {
+    fn parse(value: &str) -> Result<Self, ExprError> {
+        match value {
+            "both" => Ok(Self::Both),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "neither" => Ok(Self::Neither),
+            other => Err(ExprError::ParseError(format!(
+                "between() inclusive must be one of 'both', 'left', 'right', or 'neither', got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Neither => "neither",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -137,10 +204,130 @@ pub enum Expr {
     Not {
         expr: Box<Expr>,
     },
+    Abs {
+        expr: Box<Expr>,
+    },
+    Round {
+        expr: Box<Expr>,
+        decimals: i32,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    FillNa {
+        expr: Box<Expr>,
+        value: Scalar,
+    },
+    DropNa {
+        expr: Box<Expr>,
+    },
+    SortValues {
+        expr: Box<Expr>,
+        ascending: bool,
+        na_position: String,
+    },
+    SortIndex {
+        expr: Box<Expr>,
+        ascending: bool,
+        ignore_index: bool,
+    },
+    ArgSort {
+        expr: Box<Expr>,
+    },
+    Mode {
+        expr: Box<Expr>,
+        dropna: bool,
+    },
+    Duplicated {
+        expr: Box<Expr>,
+        keep: ExprDuplicateKeep,
+    },
+    DropDuplicates {
+        expr: Box<Expr>,
+        keep: ExprDuplicateKeep,
+    },
+    HeadTail {
+        expr: Box<Expr>,
+        n: i64,
+        tail: bool,
+    },
+    TopN {
+        expr: Box<Expr>,
+        n: usize,
+        keep: String,
+        largest: bool,
+    },
+    Replace {
+        expr: Box<Expr>,
+        to_replace: Scalar,
+        value: Scalar,
+    },
+    Astype {
+        expr: Box<Expr>,
+        dtype: DType,
+    },
+    CombineFirst {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Rank {
+        expr: Box<Expr>,
+        method: String,
+        ascending: bool,
+        na_option: String,
+        pct: bool,
+    },
+    Where {
+        expr: Box<Expr>,
+        cond: Box<Expr>,
+        other: Option<Box<Expr>>,
+        mask: bool,
+    },
+    Between {
+        expr: Box<Expr>,
+        left: Scalar,
+        right: Scalar,
+        inclusive: BetweenInclusive,
+    },
+    Clip {
+        expr: Box<Expr>,
+        lower: Option<f64>,
+        upper: Option<f64>,
+    },
+    Shift {
+        expr: Box<Expr>,
+        periods: i64,
+    },
+    Diff {
+        expr: Box<Expr>,
+        periods: i64,
+    },
+    CumSum {
+        expr: Box<Expr>,
+    },
+    CumProd {
+        expr: Box<Expr>,
+    },
+    CumMin {
+        expr: Box<Expr>,
+    },
+    CumMax {
+        expr: Box<Expr>,
+    },
+    PctChange {
+        expr: Box<Expr>,
+        periods: usize,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
         op: ComparisonOp,
+    },
+    IsIn {
+        left: Box<Expr>,
+        values: Vec<Scalar>,
+        negated: bool,
     },
     Literal {
         value: Scalar,
@@ -184,6 +371,11 @@ impl EvalContext {
             locals: locals.clone(),
             anchor_index: Some(frame.index().clone()),
         };
+        context.insert_index_series("index", frame.index())?;
+        context.insert_index_series("ilevel_0", frame.index())?;
+        if let Some(name) = frame.index().name() {
+            context.insert_index_series(name, frame.index())?;
+        }
         for (name, column) in frame.columns() {
             let series = Series::new(name.clone(), frame.index().clone(), column.clone())?;
             context.insert_series(series);
@@ -200,6 +392,13 @@ impl EvalContext {
         self.locals.insert(name.into(), value);
     }
 
+    fn insert_index_series(&mut self, name: &str, index: &Index) -> Result<(), ExprError> {
+        let values = index.labels().iter().map(index_label_to_scalar).collect();
+        let series = Series::from_values(name, index.labels().to_vec(), values)?;
+        self.insert_series(series);
+        Ok(())
+    }
+
     #[must_use]
     pub fn get_local(&self, name: &str) -> Option<&Scalar> {
         self.locals.get(name)
@@ -211,6 +410,15 @@ impl EvalContext {
             .as_ref()
             .ok_or_else(|| ExprError::UnanchoredLocal(name.to_owned()))?;
         Series::broadcast(name, value.clone(), index.labels().to_vec()).map_err(ExprError::from)
+    }
+}
+
+fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
+    match label {
+        IndexLabel::Int64(value) => Scalar::Int64(*value),
+        IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
+        IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
+        IndexLabel::Datetime64(value) => Scalar::Datetime64(*value),
     }
 }
 
@@ -304,8 +512,218 @@ pub fn evaluate(
             let input = evaluate(expr, context, policy, ledger)?;
             input.not().map_err(ExprError::from)
         }
+        Expr::Abs { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.abs().map_err(ExprError::from)
+        }
+        Expr::Round { expr, decimals } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.round(*decimals).map_err(ExprError::from)
+        }
+        Expr::IsNull { expr, negated } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *negated {
+                input.notna().map_err(ExprError::from)
+            } else {
+                input.isna().map_err(ExprError::from)
+            }
+        }
+        Expr::FillNa { expr, value } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::DropNa { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.dropna().map_err(ExprError::from)
+        }
+        Expr::SortValues {
+            expr,
+            ascending,
+            na_position,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .sort_values_na(*ascending, na_position)
+                .map_err(ExprError::from)
+        }
+        Expr::SortIndex {
+            expr,
+            ascending,
+            ignore_index,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            sort_index_series(input, *ascending, *ignore_index)
+        }
+        Expr::ArgSort { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.argsort(true).map_err(ExprError::from)
+        }
+        Expr::Mode { expr, dropna } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::Duplicated { expr, keep } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .duplicated_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::DropDuplicates { expr, keep } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .drop_duplicates_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::HeadTail { expr, n, tail } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *tail {
+                input.tail(*n).map_err(ExprError::from)
+            } else {
+                input.head(*n).map_err(ExprError::from)
+            }
+        }
+        Expr::TopN {
+            expr,
+            n,
+            keep,
+            largest,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *largest {
+                input.nlargest_keep(*n, keep).map_err(ExprError::from)
+            } else {
+                input.nsmallest_keep(*n, keep).map_err(ExprError::from)
+            }
+        }
+        Expr::Replace {
+            expr,
+            to_replace,
+            value,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .replace(&[(to_replace.clone(), value.clone())])
+                .map_err(ExprError::from)
+        }
+        Expr::Astype { expr, dtype } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.astype(*dtype).map_err(ExprError::from)
+        }
+        Expr::CombineFirst { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.combine_first(&rhs).map_err(ExprError::from)
+        }
+        Expr::Rank {
+            expr,
+            method,
+            ascending,
+            na_option,
+            pct,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .rank_with_pct(method, *ascending, na_option, *pct)
+                .map_err(ExprError::from)
+        }
+        Expr::Where {
+            expr,
+            cond,
+            other,
+            mask,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            let condition = evaluate(cond, context, policy, ledger)?;
+            match other.as_deref() {
+                None => {
+                    if *mask {
+                        input.mask(&condition, None).map_err(ExprError::from)
+                    } else {
+                        input.r#where(&condition, None).map_err(ExprError::from)
+                    }
+                }
+                Some(Expr::Literal { value }) => {
+                    if *mask {
+                        input.mask(&condition, Some(value)).map_err(ExprError::from)
+                    } else {
+                        input
+                            .r#where(&condition, Some(value))
+                            .map_err(ExprError::from)
+                    }
+                }
+                Some(other_expr) => {
+                    let replacement = evaluate(other_expr, context, policy, ledger)?;
+                    if *mask {
+                        input
+                            .mask_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    } else {
+                        input
+                            .where_cond_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    }
+                }
+            }
+        }
+        Expr::Between {
+            expr,
+            left,
+            right,
+            inclusive,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .between(left, right, inclusive.as_str())
+                .map_err(ExprError::from)
+        }
+        Expr::Clip { expr, lower, upper } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.clip(*lower, *upper).map_err(ExprError::from)
+        }
+        Expr::Shift { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.shift(*periods).map_err(ExprError::from)
+        }
+        Expr::Diff { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.diff(*periods).map_err(ExprError::from)
+        }
+        Expr::CumSum { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cumsum().map_err(ExprError::from)
+        }
+        Expr::CumProd { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cumprod().map_err(ExprError::from)
+        }
+        Expr::CumMin { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cummin().map_err(ExprError::from)
+        }
+        Expr::CumMax { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.cummax().map_err(ExprError::from)
+        }
+        Expr::PctChange { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.pct_change(*periods).map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
+        }
+        Expr::IsIn {
+            left,
+            values,
+            negated,
+        } => {
+            let out = evaluate(left, context, policy, ledger)?
+                .isin(values)
+                .map_err(ExprError::from)?;
+            if *negated {
+                out.not().map_err(ExprError::from)
+            } else {
+                Ok(out)
+            }
         }
         Expr::Literal { value } => {
             let index = context
@@ -316,6 +734,29 @@ pub fn evaluate(
                 .map_err(ExprError::from)
         }
     }
+}
+
+fn sort_index_series(
+    input: Series,
+    ascending: bool,
+    ignore_index: bool,
+) -> Result<Series, ExprError> {
+    let sorted = input.sort_index(ascending).map_err(ExprError::from)?;
+    if !ignore_index {
+        return Ok(sorted);
+    }
+
+    let mut labels = Vec::with_capacity(sorted.len());
+    for position in 0..sorted.len() {
+        let label = i64::try_from(position).map_err(|_| {
+            ExprError::Frame(FrameError::CompatibilityRejected(format!(
+                "sort_index(ignore_index=True) cannot materialize RangeIndex label for position {position}"
+            )))
+        })?;
+        labels.push(IndexLabel::Int64(label));
+    }
+    Series::from_values(sorted.name().to_owned(), labels, sorted.values().to_vec())
+        .map_err(ExprError::from)
 }
 
 pub fn evaluate_on_dataframe(
@@ -660,11 +1101,49 @@ impl MaterializedView {
             | Expr::Pow { left, right }
             | Expr::And { left, right }
             | Expr::Or { left, right }
-            | Expr::Compare { left, right, .. } => {
+            | Expr::Compare { left, right, .. }
+            | Expr::CombineFirst { left, right } => {
                 Self::extract_series(left, series_set);
                 Self::extract_series(right, series_set);
             }
-            Expr::Not { expr } => Self::extract_series(expr, series_set),
+            Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
+            Expr::Not { expr }
+            | Expr::Abs { expr }
+            | Expr::Round { expr, .. }
+            | Expr::Rank { expr, .. } => {
+                Self::extract_series(expr, series_set);
+            }
+            Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::DropNa { expr } => Self::extract_series(expr, series_set),
+            Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
+            Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Duplicated { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::DropDuplicates { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::HeadTail { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Where {
+                expr, cond, other, ..
+            } => {
+                Self::extract_series(expr, series_set);
+                Self::extract_series(cond, series_set);
+                if let Some(other) = other {
+                    Self::extract_series(other, series_set);
+                }
+            }
+            Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Clip { expr, .. }
+            | Expr::Shift { expr, .. }
+            | Expr::Diff { expr, .. }
+            | Expr::CumSum { expr }
+            | Expr::CumProd { expr }
+            | Expr::CumMin { expr }
+            | Expr::CumMax { expr }
+            | Expr::PctChange { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -771,8 +1250,218 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.not().map_err(ExprError::from)
         }
+        Expr::Abs { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.abs().map_err(ExprError::from)
+        }
+        Expr::Round { expr, decimals } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.round(*decimals).map_err(ExprError::from)
+        }
+        Expr::IsNull { expr, negated } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *negated {
+                input.notna().map_err(ExprError::from)
+            } else {
+                input.isna().map_err(ExprError::from)
+            }
+        }
+        Expr::FillNa { expr, value } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::DropNa { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.dropna().map_err(ExprError::from)
+        }
+        Expr::SortValues {
+            expr,
+            ascending,
+            na_position,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .sort_values_na(*ascending, na_position)
+                .map_err(ExprError::from)
+        }
+        Expr::SortIndex {
+            expr,
+            ascending,
+            ignore_index,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            sort_index_series(input, *ascending, *ignore_index)
+        }
+        Expr::ArgSort { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.argsort(true).map_err(ExprError::from)
+        }
+        Expr::Mode { expr, dropna } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::Duplicated { expr, keep } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .duplicated_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::DropDuplicates { expr, keep } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .drop_duplicates_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::HeadTail { expr, n, tail } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *tail {
+                input.tail(*n).map_err(ExprError::from)
+            } else {
+                input.head(*n).map_err(ExprError::from)
+            }
+        }
+        Expr::TopN {
+            expr,
+            n,
+            keep,
+            largest,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *largest {
+                input.nlargest_keep(*n, keep).map_err(ExprError::from)
+            } else {
+                input.nsmallest_keep(*n, keep).map_err(ExprError::from)
+            }
+        }
+        Expr::Replace {
+            expr,
+            to_replace,
+            value,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .replace(&[(to_replace.clone(), value.clone())])
+                .map_err(ExprError::from)
+        }
+        Expr::Astype { expr, dtype } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.astype(*dtype).map_err(ExprError::from)
+        }
+        Expr::CombineFirst { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.combine_first(&rhs).map_err(ExprError::from)
+        }
+        Expr::Rank {
+            expr,
+            method,
+            ascending,
+            na_option,
+            pct,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .rank_with_pct(method, *ascending, na_option, *pct)
+                .map_err(ExprError::from)
+        }
+        Expr::Where {
+            expr,
+            cond,
+            other,
+            mask,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            let condition = evaluate_delta(cond, delta_ctx, delta, policy, ledger)?;
+            match other.as_deref() {
+                None => {
+                    if *mask {
+                        input.mask(&condition, None).map_err(ExprError::from)
+                    } else {
+                        input.r#where(&condition, None).map_err(ExprError::from)
+                    }
+                }
+                Some(Expr::Literal { value }) => {
+                    if *mask {
+                        input.mask(&condition, Some(value)).map_err(ExprError::from)
+                    } else {
+                        input
+                            .r#where(&condition, Some(value))
+                            .map_err(ExprError::from)
+                    }
+                }
+                Some(other_expr) => {
+                    let replacement = evaluate_delta(other_expr, delta_ctx, delta, policy, ledger)?;
+                    if *mask {
+                        input
+                            .mask_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    } else {
+                        input
+                            .where_cond_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    }
+                }
+            }
+        }
+        Expr::Between {
+            expr,
+            left,
+            right,
+            inclusive,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .between(left, right, inclusive.as_str())
+                .map_err(ExprError::from)
+        }
+        Expr::Clip { expr, lower, upper } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.clip(*lower, *upper).map_err(ExprError::from)
+        }
+        Expr::Shift { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.shift(*periods).map_err(ExprError::from)
+        }
+        Expr::Diff { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.diff(*periods).map_err(ExprError::from)
+        }
+        Expr::CumSum { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cumsum().map_err(ExprError::from)
+        }
+        Expr::CumProd { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cumprod().map_err(ExprError::from)
+        }
+        Expr::CumMin { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cummin().map_err(ExprError::from)
+        }
+        Expr::CumMax { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.cummax().map_err(ExprError::from)
+        }
+        Expr::PctChange { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.pct_change(*periods).map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
+        }
+        Expr::IsIn {
+            left,
+            values,
+            negated,
+        } => {
+            let out = evaluate_delta(left, delta_ctx, delta, policy, ledger)?
+                .isin(values)
+                .map_err(ExprError::from)?;
+            if *negated {
+                out.not().map_err(ExprError::from)
+            } else {
+                Ok(out)
+            }
         }
         Expr::Literal { value } => {
             Series::broadcast("_literal", value.clone(), delta.new_labels.clone())
@@ -818,7 +1507,23 @@ fn evaluate_delta_comparison(
 //   - String literals ('...' or "...")
 //   - Boolean literals (`True` / `False`)
 //   - Comparison operators: ==, !=, >, >=, <, <=
+//   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
+//   - Unary function calls: abs(expr)
+//   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
+//     .abs(), .fillna(value), .add(other), .sub(other), .mul(other),
+//     .div(other), .truediv(other), .floordiv(other), .mod(other),
+//     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
+//     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
+//     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
+//     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
+//     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
+//     .argsort(axis, kind, order, stable), .mode(dropna),
+//     .duplicated(keep), .drop_duplicates(keep), .head(n), .tail(n),
+//     .replace(to_replace, value), .nlargest(n, keep), .nsmallest(n, keep),
+//     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
+//     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
+//     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -829,12 +1534,13 @@ fn evaluate_delta_comparison(
 ///   or_expr    → and_expr ( "or" and_expr )*
 ///   and_expr   → not_expr ( "and" not_expr )*
 ///   not_expr   → "not" not_expr | comparison
-///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr )?
+///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr | ("in" | "not" "in") list_literal )?
 ///   add_expr   → mul_expr ( ("+" | "-") mul_expr )*
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
 ///   pow_expr   → atom ( "**" unary_expr )?
-///   atom       → NUMBER | STRING | BOOL | IDENT | LOCAL | "(" expr ")"
+///   atom       → primary ( "." METHOD_CALL )*
+///   primary    → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -863,6 +1569,7 @@ enum Token {
     Ge,
     Lt,
     Le,
+    Assign,
     // Arithmetic
     Plus,
     Minus,
@@ -874,10 +1581,15 @@ enum Token {
     // Grouping
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
+    Dot,
     // Logical (keywords)
     And,
     Or,
     Not,
+    In,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
@@ -905,6 +1617,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                             Some(
                                 Token::LParen
                                     | Token::EqEq
+                                    | Token::Assign
                                     | Token::NotEq
                                     | Token::Gt
                                     | Token::Ge
@@ -920,6 +1633,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                                     | Token::And
                                     | Token::Or
                                     | Token::Not
+                                    | Token::In
+                                    | Token::LBracket
+                                    | Token::Comma
                             )
                         ))
                 {
@@ -984,9 +1700,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 })?));
             }
             '.' => {
-                return Err(ExprError::ParseError(format!(
-                    "unexpected character: '{c}'"
-                )));
+                tokens.push(Token::Dot);
+                i += 1;
             }
             '*' => {
                 if i + 1 < chars.len() && chars[i + 1] == '*' {
@@ -1018,14 +1733,25 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 tokens.push(Token::RParen);
                 i += 1;
             }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+            }
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::EqEq);
                     i += 2;
                 } else {
-                    return Err(ExprError::ParseError(
-                        "expected '==' but found single '='".into(),
-                    ));
+                    tokens.push(Token::Assign);
+                    i += 1;
                 }
             }
             '!' => {
@@ -1164,6 +1890,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
                     "not" => tokens.push(Token::Not),
+                    "in" => tokens.push(Token::In),
                     "True" => tokens.push(Token::Bool(true)),
                     "False" => tokens.push(Token::Bool(false)),
                     _ => tokens.push(Token::Ident(word)),
@@ -1220,6 +1947,34 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
     let mut left = parse_add(tokens, pos)?;
     let mut chained = None;
     while *pos < tokens.len() {
+        let membership = if tokens[*pos] == Token::In {
+            *pos += 1;
+            Some(false)
+        } else if *pos + 1 < tokens.len()
+            && tokens[*pos] == Token::Not
+            && tokens[*pos + 1] == Token::In
+        {
+            *pos += 2;
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(negated) = membership {
+            let comparison = Expr::IsIn {
+                left: Box::new(left.clone()),
+                values: parse_list_literal(tokens, pos)?,
+                negated,
+            };
+            chained = Some(match chained {
+                Some(previous) => Expr::And {
+                    left: Box::new(previous),
+                    right: Box::new(comparison),
+                },
+                None => comparison,
+            });
+            break;
+        }
+
         let op = match &tokens[*pos] {
             Token::EqEq => Some(ComparisonOp::Eq),
             Token::NotEq => Some(ComparisonOp::Ne),
@@ -1250,6 +2005,279 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
         }
     }
     Ok(chained.unwrap_or(left))
+}
+
+fn parse_list_literal(tokens: &[Token], pos: &mut usize) -> Result<Vec<Scalar>, ExprError> {
+    if *pos >= tokens.len() || tokens[*pos] != Token::LBracket {
+        return Err(ExprError::ParseError(
+            "expected list literal after membership operator".into(),
+        ));
+    }
+    *pos += 1;
+
+    let mut values = Vec::new();
+    if *pos < tokens.len() && tokens[*pos] == Token::RBracket {
+        *pos += 1;
+        return Ok(values);
+    }
+
+    loop {
+        if *pos >= tokens.len() {
+            return Err(ExprError::ParseError("unterminated list literal".into()));
+        }
+
+        let value = match &tokens[*pos] {
+            Token::Int(value) => Scalar::Int64(*value),
+            Token::Float(value) => Scalar::Float64(*value),
+            Token::Str(value) => Scalar::Utf8(value.clone()),
+            Token::Bool(value) => Scalar::Bool(*value),
+            other => {
+                return Err(ExprError::ParseError(format!(
+                    "membership list values must be scalar literals, got {other:?}"
+                )));
+            }
+        };
+        values.push(value);
+        *pos += 1;
+
+        if *pos >= tokens.len() {
+            return Err(ExprError::ParseError("unterminated list literal".into()));
+        }
+        match tokens[*pos] {
+            Token::Comma => {
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == Token::RBracket {
+                    *pos += 1;
+                    return Ok(values);
+                }
+            }
+            Token::RBracket => {
+                *pos += 1;
+                return Ok(values);
+            }
+            ref other => {
+                return Err(ExprError::ParseError(format!(
+                    "expected ',' or ']' in list literal, got {other:?}"
+                )));
+            }
+        }
+    }
+}
+
+fn parse_scalar_literal(tokens: &[Token], pos: &mut usize) -> Result<Scalar, ExprError> {
+    if *pos >= tokens.len() {
+        return Err(ExprError::ParseError("expected scalar literal".into()));
+    }
+    let scalar = match &tokens[*pos] {
+        Token::Int(value) => Scalar::Int64(*value),
+        Token::Float(value) => Scalar::Float64(*value),
+        Token::Str(value) => Scalar::Utf8(value.clone()),
+        Token::Bool(value) => Scalar::Bool(*value),
+        Token::Minus => match tokens.get(*pos + 1) {
+            Some(Token::Int(value)) => {
+                *pos += 1;
+                Scalar::Int64(value.saturating_neg())
+            }
+            Some(Token::Float(value)) => {
+                *pos += 1;
+                Scalar::Float64(-value)
+            }
+            other => {
+                return Err(ExprError::ParseError(format!(
+                    "expected numeric literal after '-', got {other:?}"
+                )));
+            }
+        },
+        other => {
+            return Err(ExprError::ParseError(format!(
+                "expected scalar literal, got {other:?}"
+            )));
+        }
+    };
+    *pos += 1;
+    Ok(scalar)
+}
+
+fn parse_numeric_literal(tokens: &[Token], pos: &mut usize) -> Result<f64, ExprError> {
+    match parse_scalar_literal(tokens, pos)? {
+        Scalar::Int64(value) => Ok(value as f64),
+        Scalar::Float64(value) => Ok(value),
+        other => Err(ExprError::ParseError(format!(
+            "expected numeric literal, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_optional_numeric_literal(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<Option<f64>, ExprError> {
+    if matches!(tokens.get(*pos), Some(Token::Ident(value)) if value == "None") {
+        *pos += 1;
+        return Ok(None);
+    }
+
+    parse_numeric_literal(tokens, pos)
+        .map(Some)
+        .map_err(|err| ExprError::ParseError(format!("{context}: {err}")))
+}
+
+fn parse_i32_literal(tokens: &[Token], pos: &mut usize, context: &str) -> Result<i32, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Int64(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be an integer literal, got {value:?}"
+        )));
+    };
+    i32::try_from(value)
+        .map_err(|_| ExprError::ParseError(format!("{context} is outside the i32 range: {value}")))
+}
+
+fn parse_i64_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<i64, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Int64(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be an integer literal, got {value:?}"
+        )));
+    };
+    Ok(value)
+}
+
+fn parse_usize_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<usize, ExprError> {
+    let value = parse_i64_literal_argument(tokens, pos, context)?;
+    usize::try_from(value).map_err(|_| {
+        ExprError::ParseError(format!(
+            "{context} must be a non-negative integer, got {value}"
+        ))
+    })
+}
+
+fn parse_top_n_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<usize, ExprError> {
+    let value = parse_i64_literal_argument(tokens, pos, context)?;
+    if value < 0 {
+        return Ok(0);
+    }
+    usize::try_from(value).map_err(|_| {
+        ExprError::ParseError(format!(
+            "{context} is too large to represent on this platform: {value}"
+        ))
+    })
+}
+
+fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
+    match value.to_ascii_lowercase().as_str() {
+        "null" | "none" => Ok(DType::Null),
+        "bool" | "boolean" | "?" => Ok(DType::Bool),
+        "int" | "integer" | "int64" | "i8" => Ok(DType::Int64),
+        "float" | "floating" | "float64" | "f8" => Ok(DType::Float64),
+        "object" | "string" | "str" | "utf8" | "o" => Ok(DType::Utf8),
+        "category" | "categorical" => Ok(DType::Categorical),
+        "timedelta" | "timedelta64" | "timedelta64[ns]" | "m8" | "m8[ns]" => Ok(DType::Timedelta64),
+        "datetime" | "datetime64" | "datetime64[ns]" => Ok(DType::Datetime64),
+        "period" => Ok(DType::Period),
+        "interval" => Ok(DType::Interval),
+        "sparse" => Ok(DType::Sparse),
+        other => Err(ExprError::ParseError(format!(
+            "astype() dtype is not supported in expressions: {other:?}"
+        ))),
+    }
+}
+
+fn parse_dtype_literal(tokens: &[Token], pos: &mut usize) -> Result<DType, ExprError> {
+    let dtype = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Utf8(value) = dtype else {
+        return Err(ExprError::ParseError(format!(
+            "astype() dtype must be a string literal, got {dtype:?}"
+        )));
+    };
+    parse_dtype_alias(&value)
+}
+
+fn parse_string_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<String, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Utf8(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be a string literal, got {value:?}"
+        )));
+    };
+    Ok(value)
+}
+
+fn parse_bool_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<bool, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Bool(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be a boolean literal, got {value:?}"
+        )));
+    };
+    Ok(value)
+}
+
+fn parse_duplicate_keep_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<ExprDuplicateKeep, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    ExprDuplicateKeep::parse(value, context)
+}
+
+fn parse_axis_zero_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<(), ExprError> {
+    let axis = parse_scalar_literal(tokens, pos)?;
+    match axis {
+        Scalar::Int64(0) => Ok(()),
+        Scalar::Utf8(value) if value == "index" || value == "rows" => Ok(()),
+        other => Err(ExprError::ParseError(format!(
+            "{context} axis must be 0, 'index', or 'rows', got {other:?}"
+        ))),
+    }
+}
+
+fn parse_sort_kind_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<(), ExprError> {
+    let kind = parse_string_literal_argument(tokens, pos, context)?;
+    match kind.as_str() {
+        "quicksort" | "mergesort" | "heapsort" | "stable" => Ok(()),
+        other => Err(ExprError::ParseError(format!(
+            "{context} must be one of 'quicksort', 'mergesort', 'heapsort', or 'stable', got {other:?}"
+        ))),
+    }
+}
+
+fn parse_none_or_scalar_argument(tokens: &[Token], pos: &mut usize) -> Result<(), ExprError> {
+    if matches!(tokens.get(*pos), Some(Token::Ident(value)) if value == "None") {
+        *pos += 1;
+        return Ok(());
+    }
+    parse_scalar_literal(tokens, pos).map(|_| ())
 }
 
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
@@ -1361,7 +2389,7 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     if *pos >= tokens.len() {
         return Err(ExprError::ParseError("unexpected end of expression".into()));
     }
-    match &tokens[*pos] {
+    let expr = match &tokens[*pos] {
         Token::Int(n) => {
             let val = *n;
             *pos += 1;
@@ -1390,6 +2418,21 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
                 value: Scalar::Bool(val),
             })
         }
+        Token::Ident(name)
+            if name == "abs" && *pos + 1 < tokens.len() && tokens[*pos + 1] == Token::LParen =>
+        {
+            *pos += 2; // skip function name and opening '('
+            let inner = parse_or(tokens, pos)?;
+            if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
+                return Err(ExprError::ParseError(
+                    "expected closing ')' after abs argument".into(),
+                ));
+            }
+            *pos += 1; // skip ')'
+            Ok(Expr::Abs {
+                expr: Box::new(inner),
+            })
+        }
         Token::Ident(name) => {
             let name = name.clone();
             *pos += 1;
@@ -1414,7 +2457,1604 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
         other => Err(ExprError::ParseError(format!(
             "unexpected token: {other:?}"
         ))),
+    }?;
+    parse_postfix(expr, tokens, pos)
+}
+
+fn build_arithmetic_method_expr(
+    method: &str,
+    receiver: Expr,
+    other: Expr,
+) -> Result<Expr, ExprError> {
+    let reflected = matches!(
+        method,
+        "radd" | "rsub" | "rmul" | "rdiv" | "rtruediv" | "rfloordiv" | "rmod" | "rpow"
+    );
+    let (left, right) = if reflected {
+        (other, receiver)
+    } else {
+        (receiver, other)
+    };
+    let left = Box::new(left);
+    let right = Box::new(right);
+
+    match method {
+        "add" | "radd" => Ok(Expr::Add { left, right }),
+        "sub" | "subtract" | "rsub" => Ok(Expr::Sub { left, right }),
+        "mul" | "multiply" | "rmul" => Ok(Expr::Mul { left, right }),
+        "div" | "divide" | "truediv" | "rdiv" | "rtruediv" => Ok(Expr::Div { left, right }),
+        "floordiv" | "rfloordiv" => Ok(Expr::FloorDiv { left, right }),
+        "mod" | "rmod" => Ok(Expr::Modulo { left, right }),
+        "pow" | "rpow" => Ok(Expr::Pow { left, right }),
+        other => Err(ExprError::ParseError(format!(
+            "unsupported arithmetic method: {other}"
+        ))),
     }
+}
+
+fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    while *pos < tokens.len() && tokens[*pos] == Token::Dot {
+        let Some(Token::Ident(method)) = tokens.get(*pos + 1) else {
+            return Err(ExprError::ParseError(
+                "expected method name after '.'".into(),
+            ));
+        };
+        if tokens.get(*pos + 2) != Some(&Token::LParen) {
+            return Err(ExprError::ParseError(format!(
+                "expected '(' after method name {method}"
+            )));
+        }
+
+        match method.as_str() {
+            "abs" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "method abs does not accept arguments in expressions".into(),
+                    ));
+                }
+                expr = Expr::Abs {
+                    expr: Box::new(expr),
+                };
+                *pos += 4;
+            }
+            "isna" | "isnull" | "notna" | "notnull" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "method {method} does not accept arguments in expressions"
+                    )));
+                }
+                expr = Expr::IsNull {
+                    expr: Box::new(expr),
+                    negated: matches!(method.as_str(), "notna" | "notnull"),
+                };
+                *pos += 4;
+            }
+            "fillna" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "value" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected fillna() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let value = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after fillna() value".into(),
+                    ));
+                }
+                expr = Expr::FillNa {
+                    expr: Box::new(expr),
+                    value,
+                };
+                *pos = arg_pos + 1;
+            }
+            "dropna" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "method dropna does not accept arguments in expressions".into(),
+                    ));
+                }
+                expr = Expr::DropNa {
+                    expr: Box::new(expr),
+                };
+                *pos += 4;
+            }
+            "sort_values" => {
+                let mut arg_pos = *pos + 3;
+                let mut ascending = true;
+                let mut na_position = "last".to_owned();
+                let mut ascending_seen = false;
+                let mut na_position_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated sort_values() arguments".into(),
+                        ));
+                    }
+
+                    let Some(Token::Ident(keyword)) = tokens.get(arg_pos) else {
+                        return Err(ExprError::ParseError(
+                            "sort_values() arguments are keyword-only in expressions".into(),
+                        ));
+                    };
+                    if tokens.get(arg_pos + 1) != Some(&Token::Assign) {
+                        return Err(ExprError::ParseError(
+                            "sort_values() arguments are keyword-only in expressions".into(),
+                        ));
+                    }
+                    let keyword = keyword.clone();
+                    arg_pos += 2;
+
+                    match keyword.as_str() {
+                        "ascending" => {
+                            if ascending_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_values() ascending argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            ascending = parse_bool_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_values() ascending",
+                            )?;
+                            ascending_seen = true;
+                        }
+                        "na_position" => {
+                            if na_position_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_values() na_position argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            na_position = parse_string_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_values() na_position",
+                            )?;
+                            na_position_seen = true;
+                        }
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected sort_values() keyword argument: {other}"
+                            )));
+                        }
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "sort_values() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in sort_values() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::SortValues {
+                    expr: Box::new(expr),
+                    ascending,
+                    na_position,
+                };
+                *pos = arg_pos + 1;
+            }
+            "sort_index" => {
+                let mut arg_pos = *pos + 3;
+                let mut ascending = true;
+                let mut ignore_index = false;
+                let mut axis_seen = false;
+                let mut ascending_seen = false;
+                let mut kind_seen = false;
+                let mut na_position_seen = false;
+                let mut level_seen = false;
+                let mut sort_remaining_seen = false;
+                let mut ignore_index_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated sort_index() arguments".into(),
+                        ));
+                    }
+
+                    let Some(Token::Ident(keyword)) = tokens.get(arg_pos) else {
+                        return Err(ExprError::ParseError(
+                            "sort_index() arguments are keyword-only in expressions".into(),
+                        ));
+                    };
+                    if tokens.get(arg_pos + 1) != Some(&Token::Assign) {
+                        return Err(ExprError::ParseError(
+                            "sort_index() arguments are keyword-only in expressions".into(),
+                        ));
+                    }
+                    let keyword = keyword.clone();
+                    arg_pos += 2;
+
+                    match keyword.as_str() {
+                        "axis" => {
+                            if axis_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() axis argument was provided more than once".into(),
+                                ));
+                            }
+                            let axis = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            match axis {
+                                Scalar::Int64(0) => {}
+                                Scalar::Utf8(value) if value == "index" || value == "rows" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() axis must be 0, 'index', or 'rows', got {other:?}"
+                                    )));
+                                }
+                            }
+                            axis_seen = true;
+                        }
+                        "ascending" => {
+                            if ascending_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() ascending argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            ascending = parse_bool_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() ascending",
+                            )?;
+                            ascending_seen = true;
+                        }
+                        "kind" => {
+                            if kind_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() kind argument was provided more than once".into(),
+                                ));
+                            }
+                            let kind = parse_string_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() kind",
+                            )?;
+                            match kind.as_str() {
+                                "quicksort" | "mergesort" | "heapsort" | "stable" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() kind must be one of 'quicksort', 'mergesort', 'heapsort', or 'stable', got {other:?}"
+                                    )));
+                                }
+                            }
+                            kind_seen = true;
+                        }
+                        "na_position" => {
+                            if na_position_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() na_position argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let na_position = parse_string_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() na_position",
+                            )?;
+                            match na_position.as_str() {
+                                "first" | "last" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() na_position must be 'first' or 'last', got {other:?}"
+                                    )));
+                                }
+                            }
+                            na_position_seen = true;
+                        }
+                        "level" => {
+                            if level_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() level argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let _ = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            level_seen = true;
+                        }
+                        "sort_remaining" => {
+                            if sort_remaining_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() sort_remaining argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let _ = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            sort_remaining_seen = true;
+                        }
+                        "ignore_index" => {
+                            if ignore_index_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() ignore_index argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            ignore_index = parse_bool_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() ignore_index",
+                            )?;
+                            ignore_index_seen = true;
+                        }
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected sort_index() keyword argument: {other}"
+                            )));
+                        }
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in sort_index() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::SortIndex {
+                    expr: Box::new(expr),
+                    ascending,
+                    ignore_index,
+                };
+                *pos = arg_pos + 1;
+            }
+            "argsort" => {
+                let mut arg_pos = *pos + 3;
+                let mut axis_seen = false;
+                let mut kind_seen = false;
+                let mut order_seen = false;
+                let mut stable_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated argsort() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "axis" => {
+                                if axis_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() axis argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_axis_zero_argument(tokens, &mut arg_pos, "argsort()")?;
+                                axis_seen = true;
+                            }
+                            "kind" => {
+                                if kind_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() kind argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_sort_kind_argument(tokens, &mut arg_pos, "argsort() kind")?;
+                                kind_seen = true;
+                            }
+                            "order" => {
+                                if order_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() order argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                order_seen = true;
+                            }
+                            "stable" => {
+                                if stable_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() stable argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                stable_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected argsort() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "argsort() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                if axis_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() axis argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_axis_zero_argument(tokens, &mut arg_pos, "argsort()")?;
+                                axis_seen = true;
+                            }
+                            1 => {
+                                if kind_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() kind argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_sort_kind_argument(tokens, &mut arg_pos, "argsort() kind")?;
+                                kind_seen = true;
+                            }
+                            2 => {
+                                if order_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() order argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                order_seen = true;
+                            }
+                            3 => {
+                                if stable_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() stable argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                stable_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "argsort() accepts at most axis, kind, order, and stable arguments"
+                                        .into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "argsort() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in argsort() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::ArgSort {
+                    expr: Box::new(expr),
+                };
+                *pos = arg_pos + 1;
+            }
+            "mode" => {
+                let mut arg_pos = *pos + 3;
+                let mut dropna = true;
+                let mut dropna_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated mode() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "dropna" => {
+                                if dropna_seen {
+                                    return Err(ExprError::ParseError(
+                                        "mode() dropna argument was provided more than once".into(),
+                                    ));
+                                }
+                                dropna = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "mode() dropna",
+                                )?;
+                                dropna_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected mode() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "mode() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                if dropna_seen {
+                                    return Err(ExprError::ParseError(
+                                        "mode() dropna argument was provided more than once".into(),
+                                    ));
+                                }
+                                dropna = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "mode() dropna",
+                                )?;
+                                dropna_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "mode() accepts at most one dropna argument".into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "mode() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in mode() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::Mode {
+                    expr: Box::new(expr),
+                    dropna,
+                };
+                *pos = arg_pos + 1;
+            }
+            "duplicated" | "drop_duplicates" => {
+                let mut arg_pos = *pos + 3;
+                let mut keep = ExprDuplicateKeep::First;
+                let mut keep_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "keep" => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_duplicate_keep_argument(tokens, &mut arg_pos, method)?;
+                                keep_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if method == "drop_duplicates" {
+                            return Err(ExprError::ParseError(
+                                "drop_duplicates() arguments are keyword-only in expressions"
+                                    .into(),
+                            ));
+                        }
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_duplicate_keep_argument(tokens, &mut arg_pos, method)?;
+                                keep_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most one keep argument"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = if method == "duplicated" {
+                    Expr::Duplicated {
+                        expr: Box::new(expr),
+                        keep,
+                    }
+                } else {
+                    Expr::DropDuplicates {
+                        expr: Box::new(expr),
+                        keep,
+                    }
+                };
+                *pos = arg_pos + 1;
+            }
+            "head" | "tail" => {
+                let mut arg_pos = *pos + 3;
+                let mut n = 5_i64;
+                let mut n_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "n" => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_i64_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "head/tail n",
+                                )?;
+                                n_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_i64_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "head/tail n",
+                                )?;
+                                n_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most one n argument"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::HeadTail {
+                    expr: Box::new(expr),
+                    n,
+                    tail: method == "tail",
+                };
+                *pos = arg_pos + 1;
+            }
+            "nlargest" | "nsmallest" => {
+                let mut arg_pos = *pos + 3;
+                let mut n = 5_usize;
+                let mut keep = "first".to_owned();
+                let mut n_seen = false;
+                let mut keep_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "n" => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_top_n_literal_argument(tokens, &mut arg_pos, "top-n n")?;
+                                n_seen = true;
+                            }
+                            "keep" => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "top-n keep",
+                                )?;
+                                keep_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_top_n_literal_argument(tokens, &mut arg_pos, "top-n n")?;
+                                n_seen = true;
+                            }
+                            1 => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "top-n keep",
+                                )?;
+                                keep_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most n and keep arguments"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::TopN {
+                    expr: Box::new(expr),
+                    n,
+                    keep,
+                    largest: method == "nlargest",
+                };
+                *pos = arg_pos + 1;
+            }
+            "replace" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "to_replace" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected replace() first keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let to_replace = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::Comma) {
+                    return Err(ExprError::ParseError(
+                        "expected ',' between replace() arguments".into(),
+                    ));
+                }
+                arg_pos += 1;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "value" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected replace() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let value = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after replace() arguments".into(),
+                    ));
+                }
+                expr = Expr::Replace {
+                    expr: Box::new(expr),
+                    to_replace,
+                    value,
+                };
+                *pos = arg_pos + 1;
+            }
+            "astype" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "dtype" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected astype() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let dtype = parse_dtype_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after astype() dtype".into(),
+                    ));
+                }
+                expr = Expr::Astype {
+                    expr: Box::new(expr),
+                    dtype,
+                };
+                *pos = arg_pos + 1;
+            }
+            "combine_first" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected combine_first() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let right = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after combine_first() argument".into(),
+                    ));
+                }
+                expr = Expr::CombineFirst {
+                    left: Box::new(expr),
+                    right: Box::new(right),
+                };
+                *pos = arg_pos + 1;
+            }
+            "rank" => {
+                let mut arg_pos = *pos + 3;
+                let mut method = "average".to_owned();
+                let mut ascending = true;
+                let mut na_option = "keep".to_owned();
+                let mut pct = false;
+                let mut positional_method_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated rank() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "method" => {
+                                method = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() method",
+                                )?;
+                            }
+                            "ascending" => {
+                                ascending = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() ascending",
+                                )?;
+                            }
+                            "na_option" => {
+                                na_option = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() na_option",
+                                )?;
+                            }
+                            "pct" => {
+                                pct = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() pct",
+                                )?;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected rank() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else if !positional_method_seen {
+                        method =
+                            parse_string_literal_argument(tokens, &mut arg_pos, "rank() method")?;
+                        positional_method_seen = true;
+                    } else {
+                        return Err(ExprError::ParseError(
+                            "rank() only accepts one positional method argument".into(),
+                        ));
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "rank() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in rank() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::Rank {
+                    expr: Box::new(expr),
+                    method,
+                    ascending,
+                    na_option,
+                    pct,
+                };
+                *pos = arg_pos + 1;
+            }
+            "add" | "radd" | "sub" | "subtract" | "rsub" | "mul" | "multiply" | "rmul" | "div"
+            | "divide" | "truediv" | "rdiv" | "rtruediv" | "floordiv" | "rfloordiv" | "mod"
+            | "rmod" | "pow" | "rpow" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let other = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() argument"
+                    )));
+                }
+                expr = build_arithmetic_method_expr(method, expr, other)?;
+                *pos = arg_pos + 1;
+            }
+            "where" | "mask" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "cond" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() first keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let cond = parse_or(tokens, &mut arg_pos)?;
+                let other = if tokens.get(arg_pos) == Some(&Token::Comma) {
+                    arg_pos += 1;
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "other" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    Some(Box::new(parse_or(tokens, &mut arg_pos)?))
+                } else {
+                    None
+                };
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() arguments"
+                    )));
+                }
+                expr = Expr::Where {
+                    expr: Box::new(expr),
+                    cond: Box::new(cond),
+                    other,
+                    mask: method == "mask",
+                };
+                *pos = arg_pos + 1;
+            }
+            "eq" | "ne" | "gt" | "ge" | "lt" | "le" => {
+                let op = match method.as_str() {
+                    "eq" => ComparisonOp::Eq,
+                    "ne" => ComparisonOp::Ne,
+                    "gt" => ComparisonOp::Gt,
+                    "ge" => ComparisonOp::Ge,
+                    "lt" => ComparisonOp::Lt,
+                    "le" => ComparisonOp::Le,
+                    other => {
+                        return Err(ExprError::ParseError(format!(
+                            "unsupported comparison method: {other}"
+                        )));
+                    }
+                };
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let right = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() argument"
+                    )));
+                }
+                expr = Expr::Compare {
+                    left: Box::new(expr),
+                    right: Box::new(right),
+                    op,
+                };
+                *pos = arg_pos + 1;
+            }
+            "isin" => {
+                let mut arg_pos = *pos + 3;
+                let values = parse_list_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after isin list literal".into(),
+                    ));
+                }
+                expr = Expr::IsIn {
+                    left: Box::new(expr),
+                    values,
+                    negated: false,
+                };
+                *pos = arg_pos + 1;
+            }
+            "between" => {
+                let mut arg_pos = *pos + 3;
+                let left = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::Comma) {
+                    return Err(ExprError::ParseError(
+                        "expected ',' between between() bounds".into(),
+                    ));
+                }
+                arg_pos += 1;
+                let right = parse_scalar_literal(tokens, &mut arg_pos)?;
+                let mut inclusive = BetweenInclusive::Both;
+                if tokens.get(arg_pos) == Some(&Token::Comma) {
+                    arg_pos += 1;
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "inclusive" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected between() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    let inclusive_arg = parse_scalar_literal(tokens, &mut arg_pos)?;
+                    let Scalar::Utf8(value) = inclusive_arg else {
+                        return Err(ExprError::ParseError(format!(
+                            "between() inclusive must be a string literal, got {inclusive_arg:?}"
+                        )));
+                    };
+                    inclusive = BetweenInclusive::parse(&value)?;
+                }
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after between() arguments".into(),
+                    ));
+                }
+                expr = Expr::Between {
+                    expr: Box::new(expr),
+                    left,
+                    right,
+                    inclusive,
+                };
+                *pos = arg_pos + 1;
+            }
+            "clip" => {
+                let mut arg_pos = *pos + 3;
+                let mut lower = None;
+                let mut upper = None;
+                let mut lower_seen = false;
+                let mut upper_seen = false;
+                let mut positional_count = 0_u8;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated clip() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "lower" => {
+                                if lower_seen {
+                                    return Err(ExprError::ParseError(
+                                        "clip() lower argument was provided more than once".into(),
+                                    ));
+                                }
+                                lower = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() lower",
+                                )?;
+                                lower_seen = true;
+                            }
+                            "upper" => {
+                                if upper_seen {
+                                    return Err(ExprError::ParseError(
+                                        "clip() upper argument was provided more than once".into(),
+                                    ));
+                                }
+                                upper = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() upper",
+                                )?;
+                                upper_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected clip() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "clip() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                lower = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() lower",
+                                )?;
+                                lower_seen = true;
+                            }
+                            1 => {
+                                upper = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() upper",
+                                )?;
+                                upper_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "clip() accepts at most lower and upper bounds".into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "clip() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in clip() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+                expr = Expr::Clip {
+                    expr: Box::new(expr),
+                    lower,
+                    upper,
+                };
+                *pos = arg_pos + 1;
+            }
+            "cumsum" | "cumprod" | "cummin" | "cummax" => {
+                let mut arg_pos = *pos + 3;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "skipna" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                        let skipna = parse_bool_literal_argument(
+                            tokens,
+                            &mut arg_pos,
+                            &format!("{method}() skipna"),
+                        )?;
+                        if !skipna {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() skipna=False is not supported in expressions"
+                            )));
+                        }
+                    } else {
+                        return Err(ExprError::ParseError(format!(
+                            "{method}() only accepts skipna=True in expressions"
+                        )));
+                    }
+
+                    if tokens.get(arg_pos) != Some(&Token::RParen) {
+                        return Err(ExprError::ParseError(format!(
+                            "expected ')' after {method}() arguments"
+                        )));
+                    }
+                }
+
+                expr = match method.as_str() {
+                    "cumsum" => Expr::CumSum {
+                        expr: Box::new(expr),
+                    },
+                    "cumprod" => Expr::CumProd {
+                        expr: Box::new(expr),
+                    },
+                    "cummin" => Expr::CumMin {
+                        expr: Box::new(expr),
+                    },
+                    "cummax" => Expr::CumMax {
+                        expr: Box::new(expr),
+                    },
+                    other => {
+                        return Err(ExprError::ParseError(format!(
+                            "unsupported cumulative method: {other}"
+                        )));
+                    }
+                };
+                *pos = arg_pos + 1;
+            }
+            "pct_change" => {
+                let mut arg_pos = *pos + 3;
+                let mut periods = 1_usize;
+                let mut periods_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated pct_change() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "periods" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected pct_change() keyword argument: {keyword}"
+                            )));
+                        }
+                        if periods_seen {
+                            return Err(ExprError::ParseError(
+                                "pct_change() periods argument was provided more than once".into(),
+                            ));
+                        }
+                        arg_pos += 2;
+                    } else if periods_seen {
+                        return Err(ExprError::ParseError(
+                            "pct_change() accepts only one periods argument".into(),
+                        ));
+                    }
+
+                    periods =
+                        parse_usize_literal_argument(tokens, &mut arg_pos, "pct_change() periods")?;
+                    periods_seen = true;
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "pct_change() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in pct_change() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::PctChange {
+                    expr: Box::new(expr),
+                    periods,
+                };
+                *pos = arg_pos + 1;
+            }
+            "shift" | "diff" => {
+                let mut arg_pos = *pos + 3;
+                let mut periods = 1_i64;
+                let mut periods_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "periods" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        if periods_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() periods argument was provided more than once"
+                            )));
+                        }
+                        arg_pos += 2;
+                    } else if periods_seen {
+                        return Err(ExprError::ParseError(format!(
+                            "{method}() accepts only one periods argument"
+                        )));
+                    }
+
+                    periods = parse_i64_literal_argument(
+                        tokens,
+                        &mut arg_pos,
+                        &format!("{method}() periods"),
+                    )?;
+                    periods_seen = true;
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = if method == "shift" {
+                    Expr::Shift {
+                        expr: Box::new(expr),
+                        periods,
+                    }
+                } else {
+                    Expr::Diff {
+                        expr: Box::new(expr),
+                        periods,
+                    }
+                };
+                *pos = arg_pos + 1;
+            }
+            "round" => {
+                let mut arg_pos = *pos + 3;
+                let decimals = if tokens.get(arg_pos) == Some(&Token::RParen) {
+                    0
+                } else {
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "decimals" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected round() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    parse_i32_literal(tokens, &mut arg_pos, "round() decimals")?
+                };
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after round() arguments".into(),
+                    ));
+                }
+                expr = Expr::Round {
+                    expr: Box::new(expr),
+                    decimals,
+                };
+                *pos = arg_pos + 1;
+            }
+            _ => {
+                return Err(ExprError::ParseError(format!(
+                    "unsupported expression method: {method}"
+                )));
+            }
+        };
+    }
+    Ok(expr)
 }
 
 #[cfg(test)]
@@ -1424,9 +4064,12 @@ mod tests {
     use fp_columnar::ComparisonOp;
     use fp_frame::{FrameError, Series};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::Scalar;
+    use fp_types::{DType, NullKind, Scalar};
 
-    use super::{Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, evaluate};
+    use super::{
+        BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
+        evaluate,
+    };
 
     #[test]
     fn expression_add_works_through_series_refs() {
@@ -2762,6 +5405,404 @@ mod tests {
     }
 
     #[test]
+    fn parse_membership_list_literal() {
+        let expr = super::parse_expr("a in [1, 3,]").unwrap();
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            panic!("expected IsIn expression");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(!negated);
+        assert_eq!(values, vec![Scalar::Int64(1), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn parse_not_in_membership_list_literal() {
+        let expr = super::parse_expr("name not in ['x', 'y']").unwrap();
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            panic!("expected IsIn expression");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("name".into())
+            }
+        );
+        assert!(negated);
+        assert_eq!(
+            values,
+            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+        );
+    }
+
+    #[test]
+    fn parse_abs_function_call() {
+        let expr = super::parse_expr("abs(a - 3)").unwrap();
+        let Expr::Abs { expr: inner } = expr else {
+            panic!("expected Abs expression");
+        };
+        assert!(matches!(inner.as_ref(), Expr::Sub { .. }));
+    }
+
+    #[test]
+    fn parse_abs_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.abs()")?;
+        let Expr::Abs { expr: inner } = expr else {
+            return Err(ExprError::ParseError("expected Abs expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_null_predicate_method_calls() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.isna()")?;
+        let Expr::IsNull {
+            expr: inner,
+            negated,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected IsNull expression".into()));
+        };
+        assert!(!negated);
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+
+        let expr = super::parse_expr("a.notnull()")?;
+        let Expr::IsNull { negated, .. } = expr else {
+            return Err(ExprError::ParseError("expected IsNull expression".into()));
+        };
+        assert!(negated);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_fillna_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.fillna(value=-3)")?;
+        let Expr::FillNa { expr: inner, value } = expr else {
+            return Err(ExprError::ParseError("expected FillNa expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(value, Scalar::Int64(-3));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_comparison_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.ge(other=b + 1)")?;
+        let Expr::Compare { left, right, op } = expr else {
+            return Err(ExprError::ParseError("expected Compare expression".into()));
+        };
+        assert_eq!(op, ComparisonOp::Ge);
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(matches!(right.as_ref(), Expr::Add { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_arithmetic_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.rsub(other=b + 10)")?;
+        let Expr::Sub { left, right } = expr else {
+            return Err(ExprError::ParseError("expected Sub expression".into()));
+        };
+        assert!(matches!(left.as_ref(), Expr::Add { .. }));
+        assert_eq!(
+            right.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_where_mask_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.mask(cond=a.gt(1), other=b + 10)")?;
+        let Expr::Where {
+            expr: inner,
+            cond,
+            other,
+            mask,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Where expression".into()));
+        };
+        assert!(mask);
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(matches!(cond.as_ref(), Expr::Compare { .. }));
+        assert!(matches!(other.as_deref(), Some(Expr::Add { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.isin([1, 3,])")?;
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected IsIn expression".into()));
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(!negated);
+        assert_eq!(values, vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_between_method_call_scalar_bounds() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.between(2, 8)")?;
+        let Expr::Between {
+            expr: inner,
+            left,
+            right,
+            inclusive,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(left, Scalar::Int64(2));
+        assert_eq!(right, Scalar::Int64(8));
+        assert_eq!(inclusive, BetweenInclusive::Both);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_between_method_call_inclusive_argument() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.between(2, 8, inclusive=\"left\")")?;
+        let Expr::Between { inclusive, .. } = expr else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(inclusive, BetweenInclusive::Left);
+
+        let positional = super::parse_expr("a.between(2, 8, \"right\")")?;
+        let Expr::Between { inclusive, .. } = positional else {
+            return Err(ExprError::ParseError("expected Between expression".into()));
+        };
+        assert_eq!(inclusive, BetweenInclusive::Right);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_clip_method_call_numeric_bounds() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.clip(2, 8)")?;
+        let Expr::Clip {
+            expr: inner,
+            lower,
+            upper,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(lower, Some(2.0));
+        assert_eq!(upper, Some(8.0));
+
+        let one_sided = super::parse_expr("a.clip(upper=8)")?;
+        let Expr::Clip { lower, upper, .. } = one_sided else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(lower, None);
+        assert_eq!(upper, Some(8.0));
+
+        let mixed = super::parse_expr("a.clip(2, upper=None)")?;
+        let Expr::Clip { lower, upper, .. } = mixed else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(lower, Some(2.0));
+        assert_eq!(upper, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_shift_and_diff_method_call_periods() -> Result<(), ExprError> {
+        let shift_default = super::parse_expr("a.shift()")?;
+        let Expr::Shift { periods, .. } = shift_default else {
+            return Err(ExprError::ParseError("expected Shift expression".into()));
+        };
+        assert_eq!(periods, 1);
+
+        let shift_keyword = super::parse_expr("a.shift(periods=-1)")?;
+        let Expr::Shift { periods, .. } = shift_keyword else {
+            return Err(ExprError::ParseError("expected Shift expression".into()));
+        };
+        assert_eq!(periods, -1);
+
+        let diff_positional = super::parse_expr("a.diff(2)")?;
+        let Expr::Diff {
+            expr: inner,
+            periods,
+        } = diff_positional
+        else {
+            return Err(ExprError::ParseError("expected Diff expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(periods, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_cumulative_method_calls() -> Result<(), ExprError> {
+        let cumsum = super::parse_expr("a.cumsum()")?;
+        let Expr::CumSum { expr: inner } = cumsum else {
+            return Err(ExprError::ParseError("expected CumSum expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+
+        assert!(matches!(
+            super::parse_expr("a.cumprod(skipna=True)")?,
+            Expr::CumProd { .. }
+        ));
+        assert!(matches!(
+            super::parse_expr("a.cummin()")?,
+            Expr::CumMin { .. }
+        ));
+        assert!(matches!(
+            super::parse_expr("a.cummax()")?,
+            Expr::CumMax { .. }
+        ));
+        assert!(super::parse_expr("a.cumsum(skipna=False)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_pct_change_method_call_periods() -> Result<(), ExprError> {
+        let default = super::parse_expr("a.pct_change()")?;
+        let Expr::PctChange { periods, .. } = default else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(periods, 1);
+
+        let positional = super::parse_expr("a.pct_change(2)")?;
+        let Expr::PctChange {
+            expr: inner,
+            periods,
+        } = positional
+        else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(periods, 2);
+
+        let keyword = super::parse_expr("a.pct_change(periods=3)")?;
+        let Expr::PctChange { periods, .. } = keyword else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(periods, 3);
+        assert!(super::parse_expr("a.pct_change(-1)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_round_method_call_optional_decimals() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.round()")?;
+        let Expr::Round {
+            expr: inner,
+            decimals,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(decimals, 0);
+
+        let positional = super::parse_expr("a.round(-1)")?;
+        let Expr::Round { decimals, .. } = positional else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(decimals, -1);
+
+        let keyword = super::parse_expr("a.round(decimals=1)")?;
+        let Expr::Round { decimals, .. } = keyword else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(decimals, 1);
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3107,6 +6148,1693 @@ mod tests {
         assert_eq!(result.len(), 2); // rows where x=5 and x=3
         assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["x"].values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn query_str_filters_with_list_membership() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("a in [1, 3]", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+
+        let result = super::query_str("b not in ['x']", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.columns()["a"].values(), &[Scalar::Int64(2)]);
+        assert_eq!(result.columns()["b"].values(), &[Scalar::Utf8("y".into())]);
+    }
+
+    #[test]
+    fn query_str_exposes_index_namespace() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("index > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            result.columns()["a"].values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let result = super::query_str("ilevel_0 > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+    }
+
+    #[test]
+    fn query_str_exposes_named_index_without_shadowing_columns() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "idx",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "value",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+        .set_index("idx", true)
+        .unwrap();
+
+        let result = super::query_str("idx > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            result.columns()["value"].values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let shadowing_frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "index",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(1)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "value",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("index > 5", &shadowing_frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into()]);
+        assert_eq!(result.columns()["index"].values(), &[Scalar::Int64(10)]);
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_abs_function() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(-2),
+                    Scalar::Int64(-1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let evaluated = super::eval_str("abs(a)", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            evaluated.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+
+        let filtered = super::query_str("abs(a) > 1", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 4_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(-2), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_abs_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(-2), Scalar::Int64(-1), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let evaluated = super::eval_str("a.abs()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            evaluated.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.abs() >= 2", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(-2), Scalar::Int64(3)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_null_predicate_methods() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let isna = super::eval_str("a.isna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            isna.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let isnull = super::query_str("a.isnull()", &frame, &policy, &mut ledger)?;
+        assert_eq!(isnull.index().labels(), &[1_i64.into()]);
+        assert_eq!(
+            isnull.columns()["a"].values(),
+            &[Scalar::Null(fp_types::NullKind::Null)]
+        );
+
+        let notna = super::query_str("a.notna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(notna.index().labels(), &[0_i64.into(), 2_i64.into()]);
+
+        let notnull = super::eval_str("a.notnull()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            notnull.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_fillna_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let filled = super::eval_str("a.fillna(0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            filled.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.fillna(0) < 2", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 1_i64.into()]);
+
+        let keyword_filtered =
+            super::query_str("a.fillna(value=5) >= 3", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            keyword_filtered.index().labels(),
+            &[1_i64.into(), 2_i64.into()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_dropna_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(30),
+                    Scalar::Int64(10),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let dropped = super::eval_str("a.dropna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dropped.index().labels(),
+            &[0_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(
+            dropped.values(),
+            &[Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        let predicate = super::eval_str("a.dropna().gt(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            predicate.index().labels(),
+            &[0_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(
+            predicate.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)]
+        );
+
+        let filtered = super::query_str(
+            "a.dropna().gt(2) and b.gt(20)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+
+        assert!(super::parse_expr("a.dropna(0)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_sort_values_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let sorted = super::eval_str("a.sort_values()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            sorted.index().labels(),
+            &[2_i64.into(), 3_i64.into(), 0_i64.into(), 1_i64.into()]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN)
+            ]
+        );
+
+        let descending_first = super::eval_str(
+            "a.sort_values(ascending=False, na_position='first')",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            descending_first.index().labels(),
+            &[1_i64.into(), 0_i64.into(), 3_i64.into(), 2_i64.into()]
+        );
+
+        let filtered = super::query_str(
+            "a.sort_values().gt(1) and b.gt(10)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 3_i64.into()]);
+
+        assert!(super::parse_expr("a.sort_values(False)").is_err());
+        assert!(super::parse_expr("a.sort_values(kind='mergesort')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_sort_index_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let sorted = super::eval_str("a.sort_index()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            sorted.index().labels(),
+            &[
+                7_i64.into(),
+                8_i64.into(),
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into()
+            ]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Null(fp_types::NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1)
+            ]
+        );
+
+        let descending = super::eval_str(
+            "a.sort_index(ascending=False)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            descending.index().labels(),
+            &[
+                12_i64.into(),
+                11_i64.into(),
+                10_i64.into(),
+                8_i64.into(),
+                7_i64.into()
+            ]
+        );
+
+        let stable = super::eval_str(
+            "a.sort_index(axis='rows', kind='stable', na_position='last', sort_remaining=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            stable.index().labels(),
+            &[
+                7_i64.into(),
+                8_i64.into(),
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into()
+            ]
+        );
+
+        let ignored_index = super::eval_str(
+            "a.sort_index(ascending=False, ignore_index=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            ignored_index.index().labels(),
+            &[
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into()
+            ]
+        );
+        assert_eq!(
+            ignored_index.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN)
+            ]
+        );
+
+        let filtered = super::query_str(
+            "a.sort_index(ascending=False).gt(2) and b.gt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[8_i64.into()]);
+
+        assert!(super::parse_expr("a.sort_index(False)").is_err());
+        assert!(super::parse_expr("a.sort_index(axis=1)").is_err());
+        assert!(super::parse_expr("a.sort_index(kind='bogus')").is_err());
+        assert!(super::parse_expr("a.sort_index(na_position='bogus')").is_err());
+        assert!(super::parse_expr("a.sort_index(ignore_index='yes')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_argsort_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let argsorted = super::eval_str("a.argsort()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            argsorted.index().labels(),
+            &[
+                10_i64.into(),
+                7_i64.into(),
+                12_i64.into(),
+                11_i64.into(),
+                8_i64.into()
+            ]
+        );
+        assert_eq!(
+            argsorted.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(-1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+                Scalar::Int64(3)
+            ]
+        );
+
+        let stable = super::eval_str("a.argsort(0, 'stable')", &frame, &policy, &mut ledger)?;
+        assert_eq!(stable.values(), argsorted.values());
+
+        let keyword = super::eval_str(
+            "a.argsort(axis='rows', kind='mergesort', order=None, stable=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(keyword.values(), argsorted.values());
+
+        let filtered = super::query_str(
+            "a.argsort().ge(0) and b.gt(20)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[10_i64.into(), 8_i64.into()]);
+
+        assert!(super::parse_expr("a.argsort(axis=1)").is_err());
+        assert!(super::parse_expr("a.argsort(kind='bogus')").is_err());
+        assert!(super::parse_expr("a.argsort(0, kind='stable', 'extra')").is_err());
+        assert!(super::parse_expr("a.argsort(ascending=False)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_mode_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    10_i64.into(),
+                    7_i64.into(),
+                    12_i64.into(),
+                    11_i64.into(),
+                    8_i64.into(),
+                ],
+                vec![
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(3),
+                    Scalar::Int64(3),
+                    Scalar::Int64(1),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![
+                    10_i64.into(),
+                    7_i64.into(),
+                    12_i64.into(),
+                    11_i64.into(),
+                    8_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mode = super::eval_str("a.mode()", &frame, &policy, &mut ledger)?;
+        assert_eq!(mode.index().labels(), &[0_i64.into()]);
+        assert_eq!(mode.values(), &[Scalar::Int64(3)]);
+
+        let with_na = super::eval_str("a.mode(False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(with_na.index().labels(), &[0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            with_na.values(),
+            &[Scalar::Int64(3), Scalar::Null(fp_types::NullKind::NaN)]
+        );
+
+        let keyword = super::eval_str("a.mode(dropna=False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword.values(), with_na.values());
+
+        let filtered =
+            super::query_str("a.mode().ge(3) and b.gt(40)", &frame, &policy, &mut ledger)?;
+        assert!(filtered.index().labels().is_empty());
+
+        assert!(super::parse_expr("a.mode(dropna=False, True)").is_err());
+        assert!(super::parse_expr("a.mode(skipna=False)").is_err());
+        assert!(super::parse_expr("a.mode(dropna='no')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_head_tail_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let head = super::eval_str("a.head(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(head.index().labels(), &[10_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            head.values(),
+            &[Scalar::Int64(3), Scalar::Null(fp_types::NullKind::NaN)]
+        );
+
+        let head_negative = super::eval_str("a.head(n=-1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            head_negative.index().labels(),
+            &[10_i64.into(), 7_i64.into(), 12_i64.into(), 11_i64.into()]
+        );
+
+        let tail = super::eval_str("a.tail(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(tail.index().labels(), &[11_i64.into(), 8_i64.into()]);
+        assert_eq!(tail.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+
+        let tail_negative = super::eval_str("a.tail(n=-1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            tail_negative.index().labels(),
+            &[7_i64.into(), 12_i64.into(), 11_i64.into(), 8_i64.into()]
+        );
+
+        let filtered =
+            super::query_str("a.head().gt(1) and b.gt(20)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[10_i64.into(), 8_i64.into()]);
+
+        assert!(super::parse_expr("a.head(1, 2)").is_err());
+        assert!(super::parse_expr("a.tail(n=1, 2)").is_err());
+        assert!(super::parse_expr("a.head(skipna=True)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_deduplicate_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let duplicated = super::eval_str("a.duplicated()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ]
+        );
+
+        let duplicated_last =
+            super::eval_str("a.duplicated(keep='last')", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated_last.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+
+        let duplicated_none =
+            super::eval_str("a.duplicated(keep=False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated_none.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ]
+        );
+
+        let dropped = super::eval_str("a.drop_duplicates()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dropped.index().labels(),
+            &[10_i64.into(), 7_i64.into(), 12_i64.into()]
+        );
+        assert_eq!(
+            dropped.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN),
+                Scalar::Int64(1),
+            ]
+        );
+
+        let dropped_last = super::eval_str(
+            "a.drop_duplicates(keep='last')",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            dropped_last.index().labels(),
+            &[12_i64.into(), 11_i64.into(), 8_i64.into()]
+        );
+        assert_eq!(
+            dropped_last.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN),
+            ]
+        );
+
+        let dropped_none =
+            super::eval_str("a.drop_duplicates(keep=0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(dropped_none.index().labels(), &[12_i64.into()]);
+        assert_eq!(dropped_none.values(), &[Scalar::Int64(1)]);
+
+        let filtered = super::query_str(
+            "not a.duplicated(keep=False) and b.lt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[12_i64.into()]);
+
+        assert!(super::parse_expr("a.duplicated(keep=True)").is_err());
+        assert!(super::parse_expr("a.duplicated(keep='middle')").is_err());
+        assert!(super::parse_expr("a.drop_duplicates('last')").is_err());
+        assert!(super::parse_expr("a.drop_duplicates('first', 'last')").is_err());
+        assert!(super::parse_expr("a.duplicated(skipna=True)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_top_n_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let largest = super::eval_str("a.nlargest(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(largest.index().labels(), &[0_i64.into(), 4_i64.into()]);
+        assert_eq!(largest.values(), &[Scalar::Int64(3), Scalar::Int64(3)]);
+
+        let largest_last =
+            super::eval_str("a.nlargest(2, keep='last')", &frame, &policy, &mut ledger)?;
+        assert_eq!(largest_last.index().labels(), &[4_i64.into(), 0_i64.into()]);
+
+        let smallest = super::eval_str("a.nsmallest(n=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(smallest.index().labels(), &[2_i64.into(), 3_i64.into()]);
+        assert_eq!(smallest.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+
+        let negative = super::eval_str("a.nlargest(n=-1)", &frame, &policy, &mut ledger)?;
+        assert!(negative.is_empty());
+
+        let filtered = super::query_str(
+            "a.nlargest(2).gt(2) and b.gt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[4_i64.into()]);
+
+        assert!(super::parse_expr("a.nlargest(2, keep='first', 'last')").is_err());
+        assert!(super::parse_expr("a.nsmallest(1, 'first', 'extra')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_replace_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "label",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("old".to_owned()),
+                    Scalar::Utf8("keep".to_owned()),
+                    Scalar::Utf8("old".to_owned()),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let replaced = super::eval_str("a.replace(1, 9)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            replaced.values(),
+            &[Scalar::Int64(9), Scalar::Int64(2), Scalar::Int64(9)]
+        );
+
+        let keyword = super::eval_str(
+            "label.replace(to_replace=\"old\", value=\"new\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            keyword.values(),
+            &[
+                Scalar::Utf8("new".to_owned()),
+                Scalar::Utf8("keep".to_owned()),
+                Scalar::Utf8("new".to_owned()),
+            ]
+        );
+
+        let filtered = super::query_str("a.replace(1, 9) == 9", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_astype_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let as_float = super::eval_str("a.astype(\"float64\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(as_float.dtype(), DType::Float64);
+        assert_eq!(
+            as_float.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let as_string = super::eval_str("a.astype(dtype=\"str\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(as_string.dtype(), DType::Utf8);
+        assert_eq!(
+            as_string.values(),
+            &[
+                Scalar::Utf8("1".to_owned()),
+                Scalar::Utf8("0".to_owned()),
+                Scalar::Utf8("1".to_owned()),
+            ]
+        );
+
+        let filtered = super::query_str("a.astype(\"bool\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_combine_first_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let combined = super::eval_str("a.combine_first(b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            combined.values(),
+            &[Scalar::Int64(1), Scalar::Int64(8), Scalar::Int64(3)]
+        );
+
+        let keyword = super::eval_str("a.combine_first(other=b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword.values(), combined.values());
+
+        let filtered = super::query_str("a.combine_first(b).gt(5)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_rank_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let average = super::eval_str("a.rank()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            average.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.5),
+            ]
+        );
+
+        let dense = super::eval_str("a.rank(\"dense\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dense.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let descending = super::eval_str(
+            "a.rank(method=\"dense\", ascending=False, na_option=\"keep\", pct=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            descending.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let filtered = super::query_str("a.rank().gt(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_comparison_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(2)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let eq_scalar = super::eval_str("a.eq(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            eq_scalar.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let ne_scalar = super::eval_str("a.ne(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            ne_scalar.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let eq_column = super::eval_str("a.eq(b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            eq_column.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let filtered = super::query_str("a.gt(1) and a.le(3)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+
+        let keyword_filtered = super::query_str(
+            "a.ge(other=2) and a.lt(other=3)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(keyword_filtered.index().labels(), &[1_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_arithmetic_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let added = super::eval_str("a.add(1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            added.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        let multiplied = super::eval_str("a.multiply(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            multiplied.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(6)]
+        );
+
+        let divided = super::eval_str("a.truediv(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            divided.values(),
+            &[
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.5)
+            ]
+        );
+
+        let reflected = super::eval_str("a.rsub(other=10)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            reflected.values(),
+            &[Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)]
+        );
+
+        let filtered = super::query_str(
+            "a.pow(2).ge(4) and a.mod(2).eq(1)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_where_mask_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(9), Scalar::Int64(9), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let where_scalar = super::eval_str("a.where(a > 1, 0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            where_scalar.values(),
+            &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let mask_scalar = super::eval_str("a.mask(a > 1, 0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask_scalar.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
+        );
+
+        let where_series = super::eval_str(
+            "a.where(cond=a.gt(1), other=b)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            where_series.values(),
+            &[Scalar::Int64(9), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.mask(a > 1, 0).eq(0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_isin_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mask = super::eval_str("a.isin([1, 9])", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let filtered = super::query_str("a.isin([1, 9])", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(9)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_between_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(8),
+                    Scalar::Int64(9),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mask = super::eval_str("a.between(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let filtered = super::query_str("a.between(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(8)]
+        );
+
+        let left_inclusive = super::eval_str(
+            "a.between(2, 8, inclusive=\"left\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            left_inclusive.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let right_inclusive =
+            super::eval_str("a.between(2, 8, \"right\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            right_inclusive.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let neither = super::query_str(
+            "a.between(2, 8, inclusive=\"neither\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert!(neither.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_clip_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let clipped = super::eval_str("a.clip(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            clipped.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(8)]
+        );
+
+        let lower_only = super::eval_str("a.clip(lower=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            lower_only.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
+        let upper_only = super::eval_str("a.clip(upper=8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            upper_only.values(),
+            &[Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(8)]
+        );
+
+        let lower_positional = super::eval_str("a.clip(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            lower_positional.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
+        let unchanged = super::eval_str("a.clip()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            unchanged.values(),
+            &[Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
+        let filtered = super::query_str("a.clip(2, 8) == 8", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(filtered.columns()["a"].values(), &[Scalar::Int64(9)]);
+
+        let keyword_filtered =
+            super::query_str("a.clip(upper=8).ge(8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword_filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(
+            keyword_filtered.columns()["a"].values(),
+            &[Scalar::Int64(9)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_shift_and_diff_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let shifted = super::eval_str("a.shift()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            shifted.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Int64(4)
+            ]
+        );
+
+        let shifted_two = super::eval_str("a.shift(periods=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            shifted_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1)
+            ]
+        );
+
+        let diffed = super::eval_str("a.diff()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            diffed.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0)
+            ]
+        );
+
+        let diffed_two = super::eval_str("a.diff(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            diffed_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let shifted_filtered = super::query_str("a.shift().isna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(shifted_filtered.index().labels(), &[0_i64.into()]);
+
+        let diff_filtered = super::query_str("a.diff().gt(4)", &frame, &policy, &mut ledger)?;
+        assert_eq!(diff_filtered.index().labels(), &[2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_cumulative_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let cumsum = super::eval_str("a.cumsum()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cumsum.values(),
+            &[Scalar::Int64(2), Scalar::Int64(5), Scalar::Int64(6)]
+        );
+
+        let cumprod = super::eval_str("a.cumprod(skipna=True)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cumprod.values(),
+            &[Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(6)]
+        );
+
+        let cummin = super::eval_str("a.cummin()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cummin.values(),
+            &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+
+        let cummax = super::eval_str("a.cummax()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            cummax.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.cumsum().gt(4)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_pct_change_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(2),
+                    Scalar::Int64(4),
+                    Scalar::Int64(8),
+                    Scalar::Int64(16),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let pct = super::eval_str("a.pct_change()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            pct.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0)
+            ]
+        );
+
+        let pct_two = super::eval_str("a.pct_change(periods=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            pct_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0)
+            ]
+        );
+
+        let filtered = super::query_str("a.pct_change().eq(1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            filtered.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_round_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.25),
+                    Scalar::Float64(2.75),
+                    Scalar::Float64(8.25),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let rounded = super::eval_str("a.round()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            rounded.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let one_decimal = super::eval_str("a.round(decimals=1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            one_decimal.values(),
+            &[
+                Scalar::Float64(1.2),
+                Scalar::Float64(2.8),
+                Scalar::Float64(8.2)
+            ]
+        );
+
+        let filtered = super::query_str("a.round(-1) >= 10", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(filtered.columns()["a"].values(), &[Scalar::Float64(8.25)]);
+        Ok(())
     }
 
     #[test]

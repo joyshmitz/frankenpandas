@@ -498,9 +498,11 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
             }
         }
         "count" => vals.len() as f64,
+        "size" => vals.len() as f64,
         "min" => vals.iter().copied().fold(f64::INFINITY, f64::min),
         "max" => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         "first" => vals.first().copied().unwrap_or(f64::NAN),
+        "last" => vals.last().copied().unwrap_or(f64::NAN),
         "prod" => vals.iter().product(),
         "median" => {
             if vals.is_empty() {
@@ -539,6 +541,10 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
             )));
         }
     })
+}
+
+fn pivot_table_counts_rows(aggfunc: &str) -> bool {
+    aggfunc == "size"
 }
 
 /// Per br-frankenpandas-a56003: pandas Series.quantile interpolation modes.
@@ -1032,7 +1038,9 @@ fn null_kind_rank(kind: NullKind) -> u8 {
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
-    use ScalarKey::{Bool, Datetime64, FloatBits, Int64, Interval, Null, Period, Timedelta64, Utf8};
+    use ScalarKey::{
+        Bool, Datetime64, FloatBits, Int64, Interval, Null, Period, Timedelta64, Utf8,
+    };
     match (a, b) {
         (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
         (Null(_), _) => Ordering::Greater,
@@ -1046,12 +1054,10 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
         (Timedelta64(a_val), Timedelta64(b_val)) => a_val.cmp(b_val),
         (Datetime64(a_val), Datetime64(b_val)) => a_val.cmp(b_val),
         (Period(a_val), Period(b_val)) => a_val.cmp(b_val),
-        (Interval(al, ar, ac), Interval(bl, br, bc)) => {
-            f64::from_bits(*al)
-                .total_cmp(&f64::from_bits(*bl))
-                .then_with(|| f64::from_bits(*ar).total_cmp(&f64::from_bits(*br)))
-                .then_with(|| ac.cmp(bc))
-        }
+        (Interval(al, ar, ac), Interval(bl, br, bc)) => f64::from_bits(*al)
+            .total_cmp(&f64::from_bits(*bl))
+            .then_with(|| f64::from_bits(*ar).total_cmp(&f64::from_bits(*br)))
+            .then_with(|| ac.cmp(bc)),
         (Bool(a_val), Int64(b_val)) => {
             let ord = i64::from(*a_val).cmp(b_val);
             if ord == Ordering::Equal {
@@ -1156,365 +1162,21 @@ fn format_pandas_csv_float(v: f64) -> String {
     }
 }
 
-fn csv_decimal_or_default(decimal: &str) -> &str {
-    if decimal.is_empty() { "." } else { decimal }
-}
-
-fn format_pandas_csv_float_with_decimal_and_quotechar(
-    v: f64,
-    sep: char,
-    lineterminator: &str,
-    decimal: &str,
-    quotechar: char,
-) -> String {
-    let decimal = csv_decimal_or_default(decimal);
-    let mut rendered = format_pandas_csv_float(v);
-    if decimal != "." && rendered.contains('.') {
-        rendered = rendered.replace('.', decimal);
-    }
-    csv_escape_with_quotechar_and_lineterminator(&rendered, sep, quotechar, lineterminator)
-}
-
-fn csv_lineterminator_or_default(lineterminator: &str) -> &str {
-    if lineterminator.is_empty() {
-        "\n"
-    } else {
-        lineterminator
-    }
-}
-
-fn csv_escape_with_quotechar_and_lineterminator(
-    value: &str,
-    sep: char,
-    quotechar: char,
-    lineterminator: &str,
-) -> String {
-    csv_escape_with_csv_options(value, sep, quotechar, true, None, lineterminator)
-        .expect("doublequote=true without escapechar cannot fail")
-}
-
-fn csv_escape_with_csv_options(
-    value: &str,
-    sep: char,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-    lineterminator: &str,
-) -> Result<String, FrameError> {
-    let lineterminator = csv_lineterminator_or_default(lineterminator);
-    let contains_lineterminator_char = lineterminator.chars().any(|ch| value.contains(ch));
-    let contains_quotechar = value.contains(quotechar);
-    let contains_escapechar = escapechar.is_some_and(|ch| value.contains(ch));
-    let needs_quotes =
-        value.contains(sep) || value.contains('\n') || value.contains('\r') || contains_lineterminator_char;
-    if contains_quotechar && !doublequote && escapechar.is_none() {
-        return Err(FrameError::CompatibilityRejected(
-            "doublequote=false requires escapechar when a field contains quotechar".to_owned(),
-        ));
-    }
-    if needs_quotes || (contains_quotechar && doublequote) {
+fn csv_escape(value: &str, sep: char) -> String {
+    if value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r') {
         let mut escaped = String::with_capacity(value.len() + 2);
-        escaped.push(quotechar);
+        escaped.push('"');
         for ch in value.chars() {
-            if ch == quotechar {
-                if doublequote {
-                    escaped.push(quotechar);
-                } else if let Some(escape) = escapechar {
-                    escaped.push(escape);
-                }
-            } else if Some(ch) == escapechar {
-                escaped.push(ch);
+            if ch == '"' {
+                escaped.push('"');
             }
             escaped.push(ch);
         }
-        escaped.push(quotechar);
-        Ok(escaped)
-    } else if contains_quotechar || contains_escapechar {
-        let mut escaped = String::with_capacity(value.len() + 1);
-        for ch in value.chars() {
-            if ch == quotechar || Some(ch) == escapechar {
-                if let Some(escape) = escapechar {
-                    escaped.push(escape);
-                }
-            }
-            escaped.push(ch);
-        }
-        Ok(escaped)
+        escaped.push('"');
+        escaped
     } else {
-        Ok(value.to_owned())
+        value.to_owned()
     }
-}
-
-fn csv_escape_quote_none_with_escapechar(
-    value: &str,
-    sep: char,
-    escapechar: Option<char>,
-    lineterminator: &str,
-) -> Result<String, FrameError> {
-    let lineterminator = csv_lineterminator_or_default(lineterminator);
-    let needs_escape = value.chars().any(|ch| {
-        ch == sep
-            || ch == '\n'
-            || ch == '\r'
-            || lineterminator.contains(ch)
-            || Some(ch) == escapechar
-    });
-
-    if !needs_escape {
-        return Ok(value.to_owned());
-    }
-
-    let escape = escapechar.ok_or_else(|| {
-        FrameError::CompatibilityRejected(
-            "quoting=QUOTE_NONE requires escapechar when a field contains special CSV characters"
-                .to_owned(),
-        )
-    })?;
-
-    let mut escaped = String::with_capacity(value.len() + 1);
-    for ch in value.chars() {
-        if ch == sep
-            || ch == '\n'
-            || ch == '\r'
-            || lineterminator.contains(ch)
-            || ch == escape
-        {
-            escaped.push(escape);
-        }
-        escaped.push(ch);
-    }
-    Ok(escaped)
-}
-
-fn format_pandas_csv_float_with_csv_options(
-    v: f64,
-    sep: char,
-    lineterminator: &str,
-    decimal: &str,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    let decimal = csv_decimal_or_default(decimal);
-    let mut rendered = format_pandas_csv_float(v);
-    if decimal != "." && rendered.contains('.') {
-        rendered = rendered.replace('.', decimal);
-    }
-    csv_escape_with_csv_options(
-        &rendered,
-        sep,
-        quotechar,
-        doublequote,
-        escapechar,
-        lineterminator,
-    )
-}
-
-fn format_pandas_csv_float_quote_none(
-    v: f64,
-    sep: char,
-    lineterminator: &str,
-    decimal: &str,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    let decimal = csv_decimal_or_default(decimal);
-    let mut rendered = format_pandas_csv_float(v);
-    if decimal != "." && rendered.contains('.') {
-        rendered = rendered.replace('.', decimal);
-    }
-    csv_escape_quote_none_with_escapechar(&rendered, sep, escapechar, lineterminator)
-}
-
-fn csv_scalar_quote_none(
-    val: &Scalar,
-    sep: char,
-    na_rep: &str,
-    lineterminator: &str,
-    decimal: &str,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    if val.is_missing() {
-        return csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator);
-    }
-
-    match val {
-        Scalar::Null(_) => csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator),
-        Scalar::Bool(b) => Ok(if *b { "True" } else { "False" }.to_string()),
-        Scalar::Int64(v) => Ok(v.to_string()),
-        Scalar::Float64(v) => {
-            format_pandas_csv_float_quote_none(*v, sep, lineterminator, decimal, escapechar)
-        }
-        Scalar::Utf8(s) => csv_escape_quote_none_with_escapechar(s, sep, escapechar, lineterminator),
-        Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
-            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
-        }
-        Scalar::Timedelta64(v) => csv_escape_quote_none_with_escapechar(
-            &Timedelta::format(*v),
-            sep,
-            escapechar,
-            lineterminator,
-        ),
-        Scalar::Datetime64(v) if *v == Timedelta::NAT => {
-            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
-        }
-        Scalar::Datetime64(v) => csv_escape_quote_none_with_escapechar(
-            &format_datetime_ns(*v),
-            sep,
-            escapechar,
-            lineterminator,
-        ),
-        Scalar::Period(v) if *v == i64::MIN => {
-            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
-        }
-        Scalar::Period(v) => {
-            csv_escape_quote_none_with_escapechar(&format!("Period[{v}]"), sep, escapechar, lineterminator)
-        }
-        Scalar::Interval(interval) => {
-            csv_escape_quote_none_with_escapechar(&format!("{interval}"), sep, escapechar, lineterminator)
-        }
-    }
-}
-
-fn csv_index_label_quote_none(
-    label: &IndexLabel,
-    sep: char,
-    escapechar: Option<char>,
-    lineterminator: &str,
-) -> Result<String, FrameError> {
-    let rendered = match label {
-        IndexLabel::Int64(v) => v.to_string(),
-        IndexLabel::Utf8(s) => s.clone(),
-        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-    };
-    csv_escape_quote_none_with_escapechar(&rendered, sep, escapechar, lineterminator)
-}
-
-fn csv_escape_quote_all_with_csv_options(
-    value: &str,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    if value.contains(quotechar) && !doublequote && escapechar.is_none() {
-        return Err(FrameError::CompatibilityRejected(
-            "doublequote=false requires escapechar when a quoted field contains quotechar"
-                .to_owned(),
-        ));
-    }
-
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push(quotechar);
-    for ch in value.chars() {
-        if ch == quotechar {
-            if doublequote {
-                escaped.push(quotechar);
-            } else if let Some(escape) = escapechar {
-                escaped.push(escape);
-            }
-        } else if Some(ch) == escapechar {
-            escaped.push(ch);
-        }
-        escaped.push(ch);
-    }
-    escaped.push(quotechar);
-    Ok(escaped)
-}
-
-fn format_pandas_csv_float_quote_all(
-    v: f64,
-    decimal: &str,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    let decimal = csv_decimal_or_default(decimal);
-    let mut rendered = format_pandas_csv_float(v);
-    if decimal != "." && rendered.contains('.') {
-        rendered = rendered.replace('.', decimal);
-    }
-    csv_escape_quote_all_with_csv_options(&rendered, quotechar, doublequote, escapechar)
-}
-
-fn csv_scalar_quote_all(
-    val: &Scalar,
-    na_rep: &str,
-    decimal: &str,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    if val.is_missing() {
-        return csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar);
-    }
-
-    match val {
-        Scalar::Null(_) => csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar),
-        Scalar::Bool(b) => csv_escape_quote_all_with_csv_options(
-            if *b { "True" } else { "False" },
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-        Scalar::Int64(v) => csv_escape_quote_all_with_csv_options(
-            &v.to_string(),
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-        Scalar::Float64(v) => {
-            format_pandas_csv_float_quote_all(*v, decimal, quotechar, doublequote, escapechar)
-        }
-        Scalar::Utf8(s) => csv_escape_quote_all_with_csv_options(s, quotechar, doublequote, escapechar),
-        Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
-            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
-        }
-        Scalar::Timedelta64(v) => csv_escape_quote_all_with_csv_options(
-            &Timedelta::format(*v),
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-        Scalar::Datetime64(v) if *v == Timedelta::NAT => {
-            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
-        }
-        Scalar::Datetime64(v) => csv_escape_quote_all_with_csv_options(
-            &format_datetime_ns(*v),
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-        Scalar::Period(v) if *v == i64::MIN => {
-            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
-        }
-        Scalar::Period(v) => csv_escape_quote_all_with_csv_options(
-            &format!("Period[{v}]"),
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-        Scalar::Interval(interval) => csv_escape_quote_all_with_csv_options(
-            &format!("{interval}"),
-            quotechar,
-            doublequote,
-            escapechar,
-        ),
-    }
-}
-
-fn csv_index_label_quote_all(
-    label: &IndexLabel,
-    quotechar: char,
-    doublequote: bool,
-    escapechar: Option<char>,
-) -> Result<String, FrameError> {
-    let rendered = match label {
-        IndexLabel::Int64(v) => v.to_string(),
-        IndexLabel::Utf8(s) => s.clone(),
-        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-    };
-    csv_escape_quote_all_with_csv_options(&rendered, quotechar, doublequote, escapechar)
 }
 
 fn scalar_to_json_value(value: &Scalar) -> Value {
@@ -6472,54 +6134,6 @@ impl Series {
         }
     }
 
-    /// Mean Absolute Deviation of non-null numeric values.
-    ///
-    /// Matches `pd.Series.mad()`. Computes the average of absolute deviations
-    /// from the mean. Returns NaN for empty series.
-    pub fn mad(&self) -> Result<Scalar, FrameError> {
-        let count = self.count();
-        if count == 0 {
-            return Ok(Scalar::Float64(f64::NAN));
-        }
-        let mean_val = match self.mean()? {
-            Scalar::Float64(v) => v,
-            Scalar::Timedelta64(ns) => {
-                if ns == Timedelta::NAT {
-                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
-                }
-                let mut ns_vals: Vec<f64> = Vec::with_capacity(count);
-                for val in self.column.values() {
-                    if let Scalar::Timedelta64(ns_v) = val {
-                        if *ns_v != Timedelta::NAT {
-                            ns_vals.push(*ns_v as f64);
-                        }
-                    }
-                }
-                if ns_vals.is_empty() {
-                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
-                }
-                let mean_ns = ns_vals.iter().sum::<f64>() / ns_vals.len() as f64;
-                let sum_abs_dev: f64 = ns_vals.iter().map(|x| (x - mean_ns).abs()).sum();
-                let mad_ns = sum_abs_dev / ns_vals.len() as f64;
-                if !mad_ns.is_finite() {
-                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
-                }
-                let clamped = mad_ns.clamp(i64::MIN as f64, i64::MAX as f64);
-                return Ok(Scalar::Timedelta64(clamped as i64));
-            }
-            _ => return Ok(Scalar::Float64(f64::NAN)),
-        };
-        let mut sum_abs_diff = 0.0_f64;
-        for val in self.column.values() {
-            if !val.is_missing() {
-                if let Ok(v) = val.to_f64() {
-                    sum_abs_diff += (v - mean_val).abs();
-                }
-            }
-        }
-        Ok(Scalar::Float64(sum_abs_diff / count as f64))
-    }
-
     /// Median of non-null numeric values. Returns NaN for empty.
     ///
     /// Matches `pd.Series.median()`.
@@ -7847,68 +7461,6 @@ impl Series {
         self.with_labels_and_values_preserving_name(labels, out_vals)
     }
 
-    /// Return indices that would partition the Series around kth position.
-    ///
-    /// Analogous to `pandas.Series.argpartition(kth)`. Elements at positions
-    /// `0..kth` are guaranteed to be less than or equal to elements at position
-    /// `kth`, and elements at positions `kth+1..n` are greater than or equal.
-    /// Missing values are placed at the end.
-    pub fn argpartition(&self, kth: usize) -> Result<Self, FrameError> {
-        self.argpartition_kind(kth, "introselect")
-    }
-
-    /// Return indices that would partition the Series around kth position with algorithm choice.
-    ///
-    /// The `kind` parameter is accepted for pandas compatibility but currently
-    /// all algorithms use the same stable partitioning implementation.
-    pub fn argpartition_kind(&self, kth: usize, _kind: &str) -> Result<Self, FrameError> {
-        let vals = self.column.values();
-        if kth >= vals.len() {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "kth ({kth}) out of bounds for size {}",
-                vals.len()
-            )));
-        }
-
-        let mut non_missing: Vec<(usize, &Scalar)> = vals
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| !v.is_missing())
-            .collect();
-
-        let missing_indices: Vec<usize> = vals
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.is_missing())
-            .map(|(i, _)| i)
-            .collect();
-
-        if kth >= non_missing.len() && !non_missing.is_empty() {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "kth ({kth}) out of bounds for {} non-missing values",
-                non_missing.len()
-            )));
-        }
-
-        if !non_missing.is_empty() {
-            let effective_kth = kth.min(non_missing.len() - 1);
-            non_missing.select_nth_unstable_by(effective_kth, |(_, a), (_, b)| {
-                compare_scalars_with_na_last(a, b, true)
-            });
-        }
-
-        let mut out_vals: Vec<Scalar> = non_missing
-            .iter()
-            .map(|(i, _)| Scalar::Int64(*i as i64))
-            .collect();
-        for idx in missing_indices {
-            out_vals.push(Scalar::Int64(idx as i64));
-        }
-
-        let labels = self.index.labels().to_vec();
-        self.with_labels_and_values_preserving_name(labels, out_vals)
-    }
-
     /// Return the integer position of the minimum value.
     ///
     /// Matches `pd.Series.argmin()`. Skips missing values.
@@ -8979,13 +8531,6 @@ impl Series {
         Self::from_values(self.name.clone(), labels, values)
     }
 
-    /// Alias for [`agg`](Self::agg).
-    ///
-    /// Matches `pd.Series.aggregate(...)`.
-    pub fn aggregate(&self, funcs: &[&str]) -> Result<Self, FrameError> {
-        self.agg(funcs)
-    }
-
     /// Select rows matching the given index key.
     ///
     /// Matches `s.xs(key)`. Returns all rows whose index matches `key`.
@@ -9097,20 +8642,12 @@ impl Series {
     ///
     /// Matches `pd.Series.to_numpy()`. Non-numeric values become NaN.
     pub fn to_numpy(&self) -> Vec<f64> {
-        self.to_numpy_with_na_value(f64::NAN)
-    }
-
-    /// Matches `pd.Series.to_numpy(na_value=...)` for numeric output.
-    ///
-    /// Missing values use `na_value`; other non-numeric values preserve the
-    /// existing numeric-coercion behavior and become NaN.
-    pub fn to_numpy_with_na_value(&self, na_value: f64) -> Vec<f64> {
         self.column
             .values()
             .iter()
             .map(|v| {
                 if v.is_missing() {
-                    na_value
+                    f64::NAN
                 } else {
                     v.to_f64().unwrap_or(f64::NAN)
                 }
@@ -9134,637 +8671,46 @@ impl Series {
     ///
     /// Matches `pd.Series.to_csv()`.
     pub fn to_csv(&self, sep: char, include_index: bool) -> String {
-        self.to_csv_with_na_rep(sep, include_index, "")
-    }
-
-    /// Matches `pd.Series.to_csv(na_rep=...)`.
-    pub fn to_csv_with_na_rep(&self, sep: char, include_index: bool, na_rep: &str) -> String {
-        self.to_csv_with_options(sep, include_index, na_rep, "\n")
-    }
-
-    /// Matches `pd.Series.to_csv(na_rep=..., lineterminator=...)`.
-    pub fn to_csv_with_options(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        lineterminator: &str,
-    ) -> String {
-        self.to_csv_with_format_options(sep, include_index, true, na_rep, lineterminator)
-    }
-
-    /// Matches `pd.Series.to_csv(header=...)`.
-    pub fn to_csv_with_header(&self, sep: char, include_index: bool, include_header: bool) -> String {
-        self.to_csv_with_format_options(sep, include_index, include_header, "", "\n")
-    }
-
-    /// Matches `pd.Series.to_csv(index_label=...)`.
-    pub fn to_csv_with_index_label(
-        &self,
-        sep: char,
-        include_index: bool,
-        index_label: Option<&str>,
-    ) -> String {
-        self.to_csv_with_format_options_and_index_label(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            index_label,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(decimal=...)`.
-    pub fn to_csv_with_decimal(&self, sep: char, include_index: bool, decimal: &str) -> String {
-        self.to_csv_with_format_options_index_label_and_decimal(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            None,
-            decimal,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(quotechar=...)`.
-    pub fn to_csv_with_quotechar(&self, sep: char, include_index: bool, quotechar: char) -> String {
-        self.to_csv_with_format_options_index_label_decimal_and_quotechar(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            None,
-            ".",
-            quotechar,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=...)`.
-    pub fn to_csv_with_format_options(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-    ) -> String {
-        self.to_csv_with_format_options_and_index_label(
-            sep,
-            include_index,
-            include_header,
-            na_rep,
-            lineterminator,
-            None,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=...)`.
-    pub fn to_csv_with_format_options_and_index_label(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-    ) -> String {
-        self.to_csv_with_format_options_index_label_and_decimal(
-            sep,
-            include_index,
-            include_header,
-            na_rep,
-            lineterminator,
-            index_label,
-            ".",
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=...)`.
-    pub fn to_csv_with_format_options_index_label_and_decimal(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-        decimal: &str,
-    ) -> String {
-        self.to_csv_with_format_options_index_label_decimal_and_quotechar(
-            sep,
-            include_index,
-            include_header,
-            na_rep,
-            lineterminator,
-            index_label,
-            decimal,
-            '"',
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=...)`.
-    pub fn to_csv_with_format_options_index_label_decimal_and_quotechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-        decimal: &str,
-        quotechar: char,
-    ) -> String {
-        fn format_scalar(
-            val: &Scalar,
-            sep: char,
-            na_rep: &str,
-            lineterminator: &str,
-            decimal: &str,
-            quotechar: char,
-        ) -> String {
-            if val.is_missing() {
-                return csv_escape_with_quotechar_and_lineterminator(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    lineterminator,
-                );
-            }
+        fn format_scalar(val: &Scalar, sep: char) -> String {
             match val {
-                Scalar::Null(_) => {
-                    csv_escape_with_quotechar_and_lineterminator(na_rep, sep, quotechar, lineterminator)
-                }
+                Scalar::Null(_) => String::new(),
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 // Per br-frankenpandas-41edff: pandas-canonical `.0` suffix.
-                Scalar::Float64(v) => {
-                    format_pandas_csv_float_with_decimal_and_quotechar(
-                        *v,
-                        sep,
-                        lineterminator,
-                        decimal,
-                        quotechar,
-                    )
-                }
-                Scalar::Utf8(s) => {
-                    csv_escape_with_quotechar_and_lineterminator(s, sep, quotechar, lineterminator)
-                }
-                Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
-                    csv_escape_with_quotechar_and_lineterminator(
-                        na_rep,
-                        sep,
-                        quotechar,
-                        lineterminator,
-                    )
-                }
+                Scalar::Float64(v) => format_pandas_csv_float(*v),
+                Scalar::Utf8(s) => csv_escape(s, sep),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => String::new(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
-                Scalar::Datetime64(v) if *v == Timedelta::NAT => {
-                    csv_escape_with_quotechar_and_lineterminator(
-                        na_rep,
-                        sep,
-                        quotechar,
-                        lineterminator,
-                    )
-                }
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => String::new(),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
-                Scalar::Period(v) if *v == i64::MIN => {
-                    csv_escape_with_quotechar_and_lineterminator(
-                        na_rep,
-                        sep,
-                        quotechar,
-                        lineterminator,
-                    )
-                }
+                Scalar::Period(v) if *v == i64::MIN => String::new(),
                 Scalar::Period(v) => format!("Period[{v}]"),
                 Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
         // Header
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    quotechar,
-                    lineterminator,
-                ));
-                out.push(sep);
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                    &self.name,
-                    sep,
-                    quotechar,
-                    lineterminator,
-                ));
-                out.push_str(lineterminator);
-            } else {
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                    &self.name,
-                    sep,
-                    quotechar,
-                    lineterminator,
-                ));
-                out.push_str(lineterminator);
-            }
+        if include_index {
+            out.push_str(&format!("{sep}{}\n", csv_escape(&self.name, sep)));
+        } else {
+            out.push_str(&format!("{}\n", csv_escape(&self.name, sep)));
         }
         // Data
         for (label, val) in self.index.labels().iter().zip(self.column.values()) {
             if include_index {
                 let idx = match label {
                     IndexLabel::Int64(v) => v.to_string(),
-                    IndexLabel::Utf8(s) => {
-                        csv_escape_with_quotechar_and_lineterminator(
-                            s,
-                            sep,
-                            quotechar,
-                            lineterminator,
-                        )
-                    }
-                    IndexLabel::Timedelta64(ns) => csv_escape_with_quotechar_and_lineterminator(
-                        &Timedelta::format(*ns),
-                        sep,
-                        quotechar,
-                        lineterminator,
-                    ),
-                    IndexLabel::Datetime64(ns) => csv_escape_with_quotechar_and_lineterminator(
-                        &format_datetime_ns(*ns),
-                        sep,
-                        quotechar,
-                        lineterminator,
-                    ),
+                    IndexLabel::Utf8(s) => csv_escape(s, sep),
+                    IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
+                    IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
                 };
-                out.push_str(&idx);
-                out.push(sep);
-                out.push_str(&format_scalar(
-                    val,
-                    sep,
-                    na_rep,
-                    lineterminator,
-                    decimal,
-                    quotechar,
-                ));
-                out.push_str(lineterminator);
+                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep)));
             } else {
-                out.push_str(&format_scalar(
-                    val,
-                    sep,
-                    na_rep,
-                    lineterminator,
-                    decimal,
-                    quotechar,
-                ));
-                out.push_str(lineterminator);
+                out.push_str(&format!("{}\n", format_scalar(val, sep)));
             }
         }
         out
-    }
-
-    /// Matches `pd.Series.to_csv(doublequote=..., escapechar=...)`.
-    pub fn to_csv_with_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_format_options_index_label_decimal_quotechar_doublequote_escapechar(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            None,
-            ".",
-            '"',
-            doublequote,
-            escapechar,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)`.
-    pub fn to_csv_with_quote_none_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_format_options_index_label_decimal_quote_none_escapechar(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            None,
-            ".",
-            escapechar,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quoting=csv.QUOTE_NONE, escapechar=...)`.
-    pub fn to_csv_with_format_options_index_label_decimal_quote_none_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-        decimal: &str,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_quote_none_with_escapechar(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            out.push_str(&csv_escape_quote_none_with_escapechar(
-                &self.name,
-                sep,
-                escapechar,
-                lineterminator,
-            )?);
-            out.push_str(lineterminator);
-        }
-
-        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
-            if include_index {
-                out.push_str(&csv_index_label_quote_none(
-                    label,
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            out.push_str(&csv_scalar_quote_none(
-                val,
-                sep,
-                na_rep,
-                lineterminator,
-                decimal,
-                escapechar,
-            )?);
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `pd.Series.to_csv(quoting=csv.QUOTE_ALL)`.
-    pub fn to_csv_with_quote_all(
-        &self,
-        sep: char,
-        include_index: bool,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_format_options_index_label_decimal_quote_all(
-            sep,
-            include_index,
-            true,
-            "",
-            "\n",
-            None,
-            ".",
-            '"',
-            true,
-            None,
-        )
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=..., doublequote=..., escapechar=..., quoting=csv.QUOTE_ALL)`.
-    pub fn to_csv_with_format_options_index_label_decimal_quote_all(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-        decimal: &str,
-        quotechar: char,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_quote_all_with_csv_options(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-                out.push(sep);
-            }
-            out.push_str(&csv_escape_quote_all_with_csv_options(
-                &self.name,
-                quotechar,
-                doublequote,
-                escapechar,
-            )?);
-            out.push_str(lineterminator);
-        }
-
-        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
-            if include_index {
-                out.push_str(&csv_index_label_quote_all(
-                    label,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-                out.push(sep);
-            }
-            out.push_str(&csv_scalar_quote_all(
-                val,
-                na_rep,
-                decimal,
-                quotechar,
-                doublequote,
-                escapechar,
-            )?);
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=..., doublequote=..., escapechar=...)`.
-    pub fn to_csv_with_format_options_index_label_decimal_quotechar_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        lineterminator: &str,
-        index_label: Option<&str>,
-        decimal: &str,
-        quotechar: char,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        fn format_scalar(
-            val: &Scalar,
-            sep: char,
-            na_rep: &str,
-            lineterminator: &str,
-            decimal: &str,
-            quotechar: char,
-            doublequote: bool,
-            escapechar: Option<char>,
-        ) -> Result<String, FrameError> {
-            if val.is_missing() {
-                return csv_escape_with_csv_options(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                );
-            }
-            match val {
-                Scalar::Null(_) => csv_escape_with_csv_options(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                ),
-                Scalar::Bool(b) => Ok(if *b { "True" } else { "False" }.to_string()),
-                Scalar::Int64(v) => Ok(v.to_string()),
-                Scalar::Float64(v) => format_pandas_csv_float_with_csv_options(
-                    *v,
-                    sep,
-                    lineterminator,
-                    decimal,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                ),
-                Scalar::Utf8(s) => csv_escape_with_csv_options(
-                    s,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                ),
-                Scalar::Timedelta64(v) if *v == Timedelta::NAT => csv_escape_with_csv_options(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                ),
-                Scalar::Timedelta64(v) => Ok(Timedelta::format(*v)),
-                Scalar::Datetime64(v) if *v == Timedelta::NAT => csv_escape_with_csv_options(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                ),
-                Scalar::Datetime64(v) => Ok(format_datetime_ns(*v)),
-                Scalar::Period(v) if *v == i64::MIN => csv_escape_with_csv_options(
-                    na_rep,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                ),
-                Scalar::Period(v) => Ok(format!("Period[{v}]")),
-                Scalar::Interval(interval) => Ok(format!("{interval}")),
-            }
-        }
-
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_with_csv_options(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            out.push_str(&csv_escape_with_csv_options(
-                &self.name,
-                sep,
-                quotechar,
-                doublequote,
-                escapechar,
-                lineterminator,
-            )?);
-            out.push_str(lineterminator);
-        }
-        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
-            if include_index {
-                let idx = match label {
-                    IndexLabel::Int64(v) => v.to_string(),
-                    IndexLabel::Utf8(s) => csv_escape_with_csv_options(
-                        s,
-                        sep,
-                        quotechar,
-                        doublequote,
-                        escapechar,
-                        lineterminator,
-                    )?,
-                    IndexLabel::Timedelta64(ns) => csv_escape_with_csv_options(
-                        &Timedelta::format(*ns),
-                        sep,
-                        quotechar,
-                        doublequote,
-                        escapechar,
-                        lineterminator,
-                    )?,
-                    IndexLabel::Datetime64(ns) => csv_escape_with_csv_options(
-                        &format_datetime_ns(*ns),
-                        sep,
-                        quotechar,
-                        doublequote,
-                        escapechar,
-                        lineterminator,
-                    )?,
-                };
-                out.push_str(&idx);
-                out.push(sep);
-            }
-            out.push_str(&format_scalar(
-                val,
-                sep,
-                na_rep,
-                lineterminator,
-                decimal,
-                quotechar,
-                doublequote,
-                escapechar,
-            )?);
-            out.push_str(lineterminator);
-        }
-        Ok(out)
     }
 
     /// Serialize the Series to a JSON string.
@@ -9774,25 +8720,6 @@ impl Series {
     /// - `"records"` / `"values"`: `[val1, val2, ...]`
     /// - `"index"`: `{"label1": val1, "label2": val2, ...}`
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
-        self.to_json_with_index(orient, true)
-    }
-
-    /// Matches `pd.Series.to_json(orient=..., index=...)`.
-    ///
-    /// Pandas accepts `index=false` only for `split`, `table`, `records`, and
-    /// `values` orientations.
-    pub fn to_json_with_index(
-        &self,
-        orient: &str,
-        include_index: bool,
-    ) -> Result<String, FrameError> {
-        if !include_index && !matches!(orient, "split" | "table" | "records" | "values") {
-            return Err(FrameError::CompatibilityRejected(
-                "index=False is only valid when orient is 'split', 'table', 'records', or 'values'"
-                    .to_owned(),
-            ));
-        }
-
         match orient {
             "split" => {
                 let index = self
@@ -9807,13 +8734,11 @@ impl Series {
                     .iter()
                     .map(scalar_to_json_value)
                     .collect();
-                let mut object = Map::new();
-                object.insert("name".to_owned(), Value::String(self.name.clone()));
-                if include_index {
-                    object.insert("index".to_owned(), Value::Array(index));
-                }
-                object.insert("data".to_owned(), Value::Array(data));
-                serialize_json_value(&Value::Object(object))
+                serialize_json_value(&Value::Object(Map::from_iter([
+                    ("name".to_owned(), Value::String(self.name.clone())),
+                    ("index".to_owned(), Value::Array(index)),
+                    ("data".to_owned(), Value::Array(data)),
+                ])))
             }
             "records" | "values" => {
                 let vals = self
@@ -9836,112 +8761,10 @@ impl Series {
                 }
                 serialize_json_value(&Value::Object(entries))
             }
-            "table" => {
-                let value_name = if self.name.is_empty() {
-                    "values".to_owned()
-                } else {
-                    self.name.clone()
-                };
-                let index_name = if include_index {
-                    Some(self.index.name().unwrap_or("index").to_owned())
-                } else {
-                    None
-                };
-                if let Some(index_name) = &index_name {
-                    if index_name == &value_name {
-                        return Err(FrameError::CompatibilityRejected(
-                            "to_json orient 'table' cannot serialize overlapping index and value names"
-                                .to_owned(),
-                        ));
-                    }
-                }
-
-                let mut fields = Vec::with_capacity(1 + usize::from(include_index));
-                if let Some(index_name) = &index_name {
-                    fields.push(Value::Object(Map::from_iter([
-                        ("name".to_owned(), Value::String(index_name.clone())),
-                        (
-                            "type".to_owned(),
-                            Value::String(
-                                index_labels_to_table_schema_type(self.index.labels()).to_owned(),
-                            ),
-                        ),
-                    ])));
-                }
-                fields.push(Value::Object(Map::from_iter([
-                    ("name".to_owned(), Value::String(value_name.clone())),
-                    (
-                        "type".to_owned(),
-                        Value::String(dtype_to_table_schema_type(self.column.dtype()).to_owned()),
-                    ),
-                ])));
-
-                let data = self
-                    .index
-                    .labels()
-                    .iter()
-                    .zip(self.column.values())
-                    .map(|(label, value)| {
-                        let mut row = Map::new();
-                        if let Some(index_name) = &index_name {
-                            row.insert(index_name.clone(), index_label_to_json_value(label));
-                        }
-                        row.insert(value_name.clone(), scalar_to_json_value(value));
-                        Value::Object(row)
-                    })
-                    .collect();
-
-                let mut schema = Map::new();
-                schema.insert("fields".to_owned(), Value::Array(fields));
-                if let Some(index_name) = index_name {
-                    schema.insert(
-                        "primaryKey".to_owned(),
-                        Value::Array(vec![Value::String(index_name)]),
-                    );
-                }
-                schema.insert(
-                    "pandas_version".to_owned(),
-                    Value::String("1.4.0".to_owned()),
-                );
-
-                serialize_json_value(&Value::Object(Map::from_iter([
-                    ("schema".to_owned(), Value::Object(schema)),
-                    ("data".to_owned(), Value::Array(data)),
-                ])))
-            }
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "unknown orient: {orient}"
             ))),
         }
-    }
-
-    /// Convert a flat-index Series into an xarray-like DataArray snapshot.
-    ///
-    /// Matches the practical `pd.Series.to_xarray()` shape for scalar values:
-    /// the row index becomes the single coordinate/dimension and Series values
-    /// become the one-dimensional data payload.
-    pub fn to_xarray(&self) -> Result<SeriesXArrayDataArray, FrameError> {
-        let dim_name = self.index.name().unwrap_or("index").to_owned();
-        let coords = BTreeMap::from([(
-            dim_name.clone(),
-            self.index
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect(),
-        )]);
-        Ok(SeriesXArrayDataArray {
-            name: if self.name.is_empty() {
-                None
-            } else {
-                Some(self.name.clone())
-            },
-            dims: vec![dim_name.clone()],
-            dim_name,
-            coords,
-            data: self.column.values().to_vec(),
-            dtype: self.column.dtype(),
-        })
     }
 
     // ── pandas-named string-output IO methods (br-frankenpandas-m785r) ─
@@ -10436,125 +9259,9 @@ impl Series {
         self.reorder_by_positions(&keep)
     }
 
-    /// Conform the row index to a datetime frequency.
-    ///
-    /// Matches `pd.Series.asfreq(freq)` for flat, strictly increasing
-    /// datetime-like indexes. Missing rows introduced by the new frequency are
-    /// filled with NaN.
-    pub fn asfreq(&self, freq: &str) -> Result<Self, FrameError> {
-        self.asfreq_with_options(freq, None, None)
-    }
-
-    /// Conform the row index to a datetime frequency with optional fill.
-    ///
-    /// `method` accepts pandas spellings `"ffill"`/`"pad"` and
-    /// `"bfill"`/`"backfill"` for labels introduced by the frequency grid.
-    /// `fill_value`, when present, fills any remaining missing values after
-    /// reindexing/method fill.
-    pub fn asfreq_with_options(
-        &self,
-        freq: &str,
-        method: Option<&str>,
-        fill_value: Option<Scalar>,
-    ) -> Result<Self, FrameError> {
-        let labels = asfreq_target_labels(&self.index, freq)?;
-        let mut result = match method {
-            Some(method) => self.reindex_with_method(labels, method)?,
-            None => self.reindex(labels)?,
-        };
-        if let Some(fill_value) = fill_value {
-            result = result.fillna(&fill_value)?;
-        }
-        result.index = result.index.set_names(self.index.name());
-        Ok(result)
-    }
-
-    /// Localize the row index to a timezone or strip timezone metadata.
-    ///
-    /// Matches `pd.Series.tz_localize(tz)` for the default row-index axis.
-    /// Series values are preserved unchanged.
-    pub fn tz_localize(&self, tz: Option<&str>) -> Result<Self, FrameError> {
-        self.tz_localize_with_options(tz, TzLocalizeOptions::default())
-    }
-
-    /// Localize the row index with explicit DST ambiguity/nonexistence policy.
-    pub fn tz_localize_with_options(
-        &self,
-        tz: Option<&str>,
-        options: TzLocalizeOptions,
-    ) -> Result<Self, FrameError> {
-        let labels = tz_localize_index_labels(self.index.labels(), tz, &options)?;
-        let index = Index::new(labels).rename_index(self.index.name());
-        Self::new(self.name.clone(), index, self.column.clone())
-    }
-
-    /// Convert a timezone-aware row index to another timezone.
-    ///
-    /// Matches `pd.Series.tz_convert(tz)` for the default row-index axis.
-    /// Series values are preserved unchanged.
-    pub fn tz_convert(&self, tz: Option<&str>) -> Result<Self, FrameError> {
-        let labels = tz_convert_index_labels(self.index.labels(), tz)?;
-        let index = Index::new(labels).rename_index(self.index.name());
-        Self::new(self.name.clone(), index, self.column.clone())
-    }
-
-    /// Convert a datetime-like row index to period-style labels.
-    ///
-    /// Matches `pd.Series.to_period(freq)` for the supported row-index
-    /// frequencies shared with [`DataFrame::to_period`].
-    pub fn to_period(&self, freq: &str) -> Result<Self, FrameError> {
-        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("to_period: unsupported frequency '{freq}'"))
-        })?;
-        let labels = self
-            .index
-            .labels()
-            .iter()
-            .map(|label| period_index_label(label, period_freq))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            name: self.name.clone(),
-            index: Index::new(labels).set_names(self.index.name()),
-            column: self.column.clone(),
-            categorical: self.categorical.clone(),
-            sparse: self.sparse.clone(),
-        })
-    }
-
-    /// Convert period-style row index labels to timestamp labels.
-    ///
-    /// Matches `pd.Series.to_timestamp(freq, how)` for canonical period
-    /// labels emitted by [`Self::to_period`].
-    pub fn to_timestamp(&self, freq: &str, how: &str) -> Result<Self, FrameError> {
-        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!(
-                "to_timestamp: unsupported frequency '{freq}'"
-            ))
-        })?;
-        let how = normalize_period_timestamp_how(how)?;
-        let labels = self
-            .index
-            .labels()
-            .iter()
-            .map(|label| period_label_to_timestamp(label, period_freq, how))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            name: self.name.clone(),
-            index: Index::new(labels).set_names(self.index.name()),
-            column: self.column.clone(),
-            categorical: self.categorical.clone(),
-            sparse: self.sparse.clone(),
-        })
-    }
-
     /// Select initial rows from a DatetimeIndex up to an offset.
     ///
     /// Matches `pd.Series.first(offset)`.
-    pub fn first(&self, offset: &str) -> Result<Self, FrameError> {
-        self.first_offset(offset)
-    }
-
-    /// Explicit alias for [`Self::first`].
     pub fn first_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -10587,11 +9294,6 @@ impl Series {
     /// Per br-frankenpandas-a79h9: the missing-last-label case is reported
     /// as a CompatibilityRejected error rather than a panic, so callers
     /// can recover from inconsistent series state instead of crashing.
-    pub fn last(&self, offset: &str) -> Result<Self, FrameError> {
-        self.last_offset(offset)
-    }
-
-    /// Explicit alias for [`Self::last`].
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -18160,10 +16862,10 @@ impl CategoricalAccessor<'_> {
         }
         let mut min_code: Option<i64> = None;
         for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val {
-                if *code >= 0 {
-                    min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
-                }
+            if let Scalar::Int64(code) = val
+                && *code >= 0
+            {
+                min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
             }
         }
         match min_code {
@@ -18185,10 +16887,10 @@ impl CategoricalAccessor<'_> {
         }
         let mut max_code: Option<i64> = None;
         for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val {
-                if *code >= 0 {
-                    max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
-                }
+            if let Scalar::Int64(code) = val
+                && *code >= 0
+            {
+                max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
             }
         }
         match max_code {
@@ -18563,370 +17265,6 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
-    /// Product of elements within each list.
-    pub fn prod(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let mut product = 1.0_f64;
-                        let mut has_value = false;
-                        for val in list {
-                            match val {
-                                Scalar::Int64(n) => {
-                                    product *= n as f64;
-                                    has_value = true;
-                                }
-                                Scalar::Float64(f) if !f.is_nan() => {
-                                    product *= f;
-                                    has_value = true;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if has_value {
-                            Scalar::Float64(product)
-                        } else {
-                            Scalar::Null(NullKind::NaN)
-                        }
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Standard deviation of elements within each list (sample, ddof=1).
-    pub fn std(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let nums: Vec<f64> = list
-                            .iter()
-                            .filter_map(|v| match v {
-                                Scalar::Int64(n) => Some(*n as f64),
-                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
-                                _ => None,
-                            })
-                            .collect();
-                        if nums.len() < 2 {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                        let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                            / (nums.len() - 1) as f64;
-                        Scalar::Float64(var.sqrt())
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Variance of elements within each list (sample, ddof=1).
-    pub fn var(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let nums: Vec<f64> = list
-                            .iter()
-                            .filter_map(|v| match v {
-                                Scalar::Int64(n) => Some(*n as f64),
-                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
-                                _ => None,
-                            })
-                            .collect();
-                        if nums.len() < 2 {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                        let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                            / (nums.len() - 1) as f64;
-                        Scalar::Float64(var)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Median of elements within each list.
-    pub fn median(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let mut nums: Vec<f64> = list
-                            .iter()
-                            .filter_map(|v| match v {
-                                Scalar::Int64(n) => Some(*n as f64),
-                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
-                                _ => None,
-                            })
-                            .collect();
-                        if nums.is_empty() {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let mid = nums.len() / 2;
-                        let median = if nums.len() % 2 == 0 {
-                            (nums[mid - 1] + nums[mid]) / 2.0
-                        } else {
-                            nums[mid]
-                        };
-                        Scalar::Float64(median)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Count non-null elements within each list.
-    pub fn count(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let cnt = list.iter().filter(|v| !v.is_missing()).count();
-                        Scalar::Int64(cnt as i64)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Get the first element of each list.
-    pub fn first(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .and_then(|list| list.into_iter().next())
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Get the last element of each list.
-    pub fn last(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .and_then(|list| list.into_iter().last())
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Reverse elements within each list.
-    pub fn reverse(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|mut list| {
-                        list.reverse();
-                        let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
-                        Scalar::Utf8(json)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Sort elements within each list.
-    pub fn sort(&self, ascending: bool) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|mut list| {
-                        list.sort_by(|a, b| {
-                            let cmp = match (a, b) {
-                                (Scalar::Int64(x), Scalar::Int64(y)) => x.cmp(y),
-                                (Scalar::Float64(x), Scalar::Float64(y)) => {
-                                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                                }
-                                (Scalar::Utf8(x), Scalar::Utf8(y)) => x.cmp(y),
-                                _ => std::cmp::Ordering::Equal,
-                            };
-                            if ascending { cmp } else { cmp.reverse() }
-                        });
-                        let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
-                        Scalar::Utf8(json)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Check if all boolean elements in each list are true.
-    pub fn all(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let result = list.iter().all(|v| matches!(v, Scalar::Bool(true)));
-                        Scalar::Bool(result)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Check if any boolean element in each list is true.
-    pub fn any(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let result = list.iter().any(|v| matches!(v, Scalar::Bool(true)));
-                        Scalar::Bool(result)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Count unique elements within each list.
-    pub fn nunique(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let mut seen = std::collections::HashSet::new();
-                        for v in list {
-                            seen.insert(format!("{:?}", v));
-                        }
-                        Scalar::Int64(seen.len() as i64)
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Index of minimum element within each list.
-    pub fn argmin(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let mut min_idx: Option<usize> = None;
-                        let mut min_val: Option<f64> = None;
-                        for (i, val) in list.iter().enumerate() {
-                            let v = match val {
-                                Scalar::Int64(n) => Some(*n as f64),
-                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
-                                _ => None,
-                            };
-                            if let Some(v) = v {
-                                if min_val.is_none() || v < min_val.unwrap() {
-                                    min_val = Some(v);
-                                    min_idx = Some(i);
-                                }
-                            }
-                        }
-                        min_idx.map(|i| Scalar::Int64(i as i64)).unwrap_or(Scalar::Null(NullKind::NaN))
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
-    /// Index of maximum element within each list.
-    pub fn argmax(&self) -> Result<Series, FrameError> {
-        let values = self.list_values()?;
-        let out: Vec<Scalar> = values
-            .into_iter()
-            .map(|opt_list| {
-                opt_list
-                    .map(|list| {
-                        let mut max_idx: Option<usize> = None;
-                        let mut max_val: Option<f64> = None;
-                        for (i, val) in list.iter().enumerate() {
-                            let v = match val {
-                                Scalar::Int64(n) => Some(*n as f64),
-                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
-                                _ => None,
-                            };
-                            if let Some(v) = v {
-                                if max_val.is_none() || v > max_val.unwrap() {
-                                    max_val = Some(v);
-                                    max_idx = Some(i);
-                                }
-                            }
-                        }
-                        max_idx.map(|i| Scalar::Int64(i as i64)).unwrap_or(Scalar::Null(NullKind::NaN))
-                    })
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        Series::new(self.series.name(), index, Column::from_values(out)?)
-    }
-
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -19213,46 +17551,6 @@ impl StructAccessor<'_> {
                 self.series.name()
             ))),
         }
-    }
-
-    /// Expand struct fields into a DataFrame with one column per field.
-    ///
-    /// Matches `pd.Series.struct.explode()`. Returns a DataFrame where each
-    /// column corresponds to a field name found across all non-missing struct
-    /// values. Missing fields in a row produce null values.
-    pub fn explode(&self) -> Result<DataFrame, FrameError> {
-        let field_names = self.field_names()?;
-        if field_names.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "Series.struct.explode: no fields found in struct values".to_owned(),
-            ));
-        }
-        let mut series_list = Vec::with_capacity(field_names.len());
-        for name in &field_names {
-            series_list.push(self.field(name)?);
-        }
-        DataFrame::from_series(series_list)
-    }
-
-    /// Return a Series mapping field names to their inferred dtypes.
-    ///
-    /// Matches `pd.Series.struct.dtypes`. For each field, the dtype is inferred
-    /// from the first non-null value encountered across all struct rows.
-    pub fn dtypes(&self) -> Result<Series, FrameError> {
-        let field_names = self.field_names()?;
-        if field_names.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "Series.struct.dtypes: no fields found in struct values".to_owned(),
-            ));
-        }
-        let mut dtype_strings = Vec::with_capacity(field_names.len());
-        for name in &field_names {
-            let field_series = self.field(name)?;
-            let dtype_str = format!("{:?}", field_series.dtype());
-            dtype_strings.push(Scalar::Utf8(dtype_str));
-        }
-        let labels: Vec<IndexLabel> = field_names.into_iter().map(IndexLabel::Utf8).collect();
-        Series::from_values("dtypes", labels, dtype_strings)
     }
 }
 
@@ -20181,27 +18479,6 @@ impl StringAccessor<'_> {
         self.split_df_n(pat, n)
     }
 
-    /// Split strings by pattern from the right, expanding into a DataFrame.
-    ///
-    /// Analogous to `pandas.Series.str.rsplit(expand=True)`.
-    /// Shorter splits are padded with NaN.
-    pub fn rsplit_expand(&self, pat: &str) -> Result<DataFrame, FrameError> {
-        self.rsplit_expand_n(pat, None)
-    }
-
-    /// Split strings by pattern from the right with an optional split limit, expanding into a DataFrame.
-    ///
-    /// Analogous to `pandas.Series.str.rsplit(pat, n=..., expand=True)`.
-    /// Shorter splits are padded with NaN.
-    pub fn rsplit_expand_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
-        if pat.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "empty separator".to_string(),
-            ));
-        }
-        self.rsplit_df(pat, n)
-    }
-
     /// Count non-overlapping matches of a regex pattern in each string.
     ///
     /// Analogous to `pandas.Series.str.count(pat)`.
@@ -20690,6 +18967,42 @@ impl StringAccessor<'_> {
         )
     }
 
+    fn find_or_error(&self, sub: &str, reverse: bool) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        for value in vals {
+            match value {
+                Scalar::Utf8(s) => {
+                    let byte_pos =
+                        if reverse { s.rfind(sub) } else { s.find(sub) }.ok_or_else(|| {
+                            FrameError::CompatibilityRejected("substring not found".to_owned())
+                        })?;
+                    out.push(Scalar::Int64(s[..byte_pos].chars().count() as i64));
+                }
+                _ if value.is_missing() => out.push(Scalar::Null(NullKind::NaN)),
+                _ => out.push(value.clone()),
+            }
+        }
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
+    }
+
+    /// Find the first occurrence of a substring; error if any non-null string misses it.
+    ///
+    /// Matches `pd.Series.str.index(sub)`.
+    pub fn index(&self, sub: &str) -> Result<Series, FrameError> {
+        self.find_or_error(sub, false)
+    }
+
+    /// Find the last occurrence of a substring; error if any non-null string misses it.
+    ///
+    /// Matches `pd.Series.str.rindex(sub)`.
+    pub fn rindex(&self, sub: &str) -> Result<Series, FrameError> {
+        self.find_or_error(sub, true)
+    }
+
     /// Find the first occurrence of a substring; error if not found.
     ///
     /// Matches `pd.Series.str.index(sub)`. Like `find()` but raises
@@ -20718,16 +19031,6 @@ impl StringAccessor<'_> {
             },
             self.series.name(),
         )
-    }
-
-    /// Pandas-named alias for [`index_of`](Self::index_of).
-    pub fn index(&self, sub: &str) -> Result<Series, FrameError> {
-        self.index_of(sub)
-    }
-
-    /// Pandas-named alias for [`rindex_of`](Self::rindex_of).
-    pub fn rindex(&self, sub: &str) -> Result<Series, FrameError> {
-        self.rindex_of(sub)
     }
 
     /// Replace tab characters with spaces.
@@ -21417,50 +19720,6 @@ impl DatetimeAccessor<'_> {
         self.dayofweek()
     }
 
-    /// Return True for weekdays (Monday=0 through Friday=4).
-    ///
-    /// Analogous to checking if `dt.dayofweek < 5`.
-    pub fn is_weekday(&self) -> Result<Series, FrameError> {
-        self.extract_component(
-            |s| {
-                if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-                    let y_adj = if m < 3 { y - 1 } else { y };
-                    let dow =
-                        (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d)
-                            % 7;
-                    let pandas_dow = (dow + 6) % 7;
-                    Scalar::Bool(pandas_dow < 5)
-                } else {
-                    Scalar::Null(NullKind::Null)
-                }
-            },
-            self.series.name(),
-        )
-    }
-
-    /// Return True for weekends (Saturday=5, Sunday=6).
-    ///
-    /// Analogous to checking if `dt.dayofweek >= 5`.
-    pub fn is_weekend(&self) -> Result<Series, FrameError> {
-        self.extract_component(
-            |s| {
-                if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
-                    let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-                    let y_adj = if m < 3 { y - 1 } else { y };
-                    let dow =
-                        (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d)
-                            % 7;
-                    let pandas_dow = (dow + 6) % 7;
-                    Scalar::Bool(pandas_dow >= 5)
-                } else {
-                    Scalar::Null(NullKind::Null)
-                }
-            },
-            self.series.name(),
-        )
-    }
-
     /// Extract date part as string (YYYY-MM-DD).
     ///
     /// Matches `pd.Series.dt.date`.
@@ -21539,7 +19798,9 @@ impl DatetimeAccessor<'_> {
                 // Check for +HH:MM or -HH:MM suffix
                 if let Some(plus_idx) = s.rfind('+') {
                     let tz_part = &s[plus_idx..];
-                    if tz_part.len() >= 5 && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit()) {
+                    if tz_part.len() >= 5
+                        && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit())
+                    {
                         return Scalar::Utf8(tz_part.to_string());
                     }
                 }
@@ -21882,7 +20143,8 @@ impl DatetimeAccessor<'_> {
                         // Day of week (Monday=1, Sunday=7 for ISO)
                         let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
                         let y_adj = if m < 3 { y - 1 } else { y };
-                        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400
+                        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100
+                            + y_adj / 400
                             + t[(m - 1) as usize]
                             + d)
                             % 7;
@@ -22080,8 +20342,7 @@ impl DatetimeAccessor<'_> {
         } else {
             0
         };
-        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second)
-        {
+        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
             return None;
         }
         Some((hour, minute, second))
@@ -22697,151 +20958,6 @@ impl DatetimeAccessor<'_> {
             self.series.name(),
         )
     }
-
-    // ── Timedelta-specific methods ──────────────────────────────────────
-
-    fn validate_timedelta_dtype(&self) -> Result<(), FrameError> {
-        match self.series.dtype() {
-            DType::Timedelta64 | DType::Null => Ok(()),
-            other => Err(FrameError::CompatibilityRejected(format!(
-                "Can only use timedelta accessors with timedelta values, got {other:?}"
-            ))),
-        }
-    }
-
-    fn extract_timedelta_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
-    where
-        F: Fn(i64) -> Scalar,
-    {
-        self.validate_timedelta_dtype()?;
-        let out: Vec<Scalar> = self
-            .series
-            .column()
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => func(*nanos),
-                _ => Scalar::Null(NullKind::NaN),
-            })
-            .collect();
-        let index = Index::new(self.series.index().labels().to_vec())
-            .rename_index(self.series.index().name());
-        let column = Column::from_values(out)?;
-        Series::new(name.to_string(), index, column)
-    }
-
-    /// Days component of each Timedelta value.
-    ///
-    /// Matches `pd.Series.dt.days` for timedelta Series. Returns the number
-    /// of complete days in the duration.
-    pub fn days(&self) -> Result<Series, FrameError> {
-        self.extract_timedelta_component(
-            |nanos| Scalar::Int64(nanos / Timedelta::NANOS_PER_DAY),
-            self.series.name(),
-        )
-    }
-
-    /// Seconds component of each Timedelta value (0-86399).
-    ///
-    /// Matches `pd.Series.dt.seconds` for timedelta Series. Returns the
-    /// seconds portion after subtracting complete days.
-    pub fn seconds(&self) -> Result<Series, FrameError> {
-        self.extract_timedelta_component(
-            |nanos| {
-                let remaining = nanos.abs() % Timedelta::NANOS_PER_DAY;
-                Scalar::Int64(remaining / Timedelta::NANOS_PER_SEC)
-            },
-            self.series.name(),
-        )
-    }
-
-    /// Microseconds component of each Timedelta value (0-999999).
-    ///
-    /// Matches `pd.Series.dt.microseconds` for timedelta Series. Returns
-    /// the microseconds portion after subtracting complete seconds.
-    pub fn microseconds(&self) -> Result<Series, FrameError> {
-        self.extract_timedelta_component(
-            |nanos| {
-                let remaining = nanos.abs() % Timedelta::NANOS_PER_SEC;
-                Scalar::Int64(remaining / Timedelta::NANOS_PER_MICRO)
-            },
-            self.series.name(),
-        )
-    }
-
-    /// Nanoseconds component of each Timedelta value (0-999).
-    ///
-    /// Matches `pd.Series.dt.nanoseconds` for timedelta Series. Returns
-    /// the nanoseconds portion after subtracting complete microseconds.
-    pub fn nanoseconds(&self) -> Result<Series, FrameError> {
-        self.extract_timedelta_component(
-            |nanos| Scalar::Int64(nanos.abs() % Timedelta::NANOS_PER_MICRO),
-            self.series.name(),
-        )
-    }
-
-    /// Total duration in seconds for each Timedelta value.
-    ///
-    /// Matches `pd.Series.dt.total_seconds()` for timedelta Series.
-    /// Returns a float64 Series with the total seconds (including fractional).
-    pub fn timedelta_total_seconds(&self) -> Result<Series, FrameError> {
-        self.extract_timedelta_component(
-            |nanos| Scalar::Float64(Timedelta::total_seconds(nanos)),
-            self.series.name(),
-        )
-    }
-
-    /// Component breakdown of each Timedelta value.
-    ///
-    /// Matches `pd.Series.dt.components` for timedelta Series. Returns a
-    /// DataFrame with columns: days, hours, minutes, seconds, milliseconds,
-    /// microseconds, nanoseconds.
-    pub fn timedelta_components(&self) -> Result<DataFrame, FrameError> {
-        self.validate_timedelta_dtype()?;
-        let n = self.series.len();
-        let mut days_vec = Vec::with_capacity(n);
-        let mut hours_vec = Vec::with_capacity(n);
-        let mut minutes_vec = Vec::with_capacity(n);
-        let mut seconds_vec = Vec::with_capacity(n);
-        let mut millis_vec = Vec::with_capacity(n);
-        let mut micros_vec = Vec::with_capacity(n);
-        let mut nanos_vec = Vec::with_capacity(n);
-
-        for v in self.series.column().values() {
-            match v {
-                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => {
-                    let comp = Timedelta::components(*nanos);
-                    days_vec.push(Scalar::Int64(comp.days));
-                    hours_vec.push(Scalar::Int64(comp.hours));
-                    minutes_vec.push(Scalar::Int64(comp.minutes));
-                    seconds_vec.push(Scalar::Int64(comp.seconds));
-                    millis_vec.push(Scalar::Int64(comp.milliseconds));
-                    micros_vec.push(Scalar::Int64(comp.microseconds));
-                    nanos_vec.push(Scalar::Int64(comp.nanoseconds));
-                }
-                _ => {
-                    days_vec.push(Scalar::Null(NullKind::NaN));
-                    hours_vec.push(Scalar::Null(NullKind::NaN));
-                    minutes_vec.push(Scalar::Null(NullKind::NaN));
-                    seconds_vec.push(Scalar::Null(NullKind::NaN));
-                    millis_vec.push(Scalar::Null(NullKind::NaN));
-                    micros_vec.push(Scalar::Null(NullKind::NaN));
-                    nanos_vec.push(Scalar::Null(NullKind::NaN));
-                }
-            }
-        }
-
-        let idx = self.series.index().labels().to_vec();
-        DataFrame::from_series(vec![
-            Series::from_values("days", idx.clone(), days_vec)?,
-            Series::from_values("hours", idx.clone(), hours_vec)?,
-            Series::from_values("minutes", idx.clone(), minutes_vec)?,
-            Series::from_values("seconds", idx.clone(), seconds_vec)?,
-            Series::from_values("milliseconds", idx.clone(), millis_vec)?,
-            Series::from_values("microseconds", idx.clone(), micros_vec)?,
-            Series::from_values("nanoseconds", idx, nanos_vec)?,
-        ])
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -22922,123 +21038,6 @@ fn localize_series_values(
                 ambiguous_policies[idx],
                 &options.nonexistent,
             ),
-        })
-        .collect()
-}
-
-fn index_label_to_tz_localize_scalar(label: &IndexLabel) -> Result<Scalar, FrameError> {
-    match label {
-        IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(Scalar::Null(NullKind::NaT)),
-        IndexLabel::Utf8(value) => Ok(Scalar::Utf8(value.clone())),
-        IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => Ok(Scalar::Null(NullKind::NaT)),
-        IndexLabel::Datetime64(nanos) => {
-            Ok(Scalar::Utf8(format_naive_datetime(datetime64_nanos_to_naive(
-                *nanos,
-            )?)))
-        }
-        other => Err(FrameError::CompatibilityRejected(format!(
-            "tz_localize: index must be a DatetimeIndex, got {other:?}"
-        ))),
-    }
-}
-
-fn tz_scalar_to_index_label(value: Scalar) -> Result<IndexLabel, FrameError> {
-    match value {
-        Scalar::Utf8(value) => Ok(IndexLabel::Utf8(value)),
-        Scalar::Null(_) => Ok(IndexLabel::Utf8("NaT".to_owned())),
-        other => Err(FrameError::CompatibilityRejected(format!(
-            "timezone index operation produced non-datetime label {other:?}"
-        ))),
-    }
-}
-
-fn strip_tz_from_index_label(label: &IndexLabel) -> Result<IndexLabel, FrameError> {
-    match label {
-        IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(IndexLabel::Utf8("NaT".to_owned())),
-        IndexLabel::Utf8(value) if has_tz_suffix(value) => {
-            parse_tz_aware_datetime(value)?;
-            Ok(IndexLabel::Utf8(strip_tz_suffix(value).to_owned()))
-        }
-        IndexLabel::Utf8(value) => {
-            parse_naive_datetime_value(value)?;
-            Ok(IndexLabel::Utf8(value.clone()))
-        }
-        IndexLabel::Datetime64(_) => Ok(label.clone()),
-        other => Err(FrameError::CompatibilityRejected(format!(
-            "tz_localize: index must be a DatetimeIndex, got {other:?}"
-        ))),
-    }
-}
-
-fn tz_localize_index_labels(
-    labels: &[IndexLabel],
-    tz: Option<&str>,
-    options: &TzLocalizeOptions,
-) -> Result<Vec<IndexLabel>, FrameError> {
-    match tz {
-        Some(tz) => {
-            let tz_spec = parse_tz_spec(tz)?;
-            let values = labels
-                .iter()
-                .map(index_label_to_tz_localize_scalar)
-                .collect::<Result<Vec<_>, FrameError>>()?;
-            localize_series_values(&values, &tz_spec, options)?
-                .into_iter()
-                .map(tz_scalar_to_index_label)
-                .collect()
-        }
-        None => labels.iter().map(strip_tz_from_index_label).collect(),
-    }
-}
-
-fn convert_tz_aware_datetime_string(
-    value: &str,
-    target_tz: Option<&TimeZoneSpec>,
-) -> Result<Scalar, FrameError> {
-    if !has_tz_suffix(value) {
-        return Err(FrameError::CompatibilityRejected(
-            "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
-        ));
-    }
-    let parsed = parse_tz_aware_datetime(value)?;
-    let utc = parsed.fixed.with_timezone(&Utc);
-    match target_tz {
-        Some(TimeZoneSpec::Fixed(offset)) => Ok(Scalar::Utf8(format_aware_datetime(
-            utc.with_timezone(offset),
-            None,
-        ))),
-        Some(TimeZoneSpec::Named { zone, name }) => {
-            let localized = utc.with_timezone(zone);
-            Ok(Scalar::Utf8(format_aware_datetime(
-                localized.with_timezone(&localized.offset().fix()),
-                Some(name),
-            )))
-        }
-        None => Ok(Scalar::Utf8(format_naive_datetime(utc.naive_utc()))),
-    }
-}
-
-fn tz_convert_index_labels(
-    labels: &[IndexLabel],
-    tz: Option<&str>,
-) -> Result<Vec<IndexLabel>, FrameError> {
-    let target_tz = tz.map(parse_tz_spec).transpose()?;
-    labels
-        .iter()
-        .map(|label| match label {
-            IndexLabel::Utf8(value) if value.trim() == "NaT" => {
-                Ok(IndexLabel::Utf8("NaT".to_owned()))
-            }
-            IndexLabel::Utf8(value) => {
-                convert_tz_aware_datetime_string(value, target_tz.as_ref())
-                    .and_then(tz_scalar_to_index_label)
-            }
-            IndexLabel::Datetime64(_) => Err(FrameError::CompatibilityRejected(
-                "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
-            )),
-            other => Err(FrameError::CompatibilityRejected(format!(
-                "tz_convert: index must be a timezone-aware DatetimeIndex, got {other:?}"
-            ))),
         })
         .collect()
 }
@@ -25729,8 +23728,7 @@ pub enum DataFrameColumnInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFrameDictSplit {
     pub columns: Vec<Scalar>,
-    /// Row index labels when pandas includes the `index` key.
-    pub index: Option<Vec<Scalar>>,
+    pub index: Vec<Scalar>,
     pub data: Vec<Vec<Scalar>>,
 }
 
@@ -25743,16 +23741,16 @@ pub enum DataFrameDictAxisLabels {
 /// Pandas 2.2 `to_dict(orient='tight')` payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFrameDictTight {
-    /// Row index labels, in row order, when pandas includes the `index` key.
-    pub index: Option<Vec<Scalar>>,
+    /// Row index labels, in row order.
+    pub index: Vec<Scalar>,
     /// Column labels, in column order. Flat columns stay flat; MultiIndex
     /// columns are emitted as tuples of level labels.
     pub columns: DataFrameDictAxisLabels,
     /// Row-major nested data: `data[row][col]`.
     pub data: Vec<Vec<Scalar>>,
-    /// Names of each index level when pandas includes the `index_names` key.
-    /// Pandas emits `[None]` for an unnamed single-level index.
-    pub index_names: Option<Vec<Option<String>>>,
+    /// Names of each index level (pandas emits `[None]` for an
+    /// unnamed single-level index).
+    pub index_names: Vec<Option<String>>,
     /// Names of each column level (always `[None]` until MultiIndex
     /// columns land).
     pub column_names: Vec<Option<String>>,
@@ -25763,23 +23761,6 @@ pub struct DataFrameXArrayVariable {
     pub dims: Vec<String>,
     pub data: Vec<Scalar>,
     pub dtype: DType,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SeriesXArrayDataArray {
-    pub name: Option<String>,
-    pub dims: Vec<String>,
-    pub dim_name: String,
-    pub coords: BTreeMap<String, Vec<Scalar>>,
-    pub data: Vec<Scalar>,
-    pub dtype: DType,
-}
-
-impl SeriesXArrayDataArray {
-    #[must_use]
-    pub fn coord(&self, name: &str) -> Option<&[Scalar]> {
-        self.coords.get(name).map(Vec::as_slice)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30374,26 +28355,17 @@ impl DataFrame {
     /// first element is the index label (converted to Scalar) followed by
     /// each column value in column order.
     pub fn to_records(&self) -> Vec<Vec<Scalar>> {
-        self.to_records_with_index(true)
-    }
-
-    /// Matches `df.to_records(index=...)`.
-    ///
-    /// When `include_index` is false, records contain only column values in
-    /// column order.
-    pub fn to_records_with_index(&self, include_index: bool) -> Vec<Vec<Scalar>> {
         let mut records = Vec::with_capacity(self.len());
         for i in 0..self.len() {
-            let mut row = Vec::with_capacity(self.column_order.len() + usize::from(include_index));
-            if include_index {
-                let lbl = &self.index.labels()[i];
-                row.push(match lbl {
-                    IndexLabel::Int64(n) => Scalar::Int64(*n),
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                    IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-                });
-            }
+            let mut row = Vec::with_capacity(self.column_order.len() + 1);
+            // Index label as first element
+            let lbl = &self.index.labels()[i];
+            row.push(match lbl {
+                IndexLabel::Int64(n) => Scalar::Int64(*n),
+                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+            });
             for col_name in &self.column_order {
                 row.push(
                     self.columns
@@ -30736,7 +28708,7 @@ impl DataFrame {
     /// `values`: column containing values to aggregate
     /// `index_col`: column to use as the new row index
     /// `columns_col`: column whose unique values become new columns
-    /// `aggfunc`: aggregation function ("mean", "sum", "count", "min", "max", "first")
+    /// `aggfunc`: aggregation function ("mean", "sum", "count", "size", "min", "max", "first", "last")
     pub fn pivot_table(
         &self,
         values: &str,
@@ -30836,7 +28808,9 @@ impl DataFrame {
             }) else {
                 continue;
             };
-            if let Ok(v) = val_col.values()[i].to_f64() {
+            if pivot_table_counts_rows(aggfunc) {
+                groups.entry((ik, ck)).or_default().push(0.0);
+            } else if let Ok(v) = val_col.values()[i].to_f64() {
                 groups.entry((ik, ck)).or_default().push(v);
             }
         }
@@ -31012,6 +28986,7 @@ impl DataFrame {
         values: &str,
         index_col: &str,
         columns_col: &str,
+        aggfunc: &str,
         row_label: Option<&IndexLabel>,
         column_name: Option<&str>,
     ) -> Vec<f64> {
@@ -31041,7 +29016,9 @@ impl DataFrame {
                 continue;
             }
 
-            if let Ok(value) = val_col.values()[row_idx].to_f64() {
+            if pivot_table_counts_rows(aggfunc) {
+                out.push(0.0);
+            } else if let Ok(value) = val_col.values()[row_idx].to_f64() {
                 out.push(value);
             }
         }
@@ -31072,6 +29049,7 @@ impl DataFrame {
                 values,
                 index_col,
                 columns_col,
+                aggfunc,
                 Some(row_label),
                 None,
             );
@@ -31091,6 +29069,7 @@ impl DataFrame {
                 values,
                 index_col,
                 columns_col,
+                aggfunc,
                 None,
                 Some(name),
             );
@@ -31102,8 +29081,14 @@ impl DataFrame {
             new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
         }
 
-        let overall_vals =
-            self.pivot_table_margin_source_values(values, index_col, columns_col, None, None);
+        let overall_vals = self.pivot_table_margin_source_values(
+            values,
+            index_col,
+            columns_col,
+            aggfunc,
+            None,
+            None,
+        );
         all_col_vals.push(if overall_vals.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
@@ -33389,27 +31374,7 @@ impl DataFrame {
     /// - `"index"`: `{index -> {column -> value}}`
     /// - `"series"`: `{column -> Series}`
     /// - `"split"`: `{index, columns, data}`
-    /// - `"tight"`: `{index, columns, data, index_names, column_names}`
     pub fn to_dict(&self, orient: &str) -> Result<DataFrameDictResult, FrameError> {
-        self.to_dict_with_index(orient, true)
-    }
-
-    /// Convert DataFrame to a nested dictionary with explicit index-key control.
-    ///
-    /// Matches `pd.DataFrame.to_dict(orient=..., index=...)`. Pandas only
-    /// accepts `index=False` for `orient='split'` and `orient='tight'`;
-    /// other orients reject it.
-    pub fn to_dict_with_index(
-        &self,
-        orient: &str,
-        include_index: bool,
-    ) -> Result<DataFrameDictResult, FrameError> {
-        if !include_index && !matches!(orient, "split" | "tight") {
-            return Err(FrameError::CompatibilityRejected(
-                "index=False is only valid when orient is 'split' or 'tight'".to_owned(),
-            ));
-        }
-
         match orient {
             "dict" => {
                 // pandas rejects duplicate index for orient='dict' — the
@@ -33490,17 +31455,12 @@ impl DataFrame {
                     .iter()
                     .map(|name| Scalar::Utf8(name.clone()))
                     .collect();
-                let index = if include_index {
-                    Some(
-                        self.index
-                            .labels()
-                            .iter()
-                            .map(Self::index_label_to_scalar)
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
+                let index = self
+                    .index
+                    .labels()
+                    .iter()
+                    .map(Self::index_label_to_scalar)
+                    .collect();
                 let data = self.row_major_values();
                 Ok(DataFrameDictResult::Split(DataFrameDictSplit {
                     columns,
@@ -33512,22 +31472,17 @@ impl DataFrame {
                 // Tight orient: pandas 2.2 payload = {index, columns,
                 // data (row-major nested list), index_names, column_names}.
                 let columns = self.tight_column_labels()?;
-                let index = if include_index {
-                    Some(
-                        self.index
-                            .labels()
-                            .iter()
-                            .map(|label| match label {
-                                IndexLabel::Int64(v) => Scalar::Int64(*v),
-                                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-                            })
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
+                let index: Vec<Scalar> = self
+                    .index
+                    .labels()
+                    .iter()
+                    .map(|label| match label {
+                        IndexLabel::Int64(v) => Scalar::Int64(*v),
+                        IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                        IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+                        IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+                    })
+                    .collect();
                 let data: Vec<Vec<Scalar>> = (0..self.index.labels().len())
                     .map(|row_idx| {
                         self.column_order
@@ -33536,11 +31491,7 @@ impl DataFrame {
                             .collect()
                     })
                     .collect();
-                let index_names = if include_index {
-                    Some(vec![self.index.name().map(str::to_owned)])
-                } else {
-                    None
-                };
+                let index_names = vec![self.index.name().map(str::to_owned)];
                 let column_names = self
                     .column_multiindex
                     .as_ref()
@@ -33640,387 +31591,32 @@ impl DataFrame {
     ///
     /// Matches `df.to_csv()` returning a string representation.
     pub fn to_csv(&self, sep: char, include_index: bool) -> String {
-        self.to_csv_with_lineterminator(sep, include_index, "\n")
-    }
-
-    /// Matches `df.to_csv(lineterminator=...)` returning a string representation.
-    pub fn to_csv_with_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        lineterminator: &str,
-    ) -> String {
-        self.to_csv_with_header_and_lineterminator(sep, include_index, true, lineterminator)
-    }
-
-    /// Matches `df.to_csv(header=...)` returning a string representation.
-    pub fn to_csv_with_header(&self, sep: char, include_index: bool, include_header: bool) -> String {
-        self.to_csv_with_header_and_lineterminator(sep, include_index, include_header, "\n")
-    }
-
-    /// Matches `df.to_csv(index_label=...)` returning a string representation.
-    pub fn to_csv_with_index_label(
-        &self,
-        sep: char,
-        include_index: bool,
-        index_label: Option<&str>,
-    ) -> String {
-        self.to_csv_with_index_label_and_lineterminator(
-            sep,
-            include_index,
-            true,
-            index_label,
-            "\n",
-        )
-    }
-
-    /// Matches `df.to_csv(decimal=...)` returning a string representation.
-    pub fn to_csv_with_decimal(&self, sep: char, include_index: bool, decimal: &str) -> String {
-        self.to_csv_with_index_label_lineterminator_and_decimal(
-            sep,
-            include_index,
-            true,
-            None,
-            "\n",
-            decimal,
-        )
-    }
-
-    /// Matches `df.to_csv(quotechar=...)` returning a string representation.
-    pub fn to_csv_with_quotechar(&self, sep: char, include_index: bool, quotechar: char) -> String {
-        self.to_csv_with_index_label_lineterminator_decimal_and_quotechar(
-            sep,
-            include_index,
-            true,
-            None,
-            "\n",
-            ".",
-            quotechar,
-        )
-    }
-
-    /// Matches `df.to_csv(doublequote=..., escapechar=...)` returning a string representation.
-    ///
-    /// When `doublequote=false`, embedded quote characters are escaped using
-    /// `escapechar` instead of being doubled. Returns an error if the data
-    /// contains quotes but `doublequote=false` and `escapechar=None`.
-    pub fn to_csv_with_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
-            sep,
-            include_index,
-            true,
-            None,
-            "\n",
-            ".",
-            '"',
-            doublequote,
-            escapechar,
-        )
-    }
-
-    /// Matches `df.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)` returning a string representation.
-    pub fn to_csv_with_quote_none_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_index_label_lineterminator_decimal_quote_none_escapechar(
-            sep,
-            include_index,
-            true,
-            None,
-            "\n",
-            ".",
-            escapechar,
-        )
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quoting=csv.QUOTE_NONE, escapechar=...)`.
-    pub fn to_csv_with_index_label_lineterminator_decimal_quote_none_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-        decimal: &str,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_quote_none_with_escapechar(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            for (i, name) in self.column_order.iter().enumerate() {
-                if i > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_escape_quote_none_with_escapechar(
-                    name,
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        for (row_idx, label) in self.index.labels().iter().enumerate() {
-            if include_index {
-                out.push_str(&csv_index_label_quote_none(
-                    label,
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            for (col_idx, name) in self.column_order.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_scalar_quote_none(
-                    &self.columns[name].values()[row_idx],
-                    sep,
-                    "",
-                    lineterminator,
-                    decimal,
-                    escapechar,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `df.to_csv(quoting=csv.QUOTE_ALL)` returning a string representation.
-    pub fn to_csv_with_quote_all(
-        &self,
-        sep: char,
-        include_index: bool,
-    ) -> Result<String, FrameError> {
-        self.to_csv_with_index_label_lineterminator_decimal_quote_all(
-            sep,
-            include_index,
-            true,
-            None,
-            "\n",
-            ".",
-            '"',
-            true,
-            None,
-        )
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quotechar=..., doublequote=..., escapechar=..., quoting=csv.QUOTE_ALL)`.
-    pub fn to_csv_with_index_label_lineterminator_decimal_quote_all(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-        decimal: &str,
-        quotechar: char,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_quote_all_with_csv_options(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-                out.push(sep);
-            }
-            for (i, name) in self.column_order.iter().enumerate() {
-                if i > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_escape_quote_all_with_csv_options(
-                    name,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        for (row_idx, label) in self.index.labels().iter().enumerate() {
-            if include_index {
-                out.push_str(&csv_index_label_quote_all(
-                    label,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-                out.push(sep);
-            }
-            for (col_idx, name) in self.column_order.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_scalar_quote_all(
-                    &self.columns[name].values()[row_idx],
-                    "",
-                    decimal,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `df.to_csv(header=..., lineterminator=...)` returning a string representation.
-    pub fn to_csv_with_header_and_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        lineterminator: &str,
-    ) -> String {
-        self.to_csv_with_index_label_and_lineterminator(
-            sep,
-            include_index,
-            include_header,
-            None,
-            lineterminator,
-        )
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=...)`.
-    pub fn to_csv_with_index_label_and_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-    ) -> String {
-        self.to_csv_with_index_label_lineterminator_and_decimal(
-            sep,
-            include_index,
-            include_header,
-            index_label,
-            lineterminator,
-            ".",
-        )
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=...)`.
-    pub fn to_csv_with_index_label_lineterminator_and_decimal(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-        decimal: &str,
-    ) -> String {
-        self.to_csv_with_index_label_lineterminator_decimal_and_quotechar(
-            sep,
-            include_index,
-            include_header,
-            index_label,
-            lineterminator,
-            decimal,
-            '"',
-        )
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quotechar=...)`.
-    pub fn to_csv_with_index_label_lineterminator_decimal_and_quotechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-        decimal: &str,
-        quotechar: char,
-    ) -> String {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
 
         // Header
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    quotechar,
-                    lineterminator,
-                ));
+        if include_index {
+            out.push_str("index");
+            out.push(sep);
+        }
+        for (i, name) in self.column_order.iter().enumerate() {
+            if i > 0 {
                 out.push(sep);
             }
-            for (i, name) in self.column_order.iter().enumerate() {
-                if i > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                    name,
-                    sep,
-                    quotechar,
-                    lineterminator,
-                ));
-            }
-            out.push_str(lineterminator);
+            out.push_str(&csv_escape(name, sep));
         }
+        out.push('\n');
 
         // Rows
         for (row_idx, label) in self.index.labels().iter().enumerate() {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                            s,
-                            sep,
-                            quotechar,
-                            lineterminator,
-                        ))
-                    }
+                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                            &Timedelta::format(*ns),
-                            sep,
-                            quotechar,
-                            lineterminator,
-                        ))
+                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
                     }
                     IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                            &format_datetime_ns(*ns),
-                            sep,
-                            quotechar,
-                            lineterminator,
-                        ))
+                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
                 }
                 out.push(sep);
@@ -34036,21 +31632,8 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_decimal_and_quotechar(
-                        *v,
-                        sep,
-                        lineterminator,
-                        decimal,
-                        quotechar,
-                    )),
-                    Scalar::Utf8(s) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
-                            s,
-                            sep,
-                            quotechar,
-                            lineterminator,
-                        ))
-                    }
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
+                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
@@ -34060,108 +31643,10 @@ impl DataFrame {
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
-            out.push_str(lineterminator);
+            out.push('\n');
         }
 
         out
-    }
-
-    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quotechar=..., doublequote=..., escapechar=...)`.
-    pub fn to_csv_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        lineterminator: &str,
-        decimal: &str,
-        quotechar: char,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_with_csv_options(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            for (i, name) in self.column_order.iter().enumerate() {
-                if i > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_escape_with_csv_options(
-                    name,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        for (row_idx, label) in self.index.labels().iter().enumerate() {
-            if include_index {
-                match label {
-                    IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            s, sep, quotechar, doublequote, escapechar, lineterminator,
-                        )?)
-                    }
-                    IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            &Timedelta::format(*ns), sep, quotechar, doublequote, escapechar, lineterminator,
-                        )?)
-                    }
-                    IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            &format_datetime_ns(*ns), sep, quotechar, doublequote, escapechar, lineterminator,
-                        )?)
-                    }
-                }
-                out.push(sep);
-            }
-            for (col_idx, name) in self.column_order.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(sep);
-                }
-                let val = &self.columns[name].values()[row_idx];
-                match val {
-                    Scalar::Null(_) => {}
-                    Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
-                    Scalar::Int64(v) => out.push_str(&v.to_string()),
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_csv_options(
-                        *v, sep, lineterminator, decimal, quotechar, doublequote, escapechar,
-                    )?),
-                    Scalar::Utf8(s) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            s, sep, quotechar, doublequote, escapechar, lineterminator,
-                        )?)
-                    }
-                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
-                    Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
-                    Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
-                    Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
-                    Scalar::Period(v) if *v == i64::MIN => {}
-                    Scalar::Period(v) => out.push_str(&format!("Period[{v}]")),
-                    Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
-                }
-            }
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
     }
 
     /// Export DataFrame to CSV string with additional formatting options.
@@ -34176,65 +31661,6 @@ impl DataFrame {
         na_rep: &str,
         columns: Option<&[&str]>,
     ) -> Result<String, FrameError> {
-        self.to_csv_options_with_lineterminator(sep, include_index, na_rep, columns, "\n")
-    }
-
-    /// Matches `df.to_csv(sep, index, na_rep, columns, quotechar)`.
-    pub fn to_csv_options_with_quotechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        quotechar: char,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_lineterminator_decimal_and_quotechar(
-            sep,
-            include_index,
-            true,
-            None,
-            na_rep,
-            columns,
-            "\n",
-            ".",
-            quotechar,
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, na_rep, columns, doublequote, escapechar)`.
-    pub fn to_csv_options_with_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
-            sep,
-            include_index,
-            true,
-            None,
-            na_rep,
-            columns,
-            "\n",
-            ".",
-            '"',
-            doublequote,
-            escapechar,
-        )
-    }
-
-    /// Matches `df.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)` for the options path.
-    pub fn to_csv_options_with_quote_none_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
                 for &c in cols {
@@ -34249,346 +31675,33 @@ impl DataFrame {
             None => self.column_order.iter().map(|s| s.as_str()).collect(),
         };
 
-        let lineterminator = "\n";
         let mut out = String::new();
-        let na_rep_escaped =
-            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)?;
-
-        if include_index {
-            out.push(sep);
-        }
-        for (i, name) in col_order.iter().enumerate() {
-            if i > 0 {
-                out.push(sep);
-            }
-            out.push_str(&csv_escape_quote_none_with_escapechar(
-                name,
-                sep,
-                escapechar,
-                lineterminator,
-            )?);
-        }
-        out.push_str(lineterminator);
-
-        for (row_idx, label) in self.index.labels().iter().enumerate() {
-            if include_index {
-                out.push_str(&csv_index_label_quote_none(
-                    label,
-                    sep,
-                    escapechar,
-                    lineterminator,
-                )?);
-                out.push(sep);
-            }
-            for (col_idx, name) in col_order.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(sep);
-                }
-                let val = &self.columns[*name].values()[row_idx];
-                if val.is_missing() {
-                    out.push_str(&na_rep_escaped);
-                } else {
-                    out.push_str(&csv_scalar_quote_none(
-                        val,
-                        sep,
-                        na_rep,
-                        lineterminator,
-                        ".",
-                        escapechar,
-                    )?);
-                }
-            }
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `df.to_csv(quoting=csv.QUOTE_ALL)` for the options path.
-    pub fn to_csv_options_with_quote_all(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-    ) -> Result<String, FrameError> {
-        let col_order: Vec<&str> = match columns {
-            Some(cols) => {
-                for &c in cols {
-                    if !self.columns.contains_key(c) {
-                        return Err(FrameError::CompatibilityRejected(format!(
-                            "column '{c}' not found"
-                        )));
-                    }
-                }
-                cols.to_vec()
-            }
-            None => self.column_order.iter().map(|s| s.as_str()).collect(),
-        };
-
-        let lineterminator = "\n";
-        let quotechar = '"';
-        let mut out = String::new();
-
-        if include_index {
-            out.push_str(&csv_escape_quote_all_with_csv_options(
-                "",
-                quotechar,
-                true,
-                None,
-            )?);
-            out.push(sep);
-        }
-        for (i, name) in col_order.iter().enumerate() {
-            if i > 0 {
-                out.push(sep);
-            }
-            out.push_str(&csv_escape_quote_all_with_csv_options(
-                name,
-                quotechar,
-                true,
-                None,
-            )?);
-        }
-        out.push_str(lineterminator);
-
-        for (row_idx, label) in self.index.labels().iter().enumerate() {
-            if include_index {
-                out.push_str(&csv_index_label_quote_all(label, quotechar, true, None)?);
-                out.push(sep);
-            }
-            for (col_idx, name) in col_order.iter().enumerate() {
-                if col_idx > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_scalar_quote_all(
-                    &self.columns[*name].values()[row_idx],
-                    na_rep,
-                    ".",
-                    quotechar,
-                    true,
-                    None,
-                )?);
-            }
-            out.push_str(lineterminator);
-        }
-
-        Ok(out)
-    }
-
-    /// Matches `df.to_csv(sep, index, na_rep, columns, lineterminator)`.
-    pub fn to_csv_options_with_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_header_and_lineterminator(
-            sep,
-            include_index,
-            true,
-            na_rep,
-            columns,
-            lineterminator,
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, header, na_rep, columns, lineterminator)`.
-    pub fn to_csv_options_with_header_and_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_and_lineterminator(
-            sep,
-            include_index,
-            include_header,
-            None,
-            na_rep,
-            columns,
-            lineterminator,
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator)`.
-    pub fn to_csv_options_with_index_label_and_lineterminator(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_lineterminator_and_decimal(
-            sep,
-            include_index,
-            include_header,
-            index_label,
-            na_rep,
-            columns,
-            lineterminator,
-            ".",
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator, decimal)`.
-    pub fn to_csv_options_with_index_label_lineterminator_and_decimal(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-        decimal: &str,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_lineterminator_decimal_and_quotechar(
-            sep,
-            include_index,
-            include_header,
-            index_label,
-            na_rep,
-            columns,
-            lineterminator,
-            decimal,
-            '"',
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator, decimal, quotechar)`.
-    pub fn to_csv_options_with_index_label_lineterminator_decimal_and_quotechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-        decimal: &str,
-        quotechar: char,
-    ) -> Result<String, FrameError> {
-        self.to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
-            sep,
-            include_index,
-            include_header,
-            index_label,
-            na_rep,
-            columns,
-            lineterminator,
-            decimal,
-            quotechar,
-            true,
-            None,
-        )
-    }
-
-    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator, decimal, quotechar, doublequote, escapechar)`.
-    pub fn to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
-        &self,
-        sep: char,
-        include_index: bool,
-        include_header: bool,
-        index_label: Option<&str>,
-        na_rep: &str,
-        columns: Option<&[&str]>,
-        lineterminator: &str,
-        decimal: &str,
-        quotechar: char,
-        doublequote: bool,
-        escapechar: Option<char>,
-    ) -> Result<String, FrameError> {
-        let col_order: Vec<&str> = match columns {
-            Some(cols) => {
-                for &c in cols {
-                    if !self.columns.contains_key(c) {
-                        return Err(FrameError::CompatibilityRejected(format!(
-                            "column '{c}' not found"
-                        )));
-                    }
-                }
-                cols.to_vec()
-            }
-            None => self.column_order.iter().map(|s| s.as_str()).collect(),
-        };
-
-        let lineterminator = csv_lineterminator_or_default(lineterminator);
-        let mut out = String::new();
-        let na_rep_escaped =
-            csv_escape_with_csv_options(na_rep, sep, quotechar, doublequote, escapechar, lineterminator)?;
+        let na_rep_escaped = csv_escape(na_rep, sep);
 
         // Header
-        if include_header {
-            if include_index {
-                out.push_str(&csv_escape_with_csv_options(
-                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                )?);
+        if include_index {
+            out.push_str("index");
+            out.push(sep);
+        }
+        for (i, name) in col_order.iter().enumerate() {
+            if i > 0 {
                 out.push(sep);
             }
-            for (i, name) in col_order.iter().enumerate() {
-                if i > 0 {
-                    out.push(sep);
-                }
-                out.push_str(&csv_escape_with_csv_options(
-                    name,
-                    sep,
-                    quotechar,
-                    doublequote,
-                    escapechar,
-                    lineterminator,
-                )?);
-            }
-            out.push_str(lineterminator);
+            out.push_str(&csv_escape(name, sep));
         }
+        out.push('\n');
 
         // Rows
         for (row_idx, label) in self.index.labels().iter().enumerate() {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            s,
-                            sep,
-                            quotechar,
-                            doublequote,
-                            escapechar,
-                            lineterminator,
-                        )?)
-                    }
+                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            &Timedelta::format(*ns),
-                            sep,
-                            quotechar,
-                            doublequote,
-                            escapechar,
-                            lineterminator,
-                        )?)
+                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
                     }
                     IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            &format_datetime_ns(*ns),
-                            sep,
-                            quotechar,
-                            doublequote,
-                            escapechar,
-                            lineterminator,
-                        )?)
+                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
                 }
                 out.push(sep);
@@ -34604,25 +31717,8 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_csv_options(
-                        *v,
-                        sep,
-                        lineterminator,
-                        decimal,
-                        quotechar,
-                        doublequote,
-                        escapechar,
-                    )?),
-                    Scalar::Utf8(s) => {
-                        out.push_str(&csv_escape_with_csv_options(
-                            s,
-                            sep,
-                            quotechar,
-                            doublequote,
-                            escapechar,
-                            lineterminator,
-                        )?)
-                    }
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
+                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
@@ -34632,7 +31728,7 @@ impl DataFrame {
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
-            out.push_str(lineterminator);
+            out.push('\n');
         }
 
         Ok(out)
@@ -34642,25 +31738,6 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.to_json(orient=...)`.
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
-        self.to_json_with_index(orient, true)
-    }
-
-    /// Matches `pd.DataFrame.to_json(orient=..., index=...)`.
-    ///
-    /// Pandas accepts `index=false` only for `split`, `table`, `records`, and
-    /// `values` orientations.
-    pub fn to_json_with_index(
-        &self,
-        orient: &str,
-        include_index: bool,
-    ) -> Result<String, FrameError> {
-        if !include_index && !matches!(orient, "split" | "table" | "records" | "values") {
-            return Err(FrameError::CompatibilityRejected(
-                "index=False is only valid when orient is 'split', 'table', 'records', or 'values'"
-                    .to_owned(),
-            ));
-        }
-
         match orient {
             "records" => {
                 let column_float_promotions = self
@@ -34748,13 +31825,11 @@ impl DataFrame {
                         )
                     })
                     .collect();
-                let mut object = Map::new();
-                object.insert("columns".to_owned(), Value::Array(columns));
-                if include_index {
-                    object.insert("index".to_owned(), Value::Array(index));
-                }
-                object.insert("data".to_owned(), Value::Array(data));
-                serialize_json_value(&Value::Object(object))
+                serialize_json_value(&Value::Object(Map::from_iter([
+                    ("columns".to_owned(), Value::Array(columns)),
+                    ("index".to_owned(), Value::Array(index)),
+                    ("data".to_owned(), Value::Array(data)),
+                ])))
             }
             "values" => {
                 let data = (0..self.len())
@@ -34778,35 +31853,28 @@ impl DataFrame {
                     ));
                 }
 
-                let index_name = if include_index {
-                    Some(match self.index.name() {
-                        Some(name) => {
-                            if self.columns.contains_key(name) {
-                                return Err(FrameError::CompatibilityRejected(format!(
-                                    "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
-                                )));
-                            }
-                            name.to_owned()
+                let index_name = match self.index.name() {
+                    Some(name) => {
+                        if self.columns.contains_key(name) {
+                            return Err(FrameError::CompatibilityRejected(format!(
+                                "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
+                            )));
                         }
-                        None => self.reset_index_column_name()?,
-                    })
-                } else {
-                    None
+                        name.to_owned()
+                    }
+                    None => self.reset_index_column_name()?,
                 };
 
-                let mut fields =
-                    Vec::with_capacity(self.column_order.len() + usize::from(include_index));
-                if let Some(index_name) = &index_name {
-                    fields.push(Value::Object(Map::from_iter([
-                        ("name".to_owned(), Value::String(index_name.clone())),
-                        (
-                            "type".to_owned(),
-                            Value::String(
-                                index_labels_to_table_schema_type(self.index.labels()).to_owned(),
-                            ),
+                let mut fields = Vec::with_capacity(self.column_order.len() + 1);
+                fields.push(Value::Object(Map::from_iter([
+                    ("name".to_owned(), Value::String(index_name.clone())),
+                    (
+                        "type".to_owned(),
+                        Value::String(
+                            index_labels_to_table_schema_type(self.index.labels()).to_owned(),
                         ),
-                    ])));
-                }
+                    ),
+                ])));
                 for (col_idx, name) in self.column_order.iter().enumerate() {
                     let column = &self.columns[name];
                     fields.push(Value::Object(Map::from_iter([
@@ -34824,12 +31892,10 @@ impl DataFrame {
                 let data = (0..self.len())
                     .map(|row_idx| {
                         let mut row = Map::new();
-                        if let Some(index_name) = &index_name {
-                            row.insert(
-                                index_name.clone(),
-                                index_label_to_json_value(&self.index.labels()[row_idx]),
-                            );
-                        }
+                        row.insert(
+                            index_name.clone(),
+                            index_label_to_json_value(&self.index.labels()[row_idx]),
+                        );
                         for (col_idx, name) in self.column_order.iter().enumerate() {
                             row.insert(
                                 self.table_column_name(col_idx)?,
@@ -34840,21 +31906,21 @@ impl DataFrame {
                     })
                     .collect::<Result<Vec<_>, FrameError>>()?;
 
-                let mut schema = Map::new();
-                schema.insert("fields".to_owned(), Value::Array(fields));
-                if let Some(index_name) = index_name {
-                    schema.insert(
-                        "primaryKey".to_owned(),
-                        Value::Array(vec![Value::String(index_name)]),
-                    );
-                }
-                schema.insert(
-                    "pandas_version".to_owned(),
-                    Value::String("1.4.0".to_owned()),
-                );
-
                 serialize_json_value(&Value::Object(Map::from_iter([
-                    ("schema".to_owned(), Value::Object(schema)),
+                    (
+                        "schema".to_owned(),
+                        Value::Object(Map::from_iter([
+                            ("fields".to_owned(), Value::Array(fields)),
+                            (
+                                "primaryKey".to_owned(),
+                                Value::Array(vec![Value::String(index_name)]),
+                            ),
+                            (
+                                "pandas_version".to_owned(),
+                                Value::String("1.4.0".to_owned()),
+                            ),
+                        ])),
+                    ),
                     ("data".to_owned(), Value::Array(data)),
                 ])))
             }
@@ -34869,14 +31935,6 @@ impl DataFrame {
     /// Matches `pd.DataFrame.to_numpy()`. Non-numeric values become NaN.
     /// Each inner vector is one row.
     pub fn to_numpy(&self) -> Vec<Vec<f64>> {
-        self.to_numpy_with_na_value(f64::NAN)
-    }
-
-    /// Matches `pd.DataFrame.to_numpy(na_value=...)` for numeric output.
-    ///
-    /// Missing values use `na_value`; other non-numeric values preserve the
-    /// existing numeric-coercion behavior and become NaN.
-    pub fn to_numpy_with_na_value(&self, na_value: f64) -> Vec<Vec<f64>> {
         (0..self.len())
             .map(|row_idx| {
                 self.column_order
@@ -34884,7 +31942,7 @@ impl DataFrame {
                     .map(|col_name| {
                         let val = &self.columns[col_name].values()[row_idx];
                         if val.is_missing() {
-                            na_value
+                            f64::NAN
                         } else {
                             val.to_f64().unwrap_or(f64::NAN)
                         }
@@ -48924,36 +45982,6 @@ mod tests {
     }
 
     #[test]
-    fn series_mad_basic() {
-        let s = Series::from_values(
-            "vals",
-            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![
-                Scalar::Float64(1.0),
-                Scalar::Float64(2.0),
-                Scalar::Float64(3.0),
-                Scalar::Float64(10.0),
-            ],
-        )
-        .unwrap();
-
-        // mean = (1+2+3+10)/4 = 4
-        // mad = (|1-4| + |2-4| + |3-4| + |10-4|)/4 = (3+2+1+6)/4 = 3.0
-        let mad = match s.mad().unwrap() {
-            Scalar::Float64(v) => v,
-            _ => panic!("expected Float64"),
-        };
-        assert!((mad - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn series_mad_empty() {
-        let s = Series::from_values("x", Vec::new(), Vec::<Scalar>::new()).unwrap();
-        let mad = s.mad().unwrap();
-        assert!(matches!(mad, Scalar::Float64(v) if v.is_nan()));
-    }
-
-    #[test]
     fn series_median_odd() {
         let s = Series::from_values(
             "vals",
@@ -54533,6 +51561,100 @@ mod tests {
         // r1, c1 → mean(10, 20) = 15.0; r1, c2 → 30.0
         assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(15.0));
         assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_size_counts_rows_including_null_values() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "size").unwrap();
+
+        assert_eq!(pivoted.columns["x"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pivoted.columns["y"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["x"].values()[1], Scalar::Float64(1.0));
+        assert!(pivoted.columns["y"].values()[1].is_missing());
+    }
+
+    #[test]
+    fn dataframe_pivot_table_last_uses_last_non_null_value() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "last").unwrap();
+
+        assert_eq!(pivoted.columns["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["y"].values()[0], Scalar::Float64(3.0));
+        assert!(pivoted.columns["x"].values()[1].is_missing());
+        assert!(pivoted.columns["y"].values()[1].is_missing());
     }
 
     #[test]
@@ -60264,42 +57386,12 @@ mod tests {
             result.columns,
             vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())]
         );
-        assert_eq!(result.index, Some(vec![Scalar::Int64(0), Scalar::Int64(1)]));
+        assert_eq!(result.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
         assert_eq!(
             result.data,
             vec![
                 vec![Scalar::Utf8("x".into()), Scalar::Int64(10)],
                 vec![Scalar::Utf8("y".into()), Scalar::Null(NullKind::NaN)],
-            ]
-        );
-    }
-
-    #[test]
-    fn dataframe_to_dict_split_can_omit_index() {
-        let df = DataFrame::from_dict(
-            &["b", "a"],
-            vec![
-                (
-                    "b",
-                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
-                ),
-                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
-            ],
-        )
-        .unwrap();
-
-        let result = df.to_dict_with_index("split", false).unwrap();
-        let split = result.as_split().expect("split orient");
-        assert_eq!(
-            split.columns,
-            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())]
-        );
-        assert_eq!(split.index, None);
-        assert_eq!(
-            split.data,
-            vec![
-                vec![Scalar::Utf8("x".into()), Scalar::Int64(10)],
-                vec![Scalar::Utf8("y".into()), Scalar::Int64(20)],
             ]
         );
     }
@@ -60630,7 +57722,7 @@ mod tests {
                 vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()),]
             )
         );
-        assert_eq!(tight.index, Some(vec![Scalar::Int64(0), Scalar::Int64(1)]));
+        assert_eq!(tight.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
         // Row-major data: row 0 = [1, "a"], row 1 = [2, "b"]
         assert_eq!(tight.data.len(), 2);
         assert_eq!(
@@ -60641,45 +57733,8 @@ mod tests {
             tight.data[1],
             vec![Scalar::Int64(2), Scalar::Utf8("b".into())]
         );
-        assert_eq!(tight.index_names, Some(vec![None]));
+        assert_eq!(tight.index_names, vec![None]);
         assert_eq!(tight.column_names, vec![None]);
-    }
-
-    #[test]
-    fn dataframe_to_dict_tight_can_omit_index_and_index_names() {
-        let index = Index::from_i64(vec![10, 20]).set_name("row_id");
-        let mut columns = BTreeMap::new();
-        columns.insert(
-            "x".to_string(),
-            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
-        );
-        let df = DataFrame::new_with_column_order(index, columns, vec!["x".to_string()]).unwrap();
-
-        let result = df.to_dict_with_index("tight", false).unwrap();
-        let tight = result.as_tight().expect("tight orient");
-        assert_eq!(
-            tight.columns,
-            DataFrameDictAxisLabels::Flat(vec![Scalar::Utf8("x".into())])
-        );
-        assert_eq!(tight.index, None);
-        assert_eq!(tight.index_names, None);
-        assert_eq!(tight.column_names, vec![None]);
-        assert_eq!(
-            tight.data,
-            vec![vec![Scalar::Int64(1)], vec![Scalar::Int64(2)]]
-        );
-    }
-
-    #[test]
-    fn dataframe_to_dict_index_false_rejects_non_split_tight_orients() {
-        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
-
-        for orient in ["dict", "list", "records", "index", "series"] {
-            let err = df.to_dict_with_index(orient, false).unwrap_err();
-            assert!(
-                matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("index=False"))
-            );
-        }
     }
 
     #[test]
@@ -60693,7 +57748,7 @@ mod tests {
         let df = DataFrame::new_with_column_order(index, columns, vec!["a".to_string()]).unwrap();
         let result = df.to_dict("tight").unwrap();
         let tight = result.as_tight().expect("tight");
-        assert_eq!(tight.index_names, Some(vec![Some("row_id".to_owned())]));
+        assert_eq!(tight.index_names, vec![Some("row_id".to_owned())]);
     }
 
     #[test]
@@ -60860,48 +57915,6 @@ mod tests {
         };
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column MultiIndex"))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn series_to_xarray_preserves_name_index_and_values() -> Result<(), FrameError> {
-        let series = Series::from_values(
-            "sales",
-            vec!["r0".into(), "r1".into()],
-            vec![Scalar::Int64(10), Scalar::Int64(12)],
-        )?
-        .rename_axis("row")?;
-
-        let array = series.to_xarray()?;
-        let expected_coord = vec![Scalar::Utf8("r0".into()), Scalar::Utf8("r1".into())];
-        assert_eq!(array.name, Some("sales".to_owned()));
-        assert_eq!(array.dim_name, "row");
-        assert_eq!(array.dims, vec!["row".to_owned()]);
-        assert_eq!(array.coord("row"), Some(expected_coord.as_slice()));
-        assert_eq!(array.dtype, DType::Int64);
-        assert_eq!(array.data, vec![Scalar::Int64(10), Scalar::Int64(12)]);
-        Ok(())
-    }
-
-    #[test]
-    fn series_to_xarray_defaults_unnamed_axes() -> Result<(), FrameError> {
-        let series = Series::from_values(
-            "",
-            vec![0.into(), 1.into()],
-            vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())],
-        )?;
-
-        let array = series.to_xarray()?;
-        let expected_coord = vec![Scalar::Int64(0), Scalar::Int64(1)];
-        assert_eq!(array.name, None);
-        assert_eq!(array.dim_name, "index");
-        assert_eq!(array.dims, vec!["index".to_owned()]);
-        assert_eq!(array.coord("index"), Some(expected_coord.as_slice()));
-        assert_eq!(array.dtype, DType::Utf8);
-        assert_eq!(
-            array.data,
-            vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())]
         );
         Ok(())
     }
@@ -63956,210 +60969,11 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_to_csv_with_lineterminator() {
-        let df = DataFrame::from_dict(
-            &["a", "b"],
-            vec![
-                ("a", vec![Scalar::Int64(1)]),
-                ("b", vec![Scalar::Int64(2)]),
-            ],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_lineterminator(',', false, "|");
-        assert_eq!(csv, "a,b|1,2|");
-    }
-
-    #[test]
-    fn dataframe_to_csv_lineterminator_quotes_matching_chars() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Utf8("fooE".to_owned())])],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_lineterminator(',', false, "END");
-        assert_eq!(csv, "xEND\"fooE\"END");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_decimal_quotes_separator_collision() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Float64(1.5), Scalar::Float64(2.0)])],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_decimal(',', false, ",");
-        assert_eq!(csv, "x\n\"1,5\"\n\"2,0\"\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_quotechar_single_quote() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a'b".to_owned()),
-                    Scalar::Utf8("c\"d".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_quotechar(',', false, '\'');
-        assert_eq!(csv, "x\n'a,b'\n'a''b'\nc\"d\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_doublequote_false_escapechar() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a\"b".to_owned()),
-                    Scalar::Utf8("a,\"b".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_with_doublequote_escapechar(',', false, false, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n\"a,\\\"b\"\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_doublequote_false_without_escapechar_errors() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Utf8("a\"b".to_owned())])],
-        )
-        .unwrap();
-
-        let result = df.to_csv_with_doublequote_escapechar(',', false, false, None);
-        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_quote_none_escapechar() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a\"b".to_owned()),
-                    Scalar::Utf8("a,\"b".to_owned()),
-                    Scalar::Utf8("a\nb".to_owned()),
-                    Scalar::Utf8("a\\b".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_with_quote_none_escapechar(',', false, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\na\\,b\na\"b\na\\,\"b\na\\\nb\na\\\\b\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_quote_none_without_escapechar_errors() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Utf8("a,b".to_owned())])],
-        )
-        .unwrap();
-
-        let result = df.to_csv_with_quote_none_escapechar(',', false, None);
-        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_quote_all() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a\"b".to_owned()),
-                    Scalar::Int64(1),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_quote_all(',', false).unwrap();
-        assert_eq!(csv, "\"x\"\n\"a,b\"\n\"a\"\"b\"\n\"1\"\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_header_false() {
-        let df = DataFrame::from_dict(
-            &["a", "b"],
-            vec![
-                ("a", vec![Scalar::Int64(1)]),
-                ("b", vec![Scalar::Int64(2)]),
-            ],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_header(',', false, false);
-        assert_eq!(csv, "1,2\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_header_false_keeps_index_values() {
-        let df = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(1)]),
-                ("b", vec![Scalar::Int64(2)]),
-            ],
-            vec!["r1".into()],
-        )
-        .unwrap();
-
-        let csv = df.to_csv_with_header(',', true, false);
-        assert_eq!(csv, "r1,1,2\n");
-    }
-
-    #[test]
     fn dataframe_to_csv_with_index() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with(",a\n"));
-        assert!(csv.contains("0,10\n"));
-    }
-
-    #[test]
-    fn dataframe_to_csv_with_named_index_header() {
-        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])])
-            .unwrap()
-            .rename_axis("idx")
-            .unwrap();
-
-        let csv = df.to_csv(',', true);
-        assert!(csv.starts_with("idx,a\n"));
-        assert!(csv.contains("0,10\n"));
-    }
-
-    #[test]
-    fn dataframe_to_csv_index_label_overrides_index_name() {
-        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])])
-            .unwrap()
-            .rename_axis("idx")
-            .unwrap();
-
-        let csv = df.to_csv_with_index_label(',', true, Some("row"));
-        assert!(csv.starts_with("row,a\n"));
+        assert!(csv.starts_with("index,a\n"));
         assert!(csv.contains("0,10\n"));
     }
 
@@ -64172,7 +60986,7 @@ mod tests {
         .unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with(",\"a,b\"\n"));
+        assert!(csv.starts_with("index,\"a,b\"\n"));
         assert!(csv.contains("\"id,1\",\"x,y\"\n"));
     }
 
@@ -64314,25 +61128,6 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_to_json_split_with_index_false_omits_index() {
-        let df = DataFrame::from_dict_with_index(
-            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec!["row0".into(), "row1".into()],
-        )
-        .unwrap();
-
-        let json = df.to_json_with_index("split", false).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "columns": ["x"],
-                "data": [[10], [20]]
-            })
-        );
-    }
-
-    #[test]
     fn dataframe_to_json_values() {
         let df = DataFrame::from_dict(
             &["x", "y"],
@@ -64346,23 +61141,6 @@ mod tests {
         let json = df.to_json("values").unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, serde_json::json!([[10.0, true], [null, false]]));
-    }
-
-    #[test]
-    fn dataframe_to_json_index_false_allows_index_free_orients() {
-        let df = DataFrame::from_dict_with_index(
-            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec!["row0".into(), "row1".into()],
-        )
-        .unwrap();
-
-        let records: Value =
-            serde_json::from_str(&df.to_json_with_index("records", false).unwrap()).unwrap();
-        assert_eq!(records, serde_json::json!([{"x": 10}, {"x": 20}]));
-
-        let values: Value =
-            serde_json::from_str(&df.to_json_with_index("values", false).unwrap()).unwrap();
-        assert_eq!(values, serde_json::json!([[10], [20]]));
     }
 
     #[test]
@@ -64405,62 +61183,6 @@ mod tests {
                 ]
             })
         );
-    }
-
-    #[test]
-    fn dataframe_to_json_table_with_index_false_omits_index_metadata() {
-        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
-        let mut columns = BTreeMap::new();
-        columns.insert(
-            "x".to_owned(),
-            Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)]).unwrap(),
-        );
-        columns.insert(
-            "y".to_owned(),
-            Column::from_values(vec![
-                Scalar::Utf8("a".to_owned()),
-                Scalar::Utf8("b".to_owned()),
-            ])
-            .unwrap(),
-        );
-        let df =
-            DataFrame::new_with_column_order(index, columns, vec!["x".to_owned(), "y".to_owned()])
-                .unwrap();
-
-        let json = df.to_json_with_index("table", false).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "schema": {
-                    "fields": [
-                        {"name": "x", "type": "integer"},
-                        {"name": "y", "type": "string"}
-                    ],
-                    "pandas_version": "1.4.0"
-                },
-                "data": [
-                    {"x": 1, "y": "a"},
-                    {"x": null, "y": "b"}
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn dataframe_to_json_index_false_rejects_index_dependent_orients() {
-        let df = DataFrame::from_dict_with_index(
-            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
-            vec!["row0".into(), "row1".into()],
-        )
-        .unwrap();
-
-        for orient in ["columns", "index"] {
-            let err = df.to_json_with_index(orient, false).unwrap_err();
-            assert!(
-                matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("index=False"))
-            );
-        }
     }
 
     #[test]
@@ -65083,74 +61805,6 @@ mod tests {
                 Scalar::Int64(0),
             ]
         );
-    }
-
-    #[test]
-    fn series_argpartition_basic() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![
-                Scalar::Float64(3.0),
-                Scalar::Float64(1.0),
-                Scalar::Float64(4.0),
-                Scalar::Float64(1.5),
-                Scalar::Float64(2.0),
-            ],
-        )
-        .unwrap();
-
-        let result = s.argpartition(2).unwrap();
-        let indices: Vec<i64> = result
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Int64(i) => *i,
-                _ => panic!("expected Int64"),
-            })
-            .collect();
-        let vals = s.values();
-        let pivot_val = match &vals[indices[2] as usize] {
-            Scalar::Float64(v) => *v,
-            _ => panic!("expected Float64"),
-        };
-        for &idx in &indices[..2] {
-            if let Scalar::Float64(v) = &vals[idx as usize] {
-                assert!(*v <= pivot_val, "left partition element {} > pivot {}", *v, pivot_val);
-            }
-        }
-        for &idx in &indices[3..] {
-            if let Scalar::Float64(v) = &vals[idx as usize] {
-                assert!(*v >= pivot_val, "right partition element {} < pivot {}", *v, pivot_val);
-            }
-        }
-    }
-
-    #[test]
-    fn series_argpartition_with_missing() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![
-                Scalar::Float64(5.0),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(1.0),
-                Scalar::Float64(3.0),
-            ],
-        )
-        .unwrap();
-
-        let result = s.argpartition(1).unwrap();
-        let indices: Vec<i64> = result
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Int64(i) => *i,
-                _ => panic!("expected Int64"),
-            })
-            .collect();
-        assert_eq!(indices.len(), 4);
-        assert_eq!(indices[3], 1, "missing value should be at end");
     }
 
     #[test]
@@ -65835,6 +62489,43 @@ mod tests {
 
         let result = s.str().rfind("abc").unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn str_index_and_rindex_pandas_named_methods() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("ababa".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let index = s.str().index("ba").unwrap();
+        assert_eq!(index.values()[0], Scalar::Int64(1));
+        assert!(index.values()[1].is_missing());
+
+        let rindex = s.str().rindex("ba").unwrap();
+        assert_eq!(rindex.values()[0], Scalar::Int64(3));
+        assert!(rindex.values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_index_and_rindex_error_on_missing_substring() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("abc".to_owned())],
+        )
+        .unwrap();
+
+        let index_err = s.str().index("z").unwrap_err();
+        assert!(index_err.to_string().contains("substring not found"));
+
+        let rindex_err = s.str().rindex("z").unwrap_err();
+        assert!(rindex_err.to_string().contains("substring not found"));
     }
 
     #[test]
@@ -69159,34 +65850,6 @@ mod tests {
     }
 
     #[test]
-    fn series_asfreq_daily_inserts_missing_rows() {
-        let s = Series::from_values(
-            "sales",
-            vec!["2024-01-01".into(), "2024-01-03".into()],
-            vec![Scalar::Float64(10.0), Scalar::Float64(30.0)],
-        )
-        .unwrap();
-
-        let result = s.asfreq("D").unwrap();
-        assert_eq!(
-            result.index().labels(),
-            &[
-                IndexLabel::Utf8("2024-01-01".into()),
-                IndexLabel::Utf8("2024-01-02".into()),
-                IndexLabel::Utf8("2024-01-03".into())
-            ]
-        );
-        assert_eq!(
-            result.values(),
-            &[
-                Scalar::Float64(10.0),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(30.0)
-            ]
-        );
-    }
-
-    #[test]
     fn dataframe_asfreq_fill_value_and_methods_4c9zl() {
         let df = DataFrame::from_dict_with_index(
             vec![("units", vec![Scalar::Int64(10), Scalar::Int64(30)])],
@@ -69204,27 +65867,6 @@ mod tests {
 
         let bfilled = df.asfreq_with_options("D", Some("bfill"), None).unwrap();
         assert_eq!(bfilled.columns()["units"].values()[1], Scalar::Int64(30));
-    }
-
-    #[test]
-    fn series_asfreq_fill_value_and_methods() {
-        let s = Series::from_values(
-            "units",
-            vec!["2024-01-01".into(), "2024-01-03".into()],
-            vec![Scalar::Int64(10), Scalar::Int64(30)],
-        )
-        .unwrap();
-
-        let filled = s
-            .asfreq_with_options("D", None, Some(Scalar::Int64(0)))
-            .unwrap();
-        assert_eq!(filled.values()[1], Scalar::Int64(0));
-
-        let ffilled = s.asfreq_with_options("D", Some("ffill"), None).unwrap();
-        assert_eq!(ffilled.values()[1], Scalar::Int64(10));
-
-        let bfilled = s.asfreq_with_options("D", Some("bfill"), None).unwrap();
-        assert_eq!(bfilled.values()[1], Scalar::Int64(30));
     }
 
     #[test]
@@ -72464,30 +69106,6 @@ mod tests {
     }
 
     #[test]
-    fn series_to_csv_with_named_index_header() {
-        let s = Series::from_values("val", vec![0_i64.into()], vec![Scalar::Int64(10)])
-            .unwrap()
-            .rename_axis("idx")
-            .unwrap();
-
-        let csv = s.to_csv(',', true);
-        assert!(csv.starts_with("idx,val\n"));
-        assert!(csv.contains("0,10\n"));
-    }
-
-    #[test]
-    fn series_to_csv_index_label_overrides_index_name() {
-        let s = Series::from_values("val", vec![0_i64.into()], vec![Scalar::Int64(10)])
-            .unwrap()
-            .rename_axis("idx")
-            .unwrap();
-
-        let csv = s.to_csv_with_index_label(',', true, Some("row"));
-        assert!(csv.starts_with("row,val\n"));
-        assert!(csv.contains("0,10\n"));
-    }
-
-    #[test]
     fn series_to_csv_escapes_fields() {
         let s = Series::from_values(
             "name,with,comma",
@@ -72513,201 +69131,6 @@ mod tests {
     }
 
     #[test]
-    fn series_to_csv_with_na_rep_replaces_missing_values() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Int64(10),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(f64::NAN),
-            ],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_na_rep(',', false, "NA");
-        assert_eq!(csv, "x\n10.0\nNA\nNA\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_na_rep_escapes_separator() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Null(NullKind::Null)],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_na_rep(',', false, "n/a,missing");
-        assert_eq!(csv, "x\n\"n/a,missing\"\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_lineterminator() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_options(',', false, "NA", "|");
-        assert_eq!(csv, "x|1.0|NA|");
-    }
-
-    #[test]
-    fn series_to_csv_lineterminator_quotes_matching_chars() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("fooE".to_owned())],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_options(',', false, "", "END");
-        assert_eq!(csv, "xEND\"fooE\"END");
-    }
-
-    #[test]
-    fn series_to_csv_with_decimal_quotes_separator_collision() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Float64(1.5), Scalar::Float64(2.0)],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_decimal(',', false, ",");
-        assert_eq!(csv, "x\n\"1,5\"\n\"2,0\"\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_quotechar_single_quote() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("a,b".to_owned()),
-                Scalar::Utf8("a'b".to_owned()),
-                Scalar::Utf8("c\"d".to_owned()),
-            ],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_quotechar(',', false, '\'');
-        assert_eq!(csv, "x\n'a,b'\n'a''b'\nc\"d\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_doublequote_false_escapechar() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("a,b".to_owned()),
-                Scalar::Utf8("a\"b".to_owned()),
-                Scalar::Utf8("a,\"b".to_owned()),
-            ],
-        )
-        .unwrap();
-
-        let csv = s
-            .to_csv_with_doublequote_escapechar(',', false, false, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n\"a,\\\"b\"\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_doublequote_false_without_escapechar_errors() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a\"b".to_owned())],
-        )
-        .unwrap();
-
-        let result = s.to_csv_with_doublequote_escapechar(',', false, false, None);
-        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
-    }
-
-    #[test]
-    fn series_to_csv_with_quote_none_escapechar() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![
-                Scalar::Utf8("a,b".to_owned()),
-                Scalar::Utf8("a\"b".to_owned()),
-                Scalar::Utf8("a,\"b".to_owned()),
-                Scalar::Utf8("a\nb".to_owned()),
-                Scalar::Utf8("a\\b".to_owned()),
-            ],
-        )
-        .unwrap();
-
-        let csv = s
-            .to_csv_with_quote_none_escapechar(',', false, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\na\\,b\na\"b\na\\,\"b\na\\\nb\na\\\\b\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_quote_none_without_escapechar_errors() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a,b".to_owned())],
-        )
-        .unwrap();
-
-        let result = s.to_csv_with_quote_none_escapechar(',', false, None);
-        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
-    }
-
-    #[test]
-    fn series_to_csv_with_quote_all_includes_index_labels() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("a,b".to_owned()),
-                Scalar::Utf8("a\"b".to_owned()),
-                Scalar::Int64(1),
-            ],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_quote_all(',', true).unwrap();
-        assert_eq!(csv, "\"\",\"x\"\n\"0\",\"a,b\"\n\"1\",\"a\"\"b\"\n\"2\",\"1\"\n");
-    }
-
-    #[test]
-    fn series_to_csv_with_header_false() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_header(',', false, false);
-        assert_eq!(csv, "1\n2\n");
-    }
-
-    #[test]
-    fn series_to_csv_header_false_keeps_index_values() {
-        let s = Series::from_values(
-            "x",
-            vec!["r1".into(), "r2".into()],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
-        )
-        .unwrap();
-
-        let csv = s.to_csv_with_header(',', true, false);
-        assert_eq!(csv, "r1,1\nr2,2\n");
-    }
-
-    #[test]
     fn series_to_json_split() {
         let s = Series::from_values(
             "x",
@@ -72718,26 +69141,6 @@ mod tests {
         let json = s.to_json("split").unwrap();
         assert!(json.contains("\"name\":\"x\""));
         assert!(json.contains("\"data\":[10,20]"));
-    }
-
-    #[test]
-    fn series_to_json_split_with_index_false_omits_index() {
-        let s = Series::from_values(
-            "x",
-            vec!["a".into(), "b".into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20)],
-        )
-        .unwrap();
-
-        let json = s.to_json_with_index("split", false).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "name": "x",
-                "data": [10, 20]
-            })
-        );
     }
 
     #[test]
@@ -72774,101 +69177,6 @@ mod tests {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(3.125)]).unwrap();
         let json = s.to_json("records").unwrap();
         assert!(json.contains("3.125"));
-    }
-
-    #[test]
-    fn series_to_json_index_false_allows_index_free_orients() {
-        let s = Series::from_values(
-            "x",
-            vec!["a".into(), "b".into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20)],
-        )
-        .unwrap();
-
-        let records: Value =
-            serde_json::from_str(&s.to_json_with_index("records", false).unwrap()).unwrap();
-        assert_eq!(records, serde_json::json!([10, 20]));
-
-        let values: Value =
-            serde_json::from_str(&s.to_json_with_index("values", false).unwrap()).unwrap();
-        assert_eq!(values, serde_json::json!([10, 20]));
-    }
-
-    #[test]
-    fn series_to_json_table() {
-        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
-        let s = Series::new(
-            "a".to_owned(),
-            index,
-            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
-        )
-        .unwrap();
-
-        let json = s.to_json("table").unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "schema": {
-                    "fields": [
-                        {"name": "row_id", "type": "integer"},
-                        {"name": "a", "type": "integer"}
-                    ],
-                    "primaryKey": ["row_id"],
-                    "pandas_version": "1.4.0"
-                },
-                "data": [
-                    {"row_id": 10, "a": 1},
-                    {"row_id": 20, "a": 2}
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn series_to_json_table_with_index_false_omits_index_metadata() {
-        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
-        let s = Series::new(
-            "a".to_owned(),
-            index,
-            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
-        )
-        .unwrap();
-
-        let json = s.to_json_with_index("table", false).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "schema": {
-                    "fields": [
-                        {"name": "a", "type": "integer"}
-                    ],
-                    "pandas_version": "1.4.0"
-                },
-                "data": [
-                    {"a": 1},
-                    {"a": 2}
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn series_to_json_index_false_rejects_index_dependent_orients() {
-        let s = Series::from_values(
-            "x",
-            vec!["a".into(), "b".into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20)],
-        )
-        .unwrap();
-
-        for orient in ["index", "columns"] {
-            let err = s.to_json_with_index(orient, false).unwrap_err();
-            assert!(
-                matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("index=False"))
-            );
-        }
     }
 
     #[test]
@@ -76246,42 +72554,6 @@ mod tests {
         assert!(err.to_string().contains("empty separator"));
     }
 
-    #[test]
-    fn str_rsplit_expand_basic() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Utf8("a_b_c".to_string()),
-                Scalar::Utf8("d_e".to_string()),
-            ],
-        )
-        .unwrap();
-        let result = s.str().rsplit_expand("_").unwrap();
-        assert_eq!(result.column_names().len(), 3);
-        assert_eq!(result.columns["0"].values()[0], Scalar::Utf8("a".to_string()));
-        assert_eq!(result.columns["1"].values()[0], Scalar::Utf8("b".to_string()));
-        assert_eq!(result.columns["2"].values()[0], Scalar::Utf8("c".to_string()));
-        assert_eq!(result.columns["0"].values()[1], Scalar::Utf8("d".to_string()));
-        assert_eq!(result.columns["1"].values()[1], Scalar::Utf8("e".to_string()));
-        assert!(result.columns["2"].values()[1].is_missing());
-    }
-
-    #[test]
-    fn str_rsplit_expand_n_limits_splits_from_right() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a_b_c_d".to_string())],
-        )
-        .unwrap();
-        // n=1 means 1 split from the right: "a_b_c" and "d"
-        let result = s.str().rsplit_expand_n("_", Some(1)).unwrap();
-        assert_eq!(result.column_names(), vec!["0", "1"]);
-        assert_eq!(result.columns["0"].values()[0], Scalar::Utf8("a_b_c".to_string()));
-        assert_eq!(result.columns["1"].values()[0], Scalar::Utf8("d".to_string()));
-    }
-
     // ── Rolling.corr / Rolling.cov ──
 
     #[test]
@@ -76698,24 +72970,6 @@ mod tests {
     }
 
     #[test]
-    fn series_to_numpy_with_na_value_replaces_missing() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![
-                Scalar::Int64(1),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(f64::NAN),
-                Scalar::Float64(4.5),
-            ],
-        )
-        .unwrap();
-
-        let arr = s.to_numpy_with_na_value(-1.25);
-        assert_eq!(arr, vec![1.0, -1.25, -1.25, 4.5]);
-    }
-
-    #[test]
     fn df_to_numpy() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -76729,21 +72983,6 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0], vec![1.0, 3.0]);
         assert_eq!(arr[1], vec![2.0, 4.0]);
-    }
-
-    #[test]
-    fn df_to_numpy_with_na_value_replaces_missing() {
-        let df = DataFrame::from_dict(
-            &["a", "b"],
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)]),
-                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(f64::NAN)]),
-            ],
-        )
-        .unwrap();
-
-        let arr = df.to_numpy_with_na_value(-7.0);
-        assert_eq!(arr, vec![vec![1.0, 3.0], vec![-7.0, -7.0]]);
     }
 
     // ── DatetimeAccessor: days_in_month, is_leap_year, is_year_start/end ──
@@ -77630,168 +73869,6 @@ mod tests {
 
         let csv = df.to_csv_options(',', false, "NA,VAL", None).unwrap();
         assert!(csv.contains("\"NA,VAL\",1"));
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_lineterminator_quotes_na_rep() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Null(NullKind::NaN)])],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_lineterminator(',', false, "NA", None, "END")
-            .unwrap();
-        assert_eq!(csv, "xEND\"NA\"END");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_header_false() {
-        let df = DataFrame::from_dict(
-            &["x", "y"],
-            vec![
-                ("x", vec![Scalar::Int64(1)]),
-                ("y", vec![Scalar::Null(NullKind::NaN)]),
-            ],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_header_and_lineterminator(
-                ',',
-                false,
-                false,
-                "NA",
-                Some(&["x", "y"]),
-                "|",
-            )
-            .unwrap();
-        assert_eq!(csv, "1,NA|");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_index_label() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap()
-        .rename_axis("idx")
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_index_label_and_lineterminator(
-                ',',
-                true,
-                true,
-                Some("row"),
-                "",
-                None,
-                "\n",
-            )
-            .unwrap();
-        assert_eq!(csv, "row,x\n0,1\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_decimal_and_alt_sep() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Float64(1.5)])],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_index_label_lineterminator_and_decimal(
-                ';',
-                false,
-                true,
-                None,
-                "",
-                None,
-                "\n",
-                ",",
-            )
-            .unwrap();
-        assert_eq!(csv, "x\n1,5\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_quotechar_single_quote() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a'b".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_quotechar(',', false, "", None, '\'')
-            .unwrap();
-        assert_eq!(csv, "x\n'a,b'\n'a''b'\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_doublequote_false_escapechar() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a\"b".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_doublequote_escapechar(',', false, "", None, false, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_quote_none_escapechar() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![
-                    Scalar::Utf8("a,b".to_owned()),
-                    Scalar::Utf8("a\\b".to_owned()),
-                ],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_quote_none_escapechar(',', false, "", None, Some('\\'))
-            .unwrap();
-        assert_eq!(csv, "x\na\\,b\na\\\\b\n");
-    }
-
-    #[test]
-    fn dataframe_to_csv_options_with_quote_all_quotes_na_rep() {
-        let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
-            )],
-        )
-        .unwrap();
-
-        let csv = df
-            .to_csv_options_with_quote_all(',', false, "NA", None)
-            .unwrap();
-        assert_eq!(csv, "\"x\"\n\"1\"\n\"NA\"\n");
     }
 
     #[test]
@@ -78793,30 +74870,6 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_to_records_with_index_false_omits_index_values() {
-        let df = DataFrame::from_dict(
-            &["a", "b"],
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                (
-                    "b",
-                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
-                ),
-            ],
-        )
-        .unwrap();
-
-        let records = df.to_records_with_index(false);
-        assert_eq!(
-            records,
-            vec![
-                vec![Scalar::Int64(1), Scalar::Utf8("x".into())],
-                vec![Scalar::Int64(2), Scalar::Utf8("y".into())],
-            ]
-        );
-    }
-
-    #[test]
     fn test_floordiv_mod_df_fill() {
         let df1 = DataFrame::from_dict(
             &["x"],
@@ -78871,8 +74924,6 @@ mod tests {
         )
         .unwrap();
         let result = s.agg(&["sum", "mean", "count"]).unwrap();
-        let aggregate = s.aggregate(&["sum", "mean", "count"]).unwrap();
-        assert_eq!(aggregate, result);
         assert_eq!(result.len(), 3);
         assert_eq!(result.column().values()[0], Scalar::Float64(6.0)); // sum
         assert_eq!(result.column().values()[1], Scalar::Float64(2.0)); // mean
@@ -84298,27 +80349,6 @@ mod tests {
     }
 
     #[test]
-    fn series_first_last_aliases_match_offset_methods() {
-        let s = Series::from_values(
-            "x",
-            vec![
-                "2024-01-01".into(),
-                "2024-01-05".into(),
-                "2024-01-15".into(),
-            ],
-            vec![
-                Scalar::Float64(1.0),
-                Scalar::Float64(2.0),
-                Scalar::Float64(3.0),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(s.first("7D").unwrap(), s.first_offset("7D").unwrap());
-        assert_eq!(s.last("10D").unwrap(), s.last_offset("10D").unwrap());
-    }
-
-    #[test]
     fn df_first_offset() {
         let df = DataFrame::from_dict_with_index(
             vec![(
@@ -86422,113 +82452,6 @@ mod tests {
     }
 
     #[test]
-    fn dt_accessor_timedelta_days() {
-        use fp_types::Timedelta;
-        let s = Series::from_values(
-            "td",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Timedelta64(
-                    2 * Timedelta::NANOS_PER_DAY + 5 * Timedelta::NANOS_PER_HOUR,
-                ),
-                Scalar::Timedelta64(Timedelta::NANOS_PER_DAY / 2),
-            ],
-        )
-        .unwrap();
-        let result = s.dt().days().unwrap();
-        assert_eq!(result.values()[0], Scalar::Int64(2));
-        assert_eq!(result.values()[1], Scalar::Int64(0));
-    }
-
-    #[test]
-    fn dt_accessor_timedelta_seconds() {
-        use fp_types::Timedelta;
-        let nanos = Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN;
-        let s = Series::from_values(
-            "td",
-            vec![0_i64.into()],
-            vec![Scalar::Timedelta64(nanos)],
-        )
-        .unwrap();
-        let result = s.dt().seconds().unwrap();
-        assert_eq!(result.values()[0], Scalar::Int64(2 * 3600 + 30 * 60));
-    }
-
-    #[test]
-    fn dt_accessor_timedelta_total_seconds() {
-        use fp_types::Timedelta;
-        let nanos = Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR;
-        let s = Series::from_values(
-            "td",
-            vec![0_i64.into()],
-            vec![Scalar::Timedelta64(nanos)],
-        )
-        .unwrap();
-        let result = s.dt().timedelta_total_seconds().unwrap();
-        assert_eq!(result.values()[0], Scalar::Float64(90000.0)); // 25 hours
-    }
-
-    #[test]
-    fn dt_accessor_timedelta_components() {
-        use fp_types::Timedelta;
-        let nanos = Timedelta::NANOS_PER_DAY
-            + 2 * Timedelta::NANOS_PER_HOUR
-            + 30 * Timedelta::NANOS_PER_MIN
-            + 45 * Timedelta::NANOS_PER_SEC
-            + 123 * Timedelta::NANOS_PER_MILLI
-            + 456 * Timedelta::NANOS_PER_MICRO
-            + 789;
-        let s = Series::from_values(
-            "td",
-            vec![0_i64.into()],
-            vec![Scalar::Timedelta64(nanos)],
-        )
-        .unwrap();
-        let df = s.dt().timedelta_components().unwrap();
-        assert_eq!(df.columns().len(), 7);
-        let days_col = df.get("days").unwrap().unwrap();
-        assert_eq!(days_col.values()[0], Scalar::Int64(1));
-        let hours_col = df.get("hours").unwrap().unwrap();
-        assert_eq!(hours_col.values()[0], Scalar::Int64(2));
-    }
-
-    #[test]
-    fn dt_accessor_is_weekday() {
-        let s = Series::from_values(
-            "dates",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("2026-05-18".to_string()), // Monday
-                Scalar::Utf8("2026-05-23".to_string()), // Saturday
-                Scalar::Utf8("2026-05-20".to_string()), // Wednesday
-            ],
-        )
-        .unwrap();
-        let result = s.dt().is_weekday().unwrap();
-        assert_eq!(result.values()[0], Scalar::Bool(true));  // Monday is weekday
-        assert_eq!(result.values()[1], Scalar::Bool(false)); // Saturday is not
-        assert_eq!(result.values()[2], Scalar::Bool(true));  // Wednesday is weekday
-    }
-
-    #[test]
-    fn dt_accessor_is_weekend() {
-        let s = Series::from_values(
-            "dates",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("2026-05-18".to_string()), // Monday
-                Scalar::Utf8("2026-05-23".to_string()), // Saturday
-                Scalar::Utf8("2026-05-24".to_string()), // Sunday
-            ],
-        )
-        .unwrap();
-        let result = s.dt().is_weekend().unwrap();
-        assert_eq!(result.values()[0], Scalar::Bool(false)); // Monday is not weekend
-        assert_eq!(result.values()[1], Scalar::Bool(true));  // Saturday is weekend
-        assert_eq!(result.values()[2], Scalar::Bool(true));  // Sunday is weekend
-    }
-
-    #[test]
     fn td_lt_comparison() {
         use fp_types::Timedelta;
         let s1 = Series::from_values(
@@ -87941,92 +83864,6 @@ mod tests {
         );
     }
 
-    // ── Series.tz_localize / tz_convert on row index ─────────────────
-
-    #[test]
-    fn series_tz_localize_operates_on_index_and_preserves_values() {
-        let s = Series::from_values(
-            "sales",
-            vec![
-                "2024-01-01 00:00:00".into(),
-                "2024-01-01 01:00:00".into(),
-            ],
-            vec![Scalar::Int64(10), Scalar::Int64(20)],
-        )
-        .unwrap()
-        .rename_axis("ts")
-        .unwrap();
-
-        let out = s.tz_localize(Some("UTC")).unwrap();
-        assert_eq!(
-            out.index().labels(),
-            &[
-                IndexLabel::Utf8("2024-01-01 00:00:00+00:00".into()),
-                IndexLabel::Utf8("2024-01-01 01:00:00+00:00".into()),
-            ]
-        );
-        assert_eq!(out.index().name(), Some("ts"));
-        assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
-    }
-
-    #[test]
-    fn series_tz_convert_operates_on_index_and_can_drop_timezone() {
-        let s = Series::from_values(
-            "sales",
-            vec![
-                "2024-01-01 00:00:00+00:00".into(),
-                "2024-01-01 01:00:00+00:00".into(),
-            ],
-            vec![Scalar::Int64(10), Scalar::Int64(20)],
-        )
-        .unwrap()
-        .rename_axis("ts")
-        .unwrap();
-
-        let converted = s.tz_convert(Some("-05:00")).unwrap();
-        assert_eq!(
-            converted.index().labels(),
-            &[
-                IndexLabel::Utf8("2023-12-31 19:00:00-05:00".into()),
-                IndexLabel::Utf8("2023-12-31 20:00:00-05:00".into()),
-            ]
-        );
-        assert_eq!(converted.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
-
-        let naive = s.tz_convert(None).unwrap();
-        assert_eq!(
-            naive.index().labels(),
-            &[
-                IndexLabel::Utf8("2024-01-01 00:00:00".into()),
-                IndexLabel::Utf8("2024-01-01 01:00:00".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn series_timezone_index_methods_reject_wrong_awareness() {
-        let naive = Series::from_values(
-            "sales",
-            vec!["2024-01-01 00:00:00".into()],
-            vec![Scalar::Int64(10)],
-        )
-        .unwrap();
-        let err = naive.tz_convert(Some("UTC")).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Cannot convert tz-naive timestamps")
-        );
-
-        let aware = Series::from_values(
-            "sales",
-            vec!["2024-01-01 00:00:00+00:00".into()],
-            vec![Scalar::Int64(10)],
-        )
-        .unwrap();
-        let err = aware.tz_localize(Some("UTC")).unwrap_err();
-        assert!(err.to_string().contains("Already tz-aware"));
-    }
-
     // ── DataFrame.tz_localize / tz_convert (br-frankenpandas-6iac0) ─
 
     fn iac0_naive_df() -> DataFrame {
@@ -88678,75 +84515,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn series_to_period_converts_datetime_index_and_preserves_values() {
-        let s = Series::new(
-            "value",
-            Index::from_utf8(vec![
-                "2001-03-31 00:00:00".to_owned(),
-                "2002-05-31T12:30:00".to_owned(),
-                "NaT".to_owned(),
-            ])
-            .set_names(Some("when")),
-            Column::from_values(vec![
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Int64(30),
-            ])
-            .unwrap(),
-        )
-        .unwrap();
-
-        let out = s.to_period("Q").unwrap();
-        assert_eq!(
-            out.index().labels(),
-            &[
-                IndexLabel::Utf8("2001Q1".into()),
-                IndexLabel::Utf8("2002Q2".into()),
-                IndexLabel::Utf8("NaT".into()),
-            ]
-        );
-        assert_eq!(out.index().name(), Some("when"));
-        assert_eq!(out.values(), s.values());
-        assert_eq!(out.name(), "value");
-    }
-
     // -- DataFrame.to_timestamp period index conversion (br-frankenpandas-4zwu2) --
 
     fn dataframe_4zwu2_timestamp_label(value: &str) -> Result<IndexLabel, FrameError> {
         let datetime = parse_naive_datetime_value(value)?;
         datetime64_label_from_naive(datetime)
-    }
-
-    #[test]
-    fn series_to_timestamp_converts_period_index_and_preserves_values() {
-        let s = Series::new(
-            "value",
-            Index::from_utf8(vec![
-                "2001-03".to_owned(),
-                "2001-04".to_owned(),
-                "NaT".to_owned(),
-            ])
-            .set_names(Some("period")),
-            Column::from_values(vec![
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Int64(30),
-            ])
-            .unwrap(),
-        )
-        .unwrap();
-
-        let out = s.to_timestamp("M", "start").unwrap();
-        let expected = vec![
-            dataframe_4zwu2_timestamp_label("2001-03-01 00:00:00").unwrap(),
-            dataframe_4zwu2_timestamp_label("2001-04-01 00:00:00").unwrap(),
-            IndexLabel::Datetime64(i64::MIN),
-        ];
-        assert_eq!(out.index().labels(), expected.as_slice());
-        assert_eq!(out.index().name(), Some("period"));
-        assert_eq!(out.values(), s.values());
-        assert_eq!(out.name(), "value");
     }
 
     #[test]
@@ -95213,7 +90986,10 @@ mod test_select_columns_perf_76e1fd {
         let s = Series::from_values(
             "text",
             vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![Scalar::Utf8("hello world".into()), Scalar::Utf8("abcabc".into())],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("abcabc".into()),
+            ],
         )
         .unwrap();
         let idx = s.str().index("o").unwrap();
@@ -95317,247 +91093,5 @@ mod test_select_columns_perf_76e1fd {
         let max_val = cat.max().unwrap();
         assert_eq!(min_val, Scalar::Utf8("b".into()));
         assert_eq!(max_val, Scalar::Utf8("a".into()));
-    }
-
-    #[test]
-    fn series_list_accessor_prod() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[2, 3, 4]".into()),
-                Scalar::Utf8("[1, 5, 2]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().prod().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Float64(24.0));
-        assert_eq!(result.column().values()[1], Scalar::Float64(10.0));
-    }
-
-    #[test]
-    fn series_list_accessor_std() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[2, 4, 4, 4, 5, 5, 7, 9]".into()),
-                Scalar::Utf8("[1, 2, 3]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().std().unwrap();
-        let v0 = match result.column().values()[0] {
-            Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
-        };
-        assert!((v0 - 2.138089935299395).abs() < 1e-10);
-        let v1 = match result.column().values()[1] {
-            Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
-        };
-        assert!((v1 - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn series_list_accessor_var() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[1, 2, 3]".into()),
-                Scalar::Utf8("[10, 20]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().var().unwrap();
-        let v0 = match result.column().values()[0] {
-            Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
-        };
-        assert!((v0 - 1.0).abs() < 1e-10);
-        let v1 = match result.column().values()[1] {
-            Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
-        };
-        assert!((v1 - 50.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn series_list_accessor_median() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[1, 3, 5, 7, 9]".into()),
-                Scalar::Utf8("[2, 4, 6, 8]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().median().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Float64(5.0));
-        assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
-    }
-
-    #[test]
-    fn series_list_accessor_count() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[1, 2, 3, null, 5]".into()),
-                Scalar::Utf8("[1, 2]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().count().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Int64(4));
-        assert_eq!(result.column().values()[1], Scalar::Int64(2));
-    }
-
-    #[test]
-    fn series_list_accessor_first_last() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[10, 20, 30]".into()),
-                Scalar::Utf8("[5, 6, 7, 8]".into()),
-            ],
-        )
-        .unwrap();
-        let first_result = s.list().first().unwrap();
-        assert_eq!(first_result.column().values()[0], Scalar::Int64(10));
-        assert_eq!(first_result.column().values()[1], Scalar::Int64(5));
-        let last_result = s.list().last().unwrap();
-        assert_eq!(last_result.column().values()[0], Scalar::Int64(30));
-        assert_eq!(last_result.column().values()[1], Scalar::Int64(8));
-    }
-
-    #[test]
-    fn series_list_accessor_reverse() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0)],
-            vec![Scalar::Utf8("[1, 2, 3]".into())],
-        )
-        .unwrap();
-        let result = s.list().reverse().unwrap();
-        let v = match &result.column().values()[0] {
-            Scalar::Utf8(s) => s.clone(),
-            _ => panic!("expected Utf8"),
-        };
-        assert!(v.contains("3") && v.contains("2") && v.contains("1"));
-    }
-
-    #[test]
-    fn series_list_accessor_sort() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0)],
-            vec![Scalar::Utf8("[3, 1, 2]".into())],
-        )
-        .unwrap();
-        let result = s.list().sort(true).unwrap();
-        let v = match &result.column().values()[0] {
-            Scalar::Utf8(s) => s.clone(),
-            _ => panic!("expected Utf8"),
-        };
-        assert!(v.contains("1") && v.contains("2") && v.contains("3"));
-    }
-
-    #[test]
-    fn series_list_accessor_all_any() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[true, true, true]".into()),
-                Scalar::Utf8("[true, false, true]".into()),
-            ],
-        )
-        .unwrap();
-        let all_result = s.list().all().unwrap();
-        assert_eq!(all_result.column().values()[0], Scalar::Bool(true));
-        assert_eq!(all_result.column().values()[1], Scalar::Bool(false));
-        let any_result = s.list().any().unwrap();
-        assert_eq!(any_result.column().values()[0], Scalar::Bool(true));
-        assert_eq!(any_result.column().values()[1], Scalar::Bool(true));
-    }
-
-    #[test]
-    fn series_list_accessor_nunique() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[1, 2, 2, 3, 1]".into()),
-                Scalar::Utf8("[1, 1, 1]".into()),
-            ],
-        )
-        .unwrap();
-        let result = s.list().nunique().unwrap();
-        assert_eq!(result.column().values()[0], Scalar::Int64(3));
-        assert_eq!(result.column().values()[1], Scalar::Int64(1));
-    }
-
-    #[test]
-    fn series_list_accessor_argmin_argmax() {
-        let s = Series::from_values(
-            "lists",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8("[3, 1, 4, 1, 5]".into()),
-                Scalar::Utf8("[9, 2, 6]".into()),
-            ],
-        )
-        .unwrap();
-        let argmin = s.list().argmin().unwrap();
-        assert_eq!(argmin.column().values()[0], Scalar::Int64(1));
-        assert_eq!(argmin.column().values()[1], Scalar::Int64(1));
-        let argmax = s.list().argmax().unwrap();
-        assert_eq!(argmax.column().values()[0], Scalar::Int64(4));
-        assert_eq!(argmax.column().values()[1], Scalar::Int64(0));
-    }
-
-    #[test]
-    fn series_struct_accessor_explode() {
-        let s = Series::from_values(
-            "structs",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)],
-            vec![
-                Scalar::Utf8(r#"{"a": 1, "b": "x"}"#.into()),
-                Scalar::Utf8(r#"{"a": 2, "b": "y"}"#.into()),
-                Scalar::Utf8(r#"{"a": 3, "b": "z"}"#.into()),
-            ],
-        )
-        .unwrap();
-        let df = s.r#struct().explode().unwrap();
-        assert_eq!(df.shape(), (3, 2));
-        let col_a = df.get_column("a");
-        assert_eq!(col_a.column().values()[0], Scalar::Int64(1));
-        assert_eq!(col_a.column().values()[1], Scalar::Int64(2));
-        assert_eq!(col_a.column().values()[2], Scalar::Int64(3));
-        let col_b = df.get_column("b");
-        assert_eq!(col_b.column().values()[0], Scalar::Utf8("x".into()));
-        assert_eq!(col_b.column().values()[1], Scalar::Utf8("y".into()));
-        assert_eq!(col_b.column().values()[2], Scalar::Utf8("z".into()));
-    }
-
-    #[test]
-    fn series_struct_accessor_dtypes() {
-        let s = Series::from_values(
-            "structs",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![
-                Scalar::Utf8(r#"{"num": 42, "text": "hello"}"#.into()),
-                Scalar::Utf8(r#"{"num": 99, "text": "world"}"#.into()),
-            ],
-        )
-        .unwrap();
-        let dtypes = s.r#struct().dtypes().unwrap();
-        assert_eq!(dtypes.len(), 2);
-        assert_eq!(dtypes.index().labels()[0], IndexLabel::Utf8("num".into()));
-        assert_eq!(dtypes.index().labels()[1], IndexLabel::Utf8("text".into()));
     }
 }

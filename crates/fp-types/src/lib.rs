@@ -933,6 +933,45 @@ impl Timedelta {
         }
     }
 
+    /// Return the days component. Matches `pd.Timedelta.days`.
+    #[must_use]
+    pub fn days(nanos: i64) -> i64 {
+        if nanos == Self::NAT {
+            return 0; // pandas returns 0 for NaT.days (no error)
+        }
+        nanos / Self::NANOS_PER_DAY
+    }
+
+    /// Return the seconds component (0-86399). Matches `pd.Timedelta.seconds`.
+    #[must_use]
+    pub fn seconds(nanos: i64) -> i64 {
+        if nanos == Self::NAT {
+            return 0;
+        }
+        let abs_nanos = nanos.abs();
+        (abs_nanos % Self::NANOS_PER_DAY) / Self::NANOS_PER_SEC
+    }
+
+    /// Return the microseconds component (0-999999). Matches `pd.Timedelta.microseconds`.
+    #[must_use]
+    pub fn microseconds(nanos: i64) -> i64 {
+        if nanos == Self::NAT {
+            return 0;
+        }
+        let abs_nanos = nanos.abs();
+        (abs_nanos % Self::NANOS_PER_SEC) / Self::NANOS_PER_MICRO
+    }
+
+    /// Return the nanoseconds component (0-999). Matches `pd.Timedelta.nanoseconds`.
+    #[must_use]
+    pub fn nanoseconds(nanos: i64) -> i64 {
+        if nanos == Self::NAT {
+            return 0;
+        }
+        let abs_nanos = nanos.abs();
+        abs_nanos % Self::NANOS_PER_MICRO
+    }
+
     pub fn format(nanos: i64) -> String {
         if nanos == Self::NAT {
             return "NaT".to_string();

@@ -1398,10 +1398,9 @@ pub fn merge_ordered(
 
         df = match method {
             "ffill" => df.ffill(None).map_err(JoinError::Frame)?,
-            "bfill" => df.bfill(None).map_err(JoinError::Frame)?,
             _ => {
                 return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                    format!("merge_ordered: unknown fill_method '{method}'"),
+                    format!("merge_ordered: fill_method must be 'ffill' or None, got '{method}'"),
                 )));
             }
         };
@@ -5301,7 +5300,36 @@ mod tests {
         assert!(matches!(
             err,
             super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
-                if message.contains("unknown fill_method")
+                if message.contains("fill_method must be 'ffill' or None")
+        ));
+    }
+
+    #[test]
+    fn merge_ordered_rejects_bfill_like_pandas() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["date", "left_val"],
+            vec![
+                ("date", vec![Scalar::Int64(1), Scalar::Int64(3)]),
+                ("left_val", vec![Scalar::Int64(10), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["date", "right_val"],
+            vec![
+                ("date", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                ("right_val", vec![Scalar::Int64(200), Scalar::Int64(300)]),
+            ],
+        )
+        .unwrap();
+
+        let err = super::merge_ordered(&left, &right, &["date"], Some("bfill"))
+            .expect_err("pandas only accepts fill_method='ffill' or None");
+        assert!(matches!(
+            err,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message.contains("fill_method must be 'ffill' or None")
         ));
     }
 

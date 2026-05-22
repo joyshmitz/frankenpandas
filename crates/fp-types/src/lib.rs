@@ -1653,6 +1653,12 @@ impl Timestamp {
         self.dayofweek()
     }
 
+    /// Alias for dayofweek(). Matches `pd.Timestamp.day_of_week`.
+    #[must_use]
+    pub fn day_of_week(&self) -> Option<i64> {
+        self.dayofweek()
+    }
+
     /// Return the day of the year (1-366).
     ///
     /// Matches `pd.Timestamp.dayofyear`. Returns None for NaT.
@@ -1672,6 +1678,12 @@ impl Timestamp {
         } else {
             Some(base)
         }
+    }
+
+    /// Alias for dayofyear(). Matches `pd.Timestamp.day_of_year`.
+    #[must_use]
+    pub fn day_of_year(&self) -> Option<i64> {
+        self.dayofyear()
     }
 
     /// Return the proleptic Gregorian ordinal (number of days since Jan 1, year 1).

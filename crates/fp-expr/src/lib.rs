@@ -192,6 +192,12 @@ pub enum Expr {
         ascending: bool,
         na_position: String,
     },
+    TopN {
+        expr: Box<Expr>,
+        n: usize,
+        keep: String,
+        largest: bool,
+    },
     Replace {
         expr: Box<Expr>,
         to_replace: Scalar,
@@ -479,6 +485,19 @@ pub fn evaluate(
             input
                 .sort_values_na(*ascending, na_position)
                 .map_err(ExprError::from)
+        }
+        Expr::TopN {
+            expr,
+            n,
+            keep,
+            largest,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *largest {
+                input.nlargest_keep(*n, keep).map_err(ExprError::from)
+            } else {
+                input.nsmallest_keep(*n, keep).map_err(ExprError::from)
+            }
         }
         Expr::Replace {
             expr,
@@ -979,6 +998,7 @@ impl MaterializedView {
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
             Expr::DropNa { expr } => Self::extract_series(expr, series_set),
             Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Where {
@@ -1138,6 +1158,19 @@ fn evaluate_delta(
             input
                 .sort_values_na(*ascending, na_position)
                 .map_err(ExprError::from)
+        }
+        Expr::TopN {
+            expr,
+            n,
+            keep,
+            largest,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *largest {
+                input.nlargest_keep(*n, keep).map_err(ExprError::from)
+            } else {
+                input.nsmallest_keep(*n, keep).map_err(ExprError::from)
+            }
         }
         Expr::Replace {
             expr,
@@ -1324,9 +1357,10 @@ fn evaluate_delta_comparison(
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
 //     .sort_values(ascending=..., na_position=...), .replace(to_replace, value),
-//     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
-//     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
-//     .notna(), .isnull(), .notnull()
+//     .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
+//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
+//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
+//     .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1964,6 +1998,22 @@ fn parse_usize_literal_argument(
     })
 }
 
+fn parse_top_n_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<usize, ExprError> {
+    let value = parse_i64_literal_argument(tokens, pos, context)?;
+    if value < 0 {
+        return Ok(0);
+    }
+    usize::try_from(value).map_err(|_| {
+        ExprError::ParseError(format!(
+            "{context} is too large to represent on this platform: {value}"
+        ))
+    })
+}
+
 fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
     match value.to_ascii_lowercase().as_str() {
         "null" | "none" => Ok(DType::Null),
@@ -2390,6 +2440,121 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     ascending,
                     na_position,
+                };
+                *pos = arg_pos + 1;
+            }
+            "nlargest" | "nsmallest" => {
+                let mut arg_pos = *pos + 3;
+                let mut n = 5_usize;
+                let mut keep = "first".to_owned();
+                let mut n_seen = false;
+                let mut keep_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "n" => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_top_n_literal_argument(tokens, &mut arg_pos, "top-n n")?;
+                                n_seen = true;
+                            }
+                            "keep" => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "top-n keep",
+                                )?;
+                                keep_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_top_n_literal_argument(tokens, &mut arg_pos, "top-n n")?;
+                                n_seen = true;
+                            }
+                            1 => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "top-n keep",
+                                )?;
+                                keep_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most n and keep arguments"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::TopN {
+                    expr: Box::new(expr),
+                    n,
+                    keep,
+                    largest: method == "nlargest",
                 };
                 *pos = arg_pos + 1;
             }
@@ -5568,6 +5733,79 @@ mod tests {
 
         assert!(super::parse_expr("a.sort_values(False)").is_err());
         assert!(super::parse_expr("a.sort_values(kind='mergesort')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_top_n_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let largest = super::eval_str("a.nlargest(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(largest.index().labels(), &[0_i64.into(), 4_i64.into()]);
+        assert_eq!(largest.values(), &[Scalar::Int64(3), Scalar::Int64(3)]);
+
+        let largest_last =
+            super::eval_str("a.nlargest(2, keep='last')", &frame, &policy, &mut ledger)?;
+        assert_eq!(largest_last.index().labels(), &[4_i64.into(), 0_i64.into()]);
+
+        let smallest = super::eval_str("a.nsmallest(n=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(smallest.index().labels(), &[2_i64.into(), 3_i64.into()]);
+        assert_eq!(smallest.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+
+        let negative = super::eval_str("a.nlargest(n=-1)", &frame, &policy, &mut ledger)?;
+        assert!(negative.is_empty());
+
+        let filtered = super::query_str(
+            "a.nlargest(2).gt(2) and b.gt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[4_i64.into()]);
+
+        assert!(super::parse_expr("a.nlargest(2, keep='first', 'last')").is_err());
+        assert!(super::parse_expr("a.nsmallest(1, 'first', 'extra')").is_err());
         Ok(())
     }
 

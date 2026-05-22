@@ -1194,9 +1194,27 @@ impl Column {
         self.values.len()
     }
 
+    /// Number of elements, matching `pd.Series.size`.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    /// One-dimensional shape, matching `pd.Series.shape`.
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// Alias for [`is_empty`](Self::is_empty), matching `pd.Series.empty`.
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
     }
 
     #[must_use]
@@ -1231,6 +1249,30 @@ impl Column {
     #[must_use]
     pub fn to_vec(&self) -> Vec<Scalar> {
         self.values.clone()
+    }
+
+    /// Alias for [`to_vec`](Self::to_vec), matching `pd.Series.to_list()`.
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Scalar> {
+        self.to_vec()
+    }
+
+    /// Alias for [`to_list`](Self::to_list), matching `pd.Series.tolist()`.
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Scalar> {
+        self.to_list()
+    }
+
+    /// Owned scalar materialization, matching `pd.Series.to_numpy()`.
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<Scalar> {
+        self.to_vec()
+    }
+
+    /// Owned scalar materialization, matching `pd.Series.array`.
+    #[must_use]
+    pub fn array(&self) -> Vec<Scalar> {
+        self.to_vec()
     }
 
     /// Whether any value in the column is missing.
@@ -7607,6 +7649,25 @@ mod tests {
             let r = col.ffill(None).expect("ffill");
             assert!(r.is_empty());
             assert_eq!(r.dtype(), DType::Null);
+        }
+
+        #[test]
+        fn pandas_metadata_and_materialization_aliases_match_core_methods()
+        -> Result<(), crate::ColumnError> {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+            ])?;
+
+            assert_eq!(col.size(), col.len());
+            assert_eq!(col.shape(), (col.len(),));
+            assert_eq!(col.empty(), col.is_empty());
+            assert_eq!(col.to_list(), col.to_vec());
+            assert_eq!(col.tolist(), col.to_vec());
+            assert_eq!(col.to_numpy(), col.to_vec());
+            assert_eq!(col.array(), col.to_vec());
+            Ok(())
         }
 
         #[test]

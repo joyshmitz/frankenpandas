@@ -6472,6 +6472,58 @@ impl Series {
         )
     }
 
+    /// Element-wise greatest common divisor.
+    ///
+    /// Matches `np.gcd(s1, s2)`.
+    pub fn gcd(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.gcd(other.column())?,
+        )
+    }
+
+    /// Numerical gradient (forward/central/backward differences).
+    ///
+    /// Matches `np.gradient(s)`.
+    pub fn gradient(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.gradient()?,
+        )
+    }
+
+    /// Discrete convolution of the series with a kernel.
+    ///
+    /// Matches `np.convolve(s, kernel, mode)`. Mode: "full", "same", "valid".
+    /// Returns a Series with a RangeIndex matching the output length.
+    pub fn convolve(&self, kernel: &Self, mode: &str) -> Result<Self, FrameError> {
+        let col = self.column.convolve(kernel.column(), mode)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Cross-correlation of the series with another.
+    ///
+    /// Matches `np.correlate(s1, s2, mode)`. Mode: "full", "same", "valid".
+    /// Returns a Series with a RangeIndex matching the output length.
+    pub fn correlate(&self, other: &Self, mode: &str) -> Result<Self, FrameError> {
+        let col = self.column.correlate(other.column(), mode)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Compress series using a boolean condition.
+    ///
+    /// Matches `np.compress(condition, s)`. Returns elements where condition is true.
+    /// Returns a Series with a RangeIndex matching the output length.
+    pub fn compress(&self, condition: &Self) -> Result<Self, FrameError> {
+        let col = self.column.compress(condition.column())?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -92824,5 +92876,96 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert_eq!(result.values()[1], Scalar::Float64(2.0));
         assert_eq!(result.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_gcd() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Int64(12)),
+                (1_i64.into(), Scalar::Int64(18)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Int64(8)),
+                (1_i64.into(), Scalar::Int64(24)),
+            ],
+        )
+        .unwrap();
+        let result = s1.gcd(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(4));
+        assert_eq!(result.values()[1], Scalar::Int64(6));
+    }
+
+    #[test]
+    fn series_gradient() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.gradient().unwrap();
+        assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        assert!((result.values()[1].to_f64().unwrap() - 1.5).abs() < 1e-10);
+        assert!((result.values()[2].to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_convolve() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let kernel = Series::from_pairs(
+            "k",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.convolve(&kernel, "valid").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!((result.values()[0].to_f64().unwrap() - 3.0).abs() < 1e-10);
+        assert!((result.values()[1].to_f64().unwrap() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_compress() {
+        let vals = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let cond = Series::from_pairs(
+            "cond",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(true)),
+            ],
+        )
+        .unwrap();
+        let result = vals.compress(&cond).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(3.0));
     }
 }

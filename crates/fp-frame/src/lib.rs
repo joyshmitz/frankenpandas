@@ -5865,6 +5865,20 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.square()?)
     }
 
+    /// Round to nearest integer (banker's rounding).
+    ///
+    /// Matches `np.rint(series)`. NaN values pass through.
+    pub fn rint(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.rint()?)
+    }
+
+    /// Round toward zero (alias for trunc).
+    ///
+    /// Matches `np.fix(series)`. NaN values pass through.
+    pub fn fix(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.fix()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35372,6 +35386,20 @@ impl DataFrame {
     /// Matches `np.square(df)`. NaN values pass through.
     pub fn square(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.square())
+    }
+
+    /// Round to nearest integer (banker's rounding).
+    ///
+    /// Matches `np.rint(df)`. NaN values pass through.
+    pub fn rint(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.rint())
+    }
+
+    /// Round toward zero (alias for trunc).
+    ///
+    /// Matches `np.fix(df)`. NaN values pass through.
+    pub fn fix(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.fix())
     }
 
     /// Add a scalar to all numeric columns.

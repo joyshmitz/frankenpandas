@@ -6667,9 +6667,9 @@ impl Column {
             } else if x == f64::INFINITY || y == f64::INFINITY {
                 f64::INFINITY
             } else if x >= y {
-                x + (1.0 + (y - x).exp()).ln()
+                x + (y - x).exp().ln_1p()
             } else {
-                y + (1.0 + (x - y).exp()).ln()
+                y + (x - y).exp().ln_1p()
             };
             out.push(Scalar::Float64(result));
         }

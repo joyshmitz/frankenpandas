@@ -12273,5 +12273,88 @@ mod tests {
             assert!((col.values()[2].to_f64().unwrap() - 100.0).abs() < 1e-10);
             assert!((col.values()[3].to_f64().unwrap() - 1000.0).abs() < 1e-10);
         }
+
+        #[test]
+        fn nan_to_num_replaces_special_values() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+            ])
+            .unwrap();
+            let result = col.nan_to_num().unwrap();
+            assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            assert!((result.values()[1].to_f64().unwrap() - 0.0).abs() < 1e-10);
+            assert_eq!(result.values()[2].to_f64().unwrap(), f64::MAX);
+            assert_eq!(result.values()[3].to_f64().unwrap(), f64::MIN);
+        }
+
+        #[test]
+        fn rint_rounds_to_nearest_even() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.5),
+            ])
+            .unwrap();
+            let result = col.rint().unwrap();
+            // Banker's rounding: 0.5->0, 1.5->2, 2.5->2, 3.5->4
+            assert!((result.values()[0].to_f64().unwrap() - 0.0).abs() < 1e-10);
+            assert!((result.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+            assert!((result.values()[2].to_f64().unwrap() - 2.0).abs() < 1e-10);
+            assert!((result.values()[3].to_f64().unwrap() - 4.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn ldexp_multiplies_by_power_of_two() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.5),
+            ])
+            .unwrap();
+            let result = col.ldexp(3).unwrap(); // multiply by 2^3 = 8
+            assert!((result.values()[0].to_f64().unwrap() - 8.0).abs() < 1e-10);
+            assert!((result.values()[1].to_f64().unwrap() - 16.0).abs() < 1e-10);
+            assert!((result.values()[2].to_f64().unwrap() - 4.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn modf_splits_integer_and_fraction() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(3.5),
+                Scalar::Float64(-2.25),
+                Scalar::Float64(1.0),
+            ])
+            .unwrap();
+            let (frac, int) = col.modf().unwrap();
+            assert!((frac.values()[0].to_f64().unwrap() - 0.5).abs() < 1e-10);
+            assert!((int.values()[0].to_f64().unwrap() - 3.0).abs() < 1e-10);
+            assert!((frac.values()[1].to_f64().unwrap() - (-0.25)).abs() < 1e-10);
+            assert!((int.values()[1].to_f64().unwrap() - (-2.0)).abs() < 1e-10);
+            assert!((frac.values()[2].to_f64().unwrap() - 0.0).abs() < 1e-10);
+            assert!((int.values()[2].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn spacing_returns_ulp() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+                Scalar::Float64(0.0),
+            ])
+            .unwrap();
+            let result = col.spacing().unwrap();
+            // Spacing at 1.0 is about 2.2e-16
+            let s1 = result.values()[0].to_f64().unwrap();
+            assert!(s1 > 0.0 && s1 < 1e-15);
+            // Spacing is symmetric for negative numbers
+            let s_neg1 = result.values()[1].to_f64().unwrap();
+            assert!((s1 - s_neg1).abs() < 1e-20);
+            // Spacing at 0 is MIN_POSITIVE
+            assert_eq!(result.values()[2].to_f64().unwrap(), f64::MIN_POSITIVE);
+        }
     }
 }

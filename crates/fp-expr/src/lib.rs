@@ -241,6 +241,10 @@ pub enum Expr {
     CumMax {
         expr: Box<Expr>,
     },
+    PctChange {
+        expr: Box<Expr>,
+        periods: usize,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -562,6 +566,10 @@ pub fn evaluate(
         Expr::CumMax { expr } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.cummax().map_err(ExprError::from)
+        }
+        Expr::PctChange { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.pct_change(*periods).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -965,7 +973,8 @@ impl MaterializedView {
             | Expr::CumSum { expr }
             | Expr::CumProd { expr }
             | Expr::CumMin { expr }
-            | Expr::CumMax { expr } => Self::extract_series(expr, series_set),
+            | Expr::CumMax { expr }
+            | Expr::PctChange { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -1201,6 +1210,10 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.cummax().map_err(ExprError::from)
         }
+        Expr::PctChange { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.pct_change(*periods).map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -1271,7 +1284,7 @@ fn evaluate_delta_comparison(
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
-//     .cummax(), .round(decimals), .replace(to_replace, value), .astype(dtype),
+//     .cummax(), .pct_change(periods), .round(decimals), .replace(to_replace, value), .astype(dtype),
 //     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
 //     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
 //     .notnull()
@@ -1897,6 +1910,19 @@ fn parse_i64_literal_argument(
         )));
     };
     Ok(value)
+}
+
+fn parse_usize_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<usize, ExprError> {
+    let value = parse_i64_literal_argument(tokens, pos, context)?;
+    usize::try_from(value).map_err(|_| {
+        ExprError::ParseError(format!(
+            "{context} must be a non-negative integer, got {value}"
+        ))
+    })
 }
 
 fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
@@ -2738,6 +2764,66 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                             "unsupported cumulative method: {other}"
                         )));
                     }
+                };
+                *pos = arg_pos + 1;
+            }
+            "pct_change" => {
+                let mut arg_pos = *pos + 3;
+                let mut periods = 1_usize;
+                let mut periods_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated pct_change() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "periods" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected pct_change() keyword argument: {keyword}"
+                            )));
+                        }
+                        if periods_seen {
+                            return Err(ExprError::ParseError(
+                                "pct_change() periods argument was provided more than once".into(),
+                            ));
+                        }
+                        arg_pos += 2;
+                    } else if periods_seen {
+                        return Err(ExprError::ParseError(
+                            "pct_change() accepts only one periods argument".into(),
+                        ));
+                    }
+
+                    periods =
+                        parse_usize_literal_argument(tokens, &mut arg_pos, "pct_change() periods")?;
+                    periods_seen = true;
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "pct_change() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in pct_change() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::PctChange {
+                    expr: Box::new(expr),
+                    periods,
                 };
                 *pos = arg_pos + 1;
             }
@@ -4524,6 +4610,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_pct_change_method_call_periods() -> Result<(), ExprError> {
+        let default = super::parse_expr("a.pct_change()")?;
+        let Expr::PctChange { periods, .. } = default else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(periods, 1);
+
+        let positional = super::parse_expr("a.pct_change(2)")?;
+        let Expr::PctChange {
+            expr: inner,
+            periods,
+        } = positional
+        else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(periods, 2);
+
+        let keyword = super::parse_expr("a.pct_change(periods=3)")?;
+        let Expr::PctChange { periods, .. } = keyword else {
+            return Err(ExprError::ParseError(
+                "expected PctChange expression".into(),
+            ));
+        };
+        assert_eq!(periods, 3);
+        assert!(super::parse_expr("a.pct_change(-1)").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn parse_round_method_call_optional_decimals() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.round()")?;
         let Expr::Round {
@@ -5785,6 +5910,56 @@ mod tests {
 
         let filtered = super::query_str("a.cumsum().gt(4)", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_pct_change_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(2),
+                    Scalar::Int64(4),
+                    Scalar::Int64(8),
+                    Scalar::Int64(16),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let pct = super::eval_str("a.pct_change()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            pct.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0)
+            ]
+        );
+
+        let pct_two = super::eval_str("a.pct_change(periods=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            pct_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0)
+            ]
+        );
+
+        let filtered = super::query_str("a.pct_change().eq(1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            filtered.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
         Ok(())
     }
 

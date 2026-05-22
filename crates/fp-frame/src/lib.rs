@@ -964,6 +964,8 @@ fn mode_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
 }
 
 fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
+    // DISC-011: Nullable extension Int64 dtype parity. Int64 columns preserve
+    // integer encoding via ValidityMask even when nulls are present for padding.
     let mut saw_bool = false;
     let mut saw_int = false;
     let mut saw_float = false;
@@ -979,20 +981,17 @@ fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
         }
     }
 
-    // Pandas widens integer mode columns to Float64 when padding with
-    // NaN is required for shorter mode lists. Bool+NaN is represented
-    // as object upstream, but FrankenPandas keeps the bool/null values
-    // directly because dtype is not yet an object bucket.
-    if saw_float || (saw_missing && saw_int) || (saw_bool && saw_int) {
+    // Only promote to Float64 when actual Float64 values are present or when
+    // bool and int are mixed. Nulls no longer force Int64 → Float64 promotion.
+    if saw_float || (saw_bool && saw_int) {
         Some(DType::Float64)
     } else if saw_int {
         Some(DType::Int64)
     } else if saw_bool {
         Some(DType::Bool)
     } else if saw_missing {
-        // All-null (or padding-only) column: fall back to Float64 so
-        // Column::new can materialize a nullable numeric column.
-        Some(DType::Float64)
+        // All-null column: use Int64 as nullable sentinel (DISC-011 extension).
+        Some(DType::Int64)
     } else {
         None
     }
@@ -56336,6 +56335,7 @@ mod tests {
 
     #[test]
     fn series_mode_dropna_false_sorts_missing_last() {
+        // DISC-011: Int64 preserved, not promoted to Float64 when nulls present.
         let s = Series::from_values(
             "x",
             (0..4_i64).map(IndexLabel::from).collect(),
@@ -56351,7 +56351,7 @@ mod tests {
         let result = s.mode_with_dropna(false).unwrap();
         assert_eq!(
             result.values(),
-            &[Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Int64(1), Scalar::Null(NullKind::NaN)]
         );
     }
 
@@ -67611,11 +67611,10 @@ mod tests {
     }
 
     #[test]
-    fn df_mode_widens_int64_to_float64_when_padding_with_nan() {
-        // FP-P2D-057/dataframe_mode_ties_strict: column 'a' has two tied
-        // modes (forcing max_modes=2) while column 'b' has a single
-        // mode. Pandas widens column 'b' to float64 because the pad
-        // cell is NaN.
+    fn df_mode_preserves_int64_when_padding_with_null() {
+        // DISC-011: Nullable extension Int64 dtype parity. Column 'a' has two
+        // tied modes (max_modes=2) while column 'b' has single mode. With
+        // extension Int64, column 'b' preserves Int64 dtype with null padding.
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
@@ -67646,10 +67645,10 @@ mod tests {
         let col_a = &result.columns()["a"];
         let col_b = &result.columns()["b"];
         assert_eq!(col_a.dtype(), DType::Int64);
-        assert_eq!(col_b.dtype(), DType::Float64, "b must widen to Float64");
+        assert_eq!(col_b.dtype(), DType::Int64, "b stays Int64 (DISC-011)");
         assert_eq!(col_a.values()[0], Scalar::Int64(1));
         assert_eq!(col_a.values()[1], Scalar::Int64(2));
-        assert_eq!(col_b.values()[0], Scalar::Float64(3.0));
+        assert_eq!(col_b.values()[0], Scalar::Int64(3));
         assert!(col_b.values()[1].is_missing(), "b padding must be null");
     }
 

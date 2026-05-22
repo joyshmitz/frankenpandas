@@ -2628,6 +2628,54 @@ impl Column {
         self.prod()
     }
 
+    /// Alias for sum, matching np.nansum.
+    #[must_use]
+    pub fn nansum(&self) -> Scalar {
+        self.sum()
+    }
+
+    /// Alias for mean, matching np.nanmean.
+    #[must_use]
+    pub fn nanmean(&self) -> Scalar {
+        self.mean()
+    }
+
+    /// Alias for min, matching np.nanmin.
+    #[must_use]
+    pub fn nanmin(&self) -> Scalar {
+        self.min()
+    }
+
+    /// Alias for max, matching np.nanmax.
+    #[must_use]
+    pub fn nanmax(&self) -> Scalar {
+        self.max()
+    }
+
+    /// Alias for prod, matching np.nanprod.
+    #[must_use]
+    pub fn nanprod(&self) -> Scalar {
+        self.prod()
+    }
+
+    /// Alias for std, matching np.nanstd.
+    #[must_use]
+    pub fn nanstd(&self, ddof: usize) -> Scalar {
+        self.std(ddof)
+    }
+
+    /// Alias for var, matching np.nanvar.
+    #[must_use]
+    pub fn nanvar(&self, ddof: usize) -> Scalar {
+        self.var(ddof)
+    }
+
+    /// Alias for median, matching np.nanmedian.
+    #[must_use]
+    pub fn nanmedian(&self) -> Scalar {
+        self.median()
+    }
+
     fn skipna_false_missing_result(&self, skipna: bool) -> Option<Scalar> {
         if skipna || !self.values.iter().any(Scalar::is_missing) {
             return None;

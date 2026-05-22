@@ -5900,6 +5900,27 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.isnan()?)
     }
 
+    /// Element-wise check for negative infinity.
+    ///
+    /// Matches `np.isneginf(series)`. Returns boolean Series.
+    pub fn isneginf(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.isneginf()?)
+    }
+
+    /// Element-wise check for positive infinity.
+    ///
+    /// Matches `np.isposinf(series)`. Returns boolean Series.
+    pub fn isposinf(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.isposinf()?)
+    }
+
+    /// Replace NaN with zero and infinity with large finite numbers.
+    ///
+    /// Matches `np.nan_to_num(series)`.
+    pub fn nan_to_num(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.nan_to_num()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35442,6 +35463,27 @@ impl DataFrame {
     /// Matches `np.isnan(df)`. Returns boolean DataFrame.
     pub fn isnan(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.isnan())
+    }
+
+    /// Element-wise check for negative infinity.
+    ///
+    /// Matches `np.isneginf(df)`. Returns boolean DataFrame.
+    pub fn isneginf(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.isneginf())
+    }
+
+    /// Element-wise check for positive infinity.
+    ///
+    /// Matches `np.isposinf(df)`. Returns boolean DataFrame.
+    pub fn isposinf(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.isposinf())
+    }
+
+    /// Replace NaN with zero and infinity with large finite numbers.
+    ///
+    /// Matches `np.nan_to_num(df)`.
+    pub fn nan_to_num(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.nan_to_num())
     }
 
     /// Add a scalar to all numeric columns.

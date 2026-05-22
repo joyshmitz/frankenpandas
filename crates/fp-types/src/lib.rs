@@ -1065,6 +1065,24 @@ impl Timestamp {
         if self.is_nat() { None } else { Some("ns") }
     }
 
+    /// Numpy datetime64 scalar payload, matching `pd.Timestamp.asm8`.
+    #[must_use]
+    pub const fn asm8(&self) -> i64 {
+        self.value()
+    }
+
+    /// Convert to a datetime64 payload, matching `pd.Timestamp.to_datetime64()`.
+    #[must_use]
+    pub const fn to_datetime64(&self) -> i64 {
+        self.value()
+    }
+
+    /// Convert to a numpy scalar payload, matching `pd.Timestamp.to_numpy()`.
+    #[must_use]
+    pub const fn to_numpy(&self) -> i64 {
+        self.value()
+    }
+
     /// Add a Timedelta. NaT in either operand → NaT; saturates on overflow.
     /// TZ is preserved from `self`.
     #[must_use]
@@ -4333,6 +4351,19 @@ mod tests {
         let nat = Timestamp::nat();
         assert_eq!(nat.value(), Timestamp::NAT);
         assert_eq!(nat.unit(), None);
+    }
+
+    #[test]
+    fn timestamp_numpy_datetime64_materializers_match_value_twksi() {
+        let ts = Timestamp::from_nanos(1_000_000_123);
+        assert_eq!(ts.asm8(), ts.value());
+        assert_eq!(ts.to_datetime64(), ts.value());
+        assert_eq!(ts.to_numpy(), ts.value());
+
+        let nat = Timestamp::nat();
+        assert_eq!(nat.asm8(), Timestamp::NAT);
+        assert_eq!(nat.to_datetime64(), Timestamp::NAT);
+        assert_eq!(nat.to_numpy(), Timestamp::NAT);
     }
 
     #[test]

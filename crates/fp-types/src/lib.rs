@@ -1271,6 +1271,47 @@ impl Timestamp {
     pub fn normalize(&self) -> Self {
         self.floor_to_unit("D")
     }
+
+    /// Return an ISO 8601 string representation of the timestamp.
+    ///
+    /// Matches `pd.Timestamp.isoformat()`. NaT returns "NaT".
+    #[must_use]
+    pub fn isoformat(&self) -> String {
+        if self.is_nat() {
+            return "NaT".to_string();
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        let days_since_epoch = total_secs / 86400;
+        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+
+        let mut days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+
+        let hour = secs_of_day / 3600;
+        let minute = (secs_of_day % 3600) / 60;
+        let second = secs_of_day % 60;
+
+        let base = if sub_nanos == 0 {
+            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
+        } else {
+            let micros = sub_nanos / 1000;
+            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}")
+        };
+        match &self.tz {
+            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
+            Some(tz) => format!("{base}[{tz}]"),
+            None => base,
+        }
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -4652,5 +4693,23 @@ mod tests {
         assert_eq!(Timedelta::unit_to_nanos(""), Some(Timedelta::NANOS_PER_DAY));
         // Unknown alias → None.
         assert_eq!(Timedelta::unit_to_nanos("century"), None);
+    }
+
+    #[test]
+    fn timestamp_isoformat_basic() {
+        let ts = Timestamp::from_nanos(0);
+        assert_eq!(ts.isoformat(), "1970-01-01T00:00:00");
+
+        let ts_utc = Timestamp::from_nanos_tz(0, "UTC");
+        assert_eq!(ts_utc.isoformat(), "1970-01-01T00:00:00+00:00");
+
+        let ts_tz = Timestamp::from_nanos_tz(
+            Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR * 14 + Timedelta::NANOS_PER_MIN * 30,
+            "America/New_York",
+        );
+        assert!(ts_tz.isoformat().contains("1970-01-02T14:30:00"));
+        assert!(ts_tz.isoformat().contains("[America/New_York]"));
+
+        assert_eq!(Timestamp::nat().isoformat(), "NaT");
     }
 }

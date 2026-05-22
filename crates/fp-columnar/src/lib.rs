@@ -2717,6 +2717,48 @@ impl Column {
         self.notnull()
     }
 
+    /// Per-row check for finite values (not NaN or infinity).
+    pub fn isfinite(&self) -> Result<Self, ColumnError> {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(f) => Scalar::Bool(f.is_finite()),
+                Scalar::Int64(_) => Scalar::Bool(true),
+                _ if v.is_missing() => Scalar::Bool(false),
+                _ => Scalar::Bool(true),
+            })
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Per-row check for infinite values.
+    pub fn isinf(&self) -> Result<Self, ColumnError> {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(f) => Scalar::Bool(f.is_infinite()),
+                _ => Scalar::Bool(false),
+            })
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Per-row check for NaN values.
+    pub fn isnan(&self) -> Result<Self, ColumnError> {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(f) => Scalar::Bool(f.is_nan()),
+                Scalar::Null(NullKind::NaN) => Scalar::Bool(true),
+                _ => Scalar::Bool(false),
+            })
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
     /// Sample variance (ddof-parameterized).
     ///
     /// Matches `pd.Series.var(ddof=1)`.

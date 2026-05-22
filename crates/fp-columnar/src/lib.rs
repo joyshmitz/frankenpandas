@@ -1632,9 +1632,19 @@ impl Column {
         self.binary_numeric(right, ArithmeticOp::Sub)
     }
 
+    /// Alias for [`sub`](Self::sub), matching `pd.Series.subtract()`.
+    pub fn subtract(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.sub(right)
+    }
+
     /// Element-wise multiplication, matching `pd.Series.mul()`.
     pub fn mul(&self, right: &Self) -> Result<Self, ColumnError> {
         self.binary_numeric(right, ArithmeticOp::Mul)
+    }
+
+    /// Alias for [`mul`](Self::mul), matching `pd.Series.multiply()`.
+    pub fn multiply(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.mul(right)
     }
 
     /// Element-wise true division, matching `pd.Series.div()`.
@@ -1645,6 +1655,26 @@ impl Column {
     /// Alias for [`div`](Self::div), matching `pd.Series.divide()`.
     pub fn divide(&self, right: &Self) -> Result<Self, ColumnError> {
         self.div(right)
+    }
+
+    /// Alias for [`div`](Self::div), matching `pd.Series.truediv()`.
+    pub fn truediv(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.div(right)
+    }
+
+    /// Element-wise floor division, matching `pd.Series.floordiv()`.
+    pub fn floordiv(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::FloorDiv)
+    }
+
+    /// Element-wise modulo, matching `pd.Series.mod()`.
+    pub fn r#mod(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Mod)
+    }
+
+    /// Element-wise exponentiation, matching `pd.Series.pow()`.
+    pub fn pow(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Pow)
     }
 
     /// Element-wise comparison producing a `Bool`-typed column.
@@ -5178,6 +5208,38 @@ mod tests {
         assert_eq!(
             left.divide(&right).expect("divide"),
             left.div(&right).expect("div")
+        );
+    }
+
+    #[test]
+    fn remaining_pandas_arithmetic_aliases_match_binary_numeric() {
+        let left = Column::from_values(vec![Scalar::Float64(10.0)]).expect("left");
+        let right = Column::from_values(vec![Scalar::Float64(3.0)]).expect("right");
+
+        assert_eq!(
+            left.subtract(&right).expect("subtract"),
+            left.sub(&right).expect("sub")
+        );
+        assert_eq!(
+            left.multiply(&right).expect("multiply"),
+            left.mul(&right).expect("mul")
+        );
+        assert_eq!(
+            left.truediv(&right).expect("truediv"),
+            left.div(&right).expect("div")
+        );
+        assert_eq!(
+            left.floordiv(&right).expect("floordiv"),
+            left.binary_numeric(&right, ArithmeticOp::FloorDiv)
+                .expect("floordiv")
+        );
+        assert_eq!(
+            left.r#mod(&right).expect("mod"),
+            left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod")
+        );
+        assert_eq!(
+            left.pow(&right).expect("pow"),
+            left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow")
         );
     }
 

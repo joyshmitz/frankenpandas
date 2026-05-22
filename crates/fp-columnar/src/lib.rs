@@ -2608,6 +2608,41 @@ impl Column {
         Self::new(self.dtype, values)
     }
 
+    /// Alias for concat, matching np.append.
+    pub fn append(&self, other: &Self) -> Result<Self, ColumnError> {
+        self.concat(other)
+    }
+
+    /// Insert values at given index.
+    ///
+    /// Matches np.insert(). Returns new column with values inserted.
+    pub fn insert(&self, index: usize, values: &[Scalar]) -> Result<Self, ColumnError> {
+        let idx = index.min(self.values.len());
+        let mut out = Vec::with_capacity(self.values.len() + values.len());
+        out.extend_from_slice(&self.values[..idx]);
+        out.extend_from_slice(values);
+        out.extend_from_slice(&self.values[idx..]);
+        Self::new(self.dtype, out)
+    }
+
+    /// Delete values at given indices.
+    ///
+    /// Matches np.delete(). Returns new column with values removed.
+    pub fn delete(&self, indices: &[usize]) -> Result<Self, ColumnError> {
+        let mut to_delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for &i in indices {
+            to_delete.insert(i);
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !to_delete.contains(i))
+            .map(|(_, v)| v.clone())
+            .collect();
+        Self::new(self.dtype, out)
+    }
+
     /// Repeat each value `repeats` times contiguously.
     ///
     /// Matches `pd.Series.repeat(n)`. `repeats=0` yields an empty

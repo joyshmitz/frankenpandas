@@ -4928,6 +4928,30 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Unary positive (identity for numeric, error for non-numeric).
+    pub fn positive(&self) -> Result<Self, ColumnError> {
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            match v {
+                Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Timedelta64(_) => {}
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Ok(self.clone())
+    }
+
+    /// Alias for positive.
+    pub fn negative(&self) -> Result<Self, ColumnError> {
+        self.neg()
+    }
+
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());

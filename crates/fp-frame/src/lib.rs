@@ -19666,6 +19666,27 @@ impl StringAccessor<'_> {
         self.split_df_n(pat, n)
     }
 
+    /// Split strings by pattern from the right, expanding into a DataFrame.
+    ///
+    /// Analogous to `pandas.Series.str.rsplit(expand=True)`.
+    /// Shorter splits are padded with NaN.
+    pub fn rsplit_expand(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        self.rsplit_expand_n(pat, None)
+    }
+
+    /// Split strings by pattern from the right with an optional split limit, expanding into a DataFrame.
+    ///
+    /// Analogous to `pandas.Series.str.rsplit(pat, n=..., expand=True)`.
+    /// Shorter splits are padded with NaN.
+    pub fn rsplit_expand_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
+        if pat.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "empty separator".to_string(),
+            ));
+        }
+        self.rsplit_df(pat, n)
+    }
+
     /// Count non-overlapping matches of a regex pattern in each string.
     ///
     /// Analogous to `pandas.Series.str.count(pat)`.
@@ -75138,6 +75159,42 @@ mod tests {
 
         let err = s.str().split_expand("").unwrap_err();
         assert!(err.to_string().contains("empty separator"));
+    }
+
+    #[test]
+    fn str_rsplit_expand_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("a_b_c".to_string()),
+                Scalar::Utf8("d_e".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().rsplit_expand("_").unwrap();
+        assert_eq!(result.column_names().len(), 3);
+        assert_eq!(result.columns["0"].values()[0], Scalar::Utf8("a".to_string()));
+        assert_eq!(result.columns["1"].values()[0], Scalar::Utf8("b".to_string()));
+        assert_eq!(result.columns["2"].values()[0], Scalar::Utf8("c".to_string()));
+        assert_eq!(result.columns["0"].values()[1], Scalar::Utf8("d".to_string()));
+        assert_eq!(result.columns["1"].values()[1], Scalar::Utf8("e".to_string()));
+        assert!(result.columns["2"].values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_rsplit_expand_n_limits_splits_from_right() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a_b_c_d".to_string())],
+        )
+        .unwrap();
+        // n=1 means 1 split from the right: "a_b_c" and "d"
+        let result = s.str().rsplit_expand_n("_", Some(1)).unwrap();
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        assert_eq!(result.columns["0"].values()[0], Scalar::Utf8("a_b_c".to_string()));
+        assert_eq!(result.columns["1"].values()[0], Scalar::Utf8("d".to_string()));
     }
 
     // ── Rolling.corr / Rolling.cov ──

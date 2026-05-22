@@ -1217,6 +1217,14 @@ impl Column {
         self.is_empty()
     }
 
+    /// Return a deep copy of this column.
+    ///
+    /// Matches `pd.Series.copy(deep=True)` at the column storage layer.
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
     #[must_use]
     pub fn values(&self) -> &[Scalar] {
         &self.values
@@ -5850,6 +5858,14 @@ mod tests {
             assert_eq!(v, vec![Scalar::Int64(5), Scalar::Int64(6)]);
             // Column still owns its values; to_vec was a clone.
             assert_eq!(col.len(), 2);
+        }
+
+        #[test]
+        fn copy_returns_independent_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(6)]).expect("col");
+            let copied = col.copy();
+            assert_eq!(copied, col);
+            assert_ne!(copied.values().as_ptr(), col.values().as_ptr());
         }
 
         #[test]

@@ -17396,6 +17396,25 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Count non-null elements within each list.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let cnt = list.iter().filter(|v| !v.is_missing()).count();
+                        Scalar::Int64(cnt as i64)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91129,5 +91148,21 @@ mod test_select_columns_perf_76e1fd {
         let result = s.list().median().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(5.0));
         assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_list_accessor_count() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 3, null, 5]".into()),
+                Scalar::Utf8("[1, 2]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().count().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(4));
+        assert_eq!(result.column().values()[1], Scalar::Int64(2));
     }
 }

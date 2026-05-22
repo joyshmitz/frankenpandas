@@ -2701,6 +2701,43 @@ impl Column {
         nanmean(&self.values)
     }
 
+    /// Weighted average of non-missing values.
+    ///
+    /// Matches np.average(a, weights=w). Returns NaN if weights sum to zero.
+    #[must_use]
+    pub fn weighted_mean(&self, weights: &Self) -> Scalar {
+        if self.len() != weights.len() {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let mut sum = 0.0;
+        let mut weight_sum = 0.0;
+        for (v, w) in self.values.iter().zip(weights.values()) {
+            if v.is_missing() || w.is_missing() {
+                continue;
+            }
+            let vf = match v.to_f64() {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            let wf = match w.to_f64() {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            sum += vf * wf;
+            weight_sum += wf;
+        }
+        if weight_sum == 0.0 {
+            return Scalar::Null(NullKind::NaN);
+        }
+        Scalar::Float64(sum / weight_sum)
+    }
+
+    /// Alias for weighted_mean, matching np.average naming.
+    #[must_use]
+    pub fn average(&self, weights: &Self) -> Scalar {
+        self.weighted_mean(weights)
+    }
+
     /// Minimum non-missing value.
     ///
     /// Matches `pd.Series.min()` via fp-types::nanmin. Preserves dtype

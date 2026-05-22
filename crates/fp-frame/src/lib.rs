@@ -8680,19 +8680,27 @@ impl Series {
     ///
     /// Matches `pd.Series.to_csv()`.
     pub fn to_csv(&self, sep: char, include_index: bool) -> String {
-        fn format_scalar(val: &Scalar, sep: char) -> String {
+        self.to_csv_with_na_rep(sep, include_index, "")
+    }
+
+    /// Matches `pd.Series.to_csv(na_rep=...)`.
+    pub fn to_csv_with_na_rep(&self, sep: char, include_index: bool, na_rep: &str) -> String {
+        fn format_scalar(val: &Scalar, sep: char, na_rep: &str) -> String {
+            if val.is_missing() {
+                return csv_escape(na_rep, sep);
+            }
             match val {
-                Scalar::Null(_) => String::new(),
+                Scalar::Null(_) => csv_escape(na_rep, sep),
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 // Per br-frankenpandas-41edff: pandas-canonical `.0` suffix.
                 Scalar::Float64(v) => format_pandas_csv_float(*v),
                 Scalar::Utf8(s) => csv_escape(s, sep),
-                Scalar::Timedelta64(v) if *v == Timedelta::NAT => String::new(),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => csv_escape(na_rep, sep),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
-                Scalar::Datetime64(v) if *v == Timedelta::NAT => String::new(),
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => csv_escape(na_rep, sep),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
-                Scalar::Period(v) if *v == i64::MIN => String::new(),
+                Scalar::Period(v) if *v == i64::MIN => csv_escape(na_rep, sep),
                 Scalar::Period(v) => format!("Period[{v}]"),
                 Scalar::Interval(interval) => format!("{interval}"),
             }
@@ -8714,9 +8722,9 @@ impl Series {
                     IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
                     IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
                 };
-                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep)));
+                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep, na_rep)));
             } else {
-                out.push_str(&format!("{}\n", format_scalar(val, sep)));
+                out.push_str(&format!("{}\n", format_scalar(val, sep, na_rep)));
             }
         }
         out
@@ -70224,6 +70232,36 @@ mod tests {
         .unwrap();
         let csv = s.to_csv(',', false);
         assert!(csv.contains("\"line\rbreak\""));
+    }
+
+    #[test]
+    fn series_to_csv_with_na_rep_replaces_missing_values() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_na_rep(',', false, "NA");
+        assert_eq!(csv, "x\n10.0\nNA\nNA\n");
+    }
+
+    #[test]
+    fn series_to_csv_with_na_rep_escapes_separator() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_na_rep(',', false, "n/a,missing");
+        assert_eq!(csv, "x\n\"n/a,missing\"\n");
     }
 
     #[test]

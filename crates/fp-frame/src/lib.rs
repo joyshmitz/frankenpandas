@@ -5921,6 +5921,25 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.nan_to_num()?)
     }
 
+    /// Element-wise negation (-x).
+    ///
+    /// Matches `np.negative(series)` / `-series`.
+    pub fn neg(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.neg()?)
+    }
+
+    /// Alias for neg(). Matches `np.negative(series)`.
+    pub fn negative(&self) -> Result<Self, FrameError> {
+        self.neg()
+    }
+
+    /// Element-wise identity (+x, no-op for numeric).
+    ///
+    /// Matches `np.positive(series)` / `+series`.
+    pub fn positive(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.positive()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35484,6 +35503,25 @@ impl DataFrame {
     /// Matches `np.nan_to_num(df)`.
     pub fn nan_to_num(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.nan_to_num())
+    }
+
+    /// Element-wise negation (-x).
+    ///
+    /// Matches `np.negative(df)` / `-df`.
+    pub fn neg(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.neg())
+    }
+
+    /// Alias for neg(). Matches `np.negative(df)`.
+    pub fn negative(&self) -> Result<Self, FrameError> {
+        self.neg()
+    }
+
+    /// Element-wise identity (+x, no-op for numeric).
+    ///
+    /// Matches `np.positive(df)` / `+df`.
+    pub fn positive(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.positive())
     }
 
     /// Add a scalar to all numeric columns.

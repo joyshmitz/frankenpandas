@@ -10231,8 +10231,8 @@ impl DataFrameIoExt for DataFrame {
 /// Import this trait to call `series.to_pickle(path)`,
 /// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
 /// `series.to_csv_string()`, `series.to_markdown_string()`,
-/// `series.to_json_string("records")`, `series.to_hdf(path)`,
-/// `series.to_excel(path)`,
+/// `series.to_latex_string()`, `series.to_json_string("records")`,
+/// `series.to_hdf(path)`, `series.to_excel(path)`,
 /// `series.to_sql(conn, table, if_exists)`, or `series.to_clipboard()`
 /// directly on Series values.
 pub trait SeriesIoExt {
@@ -10308,6 +10308,28 @@ pub trait SeriesIoExt {
         &self,
         path: &Path,
         options: &MarkdownWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this Series to a LaTeX tabular string.
+    ///
+    /// Matches `pd.Series.to_latex()` with no buffer for the supported table
+    /// formatter surface.
+    fn to_latex_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this Series to a LaTeX tabular string with explicit options.
+    fn to_latex_string_with_options(&self, options: &LatexWriteOptions) -> Result<String, IoError>;
+
+    /// Write this Series to a LaTeX tabular file.
+    ///
+    /// Uses a file-suffixed name to avoid colliding with
+    /// `Series::to_latex(include_index)`.
+    fn to_latex_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to a LaTeX tabular file with explicit options.
+    fn to_latex_file_with_options(
+        &self,
+        path: &Path,
+        options: &LatexWriteOptions,
     ) -> Result<(), IoError>;
 
     /// Write this Series to a JSON file.
@@ -10468,6 +10490,26 @@ impl SeriesIoExt for Series {
         options: &MarkdownWriteOptions,
     ) -> Result<(), IoError> {
         write_markdown_with_options(&self.to_frame(None)?, path, options)
+    }
+
+    fn to_latex_string(&self) -> Result<String, IoError> {
+        self.to_latex_string_with_options(&LatexWriteOptions::default())
+    }
+
+    fn to_latex_string_with_options(&self, options: &LatexWriteOptions) -> Result<String, IoError> {
+        write_latex_string_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_latex_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_latex_file_with_options(path, &LatexWriteOptions::default())
+    }
+
+    fn to_latex_file_with_options(
+        &self,
+        path: &Path,
+        options: &LatexWriteOptions,
+    ) -> Result<(), IoError> {
+        write_latex_with_options(&self.to_frame(None)?, path, options)
     }
 
     fn to_json_file(&self, path: &Path, orient: &str) -> Result<(), IoError> {
@@ -11368,6 +11410,55 @@ mod tests {
             source
                 .to_markdown_string_with_options(&options)
                 .expect("series markdown options string")
+        );
+    }
+
+    #[test]
+    fn series_latex_extension_aliases_forward_options() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales&tax",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Utf8("a&b".into()), Scalar::Null(NullKind::NaN)],
+        )
+        .expect("source series");
+        let options = LatexWriteOptions {
+            include_index: false,
+            na_rep: "NA".to_owned(),
+            index_label: Some("ignored".to_owned()),
+            escape: true,
+        };
+
+        assert_eq!(
+            source.to_latex_string().expect("series latex string"),
+            write_latex_string(&source.to_frame(None).expect("series frame"))
+                .expect("frame latex string")
+        );
+        assert_eq!(
+            source
+                .to_latex_string_with_options(&options)
+                .expect("series latex options"),
+            write_latex_string_with_options(
+                &source.to_frame(None).expect("series options frame"),
+                &options,
+            )
+            .expect("frame latex options")
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_series_latex_{}_{}.tex",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_latex_file_with_options(&path, &options)
+            .expect("series latex file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read series latex file"),
+            source
+                .to_latex_string_with_options(&options)
+                .expect("series latex options string")
         );
     }
 

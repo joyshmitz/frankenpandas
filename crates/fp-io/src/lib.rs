@@ -10230,7 +10230,8 @@ impl DataFrameIoExt for DataFrame {
 ///
 /// Import this trait to call `series.to_pickle(path)`,
 /// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
-/// `series.to_csv_string()`, `series.to_hdf(path)`, `series.to_excel(path)`,
+/// `series.to_csv_string()`, `series.to_json_string("records")`,
+/// `series.to_hdf(path)`, `series.to_excel(path)`,
 /// `series.to_sql(conn, table, if_exists)`, or `series.to_clipboard()`
 /// directly on Series values.
 pub trait SeriesIoExt {
@@ -10282,6 +10283,18 @@ pub trait SeriesIoExt {
 
     /// Serialize this Series to a CSV string with explicit write options.
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError>;
+
+    /// Write this Series to a JSON file.
+    ///
+    /// Matches `pd.Series.to_json(path, orient=...)` for the supported Series
+    /// JSON orientations.
+    fn to_json_file(&self, path: &Path, orient: &str) -> Result<(), IoError>;
+
+    /// Serialize this Series to a JSON string.
+    ///
+    /// Matches `pd.Series.to_json(orient=...)` for the supported Series JSON
+    /// orientations.
+    fn to_json_string(&self, orient: &str) -> Result<String, IoError>;
 
     /// Write this Series to an HDF5 file at the default key.
     ///
@@ -10406,6 +10419,15 @@ impl SeriesIoExt for Series {
 
     fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
         write_csv_string_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_json_file(&self, path: &Path, orient: &str) -> Result<(), IoError> {
+        std::fs::write(path, self.to_json_string(orient)?)?;
+        Ok(())
+    }
+
+    fn to_json_string(&self, orient: &str) -> Result<String, IoError> {
+        Ok(Series::to_json(self, orient)?)
     }
 
     fn to_hdf(&self, path: &Path) -> Result<(), IoError> {
@@ -11208,6 +11230,45 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("read series csv file"),
             csv
+        );
+    }
+
+    #[test]
+    fn series_json_extension_aliases_use_series_orients() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+
+        assert_eq!(
+            source
+                .to_json_string("records")
+                .expect("series records json"),
+            "[10,12]"
+        );
+
+        let split: serde_json::Value =
+            serde_json::from_str(&source.to_json_string("split").expect("series split json"))
+                .expect("parse split json");
+        assert_eq!(split["name"], "sales");
+        assert_eq!(split["index"], serde_json::json!(["r1", "r2"]));
+        assert_eq!(split["data"], serde_json::json!([10, 12]));
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_series_json_{}_{}.json",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_json_file(&path, "index")
+            .expect("series json file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read series json file"),
+            source.to_json("index").expect("series index json")
         );
     }
 

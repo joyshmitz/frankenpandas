@@ -5827,6 +5827,44 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.signbit()?)
     }
 
+    /// Convert angles from degrees to radians.
+    ///
+    /// Matches `np.radians(series)` / `np.deg2rad(series)`.
+    pub fn radians(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.radians()?)
+    }
+
+    /// Alias for radians(). Matches `np.deg2rad(series)`.
+    pub fn deg2rad(&self) -> Result<Self, FrameError> {
+        self.radians()
+    }
+
+    /// Convert angles from radians to degrees.
+    ///
+    /// Matches `np.degrees(series)` / `np.rad2deg(series)`.
+    pub fn degrees(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.degrees()?)
+    }
+
+    /// Alias for degrees(). Matches `np.rad2deg(series)`.
+    pub fn rad2deg(&self) -> Result<Self, FrameError> {
+        self.degrees()
+    }
+
+    /// Element-wise reciprocal (1/x).
+    ///
+    /// Matches `np.reciprocal(series)`. NaN values pass through.
+    pub fn reciprocal(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.reciprocal()?)
+    }
+
+    /// Element-wise square (x^2).
+    ///
+    /// Matches `np.square(series)`. NaN values pass through.
+    pub fn square(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.square()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35296,6 +35334,44 @@ impl DataFrame {
     /// Matches `np.signbit(df)`. NaN values pass through.
     pub fn signbit(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.signbit())
+    }
+
+    /// Convert angles from degrees to radians.
+    ///
+    /// Matches `np.radians(df)` / `np.deg2rad(df)`.
+    pub fn radians(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.radians())
+    }
+
+    /// Alias for radians(). Matches `np.deg2rad(df)`.
+    pub fn deg2rad(&self) -> Result<Self, FrameError> {
+        self.radians()
+    }
+
+    /// Convert angles from radians to degrees.
+    ///
+    /// Matches `np.degrees(df)` / `np.rad2deg(df)`.
+    pub fn degrees(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.degrees())
+    }
+
+    /// Alias for degrees(). Matches `np.rad2deg(df)`.
+    pub fn rad2deg(&self) -> Result<Self, FrameError> {
+        self.degrees()
+    }
+
+    /// Element-wise reciprocal (1/x).
+    ///
+    /// Matches `np.reciprocal(df)`. NaN values pass through.
+    pub fn reciprocal(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.reciprocal())
+    }
+
+    /// Element-wise square (x^2).
+    ///
+    /// Matches `np.square(df)`. NaN values pass through.
+    pub fn square(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.square())
     }
 
     /// Add a scalar to all numeric columns.

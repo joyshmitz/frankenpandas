@@ -1015,9 +1015,11 @@ fn evaluate_delta_comparison(
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
 //   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
-//     .abs(), .fillna(value), .eq(other), .ne(other), .gt(other), .ge(other),
-//     .lt(other), .le(other), .clip(lower, upper), .round(decimals), .isna(),
-//     .notna(), .isnull(), .notnull()
+//     .abs(), .fillna(value), .add(other), .sub(other), .mul(other),
+//     .div(other), .truediv(other), .floordiv(other), .mod(other),
+//     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
+//     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
+//     .round(decimals), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1794,6 +1796,37 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     parse_postfix(expr, tokens, pos)
 }
 
+fn build_arithmetic_method_expr(
+    method: &str,
+    receiver: Expr,
+    other: Expr,
+) -> Result<Expr, ExprError> {
+    let reflected = matches!(
+        method,
+        "radd" | "rsub" | "rmul" | "rdiv" | "rtruediv" | "rfloordiv" | "rmod" | "rpow"
+    );
+    let (left, right) = if reflected {
+        (other, receiver)
+    } else {
+        (receiver, other)
+    };
+    let left = Box::new(left);
+    let right = Box::new(right);
+
+    match method {
+        "add" | "radd" => Ok(Expr::Add { left, right }),
+        "sub" | "subtract" | "rsub" => Ok(Expr::Sub { left, right }),
+        "mul" | "multiply" | "rmul" => Ok(Expr::Mul { left, right }),
+        "div" | "divide" | "truediv" | "rdiv" | "rtruediv" => Ok(Expr::Div { left, right }),
+        "floordiv" | "rfloordiv" => Ok(Expr::FloorDiv { left, right }),
+        "mod" | "rmod" => Ok(Expr::Modulo { left, right }),
+        "pow" | "rpow" => Ok(Expr::Pow { left, right }),
+        other => Err(ExprError::ParseError(format!(
+            "unsupported arithmetic method: {other}"
+        ))),
+    }
+}
+
 fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     while *pos < tokens.len() && tokens[*pos] == Token::Dot {
         let Some(Token::Ident(method)) = tokens.get(*pos + 1) else {
@@ -1853,6 +1886,29 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     value,
                 };
+                *pos = arg_pos + 1;
+            }
+            "add" | "radd" | "sub" | "subtract" | "rsub" | "mul" | "multiply" | "rmul" | "div"
+            | "divide" | "truediv" | "rdiv" | "rtruediv" | "floordiv" | "rfloordiv" | "mod"
+            | "rmod" | "pow" | "rpow" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let other = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() argument"
+                    )));
+                }
+                expr = build_arithmetic_method_expr(method, expr, other)?;
                 *pos = arg_pos + 1;
             }
             "eq" | "ne" | "gt" | "ge" | "lt" | "le" => {
@@ -3488,6 +3544,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_arithmetic_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.rsub(other=b + 10)")?;
+        let Expr::Sub { left, right } = expr else {
+            return Err(ExprError::ParseError("expected Sub expression".into()));
+        };
+        assert!(matches!(left.as_ref(), Expr::Add { .. }));
+        assert_eq!(
+            right.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.isin([1, 3,])")?;
         let Expr::IsIn {
@@ -4272,6 +4344,59 @@ mod tests {
             &mut ledger,
         )?;
         assert_eq!(keyword_filtered.index().labels(), &[1_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_arithmetic_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let added = super::eval_str("a.add(1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            added.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        let multiplied = super::eval_str("a.multiply(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            multiplied.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(6)]
+        );
+
+        let divided = super::eval_str("a.truediv(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            divided.values(),
+            &[
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.5)
+            ]
+        );
+
+        let reflected = super::eval_str("a.rsub(other=10)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            reflected.values(),
+            &[Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)]
+        );
+
+        let filtered = super::query_str(
+            "a.pow(2).ge(4) and a.mod(2).eq(1)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
         Ok(())
     }
 

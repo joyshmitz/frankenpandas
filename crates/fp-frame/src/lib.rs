@@ -6569,6 +6569,74 @@ impl Series {
         self.column.cov_ddof(other.column(), ddof)
     }
 
+    /// Decompose float into mantissa and exponent.
+    ///
+    /// Matches `np.frexp(x)`. Returns `(mantissa, exponent)` where:
+    /// - mantissa is in `[0.5, 1.0)` or exactly `0.0`
+    /// - exponent is an integer
+    /// - `x = mantissa * 2^exponent`
+    pub fn frexp(&self) -> Result<(Self, Self), FrameError> {
+        let (mant_col, exp_col) = self.column.frexp()?;
+        let mant = Self::new(
+            format!("{}_mantissa", self.name),
+            self.index.clone(),
+            mant_col,
+        )?;
+        let exp = Self::new(
+            format!("{}_exponent", self.name),
+            self.index.clone(),
+            exp_col,
+        )?;
+        Ok((mant, exp))
+    }
+
+    /// Compute histogram using provided bin edges.
+    ///
+    /// Matches `np.histogram(a, bins=edges)`. Returns counts for each bin.
+    /// Bins are `[edges[i], edges[i+1])` except the last which is `[edges[n-1], edges[n]]`.
+    pub fn histogram(&self, bin_edges: &[f64]) -> Result<Self, FrameError> {
+        let col = self.column.histogram(bin_edges)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new("counts".to_owned(), idx, col)
+    }
+
+    /// Compute histogram with auto-generated bins.
+    ///
+    /// Matches `np.histogram(a, bins=n_bins)`. Returns `(counts, bin_edges)`.
+    /// Bins are evenly spaced between min and max of the data.
+    pub fn histogram_auto(&self, n_bins: usize) -> Result<(Self, Vec<f64>), FrameError> {
+        let (col, edges) = self.column.histogram_auto(n_bins)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        let counts = Self::new("counts".to_owned(), idx, col)?;
+        Ok((counts, edges))
+    }
+
+    /// Compute histogram counts.
+    ///
+    /// Matches the `bins=n` histogram path behind `pd.Series.hist`.
+    #[must_use]
+    pub fn hist_counts(&self, bins: usize) -> Vec<usize> {
+        self.column.hist_counts(bins)
+    }
+
+    /// Return indices that partition the array around kth element.
+    ///
+    /// Matches `np.argpartition()`. After partition, element at kth position
+    /// is in its sorted position, elements before are `<=` kth element,
+    /// elements after are `>=` kth element.
+    pub fn argpartition(&self, kth: usize) -> Result<Vec<usize>, FrameError> {
+        Ok(self.column.argpartition(kth)?)
+    }
+
+    /// Partition array around kth smallest element.
+    ///
+    /// Matches `np.partition()`. Returns a partially sorted Series where
+    /// element at kth position is in its final sorted position.
+    pub fn partition(&self, kth: usize) -> Result<Self, FrameError> {
+        let col = self.column.partition(kth)?;
+        Self::new(self.name.clone(), self.index.clone(), col)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -93117,5 +93185,107 @@ mod test_select_columns_perf_76e1fd {
         .unwrap();
         let cov = s1.cov_ddof(&s2, 1);
         assert!((cov.to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_frexp() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(8.0)),
+                (1_i64.into(), Scalar::Float64(0.5)),
+                (2_i64.into(), Scalar::Float64(0.0)),
+            ],
+        )
+        .unwrap();
+        let (mant, exp) = s.frexp().unwrap();
+        assert_eq!(mant.name(), "x_mantissa");
+        assert_eq!(exp.name(), "x_exponent");
+        assert!((mant.values()[0].to_f64().unwrap() - 0.5).abs() < 1e-10);
+        assert_eq!(exp.values()[0], Scalar::Int64(4));
+        assert!((mant.values()[1].to_f64().unwrap() - 0.5).abs() < 1e-10);
+        assert_eq!(exp.values()[1], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn series_histogram() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(0.5)),
+                (1_i64.into(), Scalar::Float64(1.5)),
+                (2_i64.into(), Scalar::Float64(2.5)),
+                (3_i64.into(), Scalar::Float64(3.5)),
+            ],
+        )
+        .unwrap();
+        let hist = s.histogram(&[0.0, 2.0, 4.0]).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist.values()[0], Scalar::Int64(2));
+        assert_eq!(hist.values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_histogram_auto() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let (hist, edges) = s.histogram_auto(2).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn series_hist_counts() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let counts = s.hist_counts(3);
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts.iter().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn series_argpartition() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let indices = s.argpartition(1).unwrap();
+        assert_eq!(indices.len(), 3);
+    }
+
+    #[test]
+    fn series_partition() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let p = s.partition(1).unwrap();
+        assert_eq!(p.len(), 3);
+        assert!((p.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
     }
 }

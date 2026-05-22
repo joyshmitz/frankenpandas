@@ -18843,6 +18843,16 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Pandas-named alias for [`index_of`](Self::index_of).
+    pub fn index(&self, sub: &str) -> Result<Series, FrameError> {
+        self.index_of(sub)
+    }
+
+    /// Pandas-named alias for [`rindex_of`](Self::rindex_of).
+    pub fn rindex(&self, sub: &str) -> Result<Series, FrameError> {
+        self.rindex_of(sub)
+    }
+
     /// Replace tab characters with spaces.
     ///
     /// Matches `pd.Series.str.expandtabs(tabsize)`.
@@ -90625,5 +90635,21 @@ mod test_select_columns_perf_76e1fd {
             "select_columns on 2000-col DF took {}ms",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn series_str_accessor_index_rindex_aliases() {
+        let s = Series::from_values(
+            "text",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Utf8("hello world".into()), Scalar::Utf8("abcabc".into())],
+        )
+        .unwrap();
+        let idx = s.str().index("o").unwrap();
+        let idx_of = s.str().index_of("o").unwrap();
+        assert_eq!(idx.column().values(), idx_of.column().values());
+        let ridx = s.str().rindex("abc").unwrap();
+        let ridx_of = s.str().rindex_of("abc").unwrap();
+        assert_eq!(ridx.column().values(), ridx_of.column().values());
     }
 }

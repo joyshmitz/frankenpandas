@@ -8643,12 +8643,20 @@ impl Series {
     ///
     /// Matches `pd.Series.to_numpy()`. Non-numeric values become NaN.
     pub fn to_numpy(&self) -> Vec<f64> {
+        self.to_numpy_with_na_value(f64::NAN)
+    }
+
+    /// Matches `pd.Series.to_numpy(na_value=...)` for numeric output.
+    ///
+    /// Missing values use `na_value`; other non-numeric values preserve the
+    /// existing numeric-coercion behavior and become NaN.
+    pub fn to_numpy_with_na_value(&self, na_value: f64) -> Vec<f64> {
         self.column
             .values()
             .iter()
             .map(|v| {
                 if v.is_missing() {
-                    f64::NAN
+                    na_value
                 } else {
                     v.to_f64().unwrap_or(f64::NAN)
                 }
@@ -32763,6 +32771,14 @@ impl DataFrame {
     /// Matches `pd.DataFrame.to_numpy()`. Non-numeric values become NaN.
     /// Each inner vector is one row.
     pub fn to_numpy(&self) -> Vec<Vec<f64>> {
+        self.to_numpy_with_na_value(f64::NAN)
+    }
+
+    /// Matches `pd.DataFrame.to_numpy(na_value=...)` for numeric output.
+    ///
+    /// Missing values use `na_value`; other non-numeric values preserve the
+    /// existing numeric-coercion behavior and become NaN.
+    pub fn to_numpy_with_na_value(&self, na_value: f64) -> Vec<Vec<f64>> {
         (0..self.len())
             .map(|row_idx| {
                 self.column_order
@@ -32770,7 +32786,7 @@ impl DataFrame {
                     .map(|col_name| {
                         let val = &self.columns[col_name].values()[row_idx];
                         if val.is_missing() {
-                            f64::NAN
+                            na_value
                         } else {
                             val.to_f64().unwrap_or(f64::NAN)
                         }
@@ -73825,6 +73841,24 @@ mod tests {
     }
 
     #[test]
+    fn series_to_numpy_with_na_value_replaces_missing() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(4.5),
+            ],
+        )
+        .unwrap();
+
+        let arr = s.to_numpy_with_na_value(-1.25);
+        assert_eq!(arr, vec![1.0, -1.25, -1.25, 4.5]);
+    }
+
+    #[test]
     fn df_to_numpy() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -73838,6 +73872,21 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0], vec![1.0, 3.0]);
         assert_eq!(arr[1], vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn df_to_numpy_with_na_value_replaces_missing() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(f64::NAN)]),
+            ],
+        )
+        .unwrap();
+
+        let arr = df.to_numpy_with_na_value(-7.0);
+        assert_eq!(arr, vec![vec![1.0, 3.0], vec![-7.0, -7.0]]);
     }
 
     // ── DatetimeAccessor: days_in_month, is_leap_year, is_year_start/end ──

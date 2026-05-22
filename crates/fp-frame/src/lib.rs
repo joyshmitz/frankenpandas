@@ -5967,6 +5967,50 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.tile(reps)?)
     }
 
+    /// Element-wise maximum of two Series.
+    ///
+    /// Matches `np.maximum(s1, s2)`. NaN propagates.
+    pub fn maximum(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.maximum(other.column())?,
+        )
+    }
+
+    /// Element-wise minimum of two Series.
+    ///
+    /// Matches `np.minimum(s1, s2)`. NaN propagates.
+    pub fn minimum(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.minimum(other.column())?,
+        )
+    }
+
+    /// Element-wise maximum ignoring NaN.
+    ///
+    /// Matches `np.fmax(s1, s2)`. Ignores NaN.
+    pub fn fmax(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.fmax(other.column())?,
+        )
+    }
+
+    /// Element-wise minimum ignoring NaN.
+    ///
+    /// Matches `np.fmin(s1, s2)`. Ignores NaN.
+    pub fn fmin(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.fmin(other.column())?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]

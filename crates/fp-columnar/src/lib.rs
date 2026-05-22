@@ -5019,6 +5019,108 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Convert angles from degrees to radians.
+    pub fn radians(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).to_radians())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.to_radians())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Alias for radians.
+    pub fn deg2rad(&self) -> Result<Self, ColumnError> {
+        self.radians()
+    }
+
+    /// Convert angles from radians to degrees.
+    pub fn degrees(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).to_degrees())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.to_degrees())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Alias for degrees.
+    pub fn rad2deg(&self) -> Result<Self, ColumnError> {
+        self.degrees()
+    }
+
+    /// Compute element-wise reciprocal (1/x).
+    pub fn reciprocal(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(1.0 / (*x as f64))),
+                Scalar::Float64(x) => out.push(Scalar::Float64(1.0 / x)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise square (x^2).
+    pub fn square(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Int64(x * x)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x * x)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        let dtype = match self.dtype {
+            DType::Int64 => DType::Int64,
+            _ => DType::Float64,
+        };
+        Self::new(dtype, out)
+    }
+
     /// Shift column values by `periods` positions, filling vacated slots
     /// with `fill`.
     ///

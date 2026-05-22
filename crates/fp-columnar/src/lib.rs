@@ -4586,6 +4586,138 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Compute element-wise floor.
+    pub fn floor(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.floor())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise ceiling.
+    pub fn ceil(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.ceil())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise truncation toward zero.
+    pub fn trunc(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.trunc())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute exp(x) - 1 with improved precision for small x.
+    pub fn expm1(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).exp_m1())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.exp_m1())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute ln(1 + x) with improved precision for small x.
+    pub fn log1p(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).ln_1p())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.ln_1p())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise cube root.
+    pub fn cbrt(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).cbrt())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.cbrt())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Shift column values by `periods` positions, filling vacated slots
     /// with `fill`.
     ///

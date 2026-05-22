@@ -180,6 +180,10 @@ pub enum Expr {
         expr: Box<Expr>,
         negated: bool,
     },
+    FillNa {
+        expr: Box<Expr>,
+        value: Scalar,
+    },
     Between {
         expr: Box<Expr>,
         left: Scalar,
@@ -399,6 +403,10 @@ pub fn evaluate(
             } else {
                 input.isna().map_err(ExprError::from)
             }
+        }
+        Expr::FillNa { expr, value } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.fillna(value).map_err(ExprError::from)
         }
         Expr::Between {
             expr,
@@ -796,6 +804,7 @@ impl MaterializedView {
                 Self::extract_series(expr, series_set);
             }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Clip { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
@@ -920,6 +929,10 @@ fn evaluate_delta(
                 input.isna().map_err(ExprError::from)
             }
         }
+        Expr::FillNa { expr, value } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.fillna(value).map_err(ExprError::from)
+        }
         Expr::Between {
             expr,
             left,
@@ -1002,8 +1015,8 @@ fn evaluate_delta_comparison(
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
 //   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
-//     .abs(), .clip(lower, upper), .round(decimals), .isna(), .notna(),
-//     .isnull(), .notnull()
+//     .abs(), .fillna(value), .clip(lower, upper), .round(decimals), .isna(),
+//     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1816,6 +1829,30 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     negated: matches!(method.as_str(), "notna" | "notnull"),
                 };
                 *pos += 4;
+            }
+            "fillna" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "value" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected fillna() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let value = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after fillna() value".into(),
+                    ));
+                }
+                expr = Expr::FillNa {
+                    expr: Box::new(expr),
+                    value,
+                };
+                *pos = arg_pos + 1;
             }
             "isin" => {
                 let mut arg_pos = *pos + 3;
@@ -3379,6 +3416,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_fillna_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.fillna(value=-3)")?;
+        let Expr::FillNa { expr: inner, value } = expr else {
+            return Err(ExprError::ParseError("expected FillNa expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(value, Scalar::Int64(-3));
+        Ok(())
+    }
+
+    #[test]
     fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.isin([1, 3,])")?;
         let Expr::IsIn {
@@ -4073,6 +4126,43 @@ mod tests {
         assert_eq!(
             notnull.values(),
             &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_fillna_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let filled = super::eval_str("a.fillna(0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            filled.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.fillna(0) < 2", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 1_i64.into()]);
+
+        let keyword_filtered =
+            super::query_str("a.fillna(value=5) >= 3", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            keyword_filtered.index().labels(),
+            &[1_i64.into(), 2_i64.into()]
         );
         Ok(())
     }

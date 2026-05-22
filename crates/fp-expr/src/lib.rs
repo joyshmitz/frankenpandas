@@ -184,6 +184,12 @@ pub enum Expr {
         expr: Box<Expr>,
         value: Scalar,
     },
+    Where {
+        expr: Box<Expr>,
+        cond: Box<Expr>,
+        other: Option<Box<Expr>>,
+        mask: bool,
+    },
     Between {
         expr: Box<Expr>,
         left: Scalar,
@@ -407,6 +413,45 @@ pub fn evaluate(
         Expr::FillNa { expr, value } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::Where {
+            expr,
+            cond,
+            other,
+            mask,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            let condition = evaluate(cond, context, policy, ledger)?;
+            match other.as_deref() {
+                None => {
+                    if *mask {
+                        input.mask(&condition, None).map_err(ExprError::from)
+                    } else {
+                        input.r#where(&condition, None).map_err(ExprError::from)
+                    }
+                }
+                Some(Expr::Literal { value }) => {
+                    if *mask {
+                        input.mask(&condition, Some(value)).map_err(ExprError::from)
+                    } else {
+                        input
+                            .r#where(&condition, Some(value))
+                            .map_err(ExprError::from)
+                    }
+                }
+                Some(other_expr) => {
+                    let replacement = evaluate(other_expr, context, policy, ledger)?;
+                    if *mask {
+                        input
+                            .mask_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    } else {
+                        input
+                            .where_cond_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    }
+                }
+            }
         }
         Expr::Between {
             expr,
@@ -805,6 +850,15 @@ impl MaterializedView {
             }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Where {
+                expr, cond, other, ..
+            } => {
+                Self::extract_series(expr, series_set);
+                Self::extract_series(cond, series_set);
+                if let Some(other) = other {
+                    Self::extract_series(other, series_set);
+                }
+            }
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Clip { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
@@ -933,6 +987,45 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
         }
+        Expr::Where {
+            expr,
+            cond,
+            other,
+            mask,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            let condition = evaluate_delta(cond, delta_ctx, delta, policy, ledger)?;
+            match other.as_deref() {
+                None => {
+                    if *mask {
+                        input.mask(&condition, None).map_err(ExprError::from)
+                    } else {
+                        input.r#where(&condition, None).map_err(ExprError::from)
+                    }
+                }
+                Some(Expr::Literal { value }) => {
+                    if *mask {
+                        input.mask(&condition, Some(value)).map_err(ExprError::from)
+                    } else {
+                        input
+                            .r#where(&condition, Some(value))
+                            .map_err(ExprError::from)
+                    }
+                }
+                Some(other_expr) => {
+                    let replacement = evaluate_delta(other_expr, delta_ctx, delta, policy, ledger)?;
+                    if *mask {
+                        input
+                            .mask_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    } else {
+                        input
+                            .where_cond_series(&condition, &replacement)
+                            .map_err(ExprError::from)
+                    }
+                }
+            }
+        }
         Expr::Between {
             expr,
             left,
@@ -1019,7 +1112,8 @@ fn evaluate_delta_comparison(
 //     .div(other), .truediv(other), .floordiv(other), .mod(other),
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
-//     .round(decimals), .isna(), .notna(), .isnull(), .notnull()
+//     .round(decimals), .where(cond, other), .mask(cond, other), .isna(),
+//     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1909,6 +2003,48 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     )));
                 }
                 expr = build_arithmetic_method_expr(method, expr, other)?;
+                *pos = arg_pos + 1;
+            }
+            "where" | "mask" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "cond" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() first keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let cond = parse_or(tokens, &mut arg_pos)?;
+                let other = if tokens.get(arg_pos) == Some(&Token::Comma) {
+                    arg_pos += 1;
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "other" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    Some(Box::new(parse_or(tokens, &mut arg_pos)?))
+                } else {
+                    None
+                };
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() arguments"
+                    )));
+                }
+                expr = Expr::Where {
+                    expr: Box::new(expr),
+                    cond: Box::new(cond),
+                    other,
+                    mask: method == "mask",
+                };
                 *pos = arg_pos + 1;
             }
             "eq" | "ne" | "gt" | "ge" | "lt" | "le" => {
@@ -3560,6 +3696,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_where_mask_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.mask(cond=a.gt(1), other=b + 10)")?;
+        let Expr::Where {
+            expr: inner,
+            cond,
+            other,
+            mask,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Where expression".into()));
+        };
+        assert!(mask);
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(matches!(cond.as_ref(), Expr::Compare { .. }));
+        assert!(matches!(other.as_deref(), Some(Expr::Add { .. })));
+        Ok(())
+    }
+
+    #[test]
     fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.isin([1, 3,])")?;
         let Expr::IsIn {
@@ -4397,6 +4557,55 @@ mod tests {
             &mut ledger,
         )?;
         assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_where_mask_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(9), Scalar::Int64(9), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let where_scalar = super::eval_str("a.where(a > 1, 0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            where_scalar.values(),
+            &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let mask_scalar = super::eval_str("a.mask(a > 1, 0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask_scalar.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
+        );
+
+        let where_series = super::eval_str(
+            "a.where(cond=a.gt(1), other=b)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            where_series.values(),
+            &[Scalar::Int64(9), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.mask(a > 1, 0).eq(0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
         Ok(())
     }
 

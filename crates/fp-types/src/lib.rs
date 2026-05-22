@@ -1606,6 +1606,78 @@ impl Timestamp {
         }
     }
 
+    /// Return the proleptic Gregorian ordinal (number of days since Jan 1, year 1).
+    ///
+    /// Matches `pd.Timestamp.toordinal()`. Returns None for NaT.
+    #[must_use]
+    pub fn toordinal(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let y = self.year()?;
+        let m = self.month()?;
+        let d = self.day()?;
+        // Algorithm: count days from year 1 to the start of the given year,
+        // add days in the months before the given month, add the day of month.
+        // Account for leap years.
+        let y_minus_1 = y - 1;
+        let mut ordinal = y_minus_1 * 365 + y_minus_1 / 4 - y_minus_1 / 100 + y_minus_1 / 400;
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let days_before: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        ordinal += days_before[(m - 1) as usize];
+        if is_leap && m > 2 {
+            ordinal += 1;
+        }
+        ordinal += d;
+        Some(ordinal)
+    }
+
+    /// Construct a Timestamp from a proleptic Gregorian ordinal.
+    ///
+    /// Matches `pd.Timestamp.fromordinal(ordinal)`. Returns NaT for invalid ordinals.
+    #[must_use]
+    pub fn fromordinal(ordinal: i64) -> Self {
+        if ordinal <= 0 {
+            return Self { nanos: Self::NAT, tz: None };
+        }
+        // Count total days from year 1 to this ordinal
+        // Using a direct calculation algorithm
+        let mut days = ordinal;
+        // Estimate year (rough approximation, then adjust)
+        let mut y = (days * 400) / 146097 + 1;
+        loop {
+            let y_m1 = y - 1;
+            let start_of_year = y_m1 * 365 + y_m1 / 4 - y_m1 / 100 + y_m1 / 400 + 1;
+            let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let year_days = if is_leap { 366 } else { 365 };
+            if days < start_of_year {
+                y -= 1;
+            } else if days >= start_of_year + year_days {
+                y += 1;
+            } else {
+                days -= start_of_year - 1;
+                break;
+            }
+        }
+        // Now `days` is the day of year (1-indexed)
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let days_in_months: [i64; 12] = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 1_i64;
+        for &dm in &days_in_months {
+            if days <= dm {
+                break;
+            }
+            days -= dm;
+            m += 1;
+        }
+        let d = days;
+        // Convert y/m/d to days since Unix epoch, then to nanos
+        // Unix epoch is 1970-01-01, which is ordinal 719163
+        let days_since_epoch = ordinal - 719163;
+        let nanos = days_since_epoch * 24 * 60 * 60 * 1_000_000_000_i64;
+        Self { nanos, tz: None }
+    }
+
     /// Return the quarter (1-4) of the year.
     ///
     /// Matches `pd.Timestamp.quarter`. Returns None for NaT.
@@ -5552,5 +5624,36 @@ mod tests {
         assert_eq!(ts.to_unit("invalid"), None);
 
         assert_eq!(Timestamp::nat().to_unit("ns"), None);
+    }
+
+    #[test]
+    fn timestamp_toordinal() {
+        // 2026-01-01 is ordinal 738886 (days since Jan 1, year 1)
+        // Days from Unix epoch: 738886 - 719163 = 19723
+        let nanos_2026_01_01 = 19723_i64 * 24 * 60 * 60 * 1_000_000_000;
+        let ts = Timestamp::from_nanos(nanos_2026_01_01);
+        assert_eq!(ts.toordinal(), Some(738886));
+
+        // NaT returns None
+        assert_eq!(Timestamp::nat().toordinal(), None);
+    }
+
+    #[test]
+    fn timestamp_fromordinal() {
+        // Round-trip test: create a timestamp from ordinal derived from toordinal
+        // First create a known timestamp
+        let nanos_2026_01_01 = 19723_i64 * 24 * 60 * 60 * 1_000_000_000;
+        let ts_orig = Timestamp::from_nanos(nanos_2026_01_01);
+        let ordinal = ts_orig.toordinal().unwrap();
+
+        // Now convert back using fromordinal
+        let ts = Timestamp::fromordinal(ordinal);
+        assert_eq!(ts.year(), ts_orig.year());
+        assert_eq!(ts.month(), ts_orig.month());
+        assert_eq!(ts.day(), ts_orig.day());
+
+        // Invalid ordinal returns NaT
+        let nat = Timestamp::fromordinal(0);
+        assert!(nat.is_nat());
     }
 }

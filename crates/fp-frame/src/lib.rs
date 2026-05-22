@@ -1390,6 +1390,133 @@ fn csv_index_label_quote_none(
     csv_escape_quote_none_with_escapechar(&rendered, sep, escapechar, lineterminator)
 }
 
+fn csv_escape_quote_all_with_csv_options(
+    value: &str,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    if value.contains(quotechar) && !doublequote && escapechar.is_none() {
+        return Err(FrameError::CompatibilityRejected(
+            "doublequote=false requires escapechar when a quoted field contains quotechar"
+                .to_owned(),
+        ));
+    }
+
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push(quotechar);
+    for ch in value.chars() {
+        if ch == quotechar {
+            if doublequote {
+                escaped.push(quotechar);
+            } else if let Some(escape) = escapechar {
+                escaped.push(escape);
+            }
+        } else if Some(ch) == escapechar {
+            escaped.push(ch);
+        }
+        escaped.push(ch);
+    }
+    escaped.push(quotechar);
+    Ok(escaped)
+}
+
+fn format_pandas_csv_float_quote_all(
+    v: f64,
+    decimal: &str,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    let decimal = csv_decimal_or_default(decimal);
+    let mut rendered = format_pandas_csv_float(v);
+    if decimal != "." && rendered.contains('.') {
+        rendered = rendered.replace('.', decimal);
+    }
+    csv_escape_quote_all_with_csv_options(&rendered, quotechar, doublequote, escapechar)
+}
+
+fn csv_scalar_quote_all(
+    val: &Scalar,
+    na_rep: &str,
+    decimal: &str,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    if val.is_missing() {
+        return csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar);
+    }
+
+    match val {
+        Scalar::Null(_) => csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar),
+        Scalar::Bool(b) => csv_escape_quote_all_with_csv_options(
+            if *b { "True" } else { "False" },
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+        Scalar::Int64(v) => csv_escape_quote_all_with_csv_options(
+            &v.to_string(),
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+        Scalar::Float64(v) => {
+            format_pandas_csv_float_quote_all(*v, decimal, quotechar, doublequote, escapechar)
+        }
+        Scalar::Utf8(s) => csv_escape_quote_all_with_csv_options(s, quotechar, doublequote, escapechar),
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
+            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
+        }
+        Scalar::Timedelta64(v) => csv_escape_quote_all_with_csv_options(
+            &Timedelta::format(*v),
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+        Scalar::Datetime64(v) if *v == Timedelta::NAT => {
+            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
+        }
+        Scalar::Datetime64(v) => csv_escape_quote_all_with_csv_options(
+            &format_datetime_ns(*v),
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+        Scalar::Period(v) if *v == i64::MIN => {
+            csv_escape_quote_all_with_csv_options(na_rep, quotechar, doublequote, escapechar)
+        }
+        Scalar::Period(v) => csv_escape_quote_all_with_csv_options(
+            &format!("Period[{v}]"),
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+        Scalar::Interval(interval) => csv_escape_quote_all_with_csv_options(
+            &format!("{interval}"),
+            quotechar,
+            doublequote,
+            escapechar,
+        ),
+    }
+}
+
+fn csv_index_label_quote_all(
+    label: &IndexLabel,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    let rendered = match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+    };
+    csv_escape_quote_all_with_csv_options(&rendered, quotechar, doublequote, escapechar)
+}
+
 fn scalar_to_json_value(value: &Scalar) -> Value {
     match value {
         Scalar::Null(_) => Value::Null,
@@ -9388,6 +9515,86 @@ impl Series {
                 na_rep,
                 lineterminator,
                 decimal,
+                escapechar,
+            )?);
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
+    }
+
+    /// Matches `pd.Series.to_csv(quoting=csv.QUOTE_ALL)`.
+    pub fn to_csv_with_quote_all(
+        &self,
+        sep: char,
+        include_index: bool,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_format_options_index_label_decimal_quote_all(
+            sep,
+            include_index,
+            true,
+            "",
+            "\n",
+            None,
+            ".",
+            '"',
+            true,
+            None,
+        )
+    }
+
+    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=..., doublequote=..., escapechar=..., quoting=csv.QUOTE_ALL)`.
+    pub fn to_csv_with_format_options_index_label_decimal_quote_all(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        na_rep: &str,
+        lineterminator: &str,
+        index_label: Option<&str>,
+        decimal: &str,
+        quotechar: char,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_quote_all_with_csv_options(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+                out.push(sep);
+            }
+            out.push_str(&csv_escape_quote_all_with_csv_options(
+                &self.name,
+                quotechar,
+                doublequote,
+                escapechar,
+            )?);
+            out.push_str(lineterminator);
+        }
+
+        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
+            if include_index {
+                out.push_str(&csv_index_label_quote_all(
+                    label,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+                out.push(sep);
+            }
+            out.push_str(&csv_scalar_quote_all(
+                val,
+                na_rep,
+                decimal,
+                quotechar,
+                doublequote,
                 escapechar,
             )?);
             out.push_str(lineterminator);
@@ -33602,6 +33809,94 @@ impl DataFrame {
         Ok(out)
     }
 
+    /// Matches `df.to_csv(quoting=csv.QUOTE_ALL)` returning a string representation.
+    pub fn to_csv_with_quote_all(
+        &self,
+        sep: char,
+        include_index: bool,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_index_label_lineterminator_decimal_quote_all(
+            sep,
+            include_index,
+            true,
+            None,
+            "\n",
+            ".",
+            '"',
+            true,
+            None,
+        )
+    }
+
+    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quotechar=..., doublequote=..., escapechar=..., quoting=csv.QUOTE_ALL)`.
+    pub fn to_csv_with_index_label_lineterminator_decimal_quote_all(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        lineterminator: &str,
+        decimal: &str,
+        quotechar: char,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_quote_all_with_csv_options(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+                out.push(sep);
+            }
+            for (i, name) in self.column_order.iter().enumerate() {
+                if i > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_escape_quote_all_with_csv_options(
+                    name,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+            }
+            out.push_str(lineterminator);
+        }
+
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                out.push_str(&csv_index_label_quote_all(
+                    label,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+                out.push(sep);
+            }
+            for (col_idx, name) in self.column_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_scalar_quote_all(
+                    &self.columns[name].values()[row_idx],
+                    "",
+                    decimal,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                )?);
+            }
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
+    }
+
     /// Matches `df.to_csv(header=..., lineterminator=...)` returning a string representation.
     pub fn to_csv_with_header_and_lineterminator(
         &self,
@@ -34002,6 +34297,78 @@ impl DataFrame {
                         escapechar,
                     )?);
                 }
+            }
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
+    }
+
+    /// Matches `df.to_csv(quoting=csv.QUOTE_ALL)` for the options path.
+    pub fn to_csv_options_with_quote_all(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        let col_order: Vec<&str> = match columns {
+            Some(cols) => {
+                for &c in cols {
+                    if !self.columns.contains_key(c) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{c}' not found"
+                        )));
+                    }
+                }
+                cols.to_vec()
+            }
+            None => self.column_order.iter().map(|s| s.as_str()).collect(),
+        };
+
+        let lineterminator = "\n";
+        let quotechar = '"';
+        let mut out = String::new();
+
+        if include_index {
+            out.push_str(&csv_escape_quote_all_with_csv_options(
+                "",
+                quotechar,
+                true,
+                None,
+            )?);
+            out.push(sep);
+        }
+        for (i, name) in col_order.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push_str(&csv_escape_quote_all_with_csv_options(
+                name,
+                quotechar,
+                true,
+                None,
+            )?);
+        }
+        out.push_str(lineterminator);
+
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                out.push_str(&csv_index_label_quote_all(label, quotechar, true, None)?);
+                out.push(sep);
+            }
+            for (col_idx, name) in col_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_scalar_quote_all(
+                    &self.columns[*name].values()[row_idx],
+                    na_rep,
+                    ".",
+                    quotechar,
+                    true,
+                    None,
+                )?);
             }
             out.push_str(lineterminator);
         }
@@ -63715,6 +64082,25 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_with_quote_all() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("a,b".to_owned()),
+                    Scalar::Utf8("a\"b".to_owned()),
+                    Scalar::Int64(1),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_with_quote_all(',', false).unwrap();
+        assert_eq!(csv, "\"x\"\n\"a,b\"\n\"a\"\"b\"\n\"1\"\n");
+    }
+
+    #[test]
     fn dataframe_to_csv_with_header_false() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -72279,6 +72665,23 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_with_quote_all_includes_index_labels() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a,b".to_owned()),
+                Scalar::Utf8("a\"b".to_owned()),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_quote_all(',', true).unwrap();
+        assert_eq!(csv, "\"\",\"x\"\n\"0\",\"a,b\"\n\"1\",\"a\"\"b\"\n\"2\",\"1\"\n");
+    }
+
+    #[test]
     fn series_to_csv_with_header_false() {
         let s = Series::from_values(
             "x",
@@ -77372,6 +77775,23 @@ mod tests {
             .to_csv_options_with_quote_none_escapechar(',', false, "", None, Some('\\'))
             .unwrap();
         assert_eq!(csv, "x\na\\,b\na\\\\b\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_with_quote_all_quotes_na_rep() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+            )],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_options_with_quote_all(',', false, "NA", None)
+            .unwrap();
+        assert_eq!(csv, "\"x\"\n\"1\"\n\"NA\"\n");
     }
 
     #[test]

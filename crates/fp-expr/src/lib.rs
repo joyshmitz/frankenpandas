@@ -218,8 +218,8 @@ pub enum Expr {
     },
     Clip {
         expr: Box<Expr>,
-        lower: f64,
-        upper: f64,
+        lower: Option<f64>,
+        upper: Option<f64>,
     },
     Compare {
         left: Box<Expr>,
@@ -517,9 +517,7 @@ pub fn evaluate(
         }
         Expr::Clip { expr, lower, upper } => {
             let input = evaluate(expr, context, policy, ledger)?;
-            input
-                .clip(Some(*lower), Some(*upper))
-                .map_err(ExprError::from)
+            input.clip(*lower, *upper).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -1127,9 +1125,7 @@ fn evaluate_delta(
         }
         Expr::Clip { expr, lower, upper } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .clip(Some(*lower), Some(*upper))
-                .map_err(ExprError::from)
+            input.clip(*lower, *upper).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
@@ -1786,6 +1782,21 @@ fn parse_numeric_literal(tokens: &[Token], pos: &mut usize) -> Result<f64, ExprE
             "expected numeric literal, got {other:?}"
         ))),
     }
+}
+
+fn parse_optional_numeric_literal(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<Option<f64>, ExprError> {
+    if matches!(tokens.get(*pos), Some(Token::Ident(value)) if value == "None") {
+        *pos += 1;
+        return Ok(None);
+    }
+
+    parse_numeric_literal(tokens, pos)
+        .map(Some)
+        .map_err(|err| ExprError::ParseError(format!("{context}: {err}")))
 }
 
 fn parse_i32_literal(tokens: &[Token], pos: &mut usize, context: &str) -> Result<i32, ExprError> {
@@ -2475,18 +2486,108 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
             }
             "clip" => {
                 let mut arg_pos = *pos + 3;
-                let lower = parse_numeric_literal(tokens, &mut arg_pos)?;
-                if tokens.get(arg_pos) != Some(&Token::Comma) {
-                    return Err(ExprError::ParseError(
-                        "expected ',' between clip() bounds".into(),
-                    ));
-                }
-                arg_pos += 1;
-                let upper = parse_numeric_literal(tokens, &mut arg_pos)?;
-                if tokens.get(arg_pos) != Some(&Token::RParen) {
-                    return Err(ExprError::ParseError(
-                        "expected ')' after clip() bounds".into(),
-                    ));
+                let mut lower = None;
+                let mut upper = None;
+                let mut lower_seen = false;
+                let mut upper_seen = false;
+                let mut positional_count = 0_u8;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated clip() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "lower" => {
+                                if lower_seen {
+                                    return Err(ExprError::ParseError(
+                                        "clip() lower argument was provided more than once".into(),
+                                    ));
+                                }
+                                lower = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() lower",
+                                )?;
+                                lower_seen = true;
+                            }
+                            "upper" => {
+                                if upper_seen {
+                                    return Err(ExprError::ParseError(
+                                        "clip() upper argument was provided more than once".into(),
+                                    ));
+                                }
+                                upper = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() upper",
+                                )?;
+                                upper_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected clip() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "clip() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                lower = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() lower",
+                                )?;
+                                lower_seen = true;
+                            }
+                            1 => {
+                                upper = parse_optional_numeric_literal(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "clip() upper",
+                                )?;
+                                upper_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "clip() accepts at most lower and upper bounds".into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "clip() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in clip() arguments, got {other:?}"
+                            )));
+                        }
+                    }
                 }
                 expr = Expr::Clip {
                     expr: Box::new(expr),
@@ -4127,8 +4228,22 @@ mod tests {
                 name: SeriesRef("a".into())
             }
         );
-        assert_eq!(lower, 2.0);
-        assert_eq!(upper, 8.0);
+        assert_eq!(lower, Some(2.0));
+        assert_eq!(upper, Some(8.0));
+
+        let one_sided = super::parse_expr("a.clip(upper=8)")?;
+        let Expr::Clip { lower, upper, .. } = one_sided else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(lower, None);
+        assert_eq!(upper, Some(8.0));
+
+        let mixed = super::parse_expr("a.clip(2, upper=None)")?;
+        let Expr::Clip { lower, upper, .. } = mixed else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(lower, Some(2.0));
+        assert_eq!(upper, None);
         Ok(())
     }
 
@@ -5252,9 +5367,41 @@ mod tests {
             &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(8)]
         );
 
+        let lower_only = super::eval_str("a.clip(lower=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            lower_only.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
+        let upper_only = super::eval_str("a.clip(upper=8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            upper_only.values(),
+            &[Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(8)]
+        );
+
+        let lower_positional = super::eval_str("a.clip(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            lower_positional.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
+        let unchanged = super::eval_str("a.clip()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            unchanged.values(),
+            &[Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)]
+        );
+
         let filtered = super::query_str("a.clip(2, 8) == 8", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[2_i64.into()]);
         assert_eq!(filtered.columns()["a"].values(), &[Scalar::Int64(9)]);
+
+        let keyword_filtered =
+            super::query_str("a.clip(upper=8).ge(8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword_filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(
+            keyword_filtered.columns()["a"].values(),
+            &[Scalar::Int64(9)]
+        );
         Ok(())
     }
 

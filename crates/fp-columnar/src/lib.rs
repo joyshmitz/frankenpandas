@@ -6415,6 +6415,230 @@ impl Column {
         Ok((Self::new(DType::Float64, frac)?, Self::new(DType::Float64, int)?))
     }
 
+    /// Decompose float into mantissa and exponent.
+    ///
+    /// Matches np.frexp(x). Returns (mantissa, exponent) where:
+    /// - mantissa is in [0.5, 1.0) or exactly 0.0
+    /// - exponent is an integer
+    /// - x = mantissa * 2^exponent
+    pub fn frexp(&self) -> Result<(Self, Self), ColumnError> {
+        let mut mantissa = Vec::with_capacity(self.values.len());
+        let mut exponent = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                mantissa.push(Scalar::Float64(f64::NAN));
+                exponent.push(Scalar::Int64(0));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    let f = *x as f64;
+                    if f == 0.0 {
+                        mantissa.push(Scalar::Float64(0.0));
+                        exponent.push(Scalar::Int64(0));
+                    } else {
+                        let bits = f.abs().to_bits();
+                        let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+                        let exp = exp_bits - 1022; // normalized mantissa is in [0.5, 1.0)
+                        let mant_bits = (bits & 0x000f_ffff_ffff_ffff) | 0x3fe0_0000_0000_0000;
+                        let mant = f64::from_bits(mant_bits);
+                        let mant = if f < 0.0 { -mant } else { mant };
+                        mantissa.push(Scalar::Float64(mant));
+                        exponent.push(Scalar::Int64(exp));
+                    }
+                }
+                Scalar::Float64(x) => {
+                    if x.is_nan() {
+                        mantissa.push(Scalar::Float64(f64::NAN));
+                        exponent.push(Scalar::Int64(0));
+                    } else if x.is_infinite() {
+                        mantissa.push(Scalar::Float64(*x));
+                        exponent.push(Scalar::Int64(0));
+                    } else if *x == 0.0 {
+                        mantissa.push(Scalar::Float64(*x)); // preserves sign of zero
+                        exponent.push(Scalar::Int64(0));
+                    } else {
+                        let bits = x.abs().to_bits();
+                        let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+                        if exp_bits == 0 {
+                            // denormalized number - scale up and extract
+                            let scaled = x.abs() * 2.0_f64.powi(64);
+                            let sbits = scaled.to_bits();
+                            let sexp_bits = ((sbits >> 52) & 0x7ff) as i64;
+                            let exp = sexp_bits - 1022 - 64;
+                            let mant_bits = (sbits & 0x000f_ffff_ffff_ffff) | 0x3fe0_0000_0000_0000;
+                            let mant = f64::from_bits(mant_bits);
+                            let mant = if *x < 0.0 { -mant } else { mant };
+                            mantissa.push(Scalar::Float64(mant));
+                            exponent.push(Scalar::Int64(exp));
+                        } else {
+                            let exp = exp_bits - 1022;
+                            let mant_bits = (bits & 0x000f_ffff_ffff_ffff) | 0x3fe0_0000_0000_0000;
+                            let mant = f64::from_bits(mant_bits);
+                            let mant = if *x < 0.0 { -mant } else { mant };
+                            mantissa.push(Scalar::Float64(mant));
+                            exponent.push(Scalar::Int64(exp));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Ok((Self::new(DType::Float64, mantissa)?, Self::new(DType::Int64, exponent)?))
+    }
+
+    /// Return the next representable floating-point value after x toward y.
+    ///
+    /// Matches np.nextafter(x, y). For each pair of elements, returns the
+    /// next representable float after x in the direction of y.
+    pub fn nextafter(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (v1, v2) in self.values.iter().zip(other.values.iter()) {
+            if v1.is_missing() || v2.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let result = if x.is_nan() || y.is_nan() {
+                f64::NAN
+            } else if x == y {
+                x
+            } else if x == 0.0 {
+                if y > 0.0 {
+                    f64::MIN_POSITIVE
+                } else {
+                    -f64::MIN_POSITIVE
+                }
+            } else {
+                let bits = x.to_bits() as i64;
+                let next_bits = if (x > 0.0) == (y > x) {
+                    bits + 1
+                } else {
+                    bits - 1
+                };
+                f64::from_bits(next_bits as u64)
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Check if values are negative infinity.
+    ///
+    /// Matches np.isneginf(x). Returns a Bool column that is True where
+    /// the value is negative infinity.
+    pub fn isneginf(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            match v {
+                Scalar::Int64(_) => out.push(Scalar::Bool(false)),
+                Scalar::Float64(x) => out.push(Scalar::Bool(*x == f64::NEG_INFINITY)),
+                _ => out.push(Scalar::Bool(false)),
+            }
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Check if values are positive infinity.
+    ///
+    /// Matches np.isposinf(x). Returns a Bool column that is True where
+    /// the value is positive infinity.
+    pub fn isposinf(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            match v {
+                Scalar::Int64(_) => out.push(Scalar::Bool(false)),
+                Scalar::Float64(x) => out.push(Scalar::Bool(*x == f64::INFINITY)),
+                _ => out.push(Scalar::Bool(false)),
+            }
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Compute 2 raised to the power of each element.
+    ///
+    /// Matches np.exp2(x). Returns 2^x for each element.
+    pub fn exp2(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(2.0_f64.powi(*x as i32))),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.exp2())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute the sinc function.
+    ///
+    /// Matches np.sinc(x). Returns sin(pi*x) / (pi*x), with sinc(0) = 1.
+    pub fn sinc(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    if *x == 0 {
+                        out.push(Scalar::Float64(1.0));
+                    } else {
+                        let px = std::f64::consts::PI * (*x as f64);
+                        out.push(Scalar::Float64(px.sin() / px));
+                    }
+                }
+                Scalar::Float64(x) => {
+                    if *x == 0.0 {
+                        out.push(Scalar::Float64(1.0));
+                    } else if x.is_nan() {
+                        out.push(Scalar::Float64(f64::NAN));
+                    } else {
+                        let px = std::f64::consts::PI * x;
+                        out.push(Scalar::Float64(px.sin() / px));
+                    }
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Compute spacing between this value and the next representable float.
     ///
     /// Matches np.spacing(x). Returns the ULP (unit in last place) - the
@@ -12420,6 +12644,110 @@ mod tests {
             assert!((s1 - s_neg1).abs() < 1e-20);
             // Spacing at 0 is MIN_POSITIVE
             assert_eq!(result.values()[2].to_f64().unwrap(), f64::MIN_POSITIVE);
+        }
+
+        #[test]
+        fn frexp_decomposes_floats() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(-8.0),
+                Scalar::Float64(0.0),
+            ])
+            .unwrap();
+            let (mant, exp) = col.frexp().unwrap();
+            // 4.0 = 0.5 * 2^3
+            assert!((mant.values()[0].to_f64().unwrap() - 0.5).abs() < 1e-10);
+            assert_eq!(exp.values()[0].to_i64().unwrap(), 3);
+            // 0.5 = 0.5 * 2^0
+            assert!((mant.values()[1].to_f64().unwrap() - 0.5).abs() < 1e-10);
+            assert_eq!(exp.values()[1].to_i64().unwrap(), 0);
+            // -8.0 = -0.5 * 2^4
+            assert!((mant.values()[2].to_f64().unwrap() - (-0.5)).abs() < 1e-10);
+            assert_eq!(exp.values()[2].to_i64().unwrap(), 4);
+            // 0.0 = 0.0 * 2^0
+            assert!((mant.values()[3].to_f64().unwrap() - 0.0).abs() < 1e-10);
+            assert_eq!(exp.values()[3].to_i64().unwrap(), 0);
+        }
+
+        #[test]
+        fn nextafter_returns_adjacent_floats() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+            ])
+            .unwrap();
+            let toward = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.0),
+            ])
+            .unwrap();
+            let result = col.nextafter(&toward).unwrap();
+            // nextafter(0, 1) = smallest positive denormal
+            assert_eq!(result.values()[0].to_f64().unwrap(), f64::MIN_POSITIVE);
+            // nextafter(1, 2) > 1
+            let r1 = result.values()[1].to_f64().unwrap();
+            assert!(r1 > 1.0 && r1 < 1.0 + 1e-15);
+            // nextafter(1, 0) < 1
+            let r2 = result.values()[2].to_f64().unwrap();
+            assert!(r2 < 1.0 && r2 > 1.0 - 1e-15);
+        }
+
+        #[test]
+        fn isneginf_isposinf_detect_infinities() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(1.0),
+                Scalar::Float64(f64::NAN),
+            ])
+            .unwrap();
+            let neginf = col.isneginf().unwrap();
+            let posinf = col.isposinf().unwrap();
+            assert_eq!(neginf.values()[0], Scalar::Bool(true));
+            assert_eq!(neginf.values()[1], Scalar::Bool(false));
+            assert_eq!(neginf.values()[2], Scalar::Bool(false));
+            assert_eq!(neginf.values()[3], Scalar::Bool(false));
+            assert_eq!(posinf.values()[0], Scalar::Bool(false));
+            assert_eq!(posinf.values()[1], Scalar::Bool(true));
+            assert_eq!(posinf.values()[2], Scalar::Bool(false));
+            assert_eq!(posinf.values()[3], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn exp2_computes_power_of_two() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(-1.0),
+            ])
+            .unwrap();
+            let result = col.exp2().unwrap();
+            assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            assert!((result.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+            assert!((result.values()[2].to_f64().unwrap() - 8.0).abs() < 1e-10);
+            assert!((result.values()[3].to_f64().unwrap() - 0.5).abs() < 1e-10);
+        }
+
+        #[test]
+        fn sinc_computes_sinc_function() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.5),
+            ])
+            .unwrap();
+            let result = col.sinc().unwrap();
+            // sinc(0) = 1
+            assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            // sinc(1) = sin(pi)/pi = 0
+            assert!(result.values()[1].to_f64().unwrap().abs() < 1e-10);
+            // sinc(0.5) = sin(pi/2)/(pi/2) = 2/pi ≈ 0.6366
+            let expected = 2.0 / std::f64::consts::PI;
+            assert!((result.values()[2].to_f64().unwrap() - expected).abs() < 1e-10);
         }
     }
 }

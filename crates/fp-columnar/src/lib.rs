@@ -1705,6 +1705,36 @@ impl Column {
         Self::new(DType::Bool, values)
     }
 
+    /// Element-wise equality, matching `pd.Series.eq()`.
+    pub fn eq(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Eq)
+    }
+
+    /// Element-wise inequality, matching `pd.Series.ne()`.
+    pub fn ne(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Ne)
+    }
+
+    /// Element-wise less-than comparison, matching `pd.Series.lt()`.
+    pub fn lt(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Lt)
+    }
+
+    /// Element-wise less-than-or-equal comparison, matching `pd.Series.le()`.
+    pub fn le(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Le)
+    }
+
+    /// Element-wise greater-than comparison, matching `pd.Series.gt()`.
+    pub fn gt(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Gt)
+    }
+
+    /// Element-wise greater-than-or-equal comparison, matching `pd.Series.ge()`.
+    pub fn ge(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_comparison(right, ComparisonOp::Ge)
+    }
+
     /// Compare every element against a scalar value, producing a `Bool`-typed column.
     ///
     /// Missing values in the column propagate as missing in the result.
@@ -5767,6 +5797,43 @@ mod tests {
             assert_eq!(ne.values()[0], Scalar::Bool(true));
             assert_eq!(ge.values()[0], Scalar::Bool(true));
             assert_eq!(le.values()[0], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn pandas_comparison_aliases_match_binary_comparison() {
+            let left = Column::from_values(vec![Scalar::Float64(5.0)]).expect("left");
+            let right = Column::from_values(vec![Scalar::Float64(3.0)]).expect("right");
+
+            assert_eq!(
+                left.eq(&right).expect("eq"),
+                left.binary_comparison(&right, ComparisonOp::Eq)
+                    .expect("eq")
+            );
+            assert_eq!(
+                left.ne(&right).expect("ne"),
+                left.binary_comparison(&right, ComparisonOp::Ne)
+                    .expect("ne")
+            );
+            assert_eq!(
+                left.lt(&right).expect("lt"),
+                left.binary_comparison(&right, ComparisonOp::Lt)
+                    .expect("lt")
+            );
+            assert_eq!(
+                left.le(&right).expect("le"),
+                left.binary_comparison(&right, ComparisonOp::Le)
+                    .expect("le")
+            );
+            assert_eq!(
+                left.gt(&right).expect("gt"),
+                left.binary_comparison(&right, ComparisonOp::Gt)
+                    .expect("gt")
+            );
+            assert_eq!(
+                left.ge(&right).expect("ge"),
+                left.binary_comparison(&right, ComparisonOp::Ge)
+                    .expect("ge")
+            );
         }
 
         #[test]

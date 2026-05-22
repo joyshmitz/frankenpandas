@@ -7580,6 +7580,73 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), col)
     }
 
+    /// Compute the sinc function.
+    ///
+    /// Matches `np.sinc(x)`. Returns `sin(pi*x) / (pi*x)`, with `sinc(0) = 1`.
+    pub fn sinc(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.sinc()?,
+        )
+    }
+
+    /// Trapezoidal numerical integration.
+    ///
+    /// Matches `np.trapz()`. Returns scalar result of integral.
+    pub fn trapz(&self, dx: f64) -> Result<Scalar, FrameError> {
+        Ok(self.column.trapz(dx)?)
+    }
+
+    /// Trim leading and/or trailing zeros.
+    ///
+    /// Matches `np.trim_zeros()`. The `trim` parameter specifies:
+    /// - `"f"`: trim leading zeros
+    /// - `"b"`: trim trailing zeros
+    /// - `"fb"` (default): trim both
+    pub fn trim_zeros(&self, trim: &str) -> Result<Self, FrameError> {
+        let col = self.column.trim_zeros(trim)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Weighted average of non-missing values.
+    ///
+    /// Matches `np.average(a, weights=w)`. Returns NaN if weights sum to zero.
+    #[must_use]
+    pub fn weighted_mean(&self, weights: &Self) -> Scalar {
+        self.column.weighted_mean(weights.column())
+    }
+
+    /// Resize Series to new size, padding or truncating as needed.
+    ///
+    /// Matches `np.resize()`. If new size is larger, values cycle from beginning.
+    pub fn resize(&self, new_size: usize) -> Result<Self, FrameError> {
+        let col = self.column.resize(new_size)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Alias for div, matching NumPy naming.
+    pub fn true_divide(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.true_divide(other.column())?,
+        )
+    }
+
+    /// Right bit shift.
+    ///
+    /// Matches `np.right_shift()`.
+    pub fn right_shift(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.right_shift(other.column())?,
+        )
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing
@@ -93672,5 +93739,92 @@ mod test_select_columns_perf_76e1fd {
         .unwrap();
         let result = s.put(&[1], &[Scalar::Int64(99)]).unwrap();
         assert_eq!(result.values()[1], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn series_sinc() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(0.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.sinc().unwrap();
+        assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        assert!(result.values()[1].to_f64().unwrap().abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_trapz() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(0.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.trapz(1.0).unwrap();
+        assert!((result.to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_trim_zeros() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(0)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(2)),
+                (3_i64.into(), Scalar::Int64(0)),
+            ],
+        )
+        .unwrap();
+        let result = s.trim_zeros("fb").unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn series_weighted_mean() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let w = Series::from_pairs(
+            "w",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.weighted_mean(&w);
+        assert!((result.to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_resize() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+            ],
+        )
+        .unwrap();
+        let result = s.resize(5).unwrap();
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.values()[2], Scalar::Int64(1));
+        assert_eq!(result.values()[3], Scalar::Int64(2));
     }
 }

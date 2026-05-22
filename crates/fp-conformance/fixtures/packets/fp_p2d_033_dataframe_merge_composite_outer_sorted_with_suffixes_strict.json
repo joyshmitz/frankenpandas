@@ -10,6 +10,7 @@
   },
   "join_type": "outer",
   "merge_on_keys": ["k1", "k2"],
+  "merge_suffixes": ["_left", "_right"],
   "frame": {
     "index": [
       { "kind": "int64", "value": 0 },

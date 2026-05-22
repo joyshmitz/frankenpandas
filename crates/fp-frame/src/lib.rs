@@ -19431,6 +19431,51 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Returns DataFrame with datetime components (year, month, day, hour, minute, second).
+    ///
+    /// Similar to `pd.Series.dt.components` for Timedelta, but for datetime values.
+    pub fn components(&self) -> Result<DataFrame, FrameError> {
+        self.validate_datetime_dtype()?;
+        let n = self.series.column().values().len();
+        let mut years = Vec::with_capacity(n);
+        let mut months = Vec::with_capacity(n);
+        let mut days = Vec::with_capacity(n);
+        let mut hours = Vec::with_capacity(n);
+        let mut minutes = Vec::with_capacity(n);
+        let mut seconds = Vec::with_capacity(n);
+
+        for v in self.series.column().values() {
+            match v {
+                Scalar::Utf8(s) => {
+                    years.push(Self::parse_datetime_component(s, 0));
+                    months.push(Self::parse_datetime_component(s, 1));
+                    days.push(Self::parse_datetime_component(s, 2));
+                    hours.push(Self::parse_datetime_component(s, 3));
+                    minutes.push(Self::parse_datetime_component(s, 4));
+                    seconds.push(Self::parse_datetime_component(s, 5));
+                }
+                _ => {
+                    years.push(Scalar::Null(NullKind::NaN));
+                    months.push(Scalar::Null(NullKind::NaN));
+                    days.push(Scalar::Null(NullKind::NaN));
+                    hours.push(Scalar::Null(NullKind::NaN));
+                    minutes.push(Scalar::Null(NullKind::NaN));
+                    seconds.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let idx = self.series.index().labels().to_vec();
+        let year_s = Series::from_values("year", idx.clone(), years)?;
+        let month_s = Series::from_values("month", idx.clone(), months)?;
+        let day_s = Series::from_values("day", idx.clone(), days)?;
+        let hour_s = Series::from_values("hour", idx.clone(), hours)?;
+        let minute_s = Series::from_values("minute", idx.clone(), minutes)?;
+        let second_s = Series::from_values("second", idx, seconds)?;
+
+        DataFrame::from_series(vec![year_s, month_s, day_s, hour_s, minute_s, second_s])
+    }
+
     /// Internal: parse a datetime string and extract a specific component.
     ///
     /// Components: 0=year, 1=month, 2=day, 3=hour, 4=minute, 5=second
@@ -76973,6 +77018,48 @@ mod tests {
         assert_eq!(
             result.column().values()[2],
             Scalar::Utf8("08:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_components() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-06-15T14:35:22".to_string()),
+                Scalar::Utf8("2024-12-31 23:59:59".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().components().unwrap();
+        assert_eq!(
+            result.column_names(),
+            &["year", "month", "day", "hour", "minute", "second"]
+        );
+        assert_eq!(
+            result.get_column("year").column().values()[0],
+            Scalar::Int64(2023)
+        );
+        assert_eq!(
+            result.get_column("month").column().values()[0],
+            Scalar::Int64(6)
+        );
+        assert_eq!(
+            result.get_column("day").column().values()[0],
+            Scalar::Int64(15)
+        );
+        assert_eq!(
+            result.get_column("hour").column().values()[0],
+            Scalar::Int64(14)
+        );
+        assert_eq!(
+            result.get_column("minute").column().values()[0],
+            Scalar::Int64(35)
+        );
+        assert_eq!(
+            result.get_column("second").column().values()[0],
+            Scalar::Int64(22)
         );
     }
 

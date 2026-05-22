@@ -17447,6 +17447,26 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Reverse elements within each list.
+    pub fn reverse(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|mut list| {
+                        list.reverse();
+                        let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                        Scalar::Utf8(json)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91215,5 +91235,21 @@ mod test_select_columns_perf_76e1fd {
         let last_result = s.list().last().unwrap();
         assert_eq!(last_result.column().values()[0], Scalar::Int64(30));
         assert_eq!(last_result.column().values()[1], Scalar::Int64(8));
+    }
+
+    #[test]
+    fn series_list_accessor_reverse() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("[1, 2, 3]".into())],
+        )
+        .unwrap();
+        let result = s.list().reverse().unwrap();
+        let v = match &result.column().values()[0] {
+            Scalar::Utf8(s) => s.clone(),
+            _ => panic!("expected Utf8"),
+        };
+        assert!(v.contains("3") && v.contains("2") && v.contains("1"));
     }
 }

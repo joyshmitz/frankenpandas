@@ -6906,7 +6906,21 @@ impl PeriodIndex {
 
     /// Cast period labels to a pandas dtype string, returning a flat Index.
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
-        self.to_flat_index().astype(dtype)
+        match dtype {
+            "int" | "int64" => Ok(Index::from_i64(
+                self.values.iter().map(|period| period.ordinal).collect(),
+            )
+            .set_names(self.name())),
+            "datetime64[ns]" => Ok(Index::from_datetime64(
+                self.values
+                    .iter()
+                    .copied()
+                    .map(period_start_nanos)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .set_names(self.name())),
+            _ => self.to_flat_index().astype(dtype),
+        }
     }
 
     /// Nearest preceding-or-equal period label lookup.
@@ -17397,6 +17411,32 @@ mod tests {
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
         assert!(empty.asi8().is_empty());
+    }
+
+    #[test]
+    fn period_index_astype_datetime_and_int_match_pandas() -> Result<(), super::IndexError> {
+        use fp_types::PeriodFreq;
+
+        let pi = super::PeriodIndex::from_ordinals(&[600, 601], PeriodFreq::Monthly).set_name("p");
+
+        let as_int = pi.astype("int64")?;
+        assert_eq!(
+            as_int.labels(),
+            &[IndexLabel::Int64(600), IndexLabel::Int64(601)]
+        );
+        assert_eq!(as_int.name(), Some("p"));
+
+        let as_datetime = pi.astype("datetime64[ns]")?;
+        assert_eq!(
+            as_datetime.labels(),
+            &[
+                IndexLabel::Datetime64(1_577_836_800_000_000_000),
+                IndexLabel::Datetime64(1_580_515_200_000_000_000),
+            ]
+        );
+        assert_eq!(as_datetime.name(), Some("p"));
+
+        Ok(())
     }
 
     #[test]

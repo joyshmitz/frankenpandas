@@ -1334,6 +1334,14 @@ impl Timestamp {
         if self.is_nat() { None } else { Some("ns") }
     }
 
+    /// Return the resolution of the timestamp (always "ns" for nanoseconds).
+    ///
+    /// Matches `pd.Timestamp.resolution`. Returns None for NaT.
+    #[must_use]
+    pub const fn resolution(&self) -> Option<&'static str> {
+        if self.is_nat() { None } else { Some("ns") }
+    }
+
     /// Numpy datetime64 scalar payload, matching `pd.Timestamp.asm8`.
     #[must_use]
     pub const fn asm8(&self) -> i64 {

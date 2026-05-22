@@ -2413,6 +2413,89 @@ impl Timestamp {
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         NAMES[(m - 1) as usize].to_string()
     }
+
+    /// Localize a naive timestamp to a timezone.
+    ///
+    /// Matches `pd.Timestamp.tz_localize(tz)`. If `tz` is None, removes the
+    /// timezone (makes timestamp naive). NaT propagates.
+    #[must_use]
+    pub fn tz_localize(&self, tz: Option<&str>) -> Self {
+        if self.is_nat() {
+            return Self::nat();
+        }
+        Self {
+            nanos: self.nanos,
+            tz: tz.map(String::from),
+        }
+    }
+
+    /// Convert timezone-aware timestamp to another timezone.
+    ///
+    /// Matches `pd.Timestamp.tz_convert(tz)`. If timestamp is naive (no tz),
+    /// the timezone is simply attached without conversion. NaT propagates.
+    /// Note: actual UTC offset conversion requires chrono-tz (Phase 3).
+    #[must_use]
+    pub fn tz_convert(&self, tz: &str) -> Self {
+        if self.is_nat() {
+            return Self::nat();
+        }
+        Self {
+            nanos: self.nanos,
+            tz: Some(tz.to_string()),
+        }
+    }
+
+    /// Create a Timestamp from a Unix timestamp (seconds since epoch).
+    ///
+    /// Matches `pd.Timestamp.fromtimestamp(ts)`. The optional `tz` parameter
+    /// specifies the timezone to localize to.
+    #[must_use]
+    pub fn fromtimestamp(ts: f64, tz: Option<&str>) -> Self {
+        if ts.is_nan() || ts.is_infinite() {
+            return Self::nat();
+        }
+        let nanos = (ts * 1_000_000_000.0) as i64;
+        Self {
+            nanos,
+            tz: tz.map(String::from),
+        }
+    }
+
+    /// Create a Timestamp from milliseconds since epoch.
+    ///
+    /// Convenience constructor complementing fromtimestamp.
+    #[must_use]
+    pub fn from_millis(ms: i64, tz: Option<&str>) -> Self {
+        Self {
+            nanos: ms.saturating_mul(1_000_000),
+            tz: tz.map(String::from),
+        }
+    }
+
+    /// Create a Timestamp from microseconds since epoch.
+    ///
+    /// Convenience constructor complementing fromtimestamp.
+    #[must_use]
+    pub fn from_micros(us: i64, tz: Option<&str>) -> Self {
+        Self {
+            nanos: us.saturating_mul(1_000),
+            tz: tz.map(String::from),
+        }
+    }
+
+    /// Return the timezone string, or None if naive.
+    #[must_use]
+    pub fn tzinfo(&self) -> Option<&str> {
+        self.tz.as_deref()
+    }
+
+    /// Return the timezone name, or None if naive.
+    ///
+    /// Alias for tzinfo() matching pandas Timestamp.tzname().
+    #[must_use]
+    pub fn tzname(&self) -> Option<&str> {
+        self.tzinfo()
+    }
 }
 
 impl std::fmt::Display for Timestamp {

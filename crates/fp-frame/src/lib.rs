@@ -3549,6 +3549,13 @@ impl Series {
         self.comparison_op(other, ComparisonOp::Le)
     }
 
+    /// Check if two series are element-wise equal within a tolerance.
+    ///
+    /// Matches `np.allclose(s1, s2, rtol, atol)`.
+    pub fn allclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<bool, FrameError> {
+        Ok(self.column.allclose(other.column(), rtol, atol)?)
+    }
+
     /// Compare each element against a scalar value.
     ///
     /// Matches `series > 5` (broadcast scalar comparison).
@@ -4625,6 +4632,14 @@ impl Series {
         self.column.validity().count_valid()
     }
 
+    /// Return the number of non-zero elements.
+    ///
+    /// Matches `np.count_nonzero(series)`.
+    #[must_use]
+    pub fn count_nonzero(&self) -> usize {
+        self.column.count_nonzero()
+    }
+
     /// Count unique non-missing values sorted by descending frequency.
     ///
     /// Matches `pd.Series.value_counts()` default behavior:
@@ -5634,6 +5649,13 @@ impl Series {
         self.abs()
     }
 
+    /// Absolute value of floating-point elements.
+    ///
+    /// Matches `np.fabs(series)`. Same as `abs()` but explicitly for floats.
+    pub fn fabs(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.fabs()?)
+    }
+
     /// Round each element to `decimals` decimal places.
     ///
     /// Matches `pd.Series.round(decimals)`. NaN values pass through.
@@ -5643,6 +5665,11 @@ impl Series {
             self.index.clone(),
             self.column.round(decimals)?,
         )
+    }
+
+    /// Alias for `round`. Matches `np.around`.
+    pub fn around(&self, decimals: i32) -> Result<Self, FrameError> {
+        self.round(decimals)
     }
 
     /// Floor each element (round toward negative infinity).
@@ -5795,6 +5822,36 @@ impl Series {
     /// Matches `np.arctanh(series)`. NaN values pass through.
     pub fn arctanh(&self) -> Result<Self, FrameError> {
         Self::new(self.name.clone(), self.index.clone(), self.column.arctanh()?)
+    }
+
+    /// Alias for `arcsin`. Matches Rust/math convention.
+    pub fn asin(&self) -> Result<Self, FrameError> {
+        self.arcsin()
+    }
+
+    /// Alias for `arccos`. Matches Rust/math convention.
+    pub fn acos(&self) -> Result<Self, FrameError> {
+        self.arccos()
+    }
+
+    /// Alias for `arctan`. Matches Rust/math convention.
+    pub fn atan(&self) -> Result<Self, FrameError> {
+        self.arctan()
+    }
+
+    /// Alias for `arcsinh`. Matches Rust/math convention.
+    pub fn asinh(&self) -> Result<Self, FrameError> {
+        self.arcsinh()
+    }
+
+    /// Alias for `arccosh`. Matches Rust/math convention.
+    pub fn acosh(&self) -> Result<Self, FrameError> {
+        self.arccosh()
+    }
+
+    /// Alias for `arctanh`. Matches Rust/math convention.
+    pub fn atanh(&self) -> Result<Self, FrameError> {
+        self.arctanh()
     }
 
     /// Element-wise exp(x) - 1 with improved precision for small x.
@@ -92072,5 +92129,90 @@ mod test_select_columns_perf_76e1fd {
             s.bitwise_not().unwrap().values(),
             s.invert().unwrap().values()
         );
+    }
+
+    #[test]
+    fn series_trig_aliases() {
+        let s = Series::from_pairs("x", vec![(0_i64.into(), Scalar::Float64(0.5))]).unwrap();
+        assert_eq!(s.arcsin().unwrap().values(), s.asin().unwrap().values());
+        assert_eq!(s.arccos().unwrap().values(), s.acos().unwrap().values());
+        assert_eq!(s.arctan().unwrap().values(), s.atan().unwrap().values());
+        assert_eq!(s.arcsinh().unwrap().values(), s.asinh().unwrap().values());
+        let s2 = Series::from_pairs("x", vec![(0_i64.into(), Scalar::Float64(1.5))]).unwrap();
+        assert_eq!(s2.arccosh().unwrap().values(), s2.acosh().unwrap().values());
+        assert_eq!(s.arctanh().unwrap().values(), s.atanh().unwrap().values());
+    }
+
+    #[test]
+    fn series_around_alias() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.234)),
+                (1_i64.into(), Scalar::Float64(5.678)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.round(2).unwrap().values(), s.around(2).unwrap().values());
+    }
+
+    #[test]
+    fn series_fabs() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(-3.5)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.fabs().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(3.5));
+        assert_eq!(result.values()[1], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn series_count_nonzero() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(0)),
+                (1_i64.into(), Scalar::Int64(5)),
+                (2_i64.into(), Scalar::Int64(0)),
+                (3_i64.into(), Scalar::Int64(-3)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.count_nonzero(), 2);
+    }
+
+    #[test]
+    fn series_allclose() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0 + 1e-10)),
+                (1_i64.into(), Scalar::Float64(2.0 + 1e-10)),
+            ],
+        )
+        .unwrap();
+        assert!(s1.allclose(&s2, 1e-5, 1e-8).unwrap());
+        let s3 = Series::from_pairs(
+            "c",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        assert!(!s1.allclose(&s3, 1e-5, 1e-8).unwrap());
     }
 }

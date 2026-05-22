@@ -4255,6 +4255,22 @@ impl Column {
         out
     }
 
+    /// Count number of non-zero elements.
+    ///
+    /// Matches np.count_nonzero().
+    #[must_use]
+    pub fn count_nonzero(&self) -> usize {
+        self.nonzero().len()
+    }
+
+    /// Indices of non-zero elements as a column.
+    ///
+    /// Matches np.flatnonzero(). Returns Int64 column of indices.
+    pub fn flatnonzero(&self) -> Result<Self, ColumnError> {
+        let indices: Vec<Scalar> = self.nonzero().into_iter().map(|i| Scalar::Int64(i as i64)).collect();
+        Self::new(DType::Int64, indices)
+    }
+
     /// Keep values where `cond` is true; replace false positions with
     /// `other`.
     ///

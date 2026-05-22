@@ -6400,6 +6400,55 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Numpy-style alias for asin.
+    ///
+    /// Matches np.arcsin(x).
+    pub fn arcsin(&self) -> Result<Self, ColumnError> {
+        self.asin()
+    }
+
+    /// Numpy-style alias for acos.
+    ///
+    /// Matches np.arccos(x).
+    pub fn arccos(&self) -> Result<Self, ColumnError> {
+        self.acos()
+    }
+
+    /// Numpy-style alias for atan.
+    ///
+    /// Matches np.arctan(x).
+    pub fn arctan(&self) -> Result<Self, ColumnError> {
+        self.atan()
+    }
+
+    /// Numpy-style alias for atan2.
+    ///
+    /// Matches np.arctan2(y, x).
+    pub fn arctan2(&self, other: &Self) -> Result<Self, ColumnError> {
+        self.atan2(other)
+    }
+
+    /// Numpy-style alias for asinh.
+    ///
+    /// Matches np.arcsinh(x).
+    pub fn arcsinh(&self) -> Result<Self, ColumnError> {
+        self.asinh()
+    }
+
+    /// Numpy-style alias for acosh.
+    ///
+    /// Matches np.arccosh(x).
+    pub fn arccosh(&self) -> Result<Self, ColumnError> {
+        self.acosh()
+    }
+
+    /// Numpy-style alias for atanh.
+    ///
+    /// Matches np.arctanh(x).
+    pub fn arctanh(&self) -> Result<Self, ColumnError> {
+        self.atanh()
+    }
+
     /// Compute element-wise floor.
     pub fn floor(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());

@@ -1169,6 +1169,34 @@ impl Timestamp {
         }
     }
 
+    /// Returns the current UTC timestamp.
+    ///
+    /// Matches `pd.Timestamp.now()` / `pd.Timestamp.utcnow()`.
+    #[must_use]
+    pub fn now() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let nanos = duration.as_nanos() as i64;
+        Self { nanos, tz: None }
+    }
+
+    /// Alias for `now()`. Matches `pd.Timestamp.utcnow()`.
+    #[must_use]
+    pub fn utcnow() -> Self {
+        Self::now()
+    }
+
+    /// Returns today's date at midnight UTC.
+    ///
+    /// Matches `pd.Timestamp.today()`.
+    #[must_use]
+    pub fn today() -> Self {
+        let now = Self::now();
+        now.normalize()
+    }
+
     /// The NaT sentinel value for a Timestamp.
     #[must_use]
     pub const fn nat() -> Self {
@@ -4952,6 +4980,32 @@ mod tests {
     fn timestamp_from_nanos_tz_carries_tz_name() {
         let ts = Timestamp::from_nanos_tz(1_700_000_000_000_000_000, "US/Eastern");
         assert_eq!(ts.tz.as_deref(), Some("US/Eastern"));
+    }
+
+    #[test]
+    fn timestamp_now_returns_current_time() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let ts = Timestamp::now();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        assert!(ts.nanos >= before);
+        assert!(ts.nanos <= after);
+        assert!(!ts.is_nat());
+    }
+
+    #[test]
+    fn timestamp_today_returns_midnight() {
+        let ts = Timestamp::today();
+        assert!(!ts.is_nat());
+        // Today should be normalized (midnight), so hour/min/sec should be 0
+        assert_eq!(ts.hour(), Some(0));
+        assert_eq!(ts.minute(), Some(0));
+        assert_eq!(ts.second(), Some(0));
     }
 
     #[test]

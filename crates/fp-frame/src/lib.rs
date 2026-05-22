@@ -2302,6 +2302,87 @@ impl Series {
         Self::from_values(name, labels, values)
     }
 
+    /// Create a Series with evenly spaced values within a given interval.
+    ///
+    /// Matches `np.arange(start, stop, step)`.
+    pub fn arange(name: impl Into<String>, start: f64, stop: f64, step: f64) -> Result<Self, FrameError> {
+        let col = Column::arange(start, stop, step)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series with evenly spaced values over [start, stop].
+    ///
+    /// Matches `np.linspace(start, stop, num)`.
+    pub fn linspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+        let col = Column::linspace(start, stop, num)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series with evenly spaced values on a log scale.
+    ///
+    /// Matches `np.logspace(start, stop, num)`.
+    pub fn logspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+        let col = Column::logspace(start, stop, num)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series with values evenly spaced on a log scale (geometric progression).
+    ///
+    /// Matches `np.geomspace(start, stop, num)`.
+    pub fn geomspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+        let col = Column::geomspace(start, stop, num)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series filled with zeros (Float64 by default).
+    ///
+    /// Matches `np.zeros(n)`.
+    pub fn zeros(name: impl Into<String>, n: usize) -> Result<Self, FrameError> {
+        let col = Column::zeros(n, DType::Float64)?;
+        let idx = Index::from_range(0, n as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series filled with zeros of specified dtype.
+    ///
+    /// Matches `np.zeros(n, dtype=dtype)`.
+    pub fn zeros_dtype(name: impl Into<String>, n: usize, dtype: DType) -> Result<Self, FrameError> {
+        let col = Column::zeros(n, dtype)?;
+        let idx = Index::from_range(0, n as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series filled with ones (Float64 by default).
+    ///
+    /// Matches `np.ones(n)`.
+    pub fn ones(name: impl Into<String>, n: usize) -> Result<Self, FrameError> {
+        let col = Column::ones(n, DType::Float64)?;
+        let idx = Index::from_range(0, n as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series filled with ones of specified dtype.
+    ///
+    /// Matches `np.ones(n, dtype=dtype)`.
+    pub fn ones_dtype(name: impl Into<String>, n: usize, dtype: DType) -> Result<Self, FrameError> {
+        let col = Column::ones(n, dtype)?;
+        let idx = Index::from_range(0, n as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Create a Series filled with a constant value.
+    ///
+    /// Matches `np.full(n, fill_value)`.
+    pub fn full(name: impl Into<String>, n: usize, fill_value: Scalar) -> Result<Self, FrameError> {
+        let col = Column::full(n, fill_value)?;
+        let idx = Index::from_range(0, n as i64, 1);
+        Self::new(name, idx, col)
+    }
+
     /// Return a backend-neutral pandas-style plotting request.
     pub fn plot(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -93875,5 +93956,42 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(result.len(), 5);
         assert_eq!(result.values()[2], Scalar::Int64(1));
         assert_eq!(result.values()[3], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_arange() {
+        let s = Series::arange("x", 0.0, 5.0, 1.0).unwrap();
+        assert_eq!(s.len(), 5);
+        assert!((s.values()[0].to_f64().unwrap() - 0.0).abs() < 1e-10);
+        assert!((s.values()[4].to_f64().unwrap() - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_linspace() {
+        let s = Series::linspace("x", 0.0, 1.0, 5).unwrap();
+        assert_eq!(s.len(), 5);
+        assert!((s.values()[0].to_f64().unwrap() - 0.0).abs() < 1e-10);
+        assert!((s.values()[4].to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_zeros() {
+        let s = Series::zeros("x", 3).unwrap();
+        assert_eq!(s.len(), 3);
+        assert!((s.values()[0].to_f64().unwrap() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_ones() {
+        let s = Series::ones("x", 3).unwrap();
+        assert_eq!(s.len(), 3);
+        assert!((s.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_full() {
+        let s = Series::full("x", 3, Scalar::Float64(42.0)).unwrap();
+        assert_eq!(s.len(), 3);
+        assert!((s.values()[1].to_f64().unwrap() - 42.0).abs() < 1e-10);
     }
 }

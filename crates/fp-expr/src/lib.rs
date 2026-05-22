@@ -142,6 +142,11 @@ pub enum Expr {
         right: Box<Expr>,
         op: ComparisonOp,
     },
+    IsIn {
+        left: Box<Expr>,
+        values: Vec<Scalar>,
+        negated: bool,
+    },
     Literal {
         value: Scalar,
     },
@@ -306,6 +311,20 @@ pub fn evaluate(
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
+        }
+        Expr::IsIn {
+            left,
+            values,
+            negated,
+        } => {
+            let out = evaluate(left, context, policy, ledger)?
+                .isin(values)
+                .map_err(ExprError::from)?;
+            if *negated {
+                out.not().map_err(ExprError::from)
+            } else {
+                Ok(out)
+            }
         }
         Expr::Literal { value } => {
             let index = context
@@ -664,6 +683,7 @@ impl MaterializedView {
                 Self::extract_series(left, series_set);
                 Self::extract_series(right, series_set);
             }
+            Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
             Expr::Not { expr } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
@@ -774,6 +794,20 @@ fn evaluate_delta(
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
+        Expr::IsIn {
+            left,
+            values,
+            negated,
+        } => {
+            let out = evaluate_delta(left, delta_ctx, delta, policy, ledger)?
+                .isin(values)
+                .map_err(ExprError::from)?;
+            if *negated {
+                out.not().map_err(ExprError::from)
+            } else {
+                Ok(out)
+            }
+        }
         Expr::Literal { value } => {
             Series::broadcast("_literal", value.clone(), delta.new_labels.clone())
                 .map_err(ExprError::from)
@@ -818,6 +852,7 @@ fn evaluate_delta_comparison(
 //   - String literals ('...' or "...")
 //   - Boolean literals (`True` / `False`)
 //   - Comparison operators: ==, !=, >, >=, <, <=
+//   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
@@ -829,7 +864,7 @@ fn evaluate_delta_comparison(
 ///   or_expr    → and_expr ( "or" and_expr )*
 ///   and_expr   → not_expr ( "and" not_expr )*
 ///   not_expr   → "not" not_expr | comparison
-///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr )?
+///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr | ("in" | "not" "in") list_literal )?
 ///   add_expr   → mul_expr ( ("+" | "-") mul_expr )*
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
@@ -874,10 +909,14 @@ enum Token {
     // Grouping
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
     // Logical (keywords)
     And,
     Or,
     Not,
+    In,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
@@ -920,6 +959,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                                     | Token::And
                                     | Token::Or
                                     | Token::Not
+                                    | Token::In
+                                    | Token::LBracket
+                                    | Token::Comma
                             )
                         ))
                 {
@@ -1016,6 +1058,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
                 i += 1;
             }
             '=' => {
@@ -1164,6 +1218,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
                     "not" => tokens.push(Token::Not),
+                    "in" => tokens.push(Token::In),
                     "True" => tokens.push(Token::Bool(true)),
                     "False" => tokens.push(Token::Bool(false)),
                     _ => tokens.push(Token::Ident(word)),
@@ -1220,6 +1275,34 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
     let mut left = parse_add(tokens, pos)?;
     let mut chained = None;
     while *pos < tokens.len() {
+        let membership = if tokens[*pos] == Token::In {
+            *pos += 1;
+            Some(false)
+        } else if *pos + 1 < tokens.len()
+            && tokens[*pos] == Token::Not
+            && tokens[*pos + 1] == Token::In
+        {
+            *pos += 2;
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(negated) = membership {
+            let comparison = Expr::IsIn {
+                left: Box::new(left.clone()),
+                values: parse_list_literal(tokens, pos)?,
+                negated,
+            };
+            chained = Some(match chained {
+                Some(previous) => Expr::And {
+                    left: Box::new(previous),
+                    right: Box::new(comparison),
+                },
+                None => comparison,
+            });
+            break;
+        }
+
         let op = match &tokens[*pos] {
             Token::EqEq => Some(ComparisonOp::Eq),
             Token::NotEq => Some(ComparisonOp::Ne),
@@ -1250,6 +1333,63 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
         }
     }
     Ok(chained.unwrap_or(left))
+}
+
+fn parse_list_literal(tokens: &[Token], pos: &mut usize) -> Result<Vec<Scalar>, ExprError> {
+    if *pos >= tokens.len() || tokens[*pos] != Token::LBracket {
+        return Err(ExprError::ParseError(
+            "expected list literal after membership operator".into(),
+        ));
+    }
+    *pos += 1;
+
+    let mut values = Vec::new();
+    if *pos < tokens.len() && tokens[*pos] == Token::RBracket {
+        *pos += 1;
+        return Ok(values);
+    }
+
+    loop {
+        if *pos >= tokens.len() {
+            return Err(ExprError::ParseError("unterminated list literal".into()));
+        }
+
+        let value = match &tokens[*pos] {
+            Token::Int(value) => Scalar::Int64(*value),
+            Token::Float(value) => Scalar::Float64(*value),
+            Token::Str(value) => Scalar::Utf8(value.clone()),
+            Token::Bool(value) => Scalar::Bool(*value),
+            other => {
+                return Err(ExprError::ParseError(format!(
+                    "membership list values must be scalar literals, got {other:?}"
+                )));
+            }
+        };
+        values.push(value);
+        *pos += 1;
+
+        if *pos >= tokens.len() {
+            return Err(ExprError::ParseError("unterminated list literal".into()));
+        }
+        match tokens[*pos] {
+            Token::Comma => {
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == Token::RBracket {
+                    *pos += 1;
+                    return Ok(values);
+                }
+            }
+            Token::RBracket => {
+                *pos += 1;
+                return Ok(values);
+            }
+            ref other => {
+                return Err(ExprError::ParseError(format!(
+                    "expected ',' or ']' in list literal, got {other:?}"
+                )));
+            }
+        }
+    }
 }
 
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
@@ -2762,6 +2902,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_membership_list_literal() {
+        let expr = super::parse_expr("a in [1, 3,]").unwrap();
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            panic!("expected IsIn expression");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(!negated);
+        assert_eq!(values, vec![Scalar::Int64(1), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn parse_not_in_membership_list_literal() {
+        let expr = super::parse_expr("name not in ['x', 'y']").unwrap();
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            panic!("expected IsIn expression");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("name".into())
+            }
+        );
+        assert!(negated);
+        assert_eq!(
+            values,
+            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+        );
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3107,6 +3292,44 @@ mod tests {
         assert_eq!(result.len(), 2); // rows where x=5 and x=3
         assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["x"].values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn query_str_filters_with_list_membership() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("a in [1, 3]", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+
+        let result = super::query_str("b not in ['x']", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.columns()["a"].values(), &[Scalar::Int64(2)]);
+        assert_eq!(result.columns()["b"].values(), &[Scalar::Utf8("y".into())]);
     }
 
     #[test]

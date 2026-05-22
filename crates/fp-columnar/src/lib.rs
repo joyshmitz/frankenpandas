@@ -6516,10 +6516,11 @@ impl Column {
             } else if x == y {
                 x
             } else if x == 0.0 {
+                // Smallest positive/negative denormal, not MIN_POSITIVE (normalized)
                 if y > 0.0 {
-                    f64::MIN_POSITIVE
+                    f64::from_bits(1) // smallest positive denormal ≈ 5e-324
                 } else {
-                    -f64::MIN_POSITIVE
+                    -f64::from_bits(1) // smallest negative denormal ≈ -5e-324
                 }
             } else {
                 let bits = x.to_bits() as i64;
@@ -12759,8 +12760,8 @@ mod tests {
             ])
             .unwrap();
             let result = col.nextafter(&toward).unwrap();
-            // nextafter(0, 1) = smallest positive denormal
-            assert_eq!(result.values()[0].to_f64().unwrap(), f64::MIN_POSITIVE);
+            // nextafter(0, 1) = smallest positive denormal (not MIN_POSITIVE which is normalized)
+            assert_eq!(result.values()[0].to_f64().unwrap(), f64::from_bits(1));
             // nextafter(1, 2) > 1
             let r1 = result.values()[1].to_f64().unwrap();
             assert!(r1 > 1.0 && r1 < 1.0 + 1e-15);

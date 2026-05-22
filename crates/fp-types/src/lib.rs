@@ -2364,13 +2364,13 @@ pub fn interval_range_by_step(
 #[serde(rename_all = "SCREAMING-KEBAB-CASE")]
 #[non_exhaustive]
 pub enum PeriodFreq {
-    /// `A` / `Y` — annual periods.
+    /// `Y-DEC` / `A` / `Y` — annual periods.
     Annual,
-    /// `Q` — quarterly periods.
+    /// `Q-DEC` / `Q` — quarterly periods.
     Quarterly,
     /// `M` — monthly periods.
     Monthly,
-    /// `W` — weekly periods.
+    /// `W-SUN` / `W` — weekly periods.
     Weekly,
     /// `D` — daily periods.
     Daily,
@@ -2386,13 +2386,14 @@ pub enum PeriodFreq {
 
 impl PeriodFreq {
     /// Parse a pandas-style frequency alias. Recognizes the common subset
-    /// (A/Y, Q, M, W, D, B, H, T/min, S). Case-insensitive.
+    /// (Y-DEC/A/Y, Q-DEC/Q, M, W-SUN/W, D, B, h/H, min/T, s/S).
+    /// Case-insensitive.
     pub fn parse(alias: &str) -> Option<Self> {
         match alias.to_ascii_uppercase().as_str() {
-            "A" | "Y" | "ANNUAL" | "YEARLY" => Some(Self::Annual),
-            "Q" | "QUARTERLY" => Some(Self::Quarterly),
+            "A" | "Y" | "A-DEC" | "Y-DEC" | "ANNUAL" | "YEARLY" => Some(Self::Annual),
+            "Q" | "Q-DEC" | "QUARTERLY" => Some(Self::Quarterly),
             "M" | "MONTHLY" => Some(Self::Monthly),
-            "W" | "WEEKLY" => Some(Self::Weekly),
+            "W" | "W-SUN" | "WEEKLY" => Some(Self::Weekly),
             "D" | "DAILY" => Some(Self::Daily),
             "B" | "BUSINESS" => Some(Self::Business),
             "H" | "HOURLY" => Some(Self::Hourly),
@@ -2406,10 +2407,10 @@ impl PeriodFreq {
     #[must_use]
     pub const fn alias(self) -> &'static str {
         match self {
-            Self::Annual => "A",
-            Self::Quarterly => "Q",
+            Self::Annual => "Y-DEC",
+            Self::Quarterly => "Q-DEC",
             Self::Monthly => "M",
-            Self::Weekly => "W",
+            Self::Weekly => "W-SUN",
             Self::Daily => "D",
             Self::Business => "B",
             Self::Hourly => "h",
@@ -2493,7 +2494,7 @@ impl Period {
 }
 
 impl std::fmt::Display for Period {
-    /// Phase 1: ordinal+freq form, e.g. `Period[Q, 216]`. Calendar-
+    /// Phase 1: ordinal+freq form, e.g. `Period[Q-DEC, 216]`. Calendar-
     /// formatted display (`2024Q1`, `2024-03`) lands in Phase 2 once the
     /// ordinal-to-ymd arithmetic is wired.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3822,6 +3823,21 @@ mod tests {
     }
 
     #[test]
+    fn period_freq_anchored_aliases_are_pandas_canonical_h2wiv() {
+        assert_eq!(PeriodFreq::Annual.alias(), "Y-DEC");
+        assert_eq!(PeriodFreq::Quarterly.alias(), "Q-DEC");
+        assert_eq!(PeriodFreq::Weekly.alias(), "W-SUN");
+
+        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
+        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
+        assert_eq!(PeriodFreq::parse("Y-DEC"), Some(PeriodFreq::Annual));
+        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("Q-DEC"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
+        assert_eq!(PeriodFreq::parse("W-SUN"), Some(PeriodFreq::Weekly));
+    }
+
+    #[test]
     fn period_freq_intraday_aliases_are_pandas_canonical_8kfdo() {
         assert_eq!(PeriodFreq::Hourly.alias(), "h");
         assert_eq!(PeriodFreq::Minutely.alias(), "min");
@@ -3895,7 +3911,7 @@ mod tests {
     #[test]
     fn period_display_carries_freq_and_ordinal() {
         let p = Period::new(216, PeriodFreq::Quarterly);
-        assert_eq!(p.to_string(), "Period[Q, 216]");
+        assert_eq!(p.to_string(), "Period[Q-DEC, 216]");
     }
 
     #[test]

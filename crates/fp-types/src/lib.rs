@@ -986,6 +986,50 @@ impl Timedelta {
         }
         (a as f64) / (b as f64)
     }
+
+    /// Returns ISO 8601 duration format string.
+    ///
+    /// Matches pandas `pd.Timedelta.isoformat()`. Returns format like
+    /// "P1DT2H3M4.567890123S" for 1 day, 2 hours, 3 minutes, 4.567890123 seconds.
+    /// NaT returns "NaT".
+    #[must_use]
+    pub fn isoformat(nanos: i64) -> String {
+        if nanos == Self::NAT {
+            return "NaT".to_string();
+        }
+
+        let negative = nanos < 0;
+        let abs_nanos = nanos.saturating_abs();
+
+        let days = abs_nanos / Self::NANOS_PER_DAY;
+        let remaining = abs_nanos % Self::NANOS_PER_DAY;
+
+        let hours = remaining / Self::NANOS_PER_HOUR;
+        let remaining = remaining % Self::NANOS_PER_HOUR;
+
+        let minutes = remaining / Self::NANOS_PER_MIN;
+        let remaining = remaining % Self::NANOS_PER_MIN;
+
+        let seconds = remaining / Self::NANOS_PER_SEC;
+        let sub_sec_nanos = remaining % Self::NANOS_PER_SEC;
+
+        let mut result = String::new();
+        if negative {
+            result.push('-');
+        }
+
+        result.push_str(&format!("P{days}DT{hours}H{minutes}M"));
+
+        if sub_sec_nanos == 0 {
+            result.push_str(&format!("{seconds}S"));
+        } else {
+            let frac = format!("{:09}", sub_sec_nanos);
+            let trimmed = frac.trim_end_matches('0');
+            result.push_str(&format!("{seconds}.{trimmed}S"));
+        }
+
+        result
+    }
 }
 
 // ── Timestamp types (br-frankenpandas-9p0u — 4r56 Phase 2) ─────────────
@@ -3769,6 +3813,31 @@ mod tests {
         assert_eq!(
             Timedelta::format(Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR),
             "1 days 02:00:00"
+        );
+    }
+
+    #[test]
+    fn timedelta_isoformat_basic() {
+        use super::Timedelta;
+        assert_eq!(Timedelta::isoformat(Timedelta::NAT), "NaT");
+        assert_eq!(Timedelta::isoformat(0), "P0DT0H0M0S");
+        assert_eq!(Timedelta::isoformat(Timedelta::NANOS_PER_DAY), "P1DT0H0M0S");
+        assert_eq!(
+            Timedelta::isoformat(
+                Timedelta::NANOS_PER_DAY
+                    + 2 * Timedelta::NANOS_PER_HOUR
+                    + 30 * Timedelta::NANOS_PER_MIN
+                    + 45 * Timedelta::NANOS_PER_SEC
+            ),
+            "P1DT2H30M45S"
+        );
+        assert_eq!(
+            Timedelta::isoformat(Timedelta::NANOS_PER_SEC + 500_000_000),
+            "P0DT0H0M1.5S"
+        );
+        assert_eq!(
+            Timedelta::isoformat(-(Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR)),
+            "-P1DT1H0M0S"
         );
     }
 

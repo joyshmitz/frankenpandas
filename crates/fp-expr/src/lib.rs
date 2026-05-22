@@ -193,6 +193,10 @@ pub enum Expr {
         expr: Box<Expr>,
         dtype: DType,
     },
+    CombineFirst {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     Where {
         expr: Box<Expr>,
         cond: Box<Expr>,
@@ -436,6 +440,11 @@ pub fn evaluate(
         Expr::Astype { expr, dtype } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.astype(*dtype).map_err(ExprError::from)
+        }
+        Expr::CombineFirst { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.combine_first(&rhs).map_err(ExprError::from)
         }
         Expr::Where {
             expr,
@@ -863,7 +872,8 @@ impl MaterializedView {
             | Expr::Pow { left, right }
             | Expr::And { left, right }
             | Expr::Or { left, right }
-            | Expr::Compare { left, right, .. } => {
+            | Expr::Compare { left, right, .. }
+            | Expr::CombineFirst { left, right } => {
                 Self::extract_series(left, series_set);
                 Self::extract_series(right, series_set);
             }
@@ -1026,6 +1036,11 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.astype(*dtype).map_err(ExprError::from)
         }
+        Expr::CombineFirst { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.combine_first(&rhs).map_err(ExprError::from)
+        }
         Expr::Where {
             expr,
             cond,
@@ -1152,8 +1167,8 @@ fn evaluate_delta_comparison(
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
 //     .round(decimals), .replace(to_replace, value), .astype(dtype),
-//     .where(cond, other), .mask(cond, other), .isna(), .notna(),
-//     .isnull(), .notnull()
+//     .combine_first(other), .where(cond, other), .mask(cond, other),
+//     .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -2117,6 +2132,30 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 };
                 *pos = arg_pos + 1;
             }
+            "combine_first" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected combine_first() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let right = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after combine_first() argument".into(),
+                    ));
+                }
+                expr = Expr::CombineFirst {
+                    left: Box::new(expr),
+                    right: Box::new(right),
+                };
+                *pos = arg_pos + 1;
+            }
             "add" | "radd" | "sub" | "subtract" | "rsub" | "mul" | "multiply" | "rmul" | "div"
             | "divide" | "truediv" | "rdiv" | "rtruediv" | "floordiv" | "rfloordiv" | "mod"
             | "rmod" | "pow" | "rpow" => {
@@ -2346,7 +2385,7 @@ mod tests {
     use fp_columnar::ComparisonOp;
     use fp_frame::{FrameError, Series};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{DType, Scalar};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{
         BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
@@ -4680,6 +4719,45 @@ mod tests {
 
         let filtered = super::query_str("a.astype(\"bool\")", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_combine_first_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let combined = super::eval_str("a.combine_first(b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            combined.values(),
+            &[Scalar::Int64(1), Scalar::Int64(8), Scalar::Int64(3)]
+        );
+
+        let keyword = super::eval_str("a.combine_first(other=b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword.values(), combined.values());
+
+        let filtered = super::query_str("a.combine_first(b).gt(5)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into()]);
         Ok(())
     }
 

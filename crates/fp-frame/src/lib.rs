@@ -5640,6 +5640,39 @@ impl Series {
         )
     }
 
+    /// Floor each element (round toward negative infinity).
+    ///
+    /// Matches `np.floor(series)`. NaN values pass through.
+    pub fn floor(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.floor()?,
+        )
+    }
+
+    /// Ceiling of each element (round toward positive infinity).
+    ///
+    /// Matches `np.ceil(series)`. NaN values pass through.
+    pub fn ceil(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.ceil()?,
+        )
+    }
+
+    /// Truncate each element toward zero.
+    ///
+    /// Matches `np.trunc(series)`. NaN values pass through.
+    pub fn trunc(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.trunc()?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -34934,6 +34967,27 @@ impl DataFrame {
     /// Matches `pd.DataFrame.round(decimals)`.
     pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.round(decimals))
+    }
+
+    /// Floor each numeric element (round toward negative infinity).
+    ///
+    /// Matches `np.floor(df)`. NaN values pass through.
+    pub fn floor(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.floor())
+    }
+
+    /// Ceiling of each numeric element (round toward positive infinity).
+    ///
+    /// Matches `np.ceil(df)`. NaN values pass through.
+    pub fn ceil(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.ceil())
+    }
+
+    /// Truncate each numeric element toward zero.
+    ///
+    /// Matches `np.trunc(df)`. NaN values pass through.
+    pub fn trunc(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.trunc())
     }
 
     /// Add a scalar to all numeric columns.

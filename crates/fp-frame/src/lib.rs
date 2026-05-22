@@ -6773,6 +6773,44 @@ impl Series {
         Ok(result)
     }
 
+    /// Alias for array_split.
+    pub fn split(&self, n: usize) -> Result<Vec<Self>, FrameError> {
+        self.array_split(n)
+    }
+
+    /// Create a zeros Series with same shape and dtype as self.
+    ///
+    /// Matches `np.zeros_like()`.
+    pub fn zeros_like(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.zeros_like()?,
+        )
+    }
+
+    /// Create a ones Series with same shape and dtype as self.
+    ///
+    /// Matches `np.ones_like()`.
+    pub fn ones_like(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.ones_like()?,
+        )
+    }
+
+    /// Create a Series filled with fill_value with same shape as self.
+    ///
+    /// Matches `np.full_like()`.
+    pub fn full_like(&self, fill_value: Scalar) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.full_like(fill_value)?,
+        )
+    }
+
     /// Logical AND between two Series.
     ///
     /// Matches `np.logical_and()`.

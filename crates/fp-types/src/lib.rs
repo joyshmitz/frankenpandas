@@ -84,6 +84,74 @@ pub enum DType {
     Sparse,
 }
 
+impl DType {
+    /// Returns true if the dtype is numeric (integer or floating point).
+    #[must_use]
+    pub const fn is_numeric(&self) -> bool {
+        matches!(self, Self::Int64 | Self::Float64)
+    }
+
+    /// Returns true if the dtype is an integer type.
+    #[must_use]
+    pub const fn is_integer(&self) -> bool {
+        matches!(self, Self::Int64)
+    }
+
+    /// Returns true if the dtype is a floating point type.
+    #[must_use]
+    pub const fn is_floating(&self) -> bool {
+        matches!(self, Self::Float64)
+    }
+
+    /// Returns true if the dtype is boolean.
+    #[must_use]
+    pub const fn is_bool(&self) -> bool {
+        matches!(self, Self::Bool)
+    }
+
+    /// Returns true if the dtype is object/string type.
+    #[must_use]
+    pub const fn is_object(&self) -> bool {
+        matches!(self, Self::Utf8)
+    }
+
+    /// Returns true if the dtype is datetime.
+    #[must_use]
+    pub const fn is_datetime(&self) -> bool {
+        matches!(self, Self::Datetime64)
+    }
+
+    /// Returns true if the dtype is timedelta.
+    #[must_use]
+    pub const fn is_timedelta(&self) -> bool {
+        matches!(self, Self::Timedelta64)
+    }
+
+    /// Returns true if the dtype is categorical.
+    #[must_use]
+    pub const fn is_categorical(&self) -> bool {
+        matches!(self, Self::Categorical)
+    }
+
+    /// Returns true if the dtype is sparse.
+    #[must_use]
+    pub const fn is_sparse(&self) -> bool {
+        matches!(self, Self::Sparse)
+    }
+
+    /// Returns true if the dtype is period.
+    #[must_use]
+    pub const fn is_period(&self) -> bool {
+        matches!(self, Self::Period)
+    }
+
+    /// Returns true if the dtype is interval.
+    #[must_use]
+    pub const fn is_interval(&self) -> bool {
+        matches!(self, Self::Interval)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SparseDType {
     pub value_dtype: DType,

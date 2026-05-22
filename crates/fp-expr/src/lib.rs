@@ -200,6 +200,10 @@ pub enum Expr {
     ArgSort {
         expr: Box<Expr>,
     },
+    Mode {
+        expr: Box<Expr>,
+        dropna: bool,
+    },
     TopN {
         expr: Box<Expr>,
         n: usize,
@@ -505,6 +509,10 @@ pub fn evaluate(
         Expr::ArgSort { expr } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.argsort(true).map_err(ExprError::from)
+        }
+        Expr::Mode { expr, dropna } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.mode_with_dropna(*dropna).map_err(ExprError::from)
         }
         Expr::TopN {
             expr,
@@ -1043,6 +1051,7 @@ impl MaterializedView {
             Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
             Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
             Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
+            Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
             Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
@@ -1215,6 +1224,10 @@ fn evaluate_delta(
         Expr::ArgSort { expr } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.argsort(true).map_err(ExprError::from)
+        }
+        Expr::Mode { expr, dropna } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.mode_with_dropna(*dropna).map_err(ExprError::from)
         }
         Expr::TopN {
             expr,
@@ -1414,8 +1427,8 @@ fn evaluate_delta_comparison(
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
 //     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
-//     .argsort(axis, kind, order, stable), .replace(to_replace, value),
-//     .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
+//     .argsort(axis, kind, order, stable), .mode(dropna), .replace(to_replace,
+//     value), .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
 //     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
 //     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
 //     .notnull()
@@ -2859,6 +2872,100 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
 
                 expr = Expr::ArgSort {
                     expr: Box::new(expr),
+                };
+                *pos = arg_pos + 1;
+            }
+            "mode" => {
+                let mut arg_pos = *pos + 3;
+                let mut dropna = true;
+                let mut dropna_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated mode() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "dropna" => {
+                                if dropna_seen {
+                                    return Err(ExprError::ParseError(
+                                        "mode() dropna argument was provided more than once".into(),
+                                    ));
+                                }
+                                dropna = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "mode() dropna",
+                                )?;
+                                dropna_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected mode() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "mode() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                if dropna_seen {
+                                    return Err(ExprError::ParseError(
+                                        "mode() dropna argument was provided more than once".into(),
+                                    ));
+                                }
+                                dropna = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "mode() dropna",
+                                )?;
+                                dropna_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "mode() accepts at most one dropna argument".into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "mode() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in mode() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::Mode {
+                    expr: Box::new(expr),
+                    dropna,
                 };
                 *pos = arg_pos + 1;
             }
@@ -6379,6 +6486,75 @@ mod tests {
         assert!(super::parse_expr("a.argsort(kind='bogus')").is_err());
         assert!(super::parse_expr("a.argsort(0, kind='stable', 'extra')").is_err());
         assert!(super::parse_expr("a.argsort(ascending=False)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_mode_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    10_i64.into(),
+                    7_i64.into(),
+                    12_i64.into(),
+                    11_i64.into(),
+                    8_i64.into(),
+                ],
+                vec![
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(3),
+                    Scalar::Int64(3),
+                    Scalar::Int64(1),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![
+                    10_i64.into(),
+                    7_i64.into(),
+                    12_i64.into(),
+                    11_i64.into(),
+                    8_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mode = super::eval_str("a.mode()", &frame, &policy, &mut ledger)?;
+        assert_eq!(mode.index().labels(), &[0_i64.into()]);
+        assert_eq!(mode.values(), &[Scalar::Int64(3)]);
+
+        let with_na = super::eval_str("a.mode(False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(with_na.index().labels(), &[0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            with_na.values(),
+            &[Scalar::Int64(3), Scalar::Null(fp_types::NullKind::NaN)]
+        );
+
+        let keyword = super::eval_str("a.mode(dropna=False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(keyword.values(), with_na.values());
+
+        let filtered =
+            super::query_str("a.mode().ge(3) and b.gt(40)", &frame, &policy, &mut ledger)?;
+        assert!(filtered.index().labels().is_empty());
+
+        assert!(super::parse_expr("a.mode(dropna=False, True)").is_err());
+        assert!(super::parse_expr("a.mode(skipna=False)").is_err());
+        assert!(super::parse_expr("a.mode(dropna='no')").is_err());
         Ok(())
     }
 

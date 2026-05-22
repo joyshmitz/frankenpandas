@@ -80,7 +80,7 @@ use std::collections::BTreeMap;
 
 use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
-use fp_index::Index;
+use fp_index::{Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,11 @@ impl EvalContext {
             locals: locals.clone(),
             anchor_index: Some(frame.index().clone()),
         };
+        context.insert_index_series("index", frame.index())?;
+        context.insert_index_series("ilevel_0", frame.index())?;
+        if let Some(name) = frame.index().name() {
+            context.insert_index_series(name, frame.index())?;
+        }
         for (name, column) in frame.columns() {
             let series = Series::new(name.clone(), frame.index().clone(), column.clone())?;
             context.insert_series(series);
@@ -205,6 +210,13 @@ impl EvalContext {
         self.locals.insert(name.into(), value);
     }
 
+    fn insert_index_series(&mut self, name: &str, index: &Index) -> Result<(), ExprError> {
+        let values = index.labels().iter().map(index_label_to_scalar).collect();
+        let series = Series::from_values(name, index.labels().to_vec(), values)?;
+        self.insert_series(series);
+        Ok(())
+    }
+
     #[must_use]
     pub fn get_local(&self, name: &str) -> Option<&Scalar> {
         self.locals.get(name)
@@ -216,6 +228,15 @@ impl EvalContext {
             .as_ref()
             .ok_or_else(|| ExprError::UnanchoredLocal(name.to_owned()))?;
         Series::broadcast(name, value.clone(), index.labels().to_vec()).map_err(ExprError::from)
+    }
+}
+
+fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
+    match label {
+        IndexLabel::Int64(value) => Scalar::Int64(*value),
+        IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
+        IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
+        IndexLabel::Datetime64(value) => Scalar::Datetime64(*value),
     }
 }
 
@@ -3330,6 +3351,83 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result.columns()["a"].values(), &[Scalar::Int64(2)]);
         assert_eq!(result.columns()["b"].values(), &[Scalar::Utf8("y".into())]);
+    }
+
+    #[test]
+    fn query_str_exposes_index_namespace() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("index > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            result.columns()["a"].values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let result = super::query_str("ilevel_0 > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+    }
+
+    #[test]
+    fn query_str_exposes_named_index_without_shadowing_columns() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "idx",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "value",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+        .set_index("idx", true)
+        .unwrap();
+
+        let result = super::query_str("idx > 5", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            result.columns()["value"].values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let shadowing_frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "index",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(1)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "value",
+                vec![5_i64.into(), 6_i64.into(), 7_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("index > 5", &shadowing_frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.index().labels(), &[6_i64.into()]);
+        assert_eq!(result.columns()["index"].values(), &[Scalar::Int64(10)]);
     }
 
     #[test]

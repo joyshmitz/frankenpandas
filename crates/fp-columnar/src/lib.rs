@@ -5471,6 +5471,34 @@ impl Column {
         indexed.into_iter().map(|(i, _)| i).collect()
     }
 
+    /// Return indices that partition the array around kth element.
+    ///
+    /// Matches np.argpartition(). After partition, element at kth position
+    /// is in its sorted position, elements before are <= kth element,
+    /// elements after are >= kth element.
+    pub fn argpartition(&self, kth: usize) -> Result<Vec<usize>, ColumnError> {
+        if kth >= self.len() {
+            return Err(ColumnError::InvalidLength {
+                operation: "argpartition",
+                expected: kth + 1,
+                actual: self.len(),
+            });
+        }
+        let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
+        indexed.select_nth_unstable_by(kth, |a, b| compare_scalars_na_last(a.1, b.1, true));
+        Ok(indexed.into_iter().map(|(i, _)| i).collect())
+    }
+
+    /// Partition array around kth smallest element.
+    ///
+    /// Matches np.partition(). Returns a partially sorted array where
+    /// element at kth position is in its final sorted position.
+    pub fn partition(&self, kth: usize) -> Result<Self, ColumnError> {
+        let indices = self.argpartition(kth)?;
+        let out: Vec<Scalar> = indices.iter().map(|&i| self.values[i].clone()).collect();
+        Self::new(self.dtype, out)
+    }
+
     /// First-order difference: `values[i] - values[i - periods]`.
     ///
     /// Matches `pd.Series.diff(periods)`. The leading `|periods|`

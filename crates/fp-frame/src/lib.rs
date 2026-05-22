@@ -16850,6 +16850,56 @@ impl CategoricalAccessor<'_> {
             sparse: None,
         })
     }
+
+    /// Return the minimum value from the series (requires ordered categorical).
+    ///
+    /// Matches `pd.Series.min()` for ordered categoricals.
+    pub fn min(&self) -> Result<Scalar, FrameError> {
+        if !self.meta.ordered {
+            return Err(FrameError::CompatibilityRejected(
+                "min() requires an ordered categorical".into(),
+            ));
+        }
+        let mut min_code: Option<i64> = None;
+        for val in self.series.column.values() {
+            if let Scalar::Int64(code) = val {
+                if *code >= 0 {
+                    min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
+                }
+            }
+        }
+        match min_code {
+            Some(code) if (code as usize) < self.meta.categories.len() => {
+                Ok(self.meta.categories[code as usize].clone())
+            }
+            _ => Ok(Scalar::Null(NullKind::NaN)),
+        }
+    }
+
+    /// Return the maximum value from the series (requires ordered categorical).
+    ///
+    /// Matches `pd.Series.max()` for ordered categoricals.
+    pub fn max(&self) -> Result<Scalar, FrameError> {
+        if !self.meta.ordered {
+            return Err(FrameError::CompatibilityRejected(
+                "max() requires an ordered categorical".into(),
+            ));
+        }
+        let mut max_code: Option<i64> = None;
+        for val in self.series.column.values() {
+            if let Scalar::Int64(code) = val {
+                if *code >= 0 {
+                    max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
+                }
+            }
+        }
+        match max_code {
+            Some(code) if (code as usize) < self.meta.categories.len() => {
+                Ok(self.meta.categories[code as usize].clone())
+            }
+            _ => Ok(Scalar::Null(NullKind::NaN)),
+        }
+    }
 }
 
 // ── SparseAccessor ──────────────────────────────────────────────────────
@@ -18519,6 +18569,13 @@ impl StringAccessor<'_> {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
         self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
+    }
+
+    /// Check whether each string matches a regex pattern at the start.
+    ///
+    /// Rust raw-identifier spelling for `pandas.Series.str.match(pat)`.
+    pub fn r#match(&self, pat: &str) -> Result<Series, FrameError> {
+        self.match_regex(pat)
     }
 
     /// Match (start-anchored) with case/na option parity.
@@ -56350,6 +56407,24 @@ mod tests {
     }
 
     #[test]
+    fn str_raw_identifier_match_alias() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("abc123".into()),
+                Scalar::Utf8("123abc".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let result = s.str().r#match(r"[a-z]+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
     fn str_fullmatch_with_options_case_insensitive() {
         let s = Series::from_values(
             "x",
@@ -91004,5 +91079,24 @@ mod test_select_columns_perf_76e1fd {
         let mapped_cat = mapped.cat().unwrap();
         assert_eq!(mapped_cat.categories()[0], Scalar::Utf8("A".into()));
         assert_eq!(mapped_cat.categories()[1], Scalar::Utf8("B".into()));
+    }
+
+    #[test]
+    fn series_categorical_accessor_min_max() {
+        let s = Series::from_categorical(
+            "cat",
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+            ],
+            true,
+        )
+        .unwrap();
+        let cat = s.cat().unwrap();
+        let min_val = cat.min().unwrap();
+        let max_val = cat.max().unwrap();
+        assert_eq!(min_val, Scalar::Utf8("b".into()));
+        assert_eq!(max_val, Scalar::Utf8("a".into()));
     }
 }

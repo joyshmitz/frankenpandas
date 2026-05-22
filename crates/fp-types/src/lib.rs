@@ -1404,6 +1404,54 @@ impl Timestamp {
         Some((sub_nanos % 1000) as i64)
     }
 
+    /// Return the day of the week (Monday=0, Sunday=6).
+    ///
+    /// Matches `pd.Timestamp.dayofweek`. Returns None for NaT.
+    #[must_use]
+    pub fn dayofweek(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        let dow = ((days_since_epoch + 3) % 7 + 7) % 7;
+        Some(dow)
+    }
+
+    /// Alias for dayofweek(). Matches `pd.Timestamp.weekday`.
+    #[must_use]
+    pub fn weekday(&self) -> Option<i64> {
+        self.dayofweek()
+    }
+
+    /// Return the day of the year (1-366).
+    ///
+    /// Matches `pd.Timestamp.dayofyear`. Returns None for NaT.
+    #[must_use]
+    pub fn dayofyear(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let m = self.month()?;
+        let d = self.day()?;
+        let y = self.year()?;
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let days_before: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        let base = days_before[(m - 1) as usize] + d;
+        if is_leap && m > 2 {
+            Some(base + 1)
+        } else {
+            Some(base)
+        }
+    }
+
+    /// Return the quarter (1-4) of the year.
+    ///
+    /// Matches `pd.Timestamp.quarter`. Returns None for NaT.
+    #[must_use]
+    pub fn quarter(&self) -> Option<i64> {
+        self.month().map(|m| (m - 1) / 3 + 1)
+    }
+
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
@@ -5030,5 +5078,25 @@ mod tests {
         assert_eq!(Timestamp::nat().year(), None);
         assert_eq!(Timestamp::nat().month(), None);
         assert_eq!(Timestamp::nat().day(), None);
+    }
+
+    #[test]
+    fn timestamp_dayofweek_dayofyear_quarter() {
+        let ts = Timestamp::from_nanos(0);
+        assert_eq!(ts.dayofweek(), Some(3));
+        assert_eq!(ts.weekday(), Some(3));
+        assert_eq!(ts.dayofyear(), Some(1));
+        assert_eq!(ts.quarter(), Some(1));
+
+        let ts2 = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 90);
+        assert_eq!(ts2.quarter(), Some(2));
+
+        let ts3 = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 365);
+        assert_eq!(ts3.dayofyear(), Some(1));
+        assert_eq!(ts3.dayofweek(), Some(4));
+
+        assert_eq!(Timestamp::nat().dayofweek(), None);
+        assert_eq!(Timestamp::nat().dayofyear(), None);
+        assert_eq!(Timestamp::nat().quarter(), None);
     }
 }

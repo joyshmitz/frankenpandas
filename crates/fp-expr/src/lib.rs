@@ -197,6 +197,13 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Rank {
+        expr: Box<Expr>,
+        method: String,
+        ascending: bool,
+        na_option: String,
+        pct: bool,
+    },
     Where {
         expr: Box<Expr>,
         cond: Box<Expr>,
@@ -445,6 +452,18 @@ pub fn evaluate(
             let lhs = evaluate(left, context, policy, ledger)?;
             let rhs = evaluate(right, context, policy, ledger)?;
             lhs.combine_first(&rhs).map_err(ExprError::from)
+        }
+        Expr::Rank {
+            expr,
+            method,
+            ascending,
+            na_option,
+            pct,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .rank_with_pct(method, *ascending, na_option, *pct)
+                .map_err(ExprError::from)
         }
         Expr::Where {
             expr,
@@ -878,7 +897,10 @@ impl MaterializedView {
                 Self::extract_series(right, series_set);
             }
             Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
-            Expr::Not { expr } | Expr::Abs { expr } | Expr::Round { expr, .. } => {
+            Expr::Not { expr }
+            | Expr::Abs { expr }
+            | Expr::Round { expr, .. }
+            | Expr::Rank { expr, .. } => {
                 Self::extract_series(expr, series_set);
             }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
@@ -1041,6 +1063,18 @@ fn evaluate_delta(
             let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
             lhs.combine_first(&rhs).map_err(ExprError::from)
         }
+        Expr::Rank {
+            expr,
+            method,
+            ascending,
+            na_option,
+            pct,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .rank_with_pct(method, *ascending, na_option, *pct)
+                .map_err(ExprError::from)
+        }
         Expr::Where {
             expr,
             cond,
@@ -1167,8 +1201,9 @@ fn evaluate_delta_comparison(
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
 //     .round(decimals), .replace(to_replace, value), .astype(dtype),
-//     .combine_first(other), .where(cond, other), .mask(cond, other),
-//     .isna(), .notna(), .isnull(), .notnull()
+//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
+//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
+//     .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1793,6 +1828,34 @@ fn parse_dtype_literal(tokens: &[Token], pos: &mut usize) -> Result<DType, ExprE
     parse_dtype_alias(&value)
 }
 
+fn parse_string_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<String, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Utf8(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be a string literal, got {value:?}"
+        )));
+    };
+    Ok(value)
+}
+
+fn parse_bool_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<bool, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Bool(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be a boolean literal, got {value:?}"
+        )));
+    };
+    Ok(value)
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -2153,6 +2216,98 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 expr = Expr::CombineFirst {
                     left: Box::new(expr),
                     right: Box::new(right),
+                };
+                *pos = arg_pos + 1;
+            }
+            "rank" => {
+                let mut arg_pos = *pos + 3;
+                let mut method = "average".to_owned();
+                let mut ascending = true;
+                let mut na_option = "keep".to_owned();
+                let mut pct = false;
+                let mut positional_method_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated rank() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "method" => {
+                                method = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() method",
+                                )?;
+                            }
+                            "ascending" => {
+                                ascending = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() ascending",
+                                )?;
+                            }
+                            "na_option" => {
+                                na_option = parse_string_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() na_option",
+                                )?;
+                            }
+                            "pct" => {
+                                pct = parse_bool_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "rank() pct",
+                                )?;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected rank() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else if !positional_method_seen {
+                        method =
+                            parse_string_literal_argument(tokens, &mut arg_pos, "rank() method")?;
+                        positional_method_seen = true;
+                    } else {
+                        return Err(ExprError::ParseError(
+                            "rank() only accepts one positional method argument".into(),
+                        ));
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "rank() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in rank() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::Rank {
+                    expr: Box::new(expr),
+                    method,
+                    ascending,
+                    na_option,
+                    pct,
                 };
                 *pos = arg_pos + 1;
             }
@@ -4757,6 +4912,61 @@ mod tests {
         assert_eq!(keyword.values(), combined.values());
 
         let filtered = super::query_str("a.combine_first(b).gt(5)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_rank_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let average = super::eval_str("a.rank()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            average.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.5),
+            ]
+        );
+
+        let dense = super::eval_str("a.rank(\"dense\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dense.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let descending = super::eval_str(
+            "a.rank(method=\"dense\", ascending=False, na_option=\"keep\", pct=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            descending.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let filtered = super::query_str("a.rank().gt(2)", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[1_i64.into()]);
         Ok(())
     }

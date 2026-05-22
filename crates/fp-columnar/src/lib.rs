@@ -6639,6 +6639,80 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Compute log(exp(x) + exp(y)) in a numerically stable way.
+    ///
+    /// Matches np.logaddexp(x, y). Useful for log-domain arithmetic
+    /// where direct computation would overflow/underflow.
+    pub fn logaddexp(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (v1, v2) in self.values.iter().zip(other.values.iter()) {
+            if v1.is_missing() || v2.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let result = if x.is_nan() || y.is_nan() {
+                f64::NAN
+            } else if x == f64::NEG_INFINITY {
+                y
+            } else if y == f64::NEG_INFINITY {
+                x
+            } else if x == f64::INFINITY || y == f64::INFINITY {
+                f64::INFINITY
+            } else if x >= y {
+                x + (1.0 + (y - x).exp()).ln()
+            } else {
+                y + (1.0 + (x - y).exp()).ln()
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute log2(2**x + 2**y) in a numerically stable way.
+    ///
+    /// Matches np.logaddexp2(x, y). Like logaddexp but using base 2.
+    pub fn logaddexp2(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let ln2 = std::f64::consts::LN_2;
+        let mut out = Vec::with_capacity(self.values.len());
+        for (v1, v2) in self.values.iter().zip(other.values.iter()) {
+            if v1.is_missing() || v2.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let result = if x.is_nan() || y.is_nan() {
+                f64::NAN
+            } else if x == f64::NEG_INFINITY {
+                y
+            } else if y == f64::NEG_INFINITY {
+                x
+            } else if x == f64::INFINITY || y == f64::INFINITY {
+                f64::INFINITY
+            } else if x >= y {
+                x + ((y - x) * ln2).exp().ln_1p() / ln2
+            } else {
+                y + ((x - y) * ln2).exp().ln_1p() / ln2
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Compute spacing between this value and the next representable float.
     ///
     /// Matches np.spacing(x). Returns the ULP (unit in last place) - the
@@ -12748,6 +12822,50 @@ mod tests {
             // sinc(0.5) = sin(pi/2)/(pi/2) = 2/pi ≈ 0.6366
             let expected = 2.0 / std::f64::consts::PI;
             assert!((result.values()[2].to_f64().unwrap() - expected).abs() < 1e-10);
+        }
+
+        #[test]
+        fn logaddexp_computes_stable_log_sum() {
+            let x = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1000.0),
+            ])
+            .unwrap();
+            let y = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(-1000.0),
+            ])
+            .unwrap();
+            let result = x.logaddexp(&y).unwrap();
+            // log(exp(0) + exp(0)) = log(2) ≈ 0.693
+            assert!((result.values()[0].to_f64().unwrap() - std::f64::consts::LN_2).abs() < 1e-10);
+            // log(exp(1) + exp(2)) ≈ 2.313
+            let expected1 = (1.0_f64.exp() + 2.0_f64.exp()).ln();
+            assert!((result.values()[1].to_f64().unwrap() - expected1).abs() < 1e-10);
+            // log(exp(-1000) + exp(-1000)) = -1000 + log(2)
+            let expected2 = -1000.0 + std::f64::consts::LN_2;
+            assert!((result.values()[2].to_f64().unwrap() - expected2).abs() < 1e-8);
+        }
+
+        #[test]
+        fn logaddexp2_computes_stable_log2_sum() {
+            let x = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+            ])
+            .unwrap();
+            let y = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+            ])
+            .unwrap();
+            let result = x.logaddexp2(&y).unwrap();
+            // log2(2^0 + 2^0) = log2(2) = 1
+            assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            // log2(2^1 + 2^1) = log2(4) = 2
+            assert!((result.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
         }
     }
 }

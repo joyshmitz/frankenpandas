@@ -1559,6 +1559,23 @@ impl Column {
         self.to_numpy()
     }
 
+    /// Flatten values to a copy, matching `np.ndarray.flatten()`.
+    ///
+    /// For 1D arrays this is equivalent to ravel() but explicitly returns
+    /// an owned copy rather than potentially a view.
+    #[must_use]
+    pub fn flatten(&self) -> Vec<Scalar> {
+        self.values.clone()
+    }
+
+    /// Convert to array, matching `np.asarray()`.
+    ///
+    /// For Column this returns a clone since we're already array-like.
+    #[must_use]
+    pub fn asarray(&self) -> Self {
+        self.clone()
+    }
+
     /// Owned scalar materialization, matching `pd.Series.array`.
     #[must_use]
     pub fn array(&self) -> Vec<Scalar> {

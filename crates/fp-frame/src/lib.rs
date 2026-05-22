@@ -33083,7 +33083,10 @@ impl DataFrame {
 
         // Header
         if include_index {
-            out.push_str("index");
+            // Use the index name if set, otherwise empty string (pandas behavior)
+            if let Some(idx_name) = self.index.name() {
+                out.push_str(&csv_escape(idx_name, sep));
+            }
             out.push(sep);
         }
         for (i, name) in self.column_order.iter().enumerate() {
@@ -33168,7 +33171,10 @@ impl DataFrame {
 
         // Header
         if include_index {
-            out.push_str("index");
+            // Use the index name if set, otherwise empty string (pandas behavior)
+            if let Some(idx_name) = self.index.name() {
+                out.push_str(&csv_escape(idx_name, sep));
+            }
             out.push(sep);
         }
         for (i, name) in col_order.iter().enumerate() {
@@ -92822,12 +92828,13 @@ mod test_select_columns_perf_76e1fd {
 
     #[test]
     fn series_str_accessor_index_rindex_aliases() {
+        // All test strings must contain both "o" and "abc" for index/rindex to succeed
         let s = Series::from_values(
             "text",
             vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
             vec![
-                Scalar::Utf8("hello world".into()),
-                Scalar::Utf8("abcabc".into()),
+                Scalar::Utf8("oabcxyz".into()),
+                Scalar::Utf8("oabcabc".into()),
             ],
         )
         .unwrap();

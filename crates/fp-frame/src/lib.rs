@@ -16824,6 +16824,26 @@ impl CategoricalAccessor<'_> {
         let column = Column::from_values(values)?;
         Series::new(self.series.name.clone(), index, column)
     }
+
+    /// Map category values through a given function.
+    ///
+    /// Matches `pd.Series.cat.map(mapper)`.
+    pub fn map<F>(&self, mapper: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        let new_categories: Vec<Scalar> = self.meta.categories.iter().map(&mapper).collect();
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: Some(CategoricalMetadata {
+                categories: new_categories,
+                ordered: self.meta.ordered,
+            }),
+            sparse: None,
+        })
+    }
 }
 
 // ── SparseAccessor ──────────────────────────────────────────────────────
@@ -90774,5 +90794,29 @@ mod test_select_columns_perf_76e1fd {
         };
         assert!(v0.contains("1") && v0.contains("2") && v0.contains("3"));
         assert!(!v0.contains("2,2") && !v0.contains("1,1"));
+    }
+
+    #[test]
+    fn series_categorical_accessor_map() {
+        let s = Series::from_categorical(
+            "cat",
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let cat = s.cat().unwrap();
+        let mapped = cat
+            .map(|s| match s {
+                Scalar::Utf8(v) => Scalar::Utf8(v.to_uppercase()),
+                other => other.clone(),
+            })
+            .unwrap();
+        let mapped_cat = mapped.cat().unwrap();
+        assert_eq!(mapped_cat.categories()[0], Scalar::Utf8("A".into()));
+        assert_eq!(mapped_cat.categories()[1], Scalar::Utf8("B".into()));
     }
 }

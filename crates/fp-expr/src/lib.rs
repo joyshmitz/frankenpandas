@@ -137,6 +137,9 @@ pub enum Expr {
     Not {
         expr: Box<Expr>,
     },
+    Abs {
+        expr: Box<Expr>,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -329,6 +332,10 @@ pub fn evaluate(
         Expr::Not { expr } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.not().map_err(ExprError::from)
+        }
+        Expr::Abs { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.abs().map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -705,7 +712,7 @@ impl MaterializedView {
                 Self::extract_series(right, series_set);
             }
             Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
-            Expr::Not { expr } => Self::extract_series(expr, series_set),
+            Expr::Not { expr } | Expr::Abs { expr } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -812,6 +819,10 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.not().map_err(ExprError::from)
         }
+        Expr::Abs { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.abs().map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -875,6 +886,7 @@ fn evaluate_delta_comparison(
 //   - Comparison operators: ==, !=, >, >=, <, <=
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
+//   - Unary function calls: abs(expr)
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -890,7 +902,7 @@ fn evaluate_delta_comparison(
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
 ///   pow_expr   → atom ( "**" unary_expr )?
-///   atom       → NUMBER | STRING | BOOL | IDENT | LOCAL | "(" expr ")"
+///   atom       → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -1549,6 +1561,21 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             *pos += 1;
             Ok(Expr::Literal {
                 value: Scalar::Bool(val),
+            })
+        }
+        Token::Ident(name)
+            if name == "abs" && *pos + 1 < tokens.len() && tokens[*pos + 1] == Token::LParen =>
+        {
+            *pos += 2; // skip function name and opening '('
+            let inner = parse_or(tokens, pos)?;
+            if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
+                return Err(ExprError::ParseError(
+                    "expected closing ')' after abs argument".into(),
+                ));
+            }
+            *pos += 1; // skip ')'
+            Ok(Expr::Abs {
+                expr: Box::new(inner),
             })
         }
         Token::Ident(name) => {
@@ -2968,6 +2995,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_abs_function_call() {
+        let expr = super::parse_expr("abs(a - 3)").unwrap();
+        let Expr::Abs { expr: inner } = expr else {
+            panic!("expected Abs expression");
+        };
+        assert!(matches!(inner.as_ref(), Expr::Sub { .. }));
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3428,6 +3464,53 @@ mod tests {
         let result = super::query_str("index > 5", &shadowing_frame, &policy, &mut ledger).unwrap();
         assert_eq!(result.index().labels(), &[6_i64.into()]);
         assert_eq!(result.columns()["index"].values(), &[Scalar::Int64(10)]);
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_abs_function() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                ],
+                vec![
+                    Scalar::Int64(-2),
+                    Scalar::Int64(-1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let evaluated = super::eval_str("abs(a)", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            evaluated.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+
+        let filtered = super::query_str("abs(a) > 1", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 4_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(-2), Scalar::Int64(2)]
+        );
     }
 
     #[test]

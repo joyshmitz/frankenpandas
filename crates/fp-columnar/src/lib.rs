@@ -1622,6 +1622,31 @@ impl Column {
         Self::new(out_dtype, values)
     }
 
+    /// Element-wise addition, matching `pd.Series.add()`.
+    pub fn add(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Add)
+    }
+
+    /// Element-wise subtraction, matching `pd.Series.sub()`.
+    pub fn sub(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Sub)
+    }
+
+    /// Element-wise multiplication, matching `pd.Series.mul()`.
+    pub fn mul(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Mul)
+    }
+
+    /// Element-wise true division, matching `pd.Series.div()`.
+    pub fn div(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.binary_numeric(right, ArithmeticOp::Div)
+    }
+
+    /// Alias for [`div`](Self::div), matching `pd.Series.divide()`.
+    pub fn divide(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.div(right)
+    }
+
     /// Element-wise comparison producing a `Bool`-typed column.
     ///
     /// Both columns must have the same length. Missing values (Null or NaN)
@@ -5127,6 +5152,33 @@ mod tests {
         assert_eq!(sub.values()[0], Scalar::Float64(7.0));
         assert_eq!(mul.values()[0], Scalar::Float64(30.0));
         assert!(matches!(div.values()[0], Scalar::Float64(v) if (v - 10.0/3.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn pandas_arithmetic_aliases_match_binary_numeric() {
+        let left = Column::from_values(vec![Scalar::Float64(10.0)]).expect("left");
+        let right = Column::from_values(vec![Scalar::Float64(3.0)]).expect("right");
+
+        assert_eq!(
+            left.add(&right).expect("add"),
+            left.binary_numeric(&right, ArithmeticOp::Add).expect("add")
+        );
+        assert_eq!(
+            left.sub(&right).expect("sub"),
+            left.binary_numeric(&right, ArithmeticOp::Sub).expect("sub")
+        );
+        assert_eq!(
+            left.mul(&right).expect("mul"),
+            left.binary_numeric(&right, ArithmeticOp::Mul).expect("mul")
+        );
+        assert_eq!(
+            left.div(&right).expect("div"),
+            left.binary_numeric(&right, ArithmeticOp::Div).expect("div")
+        );
+        assert_eq!(
+            left.divide(&right).expect("divide"),
+            left.div(&right).expect("div")
+        );
     }
 
     #[test]

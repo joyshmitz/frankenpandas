@@ -20004,6 +20004,13 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Normalize each datetime to midnight (set time to 00:00:00).
+    ///
+    /// Matches `pd.Series.dt.normalize()`. Equivalent to `floor("D")`.
+    pub fn normalize(&self) -> Result<Series, FrameError> {
+        self.floor("D")
+    }
+
     /// Internal: approximate total seconds for datetime comparison.
     fn total_secs_approx(s: &str) -> f64 {
         let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
@@ -76421,6 +76428,28 @@ mod tests {
         assert_eq!(
             result.column().values()[1],
             Scalar::Utf8("2023-01-15 00:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_normalize() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:35:22".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().normalize().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2023-01-15 00:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2023-06-30 00:00:00".to_string())
         );
     }
 

@@ -6147,6 +6147,83 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Replace NaN with zero and infinity with large finite numbers.
+    ///
+    /// Matches np.nan_to_num(x). NaN becomes 0, positive infinity becomes
+    /// a large positive number, negative infinity becomes a large negative number.
+    pub fn nan_to_num(&self) -> Result<Self, ColumnError> {
+        self.nan_to_num_with_values(0.0, f64::MAX, f64::MIN)
+    }
+
+    /// Replace NaN and infinity with specified values.
+    ///
+    /// Matches np.nan_to_num(x, nan=nan, posinf=posinf, neginf=neginf).
+    pub fn nan_to_num_with_values(
+        &self,
+        nan: f64,
+        posinf: f64,
+        neginf: f64,
+    ) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            let result = match v {
+                Scalar::Float64(x) => {
+                    if x.is_nan() {
+                        nan
+                    } else if *x == f64::INFINITY {
+                        posinf
+                    } else if *x == f64::NEG_INFINITY {
+                        neginf
+                    } else {
+                        *x
+                    }
+                }
+                Scalar::Int64(x) => *x as f64,
+                Scalar::Null(_) => nan,
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            };
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Round to nearest even integer (banker's rounding).
+    ///
+    /// Matches np.rint(x). Values exactly halfway between integers round to
+    /// the nearest even integer.
+    pub fn rint(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.round_ties_even())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Round toward zero (same as trunc).
+    ///
+    /// Matches np.fix(x). Alias for trunc().
+    pub fn fix(&self) -> Result<Self, ColumnError> {
+        self.trunc()
+    }
+
     /// Compute exp(x) - 1 with improved precision for small x.
     pub fn expm1(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());

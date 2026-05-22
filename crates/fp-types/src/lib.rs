@@ -2179,6 +2179,12 @@ impl Timestamp {
         }
     }
 
+    /// Alias for isoformat.
+    #[must_use]
+    pub fn to_iso8601(&self) -> String {
+        self.isoformat()
+    }
+
     /// Format timestamp using strftime directives.
     ///
     /// Matches `pd.Timestamp.strftime(format)`. Supports: %Y (year), %m (month),

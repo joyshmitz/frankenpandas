@@ -5055,16 +5055,17 @@ impl Column {
 
         // Generate bin edges
         let range = max_val - min_val;
-        let step = if range == 0.0 {
-            1.0
+        let (adj_min, adj_max) = if range == 0.0 {
+            // All values are the same - numpy extends by 0.5 on each side
+            (min_val - 0.5, max_val + 0.5)
         } else {
-            range / n_bins as f64
+            (min_val, max_val)
         };
-        let mut bin_edges: Vec<f64> = (0..=n_bins)
-            .map(|i| min_val + step * i as f64)
+        let adj_range = adj_max - adj_min;
+        let step = adj_range / n_bins as f64;
+        let bin_edges: Vec<f64> = (0..=n_bins)
+            .map(|i| adj_min + step * i as f64)
             .collect();
-        // Ensure max is exactly the last edge
-        bin_edges[n_bins] = max_val;
 
         let counts = self.histogram(&bin_edges)?;
         Ok((counts, bin_edges))

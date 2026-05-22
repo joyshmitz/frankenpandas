@@ -1156,6 +1156,24 @@ fn format_pandas_csv_float(v: f64) -> String {
     }
 }
 
+fn csv_decimal_or_default(decimal: &str) -> &str {
+    if decimal.is_empty() { "." } else { decimal }
+}
+
+fn format_pandas_csv_float_with_decimal(
+    v: f64,
+    sep: char,
+    lineterminator: &str,
+    decimal: &str,
+) -> String {
+    let decimal = csv_decimal_or_default(decimal);
+    let mut rendered = format_pandas_csv_float(v);
+    if decimal != "." && rendered.contains('.') {
+        rendered = rendered.replace('.', decimal);
+    }
+    csv_escape_with_lineterminator(&rendered, sep, lineterminator)
+}
+
 fn csv_lineterminator_or_default(lineterminator: &str) -> &str {
     if lineterminator.is_empty() {
         "\n"
@@ -8736,6 +8754,19 @@ impl Series {
         )
     }
 
+    /// Matches `pd.Series.to_csv(decimal=...)`.
+    pub fn to_csv_with_decimal(&self, sep: char, include_index: bool, decimal: &str) -> String {
+        self.to_csv_with_format_options_index_label_and_decimal(
+            sep,
+            include_index,
+            true,
+            "",
+            "\n",
+            None,
+            decimal,
+        )
+    }
+
     /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=...)`.
     pub fn to_csv_with_format_options(
         &self,
@@ -8765,7 +8796,35 @@ impl Series {
         lineterminator: &str,
         index_label: Option<&str>,
     ) -> String {
-        fn format_scalar(val: &Scalar, sep: char, na_rep: &str, lineterminator: &str) -> String {
+        self.to_csv_with_format_options_index_label_and_decimal(
+            sep,
+            include_index,
+            include_header,
+            na_rep,
+            lineterminator,
+            index_label,
+            ".",
+        )
+    }
+
+    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=...)`.
+    pub fn to_csv_with_format_options_index_label_and_decimal(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        na_rep: &str,
+        lineterminator: &str,
+        index_label: Option<&str>,
+        decimal: &str,
+    ) -> String {
+        fn format_scalar(
+            val: &Scalar,
+            sep: char,
+            na_rep: &str,
+            lineterminator: &str,
+            decimal: &str,
+        ) -> String {
             if val.is_missing() {
                 return csv_escape_with_lineterminator(na_rep, sep, lineterminator);
             }
@@ -8774,7 +8833,9 @@ impl Series {
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 // Per br-frankenpandas-41edff: pandas-canonical `.0` suffix.
-                Scalar::Float64(v) => format_pandas_csv_float(*v),
+                Scalar::Float64(v) => {
+                    format_pandas_csv_float_with_decimal(*v, sep, lineterminator, decimal)
+                }
                 Scalar::Utf8(s) => csv_escape_with_lineterminator(s, sep, lineterminator),
                 Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
                     csv_escape_with_lineterminator(na_rep, sep, lineterminator)
@@ -8837,10 +8898,10 @@ impl Series {
                 };
                 out.push_str(&idx);
                 out.push(sep);
-                out.push_str(&format_scalar(val, sep, na_rep, lineterminator));
+                out.push_str(&format_scalar(val, sep, na_rep, lineterminator, decimal));
                 out.push_str(lineterminator);
             } else {
-                out.push_str(&format_scalar(val, sep, na_rep, lineterminator));
+                out.push_str(&format_scalar(val, sep, na_rep, lineterminator, decimal));
                 out.push_str(lineterminator);
             }
         }
@@ -32689,6 +32750,18 @@ impl DataFrame {
         )
     }
 
+    /// Matches `df.to_csv(decimal=...)` returning a string representation.
+    pub fn to_csv_with_decimal(&self, sep: char, include_index: bool, decimal: &str) -> String {
+        self.to_csv_with_index_label_lineterminator_and_decimal(
+            sep,
+            include_index,
+            true,
+            None,
+            "\n",
+            decimal,
+        )
+    }
+
     /// Matches `df.to_csv(header=..., lineterminator=...)` returning a string representation.
     pub fn to_csv_with_header_and_lineterminator(
         &self,
@@ -32714,6 +32787,26 @@ impl DataFrame {
         include_header: bool,
         index_label: Option<&str>,
         lineterminator: &str,
+    ) -> String {
+        self.to_csv_with_index_label_lineterminator_and_decimal(
+            sep,
+            include_index,
+            include_header,
+            index_label,
+            lineterminator,
+            ".",
+        )
+    }
+
+    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=...)`.
+    pub fn to_csv_with_index_label_lineterminator_and_decimal(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        lineterminator: &str,
+        decimal: &str,
     ) -> String {
         let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
@@ -32773,7 +32866,12 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_decimal(
+                        *v,
+                        sep,
+                        lineterminator,
+                        decimal,
+                    )),
                     Scalar::Utf8(s) => {
                         out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
                     }
@@ -32858,6 +32956,30 @@ impl DataFrame {
         columns: Option<&[&str]>,
         lineterminator: &str,
     ) -> Result<String, FrameError> {
+        self.to_csv_options_with_index_label_lineterminator_and_decimal(
+            sep,
+            include_index,
+            include_header,
+            index_label,
+            na_rep,
+            columns,
+            lineterminator,
+            ".",
+        )
+    }
+
+    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator, decimal)`.
+    pub fn to_csv_options_with_index_label_lineterminator_and_decimal(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        lineterminator: &str,
+        decimal: &str,
+    ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
                 for &c in cols {
@@ -32935,7 +33057,12 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_decimal(
+                        *v,
+                        sep,
+                        lineterminator,
+                        decimal,
+                    )),
                     Scalar::Utf8(s) => {
                         out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
                     }
@@ -62269,6 +62396,18 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_with_decimal_quotes_separator_collision() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(1.5), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_with_decimal(',', false, ",");
+        assert_eq!(csv, "x\n\"1,5\"\n\"2,0\"\n");
+    }
+
+    #[test]
     fn dataframe_to_csv_with_header_false() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -70669,6 +70808,19 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_with_decimal_quotes_separator_collision() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_decimal(',', false, ",");
+        assert_eq!(csv, "x\n\"1,5\"\n\"2,0\"\n");
+    }
+
+    #[test]
     fn series_to_csv_with_header_false() {
         let s = Series::from_values(
             "x",
@@ -75643,6 +75795,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(csv, "row,x\n0,1\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_with_decimal_and_alt_sep() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(1.5)])],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_options_with_index_label_lineterminator_and_decimal(
+                ';',
+                false,
+                true,
+                None,
+                "",
+                None,
+                "\n",
+                ",",
+            )
+            .unwrap();
+        assert_eq!(csv, "x\n1,5\n");
     }
 
     #[test]

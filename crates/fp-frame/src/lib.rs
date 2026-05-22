@@ -5729,6 +5729,69 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.tan()?)
     }
 
+    /// Element-wise hyperbolic sine.
+    ///
+    /// Matches `np.sinh(series)`. NaN values pass through.
+    pub fn sinh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.sinh()?)
+    }
+
+    /// Element-wise hyperbolic cosine.
+    ///
+    /// Matches `np.cosh(series)`. NaN values pass through.
+    pub fn cosh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.cosh()?)
+    }
+
+    /// Element-wise hyperbolic tangent.
+    ///
+    /// Matches `np.tanh(series)`. NaN values pass through.
+    pub fn tanh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.tanh()?)
+    }
+
+    /// Element-wise inverse sine.
+    ///
+    /// Matches `np.arcsin(series)`. NaN values pass through.
+    pub fn arcsin(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arcsin()?)
+    }
+
+    /// Element-wise inverse cosine.
+    ///
+    /// Matches `np.arccos(series)`. NaN values pass through.
+    pub fn arccos(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arccos()?)
+    }
+
+    /// Element-wise inverse tangent.
+    ///
+    /// Matches `np.arctan(series)`. NaN values pass through.
+    pub fn arctan(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arctan()?)
+    }
+
+    /// Element-wise inverse hyperbolic sine.
+    ///
+    /// Matches `np.arcsinh(series)`. NaN values pass through.
+    pub fn arcsinh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arcsinh()?)
+    }
+
+    /// Element-wise inverse hyperbolic cosine.
+    ///
+    /// Matches `np.arccosh(series)`. NaN values pass through.
+    pub fn arccosh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arccosh()?)
+    }
+
+    /// Element-wise inverse hyperbolic tangent.
+    ///
+    /// Matches `np.arctanh(series)`. NaN values pass through.
+    pub fn arctanh(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.arctanh()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35100,6 +35163,69 @@ impl DataFrame {
     /// Matches `np.tan(df)`. NaN values pass through.
     pub fn tan(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.tan())
+    }
+
+    /// Element-wise hyperbolic sine.
+    ///
+    /// Matches `np.sinh(df)`. NaN values pass through.
+    pub fn sinh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.sinh())
+    }
+
+    /// Element-wise hyperbolic cosine.
+    ///
+    /// Matches `np.cosh(df)`. NaN values pass through.
+    pub fn cosh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.cosh())
+    }
+
+    /// Element-wise hyperbolic tangent.
+    ///
+    /// Matches `np.tanh(df)`. NaN values pass through.
+    pub fn tanh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.tanh())
+    }
+
+    /// Element-wise inverse sine.
+    ///
+    /// Matches `np.arcsin(df)`. NaN values pass through.
+    pub fn arcsin(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arcsin())
+    }
+
+    /// Element-wise inverse cosine.
+    ///
+    /// Matches `np.arccos(df)`. NaN values pass through.
+    pub fn arccos(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arccos())
+    }
+
+    /// Element-wise inverse tangent.
+    ///
+    /// Matches `np.arctan(df)`. NaN values pass through.
+    pub fn arctan(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arctan())
+    }
+
+    /// Element-wise inverse hyperbolic sine.
+    ///
+    /// Matches `np.arcsinh(df)`. NaN values pass through.
+    pub fn arcsinh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arcsinh())
+    }
+
+    /// Element-wise inverse hyperbolic cosine.
+    ///
+    /// Matches `np.arccosh(df)`. NaN values pass through.
+    pub fn arccosh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arccosh())
+    }
+
+    /// Element-wise inverse hyperbolic tangent.
+    ///
+    /// Matches `np.arctanh(df)`. NaN values pass through.
+    pub fn arctanh(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.arctanh())
     }
 
     /// Add a scalar to all numeric columns.

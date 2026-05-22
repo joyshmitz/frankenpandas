@@ -202,6 +202,105 @@ impl DType {
             Self::Utf8 | Self::Categorical | Self::Interval | Self::Sparse | Self::Null => 8,
         }
     }
+
+    /// Returns true if this is an extension dtype (categorical, sparse, period, interval).
+    ///
+    /// Matches `pd.api.types.is_extension_array_dtype()`.
+    #[must_use]
+    pub const fn is_extension(&self) -> bool {
+        matches!(
+            self,
+            Self::Categorical | Self::Sparse | Self::Period | Self::Interval
+        )
+    }
+
+    /// Returns true if this is a signed integer type.
+    ///
+    /// Matches `pd.api.types.is_signed_integer_dtype()`.
+    #[must_use]
+    pub const fn is_signed_integer(&self) -> bool {
+        matches!(self, Self::Int64)
+    }
+
+    /// Returns true if this is a string/object dtype.
+    ///
+    /// Matches `pd.api.types.is_string_dtype()`.
+    #[must_use]
+    pub const fn is_string_dtype(&self) -> bool {
+        matches!(self, Self::Utf8)
+    }
+
+    /// Returns true for any real numeric dtype (integer or float).
+    ///
+    /// Matches `pd.api.types.is_any_real_numeric_dtype()`.
+    #[must_use]
+    pub const fn is_any_real_numeric(&self) -> bool {
+        self.is_numeric()
+    }
+
+    /// Returns true for datetime-like dtypes (datetime, timedelta, period).
+    ///
+    /// Matches `pd.api.types.is_datetime64_any_dtype()` family.
+    #[must_use]
+    pub const fn is_datetime_like(&self) -> bool {
+        matches!(self, Self::Datetime64 | Self::Timedelta64 | Self::Period)
+    }
+
+    /// Return the numpy dtype character code.
+    ///
+    /// Matches numpy dtype.char property.
+    #[must_use]
+    pub const fn char(&self) -> char {
+        match self {
+            Self::Bool => '?',
+            Self::Int64 => 'l',
+            Self::Float64 => 'd',
+            Self::Utf8 => 'O',
+            Self::Datetime64 => 'M',
+            Self::Timedelta64 => 'm',
+            Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => 'O',
+        }
+    }
+
+    /// Return the numpy type number.
+    ///
+    /// Matches numpy dtype.num property.
+    #[must_use]
+    pub const fn num(&self) -> i32 {
+        match self {
+            Self::Bool => 0,
+            Self::Int64 => 7,
+            Self::Float64 => 12,
+            Self::Utf8 => 17,
+            Self::Datetime64 => 21,
+            Self::Timedelta64 => 22,
+            Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => 17,
+        }
+    }
+
+    /// Return the byte order character.
+    ///
+    /// Matches numpy dtype.byteorder property. Returns '=' (native) for all types.
+    #[must_use]
+    pub const fn byteorder(&self) -> char {
+        '='
+    }
+
+    /// Return the numpy dtype string representation.
+    ///
+    /// Matches numpy dtype.str property.
+    #[must_use]
+    pub const fn str_repr(&self) -> &'static str {
+        match self {
+            Self::Bool => "|b1",
+            Self::Int64 => "<i8",
+            Self::Float64 => "<f8",
+            Self::Utf8 => "|O8",
+            Self::Datetime64 => "<M8[ns]",
+            Self::Timedelta64 => "<m8[ns]",
+            Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => "|O8",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -19309,6 +19309,44 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Extract time part as string (HH:MM:SS).
+    ///
+    /// Matches `pd.Series.dt.time`.
+    pub fn time(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                let s = s.trim();
+                // Try ISO 8601: "YYYY-MM-DDTHH:MM:SS"
+                if let Some(i) = s.find('T') {
+                    let time_part = &s[i + 1..];
+                    // Remove timezone info if present
+                    let time_clean = time_part
+                        .split('+')
+                        .next()
+                        .and_then(|t| t.split('Z').next())
+                        .unwrap_or(time_part);
+                    if Self::parse_time(time_clean).is_some() {
+                        return Scalar::Utf8(time_clean.to_string());
+                    }
+                }
+                // Try space-delimited: "YYYY-MM-DD HH:MM:SS"
+                if let Some(i) = s.find(' ') {
+                    let time_part = &s[i + 1..];
+                    let time_clean = time_part
+                        .split('+')
+                        .next()
+                        .and_then(|t| t.split('Z').next())
+                        .unwrap_or(time_part);
+                    if Self::parse_time(time_clean).is_some() {
+                        return Scalar::Utf8(time_clean.to_string());
+                    }
+                }
+                Scalar::Null(NullKind::NaN)
+            },
+            self.series.name(),
+        )
+    }
+
     /// Internal: parse a datetime string and extract a specific component.
     ///
     /// Components: 0=year, 1=month, 2=day, 3=hour, 4=minute, 5=second
@@ -19645,6 +19683,29 @@ impl DatetimeAccessor<'_> {
         let date_part = s.split('T').next().unwrap_or(s);
         let date_part = date_part.split(' ').next().unwrap_or(date_part);
         Self::parse_ymd(date_part)
+    }
+
+    /// Internal: parse hour, minute, second from a time string ("HH:MM:SS").
+    fn parse_time(s: &str) -> Option<(i64, i64, i64)> {
+        let s = s.trim();
+        // Handle fractional seconds
+        let s = s.split('.').next().unwrap_or(s);
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let hour = parts[0].parse::<i64>().ok()?;
+        let minute = parts[1].parse::<i64>().ok()?;
+        let second = if parts.len() > 2 {
+            parts[2].parse::<i64>().ok()?
+        } else {
+            0
+        };
+        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second)
+        {
+            return None;
+        }
+        Some((hour, minute, second))
     }
 
     /// Internal: is the given year a leap year?
@@ -76636,6 +76697,33 @@ mod tests {
         assert_eq!(
             result.column().values()[1],
             Scalar::Utf8("2023-06-30 00:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_time() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15T14:35:22".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00.123456".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().time().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("14:35:22".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("23:59:59".to_string())
+        );
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("08:00:00.123456".to_string())
         );
     }
 

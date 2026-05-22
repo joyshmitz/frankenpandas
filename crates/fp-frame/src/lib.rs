@@ -16617,6 +16617,50 @@ impl CategoricalAccessor<'_> {
         })
     }
 
+    /// Remove specified categories from the categorical.
+    ///
+    /// Matches `pd.Series.cat.remove_categories(removals)`.
+    /// Values in removed categories become missing (-1).
+    pub fn remove_categories(&self, removals: &[Scalar]) -> Result<Series, FrameError> {
+        let removal_set: HashSet<ScalarKey<'_>> =
+            removals.iter().map(scalar_key_allow_missing).collect();
+
+        // Build new categories excluding removals.
+        let mut new_categories = Vec::new();
+        let mut remap: Vec<i64> = vec![-1; self.meta.categories.len()];
+        for (old_code, cat) in self.meta.categories.iter().enumerate() {
+            if !removal_set.contains(&scalar_key_allow_missing(cat)) {
+                remap[old_code] = new_categories.len() as i64;
+                new_categories.push(cat.clone());
+            }
+        }
+
+        // Remap codes.
+        let new_codes: Vec<Scalar> = self
+            .series
+            .column
+            .values()
+            .iter()
+            .map(|val| match val {
+                Scalar::Int64(code) if *code >= 0 && (*code as usize) < remap.len() => {
+                    Scalar::Int64(remap[*code as usize])
+                }
+                _ => val.clone(),
+            })
+            .collect();
+
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: Column::from_values(new_codes)?,
+            categorical: Some(CategoricalMetadata {
+                categories: new_categories,
+                ordered: self.meta.ordered,
+            }),
+            sparse: None,
+        })
+    }
+
     /// Set the categories to a new list, remapping codes accordingly.
     ///
     /// Matches `pd.Series.cat.set_categories(new_categories)`.
@@ -77061,6 +77105,28 @@ mod tests {
             result.get_column("second").column().values()[0],
             Scalar::Int64(22)
         );
+    }
+
+    #[test]
+    fn test_cat_remove_categories() {
+        let s = Series::from_categorical(
+            "cat",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("c".to_string()),
+            ],
+            false,
+        )
+        .unwrap();
+        let result = s
+            .cat()
+            .remove_categories(&[Scalar::Utf8("b".to_string())])
+            .unwrap();
+        assert_eq!(result.cat().categories().len(), 2);
+        assert_eq!(result.column().values()[1], Scalar::Int64(-1));
     }
 
     #[test]

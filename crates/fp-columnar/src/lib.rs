@@ -1896,6 +1896,11 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Alias for [`ffill`](Self::ffill), matching deprecated `pd.Series.pad()`.
+    pub fn pad(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        self.ffill(limit)
+    }
+
     /// Backward-fill missing values with the next non-missing value,
     /// optionally capped by `limit` consecutive fills.
     ///
@@ -1922,6 +1927,11 @@ impl Column {
             }
         }
         Self::new(self.dtype, out)
+    }
+
+    /// Alias for [`bfill`](Self::bfill), matching deprecated `pd.Series.backfill()`.
+    pub fn backfill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        self.bfill(limit)
     }
 
     /// Count of distinct non-missing values.
@@ -7554,6 +7564,7 @@ mod tests {
             assert_eq!(r.values()[2], Scalar::Int64(1));
             assert!(r.values()[3].is_missing());
             assert_eq!(r.values()[4], Scalar::Int64(9));
+            assert_eq!(col.pad(Some(2)), col.ffill(Some(2)));
         }
 
         #[test]
@@ -7587,6 +7598,7 @@ mod tests {
             assert!(r.values()[1].is_missing());
             assert_eq!(r.values()[2], Scalar::Int64(7));
             assert_eq!(r.values()[3], Scalar::Int64(7));
+            assert_eq!(col.backfill(Some(1)), col.bfill(Some(1)));
         }
 
         #[test]

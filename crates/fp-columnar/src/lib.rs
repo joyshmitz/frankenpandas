@@ -2093,6 +2093,104 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Logical AND between two boolean columns.
+    pub fn logical_and(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            let av = match a {
+                Scalar::Bool(x) => *x,
+                _ => a.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            let bv = match b {
+                Scalar::Bool(x) => *x,
+                _ => b.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            out.push(Scalar::Bool(av && bv));
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Logical OR between two boolean columns.
+    pub fn logical_or(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            let av = match a {
+                Scalar::Bool(x) => *x,
+                _ => a.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            let bv = match b {
+                Scalar::Bool(x) => *x,
+                _ => b.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            out.push(Scalar::Bool(av || bv));
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Logical XOR between two boolean columns.
+    pub fn logical_xor(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            let av = match a {
+                Scalar::Bool(x) => *x,
+                _ => a.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            let bv = match b {
+                Scalar::Bool(x) => *x,
+                _ => b.to_f64().map(|v| v != 0.0).unwrap_or(false),
+            };
+            out.push(Scalar::Bool(av ^ bv));
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Logical NOT (element-wise negation to boolean).
+    pub fn logical_not(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            let bv = match v {
+                Scalar::Bool(x) => *x,
+                _ => v.to_f64().map(|x| x != 0.0).unwrap_or(false),
+            };
+            out.push(Scalar::Bool(!bv));
+        }
+        Self::new(DType::Bool, out)
+    }
+
     /// Element-wise comparison producing a `Bool`-typed column.
     ///
     /// Both columns must have the same length. Missing values (Null or NaN)

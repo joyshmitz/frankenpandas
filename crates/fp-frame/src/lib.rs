@@ -6339,6 +6339,39 @@ impl Series {
         self.bitwise_not()
     }
 
+    /// Element-wise float power.
+    ///
+    /// Matches `np.float_power(s1, s2)`.
+    pub fn float_power(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.float_power(other.column())?,
+        )
+    }
+
+    /// Element-wise floor division.
+    ///
+    /// Matches `np.floor_divide(s1, s2)` / `s1 // s2`.
+    pub fn floor_divide(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.floor_divide(other.column())?,
+        )
+    }
+
+    /// Element-wise float modulo.
+    ///
+    /// Matches `np.fmod(s1, s2)`.
+    pub fn fmod(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.fmod(other.column())?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -6456,6 +6489,14 @@ impl Series {
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
         Ok(Scalar::Float64(sum_val / count as f64))
+    }
+
+    /// Weighted average of non-null numeric values.
+    ///
+    /// Matches `np.average(s, weights=w)`. Returns NaN if all weights are zero
+    /// or the series is empty.
+    pub fn average(&self, weights: &Self) -> Scalar {
+        self.column.average(weights.column())
     }
 
     /// Min of non-null numeric values. Returns NaN for empty.
@@ -92444,5 +92485,99 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         assert!(!s1.allclose(&s3, 1e-5, 1e-8).unwrap());
+    }
+
+    #[test]
+    fn series_float_power() {
+        let base = Series::from_pairs(
+            "base",
+            vec![
+                (0_i64.into(), Scalar::Float64(2.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let exp = Series::from_pairs(
+            "exp",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = base.float_power(&exp).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(8.0));
+        assert_eq!(result.values()[1], Scalar::Float64(9.0));
+    }
+
+    #[test]
+    fn series_floor_divide() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(7.0)),
+                (1_i64.into(), Scalar::Float64(10.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.floor_divide(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.values()[1], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn series_fmod() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(7.0)),
+                (1_i64.into(), Scalar::Float64(10.5)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.fmod(&s2).unwrap();
+        assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        assert!((result.values()[1].to_f64().unwrap() - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_average() {
+        let vals = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let weights = Series::from_pairs(
+            "w",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let avg = vals.average(&weights);
+        let expected = (1.0 * 1.0 + 2.0 * 2.0 + 3.0 * 3.0) / (1.0 + 2.0 + 3.0);
+        assert!((avg.to_f64().unwrap() - expected).abs() < 1e-10);
     }
 }

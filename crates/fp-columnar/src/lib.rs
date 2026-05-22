@@ -4256,6 +4256,70 @@ impl Column {
         Ok(sum)
     }
 
+    /// Discrete linear convolution of two 1D sequences.
+    ///
+    /// Matches np.convolve(a, v, mode). Modes:
+    /// - "full": output length = len(a) + len(v) - 1
+    /// - "same": output length = max(len(a), len(v))
+    /// - "valid": output length = max(len(a), len(v)) - min(len(a), len(v)) + 1
+    pub fn convolve(&self, kernel: &Self, mode: &str) -> Result<Self, ColumnError> {
+        let a: Vec<f64> = self
+            .values
+            .iter()
+            .map(|v| v.to_f64().unwrap_or(0.0))
+            .collect();
+        let v: Vec<f64> = kernel
+            .values
+            .iter()
+            .map(|v| v.to_f64().unwrap_or(0.0))
+            .collect();
+
+        if a.is_empty() || v.is_empty() {
+            return Self::new(DType::Float64, vec![]);
+        }
+
+        let full_len = a.len() + v.len() - 1;
+        let mut full: Vec<f64> = vec![0.0; full_len];
+
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &vj) in v.iter().enumerate() {
+                full[i + j] += ai * vj;
+            }
+        }
+
+        let out: Vec<f64> = match mode {
+            "full" => full,
+            "same" => {
+                let target_len = a.len().max(v.len());
+                let start = (full_len - target_len) / 2;
+                full[start..start + target_len].to_vec()
+            }
+            "valid" => {
+                let min_len = a.len().min(v.len());
+                let valid_len = a.len().max(v.len()) - min_len + 1;
+                let start = min_len - 1;
+                full[start..start + valid_len].to_vec()
+            }
+            _ => {
+                return Err(ColumnError::Type(TypeError::NonNumericValue {
+                    value: format!("invalid mode '{mode}', expected 'full', 'same', or 'valid'"),
+                    dtype: self.dtype,
+                }));
+            }
+        };
+
+        let scalars: Vec<Scalar> = out.into_iter().map(Scalar::Float64).collect();
+        Self::new(DType::Float64, scalars)
+    }
+
+    /// Cross-correlation of two 1D sequences.
+    ///
+    /// Matches np.correlate(a, v, mode). This is convolve(a, reverse(v), mode).
+    pub fn correlate(&self, other: &Self, mode: &str) -> Result<Self, ColumnError> {
+        let reversed = other.reverse()?;
+        self.convolve(&reversed, mode)
+    }
+
     /// Fill missing values in `self` with aligned values from `other`.
     ///
     /// Matches `pd.Series.fillna(other)` when `other` is a Series. Only

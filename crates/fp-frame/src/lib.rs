@@ -1189,27 +1189,84 @@ fn csv_escape_with_quotechar_and_lineterminator(
     quotechar: char,
     lineterminator: &str,
 ) -> String {
+    csv_escape_with_csv_options(value, sep, quotechar, true, None, lineterminator)
+        .expect("doublequote=true without escapechar cannot fail")
+}
+
+fn csv_escape_with_csv_options(
+    value: &str,
+    sep: char,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+    lineterminator: &str,
+) -> Result<String, FrameError> {
     let lineterminator = csv_lineterminator_or_default(lineterminator);
     let contains_lineterminator_char = lineterminator.chars().any(|ch| value.contains(ch));
-    if value.contains(sep)
-        || value.contains(quotechar)
-        || value.contains('\n')
-        || value.contains('\r')
-        || contains_lineterminator_char
-    {
+    let contains_quotechar = value.contains(quotechar);
+    let contains_escapechar = escapechar.is_some_and(|ch| value.contains(ch));
+    let needs_quotes =
+        value.contains(sep) || value.contains('\n') || value.contains('\r') || contains_lineterminator_char;
+    if contains_quotechar && !doublequote && escapechar.is_none() {
+        return Err(FrameError::CompatibilityRejected(
+            "doublequote=false requires escapechar when a field contains quotechar".to_owned(),
+        ));
+    }
+    if needs_quotes || (contains_quotechar && doublequote) {
         let mut escaped = String::with_capacity(value.len() + 2);
         escaped.push(quotechar);
         for ch in value.chars() {
             if ch == quotechar {
-                escaped.push(quotechar);
+                if doublequote {
+                    escaped.push(quotechar);
+                } else if let Some(escape) = escapechar {
+                    escaped.push(escape);
+                }
+            } else if Some(ch) == escapechar {
+                escaped.push(ch);
             }
             escaped.push(ch);
         }
         escaped.push(quotechar);
-        escaped
+        Ok(escaped)
+    } else if contains_quotechar || contains_escapechar {
+        let mut escaped = String::with_capacity(value.len() + 1);
+        for ch in value.chars() {
+            if ch == quotechar || Some(ch) == escapechar {
+                if let Some(escape) = escapechar {
+                    escaped.push(escape);
+                }
+            }
+            escaped.push(ch);
+        }
+        Ok(escaped)
     } else {
-        value.to_owned()
+        Ok(value.to_owned())
     }
+}
+
+fn format_pandas_csv_float_with_csv_options(
+    v: f64,
+    sep: char,
+    lineterminator: &str,
+    decimal: &str,
+    quotechar: char,
+    doublequote: bool,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    let decimal = csv_decimal_or_default(decimal);
+    let mut rendered = format_pandas_csv_float(v);
+    if decimal != "." && rendered.contains('.') {
+        rendered = rendered.replace('.', decimal);
+    }
+    csv_escape_with_csv_options(
+        &rendered,
+        sep,
+        quotechar,
+        doublequote,
+        escapechar,
+        lineterminator,
+    )
 }
 
 fn scalar_to_json_value(value: &Scalar) -> Value {
@@ -9007,6 +9064,192 @@ impl Series {
             }
         }
         out
+    }
+
+    /// Matches `pd.Series.to_csv(doublequote=..., escapechar=...)`.
+    pub fn to_csv_with_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_format_options_index_label_decimal_quotechar_doublequote_escapechar(
+            sep,
+            include_index,
+            true,
+            "",
+            "\n",
+            None,
+            ".",
+            '"',
+            doublequote,
+            escapechar,
+        )
+    }
+
+    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=..., doublequote=..., escapechar=...)`.
+    pub fn to_csv_with_format_options_index_label_decimal_quotechar_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        na_rep: &str,
+        lineterminator: &str,
+        index_label: Option<&str>,
+        decimal: &str,
+        quotechar: char,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        fn format_scalar(
+            val: &Scalar,
+            sep: char,
+            na_rep: &str,
+            lineterminator: &str,
+            decimal: &str,
+            quotechar: char,
+            doublequote: bool,
+            escapechar: Option<char>,
+        ) -> Result<String, FrameError> {
+            if val.is_missing() {
+                return csv_escape_with_csv_options(
+                    na_rep,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                );
+            }
+            match val {
+                Scalar::Null(_) => csv_escape_with_csv_options(
+                    na_rep,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                ),
+                Scalar::Bool(b) => Ok(if *b { "True" } else { "False" }.to_string()),
+                Scalar::Int64(v) => Ok(v.to_string()),
+                Scalar::Float64(v) => format_pandas_csv_float_with_csv_options(
+                    *v,
+                    sep,
+                    lineterminator,
+                    decimal,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                ),
+                Scalar::Utf8(s) => csv_escape_with_csv_options(
+                    s,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                ),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => csv_escape_with_csv_options(
+                    na_rep,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                ),
+                Scalar::Timedelta64(v) => Ok(Timedelta::format(*v)),
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => csv_escape_with_csv_options(
+                    na_rep,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                ),
+                Scalar::Datetime64(v) => Ok(format_datetime_ns(*v)),
+                Scalar::Period(v) if *v == i64::MIN => csv_escape_with_csv_options(
+                    na_rep,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                ),
+                Scalar::Period(v) => Ok(format!("Period[{v}]")),
+                Scalar::Interval(interval) => Ok(format!("{interval}")),
+            }
+        }
+
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_with_csv_options(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            out.push_str(&csv_escape_with_csv_options(
+                &self.name,
+                sep,
+                quotechar,
+                doublequote,
+                escapechar,
+                lineterminator,
+            )?);
+            out.push_str(lineterminator);
+        }
+        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
+            if include_index {
+                let idx = match label {
+                    IndexLabel::Int64(v) => v.to_string(),
+                    IndexLabel::Utf8(s) => csv_escape_with_csv_options(
+                        s,
+                        sep,
+                        quotechar,
+                        doublequote,
+                        escapechar,
+                        lineterminator,
+                    )?,
+                    IndexLabel::Timedelta64(ns) => csv_escape_with_csv_options(
+                        &Timedelta::format(*ns),
+                        sep,
+                        quotechar,
+                        doublequote,
+                        escapechar,
+                        lineterminator,
+                    )?,
+                    IndexLabel::Datetime64(ns) => csv_escape_with_csv_options(
+                        &format_datetime_ns(*ns),
+                        sep,
+                        quotechar,
+                        doublequote,
+                        escapechar,
+                        lineterminator,
+                    )?,
+                };
+                out.push_str(&idx);
+                out.push(sep);
+            }
+            out.push_str(&format_scalar(
+                val,
+                sep,
+                na_rep,
+                lineterminator,
+                decimal,
+                quotechar,
+                doublequote,
+                escapechar,
+            )?);
+            out.push_str(lineterminator);
+        }
+        Ok(out)
     }
 
     /// Serialize the Series to a JSON string.
@@ -32876,6 +33119,31 @@ impl DataFrame {
         )
     }
 
+    /// Matches `df.to_csv(doublequote=..., escapechar=...)` returning a string representation.
+    ///
+    /// When `doublequote=false`, embedded quote characters are escaped using
+    /// `escapechar` instead of being doubled. Returns an error if the data
+    /// contains quotes but `doublequote=false` and `escapechar=None`.
+    pub fn to_csv_with_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
+            sep,
+            include_index,
+            true,
+            None,
+            "\n",
+            ".",
+            '"',
+            doublequote,
+            escapechar,
+        )
+    }
+
     /// Matches `df.to_csv(header=..., lineterminator=...)` returning a string representation.
     pub fn to_csv_with_header_and_lineterminator(
         &self,
@@ -33045,6 +33313,104 @@ impl DataFrame {
         out
     }
 
+    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quotechar=..., doublequote=..., escapechar=...)`.
+    pub fn to_csv_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        lineterminator: &str,
+        decimal: &str,
+        quotechar: char,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_with_csv_options(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            for (i, name) in self.column_order.iter().enumerate() {
+                if i > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_escape_with_csv_options(
+                    name,
+                    sep,
+                    quotechar,
+                    doublequote,
+                    escapechar,
+                    lineterminator,
+                )?);
+            }
+            out.push_str(lineterminator);
+        }
+
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                match label {
+                    IndexLabel::Int64(v) => out.push_str(&v.to_string()),
+                    IndexLabel::Utf8(s) => {
+                        out.push_str(&csv_escape_with_csv_options(
+                            s, sep, quotechar, doublequote, escapechar, lineterminator,
+                        )?)
+                    }
+                    IndexLabel::Timedelta64(ns) => {
+                        out.push_str(&csv_escape_with_csv_options(
+                            &Timedelta::format(*ns), sep, quotechar, doublequote, escapechar, lineterminator,
+                        )?)
+                    }
+                    IndexLabel::Datetime64(ns) => {
+                        out.push_str(&csv_escape_with_csv_options(
+                            &format_datetime_ns(*ns), sep, quotechar, doublequote, escapechar, lineterminator,
+                        )?)
+                    }
+                }
+                out.push(sep);
+            }
+            for (col_idx, name) in self.column_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                let val = &self.columns[name].values()[row_idx];
+                match val {
+                    Scalar::Null(_) => {}
+                    Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+                    Scalar::Int64(v) => out.push_str(&v.to_string()),
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_csv_options(
+                        *v, sep, lineterminator, decimal, quotechar, doublequote, escapechar,
+                    )?),
+                    Scalar::Utf8(s) => {
+                        out.push_str(&csv_escape_with_csv_options(
+                            s, sep, quotechar, doublequote, escapechar, lineterminator,
+                        )?)
+                    }
+                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
+                    Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
+                    Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
+                    Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
+                    Scalar::Period(v) if *v == i64::MIN => {}
+                    Scalar::Period(v) => out.push_str(&format!("Period[{v}]")),
+                    Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
+                }
+            }
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
+    }
+
     /// Export DataFrame to CSV string with additional formatting options.
     ///
     /// Matches `df.to_csv(sep, index, na_rep, columns)`.
@@ -33079,6 +33445,31 @@ impl DataFrame {
             "\n",
             ".",
             quotechar,
+        )
+    }
+
+    /// Matches `df.to_csv(sep, index, na_rep, columns, doublequote, escapechar)`.
+    pub fn to_csv_options_with_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        self.to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
+            sep,
+            include_index,
+            true,
+            None,
+            na_rep,
+            columns,
+            "\n",
+            ".",
+            '"',
+            doublequote,
+            escapechar,
         )
     }
 
@@ -33183,6 +33574,36 @@ impl DataFrame {
         decimal: &str,
         quotechar: char,
     ) -> Result<String, FrameError> {
+        self.to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
+            sep,
+            include_index,
+            include_header,
+            index_label,
+            na_rep,
+            columns,
+            lineterminator,
+            decimal,
+            quotechar,
+            true,
+            None,
+        )
+    }
+
+    /// Matches `df.to_csv(sep, index, header, index_label, na_rep, columns, lineterminator, decimal, quotechar, doublequote, escapechar)`.
+    pub fn to_csv_options_with_index_label_lineterminator_decimal_quotechar_doublequote_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        lineterminator: &str,
+        decimal: &str,
+        quotechar: char,
+        doublequote: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
                 for &c in cols {
@@ -33200,29 +33621,33 @@ impl DataFrame {
         let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
         let na_rep_escaped =
-            csv_escape_with_quotechar_and_lineterminator(na_rep, sep, quotechar, lineterminator);
+            csv_escape_with_csv_options(na_rep, sep, quotechar, doublequote, escapechar, lineterminator)?;
 
         // Header
         if include_header {
             if include_index {
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                out.push_str(&csv_escape_with_csv_options(
                     index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
                     sep,
                     quotechar,
+                    doublequote,
+                    escapechar,
                     lineterminator,
-                ));
+                )?);
                 out.push(sep);
             }
             for (i, name) in col_order.iter().enumerate() {
                 if i > 0 {
                     out.push(sep);
                 }
-                out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                out.push_str(&csv_escape_with_csv_options(
                     name,
                     sep,
                     quotechar,
+                    doublequote,
+                    escapechar,
                     lineterminator,
-                ));
+                )?);
             }
             out.push_str(lineterminator);
         }
@@ -33233,28 +33658,34 @@ impl DataFrame {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
                     IndexLabel::Utf8(s) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                        out.push_str(&csv_escape_with_csv_options(
                             s,
                             sep,
                             quotechar,
+                            doublequote,
+                            escapechar,
                             lineterminator,
-                        ))
+                        )?)
                     }
                     IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                        out.push_str(&csv_escape_with_csv_options(
                             &Timedelta::format(*ns),
                             sep,
                             quotechar,
+                            doublequote,
+                            escapechar,
                             lineterminator,
-                        ))
+                        )?)
                     }
                     IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                        out.push_str(&csv_escape_with_csv_options(
                             &format_datetime_ns(*ns),
                             sep,
                             quotechar,
+                            doublequote,
+                            escapechar,
                             lineterminator,
-                        ))
+                        )?)
                     }
                 }
                 out.push(sep);
@@ -33270,20 +33701,24 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
-                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_decimal_and_quotechar(
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float_with_csv_options(
                         *v,
                         sep,
                         lineterminator,
                         decimal,
                         quotechar,
-                    )),
+                        doublequote,
+                        escapechar,
+                    )?),
                     Scalar::Utf8(s) => {
-                        out.push_str(&csv_escape_with_quotechar_and_lineterminator(
+                        out.push_str(&csv_escape_with_csv_options(
                             s,
                             sep,
                             quotechar,
+                            doublequote,
+                            escapechar,
                             lineterminator,
-                        ))
+                        )?)
                     }
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
@@ -62646,6 +63081,39 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_with_doublequote_false_escapechar() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("a,b".to_owned()),
+                    Scalar::Utf8("a\"b".to_owned()),
+                    Scalar::Utf8("a,\"b".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_with_doublequote_escapechar(',', false, false, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n\"a,\\\"b\"\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_with_doublequote_false_without_escapechar_errors() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Utf8("a\"b".to_owned())])],
+        )
+        .unwrap();
+
+        let result = df.to_csv_with_doublequote_escapechar(',', false, false, None);
+        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
+    }
+
+    #[test]
     fn dataframe_to_csv_with_header_false() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -71076,6 +71544,38 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_with_doublequote_false_escapechar() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a,b".to_owned()),
+                Scalar::Utf8("a\"b".to_owned()),
+                Scalar::Utf8("a,\"b".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let csv = s
+            .to_csv_with_doublequote_escapechar(',', false, false, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n\"a,\\\"b\"\n");
+    }
+
+    #[test]
+    fn series_to_csv_with_doublequote_false_without_escapechar_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a\"b".to_owned())],
+        )
+        .unwrap();
+
+        let result = s.to_csv_with_doublequote_escapechar(',', false, false, None);
+        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
+    }
+
+    #[test]
     fn series_to_csv_with_header_false() {
         let s = Series::from_values(
             "x",
@@ -76093,6 +76593,26 @@ mod tests {
             .to_csv_options_with_quotechar(',', false, "", None, '\'')
             .unwrap();
         assert_eq!(csv, "x\n'a,b'\n'a''b'\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_with_doublequote_false_escapechar() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("a,b".to_owned()),
+                    Scalar::Utf8("a\"b".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_options_with_doublequote_escapechar(',', false, "", None, false, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n");
     }
 
     #[test]

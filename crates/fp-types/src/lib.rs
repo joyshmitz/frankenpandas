@@ -1030,6 +1030,96 @@ impl Timedelta {
 
         result
     }
+
+    /// Rounds down to the nearest frequency unit.
+    ///
+    /// Matches pandas `pd.Timedelta.floor(freq)`. NaT is preserved.
+    #[must_use]
+    pub fn floor(nanos: i64, freq: &str) -> i64 {
+        if nanos == Self::NAT {
+            return Self::NAT;
+        }
+        let Some(unit_nanos) = Self::unit_to_nanos(freq) else {
+            return Self::NAT;
+        };
+        if unit_nanos == 0 {
+            return Self::NAT;
+        }
+        let negative = nanos < 0;
+        let abs_nanos = nanos.saturating_abs();
+        let floored = (abs_nanos / unit_nanos) * unit_nanos;
+        if negative {
+            -floored
+        } else {
+            floored
+        }
+    }
+
+    /// Rounds up to the nearest frequency unit.
+    ///
+    /// Matches pandas `pd.Timedelta.ceil(freq)`. NaT is preserved.
+    #[must_use]
+    pub fn ceil(nanos: i64, freq: &str) -> i64 {
+        if nanos == Self::NAT {
+            return Self::NAT;
+        }
+        let Some(unit_nanos) = Self::unit_to_nanos(freq) else {
+            return Self::NAT;
+        };
+        if unit_nanos == 0 {
+            return Self::NAT;
+        }
+        let negative = nanos < 0;
+        let abs_nanos = nanos.saturating_abs();
+        let ceiled = ((abs_nanos + unit_nanos - 1) / unit_nanos) * unit_nanos;
+        if negative {
+            -ceiled
+        } else {
+            ceiled
+        }
+    }
+
+    /// Rounds to the nearest frequency unit.
+    ///
+    /// Matches pandas `pd.Timedelta.round(freq)`. Uses banker's rounding
+    /// (round half to even). NaT is preserved.
+    #[must_use]
+    pub fn round(nanos: i64, freq: &str) -> i64 {
+        if nanos == Self::NAT {
+            return Self::NAT;
+        }
+        let Some(unit_nanos) = Self::unit_to_nanos(freq) else {
+            return Self::NAT;
+        };
+        if unit_nanos == 0 {
+            return Self::NAT;
+        }
+        let negative = nanos < 0;
+        let abs_nanos = nanos.saturating_abs();
+
+        let quotient = abs_nanos / unit_nanos;
+        let remainder = abs_nanos % unit_nanos;
+        let half = unit_nanos / 2;
+
+        let rounded = if remainder > half {
+            (quotient + 1) * unit_nanos
+        } else if remainder < half {
+            quotient * unit_nanos
+        } else {
+            // Exactly half: round to even
+            if quotient % 2 == 0 {
+                quotient * unit_nanos
+            } else {
+                (quotient + 1) * unit_nanos
+            }
+        };
+
+        if negative {
+            -rounded
+        } else {
+            rounded
+        }
+    }
 }
 
 // ── Timestamp types (br-frankenpandas-9p0u — 4r56 Phase 2) ─────────────
@@ -3839,6 +3929,31 @@ mod tests {
             Timedelta::isoformat(-(Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR)),
             "-P1DT1H0M0S"
         );
+    }
+
+    #[test]
+    fn timedelta_floor_ceil_round() {
+        use super::Timedelta;
+        let nanos = Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN;
+
+        // floor: rounds down
+        assert_eq!(Timedelta::floor(nanos, "h"), Timedelta::NANOS_PER_HOUR);
+        assert_eq!(Timedelta::floor(nanos, "d"), 0);
+
+        // ceil: rounds up
+        assert_eq!(Timedelta::ceil(nanos, "h"), 2 * Timedelta::NANOS_PER_HOUR);
+        assert_eq!(Timedelta::ceil(nanos, "d"), Timedelta::NANOS_PER_DAY);
+
+        // round: rounds to nearest (banker's rounding on tie)
+        assert_eq!(Timedelta::round(nanos, "h"), 2 * Timedelta::NANOS_PER_HOUR);
+
+        // NaT preserved
+        assert_eq!(Timedelta::floor(Timedelta::NAT, "h"), Timedelta::NAT);
+        assert_eq!(Timedelta::ceil(Timedelta::NAT, "h"), Timedelta::NAT);
+        assert_eq!(Timedelta::round(Timedelta::NAT, "h"), Timedelta::NAT);
+
+        // Invalid freq returns NAT
+        assert_eq!(Timedelta::floor(nanos, "invalid"), Timedelta::NAT);
     }
 
     #[test]

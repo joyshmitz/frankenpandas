@@ -1882,6 +1882,117 @@ impl Column {
         Self::new(dtype, out)
     }
 
+    /// Element-wise bitwise AND.
+    pub fn bitwise_and(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => out.push(Scalar::Int64(x & y)),
+                (Scalar::Bool(x), Scalar::Bool(y)) => out.push(Scalar::Bool(*x && *y)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Element-wise bitwise OR.
+    pub fn bitwise_or(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => out.push(Scalar::Int64(x | y)),
+                (Scalar::Bool(x), Scalar::Bool(y)) => out.push(Scalar::Bool(*x || *y)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Element-wise bitwise XOR.
+    pub fn bitwise_xor(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => out.push(Scalar::Int64(x ^ y)),
+                (Scalar::Bool(x), Scalar::Bool(y)) => out.push(Scalar::Bool(*x ^ *y)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Element-wise bitwise NOT (invert).
+    pub fn bitwise_not(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Int64(!x)),
+                Scalar::Bool(x) => out.push(Scalar::Bool(!x)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Alias for bitwise_not.
+    pub fn invert(&self) -> Result<Self, ColumnError> {
+        self.bitwise_not()
+    }
+
     /// Element-wise comparison producing a `Bool`-typed column.
     ///
     /// Both columns must have the same length. Missing values (Null or NaN)

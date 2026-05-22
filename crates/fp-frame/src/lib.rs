@@ -5879,6 +5879,27 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.fix()?)
     }
 
+    /// Element-wise check for finite values.
+    ///
+    /// Matches `np.isfinite(series)`. Returns boolean Series.
+    pub fn isfinite(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.isfinite()?)
+    }
+
+    /// Element-wise check for infinite values.
+    ///
+    /// Matches `np.isinf(series)`. Returns boolean Series.
+    pub fn isinf(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.isinf()?)
+    }
+
+    /// Element-wise check for NaN values.
+    ///
+    /// Matches `np.isnan(series)`. Returns boolean Series.
+    pub fn isnan(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.isnan()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35400,6 +35421,27 @@ impl DataFrame {
     /// Matches `np.fix(df)`. NaN values pass through.
     pub fn fix(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.fix())
+    }
+
+    /// Element-wise check for finite values.
+    ///
+    /// Matches `np.isfinite(df)`. Returns boolean DataFrame.
+    pub fn isfinite(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.isfinite())
+    }
+
+    /// Element-wise check for infinite values.
+    ///
+    /// Matches `np.isinf(df)`. Returns boolean DataFrame.
+    pub fn isinf(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.isinf())
+    }
+
+    /// Element-wise check for NaN values.
+    ///
+    /// Matches `np.isnan(df)`. Returns boolean DataFrame.
+    pub fn isnan(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.isnan())
     }
 
     /// Add a scalar to all numeric columns.

@@ -483,6 +483,85 @@ impl Scalar {
             }),
         }
     }
+
+    /// Try to convert to i64. Returns error for missing or non-numeric values.
+    pub fn to_i64(&self) -> Result<i64, TypeError> {
+        match self {
+            Self::Bool(v) => Ok(if *v { 1 } else { 0 }),
+            Self::Int64(v) => Ok(*v),
+            Self::Float64(v) => Ok(*v as i64),
+            Self::Null(kind) => Err(TypeError::ValueIsMissing { kind: *kind }),
+            Self::Utf8(v) => Err(TypeError::NonNumericValue {
+                value: v.clone(),
+                dtype: DType::Utf8,
+            }),
+            Self::Timedelta64(v) if *v == Timedelta::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Timedelta64(v) => Ok(*v),
+            Self::Datetime64(v) if *v == Timestamp::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Datetime64(v) => Ok(*v),
+            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Period(v) => Ok(*v),
+            Self::Interval(v) => Err(TypeError::NonNumericValue {
+                value: v.to_string(),
+                dtype: DType::Interval,
+            }),
+        }
+    }
+
+    /// Try to convert to bool. Returns error for missing values.
+    pub fn to_bool(&self) -> Result<bool, TypeError> {
+        match self {
+            Self::Bool(v) => Ok(*v),
+            Self::Int64(v) => Ok(*v != 0),
+            Self::Float64(v) => Ok(*v != 0.0 && !v.is_nan()),
+            Self::Null(kind) => Err(TypeError::ValueIsMissing { kind: *kind }),
+            Self::Utf8(v) => Ok(!v.is_empty()),
+            Self::Timedelta64(v) if *v == Timedelta::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Timedelta64(v) => Ok(*v != 0),
+            Self::Datetime64(v) if *v == Timestamp::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Datetime64(v) => Ok(*v != 0),
+            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Period(v) => Ok(*v != 0),
+            Self::Interval(_) => Ok(true),
+        }
+    }
+
+    /// Try to convert to string representation.
+    pub fn to_str(&self) -> String {
+        match self {
+            Self::Bool(v) => if *v { "True" } else { "False" }.to_string(),
+            Self::Int64(v) => v.to_string(),
+            Self::Float64(v) => {
+                if v.is_nan() {
+                    "nan".to_string()
+                } else if v.is_infinite() {
+                    if *v > 0.0 { "inf" } else { "-inf" }.to_string()
+                } else {
+                    v.to_string()
+                }
+            }
+            Self::Null(_) => "NaN".to_string(),
+            Self::Utf8(v) => v.clone(),
+            Self::Timedelta64(v) => Timedelta::format(*v),
+            Self::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_string(),
+            Self::Datetime64(v) => Timestamp::from_nanos(*v).isoformat(),
+            Self::Period(v) if *v == i64::MIN => "NaT".to_string(),
+            Self::Period(v) => format!("Period[{}]", v),
+            Self::Interval(v) => v.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]

@@ -1758,6 +1758,130 @@ impl Column {
         left.binary_numeric(self, ArithmeticOp::Pow)
     }
 
+    /// Element-wise arctangent of y/x.
+    pub fn atan2(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (y, x) in self.values.iter().zip(&other.values) {
+            if y.is_missing() || x.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let yf = y.to_f64().map_err(ColumnError::Type)?;
+            let xf = x.to_f64().map_err(ColumnError::Type)?;
+            out.push(Scalar::Float64(yf.atan2(xf)));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise Euclidean distance sqrt(x^2 + y^2).
+    pub fn hypot(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let af = a.to_f64().map_err(ColumnError::Type)?;
+            let bf = b.to_f64().map_err(ColumnError::Type)?;
+            out.push(Scalar::Float64(af.hypot(bf)));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise floating-point remainder (fmod).
+    pub fn fmod(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let af = a.to_f64().map_err(ColumnError::Type)?;
+            let bf = b.to_f64().map_err(ColumnError::Type)?;
+            out.push(Scalar::Float64(af % bf));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise copysign: magnitude of self with sign of other.
+    pub fn copysign(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (mag, sign) in self.values.iter().zip(&other.values) {
+            if mag.is_missing() || sign.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let mf = mag.to_f64().map_err(ColumnError::Type)?;
+            let sf = sign.to_f64().map_err(ColumnError::Type)?;
+            out.push(Scalar::Float64(mf.copysign(sf)));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise sign: -1, 0, or 1.
+    pub fn sign(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    let s = if *x > 0 { 1 } else if *x < 0 { -1 } else { 0 };
+                    out.push(Scalar::Int64(s));
+                }
+                Scalar::Float64(x) => {
+                    let s = if x.is_nan() {
+                        f64::NAN
+                    } else if *x > 0.0 {
+                        1.0
+                    } else if *x < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    out.push(Scalar::Float64(s));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        let dtype = match self.dtype {
+            DType::Int64 => DType::Int64,
+            _ => DType::Float64,
+        };
+        Self::new(dtype, out)
+    }
+
     /// Element-wise comparison producing a `Bool`-typed column.
     ///
     /// Both columns must have the same length. Missing values (Null or NaN)

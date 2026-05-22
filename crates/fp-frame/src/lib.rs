@@ -17055,6 +17055,45 @@ impl ListAccessor<'_> {
         )
     }
 
+    /// Sum elements within each list.
+    ///
+    /// Returns a Series with the sum of each list. Missing lists return NaN.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut total = 0.0_f64;
+                        let mut has_value = false;
+                        for val in list {
+                            match val {
+                                Scalar::Int64(n) => {
+                                    total += n as f64;
+                                    has_value = true;
+                                }
+                                Scalar::Float64(f) if !f.is_nan() => {
+                                    total += f;
+                                    has_value = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if has_value {
+                            Scalar::Float64(total)
+                        } else {
+                            Scalar::Null(NullKind::NaN)
+                        }
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     fn parsed_lists(&self) -> Result<(), FrameError> {
         self.list_values().map(|_| ())
     }
@@ -65989,6 +66028,22 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
         );
+    }
+
+    #[test]
+    fn series_list_accessor_sum() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 3]".into()),
+                Scalar::Utf8("[4.5, 5.5]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().sum().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(6.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(10.0));
     }
 
     #[test]

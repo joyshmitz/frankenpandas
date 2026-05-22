@@ -1907,6 +1907,83 @@ impl Column {
         nanprod(&self.values)
     }
 
+    fn skipna_false_missing_result(&self, skipna: bool) -> Option<Scalar> {
+        if skipna || !self.values.iter().any(Scalar::is_missing) {
+            return None;
+        }
+
+        Some(if matches!(self.dtype, DType::Timedelta64) {
+            Scalar::Timedelta64(Timedelta::NAT)
+        } else {
+            Scalar::Float64(f64::NAN)
+        })
+    }
+
+    /// Sum with explicit pandas `skipna=` control.
+    ///
+    /// Matches `pd.Series.sum(skipna=...)`.
+    #[must_use]
+    pub fn sum_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.sum())
+    }
+
+    /// Mean with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn mean_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.mean())
+    }
+
+    /// Minimum with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn min_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.min())
+    }
+
+    /// Maximum with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn max_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.max())
+    }
+
+    /// Median with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn median_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.median())
+    }
+
+    /// Product with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn prod_skipna(&self, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.prod())
+    }
+
+    /// Variance with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn var_skipna(&self, ddof: usize, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.var(ddof))
+    }
+
+    /// Standard deviation with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn std_skipna(&self, ddof: usize, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.std(ddof))
+    }
+
+    /// Standard error of the mean with explicit pandas `skipna=` control.
+    #[must_use]
+    pub fn sem_skipna(&self, ddof: usize, skipna: bool) -> Scalar {
+        self.skipna_false_missing_result(skipna)
+            .unwrap_or_else(|| self.sem(ddof))
+    }
+
     /// Count of non-missing values.
     ///
     /// Matches `pd.Series.count()`.
@@ -6863,9 +6940,16 @@ mod tests {
     }
 
     mod aggregation_helpers {
-        use fp_types::NullKind;
+        use fp_types::{NullKind, Timedelta};
 
         use super::*;
+
+        fn assert_float_nan(value: Scalar) {
+            assert!(
+                matches!(value, Scalar::Float64(v) if v.is_nan()),
+                "expected Float64(NaN), got {value:?}"
+            );
+        }
 
         #[test]
         fn sum_skips_nulls() {
@@ -6968,6 +7052,41 @@ mod tests {
         fn prod_empty_is_one() {
             let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
             assert_eq!(col.prod(), Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn skipna_false_aggregate_variants_propagate_nan() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+
+            assert_eq!(col.sum_skipna(true), col.sum());
+            assert_float_nan(col.sum_skipna(false));
+            assert_float_nan(col.mean_skipna(false));
+            assert_float_nan(col.min_skipna(false));
+            assert_float_nan(col.max_skipna(false));
+            assert_float_nan(col.median_skipna(false));
+            assert_float_nan(col.prod_skipna(false));
+            assert_float_nan(col.var_skipna(1, false));
+            assert_float_nan(col.std_skipna(1, false));
+            assert_float_nan(col.sem_skipna(1, false));
+        }
+
+        #[test]
+        fn skipna_false_timedelta_aggregate_variants_propagate_nat() {
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(Timedelta::NANOS_PER_SEC),
+                Scalar::Timedelta64(Timedelta::NAT),
+            ])
+            .expect("col");
+
+            assert_eq!(col.sum_skipna(false), Scalar::Timedelta64(Timedelta::NAT));
+            assert_eq!(col.mean_skipna(false), Scalar::Timedelta64(Timedelta::NAT));
+            assert_eq!(col.min_skipna(false), Scalar::Timedelta64(Timedelta::NAT));
+            assert_eq!(col.max_skipna(false), Scalar::Timedelta64(Timedelta::NAT));
         }
 
         #[test]

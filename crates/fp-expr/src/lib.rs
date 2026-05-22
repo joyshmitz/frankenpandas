@@ -197,6 +197,9 @@ pub enum Expr {
         ascending: bool,
         ignore_index: bool,
     },
+    ArgSort {
+        expr: Box<Expr>,
+    },
     TopN {
         expr: Box<Expr>,
         n: usize,
@@ -498,6 +501,10 @@ pub fn evaluate(
         } => {
             let input = evaluate(expr, context, policy, ledger)?;
             sort_index_series(input, *ascending, *ignore_index)
+        }
+        Expr::ArgSort { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.argsort(true).map_err(ExprError::from)
         }
         Expr::TopN {
             expr,
@@ -1035,6 +1042,7 @@ impl MaterializedView {
             Expr::DropNa { expr } => Self::extract_series(expr, series_set),
             Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
             Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
             Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
@@ -1203,6 +1211,10 @@ fn evaluate_delta(
         } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             sort_index_series(input, *ascending, *ignore_index)
+        }
+        Expr::ArgSort { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.argsort(true).map_err(ExprError::from)
         }
         Expr::TopN {
             expr,
@@ -1402,10 +1414,11 @@ fn evaluate_delta_comparison(
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
 //     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
-//     .replace(to_replace, value), .nlargest(n, keep), .nsmallest(n, keep),
-//     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
-//     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
-//     .notna(), .isnull(), .notnull()
+//     .argsort(axis, kind, order, stable), .replace(to_replace, value),
+//     .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
+//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
+//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
+//     .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -2116,6 +2129,43 @@ fn parse_bool_literal_argument(
     Ok(value)
 }
 
+fn parse_axis_zero_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<(), ExprError> {
+    let axis = parse_scalar_literal(tokens, pos)?;
+    match axis {
+        Scalar::Int64(0) => Ok(()),
+        Scalar::Utf8(value) if value == "index" || value == "rows" => Ok(()),
+        other => Err(ExprError::ParseError(format!(
+            "{context} axis must be 0, 'index', or 'rows', got {other:?}"
+        ))),
+    }
+}
+
+fn parse_sort_kind_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<(), ExprError> {
+    let kind = parse_string_literal_argument(tokens, pos, context)?;
+    match kind.as_str() {
+        "quicksort" | "mergesort" | "heapsort" | "stable" => Ok(()),
+        other => Err(ExprError::ParseError(format!(
+            "{context} must be one of 'quicksort', 'mergesort', 'heapsort', or 'stable', got {other:?}"
+        ))),
+    }
+}
+
+fn parse_none_or_scalar_argument(tokens: &[Token], pos: &mut usize) -> Result<(), ExprError> {
+    if matches!(tokens.get(*pos), Some(Token::Ident(value)) if value == "None") {
+        *pos += 1;
+        return Ok(());
+    }
+    parse_scalar_literal(tokens, pos).map(|_| ())
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -2659,6 +2709,156 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     ascending,
                     ignore_index,
+                };
+                *pos = arg_pos + 1;
+            }
+            "argsort" => {
+                let mut arg_pos = *pos + 3;
+                let mut axis_seen = false;
+                let mut kind_seen = false;
+                let mut order_seen = false;
+                let mut stable_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated argsort() arguments".into(),
+                        ));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "axis" => {
+                                if axis_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() axis argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_axis_zero_argument(tokens, &mut arg_pos, "argsort()")?;
+                                axis_seen = true;
+                            }
+                            "kind" => {
+                                if kind_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() kind argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_sort_kind_argument(tokens, &mut arg_pos, "argsort() kind")?;
+                                kind_seen = true;
+                            }
+                            "order" => {
+                                if order_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() order argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                order_seen = true;
+                            }
+                            "stable" => {
+                                if stable_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() stable argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                stable_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected argsort() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(
+                                "argsort() positional arguments cannot follow keyword arguments"
+                                    .into(),
+                            ));
+                        }
+                        match positional_count {
+                            0 => {
+                                if axis_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() axis argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_axis_zero_argument(tokens, &mut arg_pos, "argsort()")?;
+                                axis_seen = true;
+                            }
+                            1 => {
+                                if kind_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() kind argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_sort_kind_argument(tokens, &mut arg_pos, "argsort() kind")?;
+                                kind_seen = true;
+                            }
+                            2 => {
+                                if order_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() order argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                order_seen = true;
+                            }
+                            3 => {
+                                if stable_seen {
+                                    return Err(ExprError::ParseError(
+                                        "argsort() stable argument was provided more than once"
+                                            .into(),
+                                    ));
+                                }
+                                parse_none_or_scalar_argument(tokens, &mut arg_pos)?;
+                                stable_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(
+                                    "argsort() accepts at most axis, kind, order, and stable arguments"
+                                        .into(),
+                                ));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "argsort() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in argsort() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::ArgSort {
+                    expr: Box::new(expr),
                 };
                 *pos = arg_pos + 1;
             }
@@ -6091,6 +6291,94 @@ mod tests {
         assert!(super::parse_expr("a.sort_index(kind='bogus')").is_err());
         assert!(super::parse_expr("a.sort_index(na_position='bogus')").is_err());
         assert!(super::parse_expr("a.sort_index(ignore_index='yes')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_argsort_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let argsorted = super::eval_str("a.argsort()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            argsorted.index().labels(),
+            &[
+                10_i64.into(),
+                7_i64.into(),
+                12_i64.into(),
+                11_i64.into(),
+                8_i64.into()
+            ]
+        );
+        assert_eq!(
+            argsorted.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(-1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+                Scalar::Int64(3)
+            ]
+        );
+
+        let stable = super::eval_str("a.argsort(0, 'stable')", &frame, &policy, &mut ledger)?;
+        assert_eq!(stable.values(), argsorted.values());
+
+        let keyword = super::eval_str(
+            "a.argsort(axis='rows', kind='mergesort', order=None, stable=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(keyword.values(), argsorted.values());
+
+        let filtered = super::query_str(
+            "a.argsort().ge(0) and b.gt(20)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[10_i64.into(), 8_i64.into()]);
+
+        assert!(super::parse_expr("a.argsort(axis=1)").is_err());
+        assert!(super::parse_expr("a.argsort(kind='bogus')").is_err());
+        assert!(super::parse_expr("a.argsort(0, kind='stable', 'extra')").is_err());
+        assert!(super::parse_expr("a.argsort(ascending=False)").is_err());
         Ok(())
     }
 

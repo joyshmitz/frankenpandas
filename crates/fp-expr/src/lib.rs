@@ -192,6 +192,11 @@ pub enum Expr {
         ascending: bool,
         na_position: String,
     },
+    SortIndex {
+        expr: Box<Expr>,
+        ascending: bool,
+        ignore_index: bool,
+    },
     TopN {
         expr: Box<Expr>,
         n: usize,
@@ -486,6 +491,14 @@ pub fn evaluate(
                 .sort_values_na(*ascending, na_position)
                 .map_err(ExprError::from)
         }
+        Expr::SortIndex {
+            expr,
+            ascending,
+            ignore_index,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            sort_index_series(input, *ascending, *ignore_index)
+        }
         Expr::TopN {
             expr,
             n,
@@ -638,6 +651,29 @@ pub fn evaluate(
                 .map_err(ExprError::from)
         }
     }
+}
+
+fn sort_index_series(
+    input: Series,
+    ascending: bool,
+    ignore_index: bool,
+) -> Result<Series, ExprError> {
+    let sorted = input.sort_index(ascending).map_err(ExprError::from)?;
+    if !ignore_index {
+        return Ok(sorted);
+    }
+
+    let mut labels = Vec::with_capacity(sorted.len());
+    for position in 0..sorted.len() {
+        let label = i64::try_from(position).map_err(|_| {
+            ExprError::Frame(FrameError::CompatibilityRejected(format!(
+                "sort_index(ignore_index=True) cannot materialize RangeIndex label for position {position}"
+            )))
+        })?;
+        labels.push(IndexLabel::Int64(label));
+    }
+    Series::from_values(sorted.name().to_owned(), labels, sorted.values().to_vec())
+        .map_err(ExprError::from)
 }
 
 pub fn evaluate_on_dataframe(
@@ -998,6 +1034,7 @@ impl MaterializedView {
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
             Expr::DropNa { expr } => Self::extract_series(expr, series_set),
             Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
             Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
@@ -1158,6 +1195,14 @@ fn evaluate_delta(
             input
                 .sort_values_na(*ascending, na_position)
                 .map_err(ExprError::from)
+        }
+        Expr::SortIndex {
+            expr,
+            ascending,
+            ignore_index,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            sort_index_series(input, *ascending, *ignore_index)
         }
         Expr::TopN {
             expr,
@@ -1356,11 +1401,11 @@ fn evaluate_delta_comparison(
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
-//     .sort_values(ascending=..., na_position=...), .replace(to_replace, value),
-//     .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
-//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
-//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
-//     .notnull()
+//     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
+//     .replace(to_replace, value), .nlargest(n, keep), .nsmallest(n, keep),
+//     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
+//     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
+//     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -2440,6 +2485,180 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     ascending,
                     na_position,
+                };
+                *pos = arg_pos + 1;
+            }
+            "sort_index" => {
+                let mut arg_pos = *pos + 3;
+                let mut ascending = true;
+                let mut ignore_index = false;
+                let mut axis_seen = false;
+                let mut ascending_seen = false;
+                let mut kind_seen = false;
+                let mut na_position_seen = false;
+                let mut level_seen = false;
+                let mut sort_remaining_seen = false;
+                let mut ignore_index_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(
+                            "unterminated sort_index() arguments".into(),
+                        ));
+                    }
+
+                    let Some(Token::Ident(keyword)) = tokens.get(arg_pos) else {
+                        return Err(ExprError::ParseError(
+                            "sort_index() arguments are keyword-only in expressions".into(),
+                        ));
+                    };
+                    if tokens.get(arg_pos + 1) != Some(&Token::Assign) {
+                        return Err(ExprError::ParseError(
+                            "sort_index() arguments are keyword-only in expressions".into(),
+                        ));
+                    }
+                    let keyword = keyword.clone();
+                    arg_pos += 2;
+
+                    match keyword.as_str() {
+                        "axis" => {
+                            if axis_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() axis argument was provided more than once".into(),
+                                ));
+                            }
+                            let axis = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            match axis {
+                                Scalar::Int64(0) => {}
+                                Scalar::Utf8(value) if value == "index" || value == "rows" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() axis must be 0, 'index', or 'rows', got {other:?}"
+                                    )));
+                                }
+                            }
+                            axis_seen = true;
+                        }
+                        "ascending" => {
+                            if ascending_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() ascending argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            ascending = parse_bool_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() ascending",
+                            )?;
+                            ascending_seen = true;
+                        }
+                        "kind" => {
+                            if kind_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() kind argument was provided more than once".into(),
+                                ));
+                            }
+                            let kind = parse_string_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() kind",
+                            )?;
+                            match kind.as_str() {
+                                "quicksort" | "mergesort" | "heapsort" | "stable" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() kind must be one of 'quicksort', 'mergesort', 'heapsort', or 'stable', got {other:?}"
+                                    )));
+                                }
+                            }
+                            kind_seen = true;
+                        }
+                        "na_position" => {
+                            if na_position_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() na_position argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let na_position = parse_string_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() na_position",
+                            )?;
+                            match na_position.as_str() {
+                                "first" | "last" => {}
+                                other => {
+                                    return Err(ExprError::ParseError(format!(
+                                        "sort_index() na_position must be 'first' or 'last', got {other:?}"
+                                    )));
+                                }
+                            }
+                            na_position_seen = true;
+                        }
+                        "level" => {
+                            if level_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() level argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let _ = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            level_seen = true;
+                        }
+                        "sort_remaining" => {
+                            if sort_remaining_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() sort_remaining argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            let _ = parse_scalar_literal(tokens, &mut arg_pos)?;
+                            sort_remaining_seen = true;
+                        }
+                        "ignore_index" => {
+                            if ignore_index_seen {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() ignore_index argument was provided more than once"
+                                        .into(),
+                                ));
+                            }
+                            ignore_index = parse_bool_literal_argument(
+                                tokens,
+                                &mut arg_pos,
+                                "sort_index() ignore_index",
+                            )?;
+                            ignore_index_seen = true;
+                        }
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected sort_index() keyword argument: {other}"
+                            )));
+                        }
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(
+                                    "sort_index() arguments cannot end with ','".into(),
+                                ));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in sort_index() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::SortIndex {
+                    expr: Box::new(expr),
+                    ascending,
+                    ignore_index,
                 };
                 *pos = arg_pos + 1;
             }
@@ -5733,6 +5952,145 @@ mod tests {
 
         assert!(super::parse_expr("a.sort_values(False)").is_err());
         assert!(super::parse_expr("a.sort_values(kind='mergesort')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_sort_index_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let sorted = super::eval_str("a.sort_index()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            sorted.index().labels(),
+            &[
+                7_i64.into(),
+                8_i64.into(),
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into()
+            ]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Null(fp_types::NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1)
+            ]
+        );
+
+        let descending = super::eval_str(
+            "a.sort_index(ascending=False)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            descending.index().labels(),
+            &[
+                12_i64.into(),
+                11_i64.into(),
+                10_i64.into(),
+                8_i64.into(),
+                7_i64.into()
+            ]
+        );
+
+        let stable = super::eval_str(
+            "a.sort_index(axis='rows', kind='stable', na_position='last', sort_remaining=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            stable.index().labels(),
+            &[
+                7_i64.into(),
+                8_i64.into(),
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into()
+            ]
+        );
+
+        let ignored_index = super::eval_str(
+            "a.sort_index(ascending=False, ignore_index=True)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            ignored_index.index().labels(),
+            &[
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into()
+            ]
+        );
+        assert_eq!(
+            ignored_index.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN)
+            ]
+        );
+
+        let filtered = super::query_str(
+            "a.sort_index(ascending=False).gt(2) and b.gt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[8_i64.into()]);
+
+        assert!(super::parse_expr("a.sort_index(False)").is_err());
+        assert!(super::parse_expr("a.sort_index(axis=1)").is_err());
+        assert!(super::parse_expr("a.sort_index(kind='bogus')").is_err());
+        assert!(super::parse_expr("a.sort_index(na_position='bogus')").is_err());
+        assert!(super::parse_expr("a.sort_index(ignore_index='yes')").is_err());
         Ok(())
     }
 

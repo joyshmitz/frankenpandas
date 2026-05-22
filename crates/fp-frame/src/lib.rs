@@ -19286,6 +19286,16 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Alias for `dayofweek()`. Matches `pd.Series.dt.weekday`.
+    pub fn weekday(&self) -> Result<Series, FrameError> {
+        self.dayofweek()
+    }
+
+    /// Alias for `dayofweek()`. Matches `pd.Series.dt.day_of_week`.
+    pub fn day_of_week(&self) -> Result<Series, FrameError> {
+        self.dayofweek()
+    }
+
     /// Extract date part as string (YYYY-MM-DD).
     ///
     /// Matches `pd.Series.dt.date`.
@@ -19493,6 +19503,11 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Alias for `dayofyear()`. Matches `pd.Series.dt.day_of_year`.
+    pub fn day_of_year(&self) -> Result<Series, FrameError> {
+        self.dayofyear()
+    }
+
     /// Extract ISO week number (1-53).
     ///
     /// Matches `pd.Series.dt.isocalendar().week`.
@@ -19541,6 +19556,11 @@ impl DatetimeAccessor<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// Alias for `weekofyear()`. Matches `pd.Series.dt.week`.
+    pub fn week(&self) -> Result<Series, FrameError> {
+        self.weekofyear()
     }
 
     /// Check if date is the first day of the month.
@@ -19743,6 +19763,11 @@ impl DatetimeAccessor<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// Alias for `days_in_month()`. Matches `pd.Series.dt.daysinmonth`.
+    pub fn daysinmonth(&self) -> Result<Series, FrameError> {
+        self.days_in_month()
     }
 
     /// Whether the year of each datetime is a leap year.

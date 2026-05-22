@@ -76925,8 +76925,6 @@ mod tests {
     fn test_cat_remove_categories() {
         let s = Series::from_categorical(
             "cat",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
             vec![
                 Scalar::Utf8("a".to_string()),
                 Scalar::Utf8("b".to_string()),
@@ -76937,9 +76935,10 @@ mod tests {
         .unwrap();
         let result = s
             .cat()
+            .unwrap()
             .remove_categories(&[Scalar::Utf8("b".to_string())])
             .unwrap();
-        assert_eq!(result.cat().categories().len(), 2);
+        assert_eq!(result.cat().unwrap().categories().len(), 2);
         assert_eq!(result.column().values()[1], Scalar::Int64(-1));
     }
 

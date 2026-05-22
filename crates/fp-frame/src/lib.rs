@@ -21328,6 +21328,151 @@ impl DatetimeAccessor<'_> {
             self.series.name(),
         )
     }
+
+    // ── Timedelta-specific methods ──────────────────────────────────────
+
+    fn validate_timedelta_dtype(&self) -> Result<(), FrameError> {
+        match self.series.dtype() {
+            DType::Timedelta64 | DType::Null => Ok(()),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "Can only use timedelta accessors with timedelta values, got {other:?}"
+            ))),
+        }
+    }
+
+    fn extract_timedelta_component<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(i64) -> Scalar,
+    {
+        self.validate_timedelta_dtype()?;
+        let out: Vec<Scalar> = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => func(*nanos),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
+    }
+
+    /// Days component of each Timedelta value.
+    ///
+    /// Matches `pd.Series.dt.days` for timedelta Series. Returns the number
+    /// of complete days in the duration.
+    pub fn days(&self) -> Result<Series, FrameError> {
+        self.extract_timedelta_component(
+            |nanos| Scalar::Int64(nanos / Timedelta::NANOS_PER_DAY),
+            self.series.name(),
+        )
+    }
+
+    /// Seconds component of each Timedelta value (0-86399).
+    ///
+    /// Matches `pd.Series.dt.seconds` for timedelta Series. Returns the
+    /// seconds portion after subtracting complete days.
+    pub fn seconds(&self) -> Result<Series, FrameError> {
+        self.extract_timedelta_component(
+            |nanos| {
+                let remaining = nanos.abs() % Timedelta::NANOS_PER_DAY;
+                Scalar::Int64(remaining / Timedelta::NANOS_PER_SEC)
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Microseconds component of each Timedelta value (0-999999).
+    ///
+    /// Matches `pd.Series.dt.microseconds` for timedelta Series. Returns
+    /// the microseconds portion after subtracting complete seconds.
+    pub fn microseconds(&self) -> Result<Series, FrameError> {
+        self.extract_timedelta_component(
+            |nanos| {
+                let remaining = nanos.abs() % Timedelta::NANOS_PER_SEC;
+                Scalar::Int64(remaining / Timedelta::NANOS_PER_MICRO)
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Nanoseconds component of each Timedelta value (0-999).
+    ///
+    /// Matches `pd.Series.dt.nanoseconds` for timedelta Series. Returns
+    /// the nanoseconds portion after subtracting complete microseconds.
+    pub fn nanoseconds(&self) -> Result<Series, FrameError> {
+        self.extract_timedelta_component(
+            |nanos| Scalar::Int64(nanos.abs() % Timedelta::NANOS_PER_MICRO),
+            self.series.name(),
+        )
+    }
+
+    /// Total duration in seconds for each Timedelta value.
+    ///
+    /// Matches `pd.Series.dt.total_seconds()` for timedelta Series.
+    /// Returns a float64 Series with the total seconds (including fractional).
+    pub fn timedelta_total_seconds(&self) -> Result<Series, FrameError> {
+        self.extract_timedelta_component(
+            |nanos| Scalar::Float64(Timedelta::total_seconds(nanos)),
+            self.series.name(),
+        )
+    }
+
+    /// Component breakdown of each Timedelta value.
+    ///
+    /// Matches `pd.Series.dt.components` for timedelta Series. Returns a
+    /// DataFrame with columns: days, hours, minutes, seconds, milliseconds,
+    /// microseconds, nanoseconds.
+    pub fn timedelta_components(&self) -> Result<DataFrame, FrameError> {
+        self.validate_timedelta_dtype()?;
+        let n = self.series.len();
+        let mut days_vec = Vec::with_capacity(n);
+        let mut hours_vec = Vec::with_capacity(n);
+        let mut minutes_vec = Vec::with_capacity(n);
+        let mut seconds_vec = Vec::with_capacity(n);
+        let mut millis_vec = Vec::with_capacity(n);
+        let mut micros_vec = Vec::with_capacity(n);
+        let mut nanos_vec = Vec::with_capacity(n);
+
+        for v in self.series.column().values() {
+            match v {
+                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => {
+                    let comp = Timedelta::components(*nanos);
+                    days_vec.push(Scalar::Int64(comp.days));
+                    hours_vec.push(Scalar::Int64(comp.hours));
+                    minutes_vec.push(Scalar::Int64(comp.minutes));
+                    seconds_vec.push(Scalar::Int64(comp.seconds));
+                    millis_vec.push(Scalar::Int64(comp.milliseconds));
+                    micros_vec.push(Scalar::Int64(comp.microseconds));
+                    nanos_vec.push(Scalar::Int64(comp.nanoseconds));
+                }
+                _ => {
+                    days_vec.push(Scalar::Null(NullKind::NaN));
+                    hours_vec.push(Scalar::Null(NullKind::NaN));
+                    minutes_vec.push(Scalar::Null(NullKind::NaN));
+                    seconds_vec.push(Scalar::Null(NullKind::NaN));
+                    millis_vec.push(Scalar::Null(NullKind::NaN));
+                    micros_vec.push(Scalar::Null(NullKind::NaN));
+                    nanos_vec.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let idx = self.series.index().labels().to_vec();
+        DataFrame::from_series(vec![
+            Series::from_values("days", idx.clone(), days_vec)?,
+            Series::from_values("hours", idx.clone(), hours_vec)?,
+            Series::from_values("minutes", idx.clone(), minutes_vec)?,
+            Series::from_values("seconds", idx.clone(), seconds_vec)?,
+            Series::from_values("milliseconds", idx.clone(), millis_vec)?,
+            Series::from_values("microseconds", idx.clone(), micros_vec)?,
+            Series::from_values("nanoseconds", idx, nanos_vec)?,
+        ])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82675,6 +82820,77 @@ mod tests {
             result.values()[0],
             Scalar::Timedelta64(Timedelta::NANOS_PER_DAY)
         );
+    }
+
+    #[test]
+    fn dt_accessor_timedelta_days() {
+        use fp_types::Timedelta;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Timedelta64(
+                    2 * Timedelta::NANOS_PER_DAY + 5 * Timedelta::NANOS_PER_HOUR,
+                ),
+                Scalar::Timedelta64(Timedelta::NANOS_PER_DAY / 2),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().days().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn dt_accessor_timedelta_seconds() {
+        use fp_types::Timedelta;
+        let nanos = Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(nanos)],
+        )
+        .unwrap();
+        let result = s.dt().seconds().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2 * 3600 + 30 * 60));
+    }
+
+    #[test]
+    fn dt_accessor_timedelta_total_seconds() {
+        use fp_types::Timedelta;
+        let nanos = Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(nanos)],
+        )
+        .unwrap();
+        let result = s.dt().timedelta_total_seconds().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(90000.0)); // 25 hours
+    }
+
+    #[test]
+    fn dt_accessor_timedelta_components() {
+        use fp_types::Timedelta;
+        let nanos = Timedelta::NANOS_PER_DAY
+            + 2 * Timedelta::NANOS_PER_HOUR
+            + 30 * Timedelta::NANOS_PER_MIN
+            + 45 * Timedelta::NANOS_PER_SEC
+            + 123 * Timedelta::NANOS_PER_MILLI
+            + 456 * Timedelta::NANOS_PER_MICRO
+            + 789;
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Timedelta64(nanos)],
+        )
+        .unwrap();
+        let df = s.dt().timedelta_components().unwrap();
+        assert_eq!(df.columns().len(), 7);
+        let days_col = df.get("days").unwrap().unwrap();
+        assert_eq!(days_col.values()[0], Scalar::Int64(1));
+        let hours_col = df.get("hours").unwrap().unwrap();
+        assert_eq!(hours_col.values()[0], Scalar::Int64(2));
     }
 
     #[test]

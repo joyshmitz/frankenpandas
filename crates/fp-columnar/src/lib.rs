@@ -2883,6 +2883,27 @@ impl Column {
         self.reverse()
     }
 
+    /// Roll array elements along the axis.
+    ///
+    /// Matches np.roll(a, shift). Elements that roll beyond the last position
+    /// are re-introduced at the first, and vice versa. Positive shift rolls
+    /// elements to higher indices (right), negative to lower (left).
+    pub fn roll(&self, shift: i64) -> Result<Self, ColumnError> {
+        let len = self.len();
+        if len == 0 {
+            return Ok(self.clone());
+        }
+        let shift = ((shift % len as i64) + len as i64) as usize % len;
+        if shift == 0 {
+            return Ok(self.clone());
+        }
+        let mut out = Vec::with_capacity(len);
+        let split = len - shift;
+        out.extend_from_slice(&self.values[split..]);
+        out.extend_from_slice(&self.values[..split]);
+        Self::new(self.dtype, out)
+    }
+
     /// Filter values based on a boolean condition column.
     ///
     /// Matches `np.compress()`. Returns only values where condition is True.
@@ -12867,6 +12888,33 @@ mod tests {
             assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
             // log2(2^1 + 2^1) = log2(4) = 2
             assert!((result.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn roll_shifts_elements_circularly() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ])
+            .unwrap();
+            // Roll right by 2: [4, 5, 1, 2, 3]
+            let r1 = col.roll(2).unwrap();
+            assert_eq!(r1.values()[0].to_i64().unwrap(), 4);
+            assert_eq!(r1.values()[1].to_i64().unwrap(), 5);
+            assert_eq!(r1.values()[2].to_i64().unwrap(), 1);
+            // Roll left by 2: [3, 4, 5, 1, 2]
+            let r2 = col.roll(-2).unwrap();
+            assert_eq!(r2.values()[0].to_i64().unwrap(), 3);
+            assert_eq!(r2.values()[1].to_i64().unwrap(), 4);
+            assert_eq!(r2.values()[2].to_i64().unwrap(), 5);
+            // Roll by 0 or length is no-op
+            let r3 = col.roll(0).unwrap();
+            assert_eq!(r3.values()[0].to_i64().unwrap(), 1);
+            let r4 = col.roll(5).unwrap();
+            assert_eq!(r4.values()[0].to_i64().unwrap(), 1);
         }
     }
 }

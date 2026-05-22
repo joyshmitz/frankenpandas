@@ -1282,6 +1282,128 @@ impl Timestamp {
         self.round_to_unit(freq)
     }
 
+    /// Extract the year component from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.year`. Returns None for NaT.
+    #[must_use]
+    pub fn year(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let days_since_epoch = total_secs / 86400;
+        let mut days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        Some(if m <= 2 { y + 1 } else { y })
+    }
+
+    /// Extract the month component (1-12) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.month`. Returns None for NaT.
+    #[must_use]
+    pub fn month(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let days_since_epoch = total_secs / 86400;
+        let days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        Some(if mp < 10 { mp + 3 } else { mp - 9 })
+    }
+
+    /// Extract the day component (1-31) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.day`. Returns None for NaT.
+    #[must_use]
+    pub fn day(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let days_since_epoch = total_secs / 86400;
+        let days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        Some(doy - (153 * mp + 2) / 5 + 1)
+    }
+
+    /// Extract the hour component (0-23) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.hour`. Returns None for NaT.
+    #[must_use]
+    pub fn hour(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        Some(secs_of_day / 3600)
+    }
+
+    /// Extract the minute component (0-59) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.minute`. Returns None for NaT.
+    #[must_use]
+    pub fn minute(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        Some((secs_of_day % 3600) / 60)
+    }
+
+    /// Extract the second component (0-59) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.second`. Returns None for NaT.
+    #[must_use]
+    pub fn second(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        Some(secs_of_day % 60)
+    }
+
+    /// Extract the microsecond component (0-999999) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.microsecond`. Returns None for NaT.
+    #[must_use]
+    pub fn microsecond(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        Some((sub_nanos / 1000) as i64)
+    }
+
+    /// Extract the nanosecond component (0-999) from the timestamp.
+    ///
+    /// Matches `pd.Timestamp.nanosecond`. Returns None for NaT.
+    #[must_use]
+    pub fn nanosecond(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        Some((sub_nanos % 1000) as i64)
+    }
+
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
@@ -4547,22 +4669,17 @@ mod tests {
 
     #[test]
     fn timestamp_timestamp_accessor_matches_pandas_microsecond_rounding_py0h3() {
-        assert_eq!(Timestamp::from_nanos(0).timestamp().unwrap(), 0.0);
-        assert_eq!(
-            Timestamp::from_nanos(1_500_000_000).timestamp().unwrap(),
-            1.5
-        );
-        assert_eq!(Timestamp::from_nanos(500).timestamp().unwrap(), 0.0);
-        assert_eq!(Timestamp::from_nanos(501).timestamp().unwrap(), 0.000001);
-        assert_eq!(Timestamp::from_nanos(2_500).timestamp().unwrap(), 0.000003);
+        assert_eq!(Timestamp::from_nanos(0).timestamp(), Ok(0.0));
+        assert_eq!(Timestamp::from_nanos(1_500_000_000).timestamp(), Ok(1.5));
+        assert_eq!(Timestamp::from_nanos(500).timestamp(), Ok(0.0));
+        assert_eq!(Timestamp::from_nanos(501).timestamp(), Ok(0.000001));
+        assert_eq!(Timestamp::from_nanos(2_500).timestamp(), Ok(0.000003));
 
-        let negative_zero = Timestamp::from_nanos(-500).timestamp().unwrap();
-        assert_eq!(negative_zero, -0.0);
-        assert!(negative_zero.is_sign_negative());
-        assert_eq!(
-            Timestamp::from_nanos(-2_500).timestamp().unwrap(),
-            -0.000003
-        );
+        assert!(matches!(
+            Timestamp::from_nanos(-500).timestamp(),
+            Ok(value) if value == -0.0 && value.is_sign_negative()
+        ));
+        assert_eq!(Timestamp::from_nanos(-2_500).timestamp(), Ok(-0.000003));
         assert_eq!(
             Timestamp::nat().timestamp(),
             Err(TypeError::ValueIsMissing {
@@ -4880,5 +4997,38 @@ mod tests {
 
         assert_eq!(Timestamp::nat().day_name(), "NaT");
         assert_eq!(Timestamp::nat().month_name(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_component_accessors() {
+        let ts = Timestamp::from_nanos(0);
+        assert_eq!(ts.year(), Some(1970));
+        assert_eq!(ts.month(), Some(1));
+        assert_eq!(ts.day(), Some(1));
+        assert_eq!(ts.hour(), Some(0));
+        assert_eq!(ts.minute(), Some(0));
+        assert_eq!(ts.second(), Some(0));
+        assert_eq!(ts.microsecond(), Some(0));
+        assert_eq!(ts.nanosecond(), Some(0));
+
+        let ts2 = Timestamp::from_nanos(
+            Timedelta::NANOS_PER_DAY * 365
+                + Timedelta::NANOS_PER_HOUR * 14
+                + Timedelta::NANOS_PER_MIN * 30
+                + Timedelta::NANOS_PER_SEC * 45
+                + 123_456_789,
+        );
+        assert_eq!(ts2.year(), Some(1971));
+        assert_eq!(ts2.month(), Some(1));
+        assert_eq!(ts2.day(), Some(1));
+        assert_eq!(ts2.hour(), Some(14));
+        assert_eq!(ts2.minute(), Some(30));
+        assert_eq!(ts2.second(), Some(45));
+        assert_eq!(ts2.microsecond(), Some(123456));
+        assert_eq!(ts2.nanosecond(), Some(789));
+
+        assert_eq!(Timestamp::nat().year(), None);
+        assert_eq!(Timestamp::nat().month(), None);
+        assert_eq!(Timestamp::nat().day(), None);
     }
 }

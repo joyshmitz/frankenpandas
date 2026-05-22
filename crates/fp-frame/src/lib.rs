@@ -6224,6 +6224,54 @@ impl Series {
         }
     }
 
+    /// Mean Absolute Deviation of non-null numeric values.
+    ///
+    /// Matches `pd.Series.mad()`. Computes the average of absolute deviations
+    /// from the mean. Returns NaN for empty series.
+    pub fn mad(&self) -> Result<Scalar, FrameError> {
+        let count = self.count();
+        if count == 0 {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        let mean_val = match self.mean()? {
+            Scalar::Float64(v) => v,
+            Scalar::Timedelta64(ns) => {
+                if ns == Timedelta::NAT {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let mut ns_vals: Vec<f64> = Vec::with_capacity(count);
+                for val in self.column.values() {
+                    if let Scalar::Timedelta64(ns_v) = val {
+                        if *ns_v != Timedelta::NAT {
+                            ns_vals.push(*ns_v as f64);
+                        }
+                    }
+                }
+                if ns_vals.is_empty() {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let mean_ns = ns_vals.iter().sum::<f64>() / ns_vals.len() as f64;
+                let sum_abs_dev: f64 = ns_vals.iter().map(|x| (x - mean_ns).abs()).sum();
+                let mad_ns = sum_abs_dev / ns_vals.len() as f64;
+                if !mad_ns.is_finite() {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let clamped = mad_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+                return Ok(Scalar::Timedelta64(clamped as i64));
+            }
+            _ => return Ok(Scalar::Float64(f64::NAN)),
+        };
+        let mut sum_abs_diff = 0.0_f64;
+        for val in self.column.values() {
+            if !val.is_missing() {
+                if let Ok(v) = val.to_f64() {
+                    sum_abs_diff += (v - mean_val).abs();
+                }
+            }
+        }
+        Ok(Scalar::Float64(sum_abs_diff / count as f64))
+    }
+
     /// Median of non-null numeric values. Returns NaN for empty.
     ///
     /// Matches `pd.Series.median()`.
@@ -48101,6 +48149,36 @@ mod tests {
             _ => 0.0,
         };
         assert!((std - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_mad_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        // mean = (1+2+3+10)/4 = 4
+        // mad = (|1-4| + |2-4| + |3-4| + |10-4|)/4 = (3+2+1+6)/4 = 3.0
+        let mad = match s.mad().unwrap() {
+            Scalar::Float64(v) => v,
+            _ => panic!("expected Float64"),
+        };
+        assert!((mad - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_mad_empty() {
+        let s = Series::from_values("x", Vec::new(), Vec::<Scalar>::new()).unwrap();
+        let mad = s.mad().unwrap();
+        assert!(matches!(mad, Scalar::Float64(v) if v.is_nan()));
     }
 
     #[test]

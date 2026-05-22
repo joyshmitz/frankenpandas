@@ -6372,6 +6372,72 @@ impl Series {
         )
     }
 
+    /// Element-wise power.
+    ///
+    /// Matches `np.power(s1, s2)` / `s1 ** s2`.
+    pub fn power(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.power(other.column())?,
+        )
+    }
+
+    /// Element-wise remainder.
+    ///
+    /// Matches `np.remainder(s1, s2)` / `s1 % s2`.
+    pub fn remainder(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.remainder(other.column())?,
+        )
+    }
+
+    /// Heaviside step function.
+    ///
+    /// Matches `np.heaviside(s, h0)`. Returns 0 where x < 0, h0 where x == 0, 1 where x > 0.
+    pub fn heaviside(&self, h0: f64) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.heaviside(h0)?,
+        )
+    }
+
+    /// Multiply by 2^exp.
+    ///
+    /// Matches `np.ldexp(s, exp)`.
+    pub fn ldexp(&self, exp: i32) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.ldexp(exp)?,
+        )
+    }
+
+    /// Log of sum of exponentials: log(exp(s1) + exp(s2)).
+    ///
+    /// Matches `np.logaddexp(s1, s2)`.
+    pub fn logaddexp(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logaddexp(other.column())?,
+        )
+    }
+
+    /// Log base 2 of sum of exponentials: log2(2^s1 + 2^s2).
+    ///
+    /// Matches `np.logaddexp2(s1, s2)`.
+    pub fn logaddexp2(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logaddexp2(other.column())?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -92579,5 +92645,100 @@ mod test_select_columns_perf_76e1fd {
         let avg = vals.average(&weights);
         let expected = (1.0 * 1.0 + 2.0 * 2.0 + 3.0 * 3.0) / (1.0 + 2.0 + 3.0);
         assert!((avg.to_f64().unwrap() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_power() {
+        let base = Series::from_pairs(
+            "base",
+            vec![
+                (0_i64.into(), Scalar::Float64(2.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let exp = Series::from_pairs(
+            "exp",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = base.power(&exp).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(8.0));
+        assert_eq!(result.values()[1], Scalar::Float64(9.0));
+    }
+
+    #[test]
+    fn series_remainder() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(7.0)),
+                (1_i64.into(), Scalar::Float64(-7.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.remainder(&s2).unwrap();
+        assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        assert!((result.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_heaviside() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(-1.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.heaviside(0.5).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(0.0));
+        assert_eq!(result.values()[1], Scalar::Float64(0.5));
+        assert_eq!(result.values()[2], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn series_ldexp() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.ldexp(3).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(8.0));
+        assert_eq!(result.values()[1], Scalar::Float64(16.0));
+    }
+
+    #[test]
+    fn series_logaddexp() {
+        let s1 = Series::from_pairs("a", vec![(0_i64.into(), Scalar::Float64(0.0))]).unwrap();
+        let s2 = Series::from_pairs("b", vec![(0_i64.into(), Scalar::Float64(0.0))]).unwrap();
+        let result = s1.logaddexp(&s2).unwrap();
+        let expected = (2.0_f64).ln();
+        assert!((result.values()[0].to_f64().unwrap() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_logaddexp2() {
+        let s1 = Series::from_pairs("a", vec![(0_i64.into(), Scalar::Float64(0.0))]).unwrap();
+        let s2 = Series::from_pairs("b", vec![(0_i64.into(), Scalar::Float64(0.0))]).unwrap();
+        let result = s1.logaddexp2(&s2).unwrap();
+        assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
     }
 }

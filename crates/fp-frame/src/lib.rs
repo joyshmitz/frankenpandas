@@ -16862,10 +16862,10 @@ impl CategoricalAccessor<'_> {
         }
         let mut min_code: Option<i64> = None;
         for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val {
-                if *code >= 0 {
-                    min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
-                }
+            if let Scalar::Int64(code) = val
+                && *code >= 0
+            {
+                min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
             }
         }
         match min_code {
@@ -16887,10 +16887,10 @@ impl CategoricalAccessor<'_> {
         }
         let mut max_code: Option<i64> = None;
         for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val {
-                if *code >= 0 {
-                    max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
-                }
+            if let Scalar::Int64(code) = val
+                && *code >= 0
+            {
+                max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
             }
         }
         match max_code {
@@ -19033,16 +19033,6 @@ impl StringAccessor<'_> {
         )
     }
 
-    /// Pandas-named alias for [`index_of`](Self::index_of).
-    pub fn index(&self, sub: &str) -> Result<Series, FrameError> {
-        self.index_of(sub)
-    }
-
-    /// Pandas-named alias for [`rindex_of`](Self::rindex_of).
-    pub fn rindex(&self, sub: &str) -> Result<Series, FrameError> {
-        self.rindex_of(sub)
-    }
-
     /// Replace tab characters with spaces.
     ///
     /// Matches `pd.Series.str.expandtabs(tabsize)`.
@@ -19808,7 +19798,9 @@ impl DatetimeAccessor<'_> {
                 // Check for +HH:MM or -HH:MM suffix
                 if let Some(plus_idx) = s.rfind('+') {
                     let tz_part = &s[plus_idx..];
-                    if tz_part.len() >= 5 && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit()) {
+                    if tz_part.len() >= 5
+                        && tz_part.chars().skip(1).take(2).all(|c| c.is_ascii_digit())
+                    {
                         return Scalar::Utf8(tz_part.to_string());
                     }
                 }
@@ -20151,7 +20143,8 @@ impl DatetimeAccessor<'_> {
                         // Day of week (Monday=1, Sunday=7 for ISO)
                         let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
                         let y_adj = if m < 3 { y - 1 } else { y };
-                        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400
+                        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100
+                            + y_adj / 400
                             + t[(m - 1) as usize]
                             + d)
                             % 7;
@@ -20349,8 +20342,7 @@ impl DatetimeAccessor<'_> {
         } else {
             0
         };
-        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second)
-        {
+        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
             return None;
         }
         Some((hour, minute, second))
@@ -90994,7 +90986,10 @@ mod test_select_columns_perf_76e1fd {
         let s = Series::from_values(
             "text",
             vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
-            vec![Scalar::Utf8("hello world".into()), Scalar::Utf8("abcabc".into())],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("abcabc".into()),
+            ],
         )
         .unwrap();
         let idx = s.str().index("o").unwrap();

@@ -9260,6 +9260,39 @@ impl Series {
         self.reorder_by_positions(&keep)
     }
 
+    /// Conform the row index to a datetime frequency.
+    ///
+    /// Matches `pd.Series.asfreq(freq)` for flat, strictly increasing
+    /// datetime-like indexes. Missing rows introduced by the new frequency are
+    /// filled with NaN.
+    pub fn asfreq(&self, freq: &str) -> Result<Self, FrameError> {
+        self.asfreq_with_options(freq, None, None)
+    }
+
+    /// Conform the row index to a datetime frequency with optional fill.
+    ///
+    /// `method` accepts pandas spellings `"ffill"`/`"pad"` and
+    /// `"bfill"`/`"backfill"` for labels introduced by the frequency grid.
+    /// `fill_value`, when present, fills any remaining missing values after
+    /// reindexing/method fill.
+    pub fn asfreq_with_options(
+        &self,
+        freq: &str,
+        method: Option<&str>,
+        fill_value: Option<Scalar>,
+    ) -> Result<Self, FrameError> {
+        let labels = asfreq_target_labels(&self.index, freq)?;
+        let mut result = match method {
+            Some(method) => self.reindex_with_method(labels, method)?,
+            None => self.reindex(labels)?,
+        };
+        if let Some(fill_value) = fill_value {
+            result = result.fillna(&fill_value)?;
+        }
+        result.index = result.index.set_names(self.index.name());
+        Ok(result)
+    }
+
     /// Convert a datetime-like row index to period-style labels.
     ///
     /// Matches `pd.Series.to_period(freq)` for the supported row-index
@@ -66287,6 +66320,34 @@ mod tests {
     }
 
     #[test]
+    fn series_asfreq_daily_inserts_missing_rows() {
+        let s = Series::from_values(
+            "sales",
+            vec!["2024-01-01".into(), "2024-01-03".into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(30.0)],
+        )
+        .unwrap();
+
+        let result = s.asfreq("D").unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-01".into()),
+                IndexLabel::Utf8("2024-01-02".into()),
+                IndexLabel::Utf8("2024-01-03".into())
+            ]
+        );
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(30.0)
+            ]
+        );
+    }
+
+    #[test]
     fn dataframe_asfreq_fill_value_and_methods_4c9zl() {
         let df = DataFrame::from_dict_with_index(
             vec![("units", vec![Scalar::Int64(10), Scalar::Int64(30)])],
@@ -66304,6 +66365,27 @@ mod tests {
 
         let bfilled = df.asfreq_with_options("D", Some("bfill"), None).unwrap();
         assert_eq!(bfilled.columns()["units"].values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn series_asfreq_fill_value_and_methods() {
+        let s = Series::from_values(
+            "units",
+            vec!["2024-01-01".into(), "2024-01-03".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let filled = s
+            .asfreq_with_options("D", None, Some(Scalar::Int64(0)))
+            .unwrap();
+        assert_eq!(filled.values()[1], Scalar::Int64(0));
+
+        let ffilled = s.asfreq_with_options("D", Some("ffill"), None).unwrap();
+        assert_eq!(ffilled.values()[1], Scalar::Int64(10));
+
+        let bfilled = s.asfreq_with_options("D", Some("bfill"), None).unwrap();
+        assert_eq!(bfilled.values()[1], Scalar::Int64(30));
     }
 
     #[test]

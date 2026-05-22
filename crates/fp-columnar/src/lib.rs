@@ -2629,6 +2629,11 @@ impl Column {
         Self::new(self.dtype, values)
     }
 
+    /// Alias for reverse, matching np.flip.
+    pub fn flip(&self) -> Result<Self, ColumnError> {
+        self.reverse()
+    }
+
     /// Filter values based on a boolean condition column.
     ///
     /// Matches `np.compress()`. Returns only values where condition is True.

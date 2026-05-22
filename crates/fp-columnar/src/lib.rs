@@ -2122,6 +2122,71 @@ impl Column {
         Self::new(dtype, out)
     }
 
+    /// Test element-wise for negative sign bit.
+    ///
+    /// Matches np.signbit(x). Returns True for negative values including -0.0.
+    pub fn signbit(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Bool(*x < 0)),
+                Scalar::Float64(x) => out.push(Scalar::Bool(x.is_sign_negative())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Compute the Heaviside step function.
+    ///
+    /// Matches np.heaviside(x, h0). Returns:
+    /// - 0 where x < 0
+    /// - h0 where x == 0
+    /// - 1 where x > 0
+    pub fn heaviside(&self, h0: f64) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    let val = if *x < 0 { 0.0 } else if *x > 0 { 1.0 } else { h0 };
+                    out.push(Scalar::Float64(val));
+                }
+                Scalar::Float64(x) => {
+                    let val = if x.is_nan() {
+                        f64::NAN
+                    } else if *x < 0.0 {
+                        0.0
+                    } else if *x > 0.0 {
+                        1.0
+                    } else {
+                        h0
+                    };
+                    out.push(Scalar::Float64(val));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Element-wise bitwise AND.
     pub fn bitwise_and(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {

@@ -17467,6 +17467,36 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Sort elements within each list.
+    pub fn sort(&self, ascending: bool) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|mut list| {
+                        list.sort_by(|a, b| {
+                            let cmp = match (a, b) {
+                                (Scalar::Int64(x), Scalar::Int64(y)) => x.cmp(y),
+                                (Scalar::Float64(x), Scalar::Float64(y)) => {
+                                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                                }
+                                (Scalar::Utf8(x), Scalar::Utf8(y)) => x.cmp(y),
+                                _ => std::cmp::Ordering::Equal,
+                            };
+                            if ascending { cmp } else { cmp.reverse() }
+                        });
+                        let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                        Scalar::Utf8(json)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91251,5 +91281,21 @@ mod test_select_columns_perf_76e1fd {
             _ => panic!("expected Utf8"),
         };
         assert!(v.contains("3") && v.contains("2") && v.contains("1"));
+    }
+
+    #[test]
+    fn series_list_accessor_sort() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("[3, 1, 2]".into())],
+        )
+        .unwrap();
+        let result = s.list().sort(true).unwrap();
+        let v = match &result.column().values()[0] {
+            Scalar::Utf8(s) => s.clone(),
+            _ => panic!("expected Utf8"),
+        };
+        assert!(v.contains("1") && v.contains("2") && v.contains("3"));
     }
 }

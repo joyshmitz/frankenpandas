@@ -1627,9 +1627,19 @@ impl Column {
         self.binary_numeric(right, ArithmeticOp::Add)
     }
 
+    /// Reverse element-wise addition, matching `pd.Series.radd()`.
+    pub fn radd(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Add)
+    }
+
     /// Element-wise subtraction, matching `pd.Series.sub()`.
     pub fn sub(&self, right: &Self) -> Result<Self, ColumnError> {
         self.binary_numeric(right, ArithmeticOp::Sub)
+    }
+
+    /// Reverse element-wise subtraction, matching `pd.Series.rsub()`.
+    pub fn rsub(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Sub)
     }
 
     /// Alias for [`sub`](Self::sub), matching `pd.Series.subtract()`.
@@ -1642,6 +1652,11 @@ impl Column {
         self.binary_numeric(right, ArithmeticOp::Mul)
     }
 
+    /// Reverse element-wise multiplication, matching `pd.Series.rmul()`.
+    pub fn rmul(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Mul)
+    }
+
     /// Alias for [`mul`](Self::mul), matching `pd.Series.multiply()`.
     pub fn multiply(&self, right: &Self) -> Result<Self, ColumnError> {
         self.mul(right)
@@ -1650,6 +1665,11 @@ impl Column {
     /// Element-wise true division, matching `pd.Series.div()`.
     pub fn div(&self, right: &Self) -> Result<Self, ColumnError> {
         self.binary_numeric(right, ArithmeticOp::Div)
+    }
+
+    /// Reverse element-wise true division, matching `pd.Series.rdiv()`.
+    pub fn rdiv(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Div)
     }
 
     /// Alias for [`div`](Self::div), matching `pd.Series.divide()`.
@@ -1662,9 +1682,19 @@ impl Column {
         self.div(right)
     }
 
+    /// Alias for [`rdiv`](Self::rdiv), matching `pd.Series.rtruediv()`.
+    pub fn rtruediv(&self, left: &Self) -> Result<Self, ColumnError> {
+        self.rdiv(left)
+    }
+
     /// Element-wise floor division, matching `pd.Series.floordiv()`.
     pub fn floordiv(&self, right: &Self) -> Result<Self, ColumnError> {
         self.binary_numeric(right, ArithmeticOp::FloorDiv)
+    }
+
+    /// Reverse element-wise floor division, matching `pd.Series.rfloordiv()`.
+    pub fn rfloordiv(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::FloorDiv)
     }
 
     /// Element-wise modulo, matching `pd.Series.mod()`.
@@ -1672,9 +1702,19 @@ impl Column {
         self.binary_numeric(right, ArithmeticOp::Mod)
     }
 
+    /// Reverse element-wise modulo, matching `pd.Series.rmod()`.
+    pub fn rmod(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Mod)
+    }
+
     /// Element-wise exponentiation, matching `pd.Series.pow()`.
     pub fn pow(&self, right: &Self) -> Result<Self, ColumnError> {
         self.binary_numeric(right, ArithmeticOp::Pow)
+    }
+
+    /// Reverse element-wise exponentiation, matching `pd.Series.rpow()`.
+    pub fn rpow(&self, left: &Self) -> Result<Self, ColumnError> {
+        left.binary_numeric(self, ArithmeticOp::Pow)
     }
 
     /// Element-wise comparison producing a `Bool`-typed column.
@@ -5270,6 +5310,59 @@ mod tests {
         assert_eq!(
             left.pow(&right).expect("pow"),
             left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow")
+        );
+    }
+
+    #[test]
+    fn pandas_reverse_arithmetic_aliases_swap_operands() {
+        let series = Column::from_values(vec![Scalar::Float64(10.0)]).expect("series");
+        let other = Column::from_values(vec![Scalar::Float64(3.0)]).expect("other");
+
+        assert_eq!(
+            series.radd(&other).expect("radd"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Add)
+                .expect("add")
+        );
+        assert_eq!(
+            series.rsub(&other).expect("rsub"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Sub)
+                .expect("sub")
+        );
+        assert_eq!(
+            series.rmul(&other).expect("rmul"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Mul)
+                .expect("mul")
+        );
+        assert_eq!(
+            series.rdiv(&other).expect("rdiv"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Div)
+                .expect("div")
+        );
+        assert_eq!(
+            series.rtruediv(&other).expect("rtruediv"),
+            series.rdiv(&other).expect("rdiv")
+        );
+        assert_eq!(
+            series.rfloordiv(&other).expect("rfloordiv"),
+            other
+                .binary_numeric(&series, ArithmeticOp::FloorDiv)
+                .expect("floordiv")
+        );
+        assert_eq!(
+            series.rmod(&other).expect("rmod"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Mod)
+                .expect("mod")
+        );
+        assert_eq!(
+            series.rpow(&other).expect("rpow"),
+            other
+                .binary_numeric(&series, ArithmeticOp::Pow)
+                .expect("pow")
         );
     }
 

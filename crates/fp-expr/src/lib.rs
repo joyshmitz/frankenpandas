@@ -1015,7 +1015,8 @@ fn evaluate_delta_comparison(
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
 //   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
-//     .abs(), .fillna(value), .clip(lower, upper), .round(decimals), .isna(),
+//     .abs(), .fillna(value), .eq(other), .ne(other), .gt(other), .ge(other),
+//     .lt(other), .le(other), .clip(lower, upper), .round(decimals), .isna(),
 //     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
@@ -1851,6 +1852,44 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 expr = Expr::FillNa {
                     expr: Box::new(expr),
                     value,
+                };
+                *pos = arg_pos + 1;
+            }
+            "eq" | "ne" | "gt" | "ge" | "lt" | "le" => {
+                let op = match method.as_str() {
+                    "eq" => ComparisonOp::Eq,
+                    "ne" => ComparisonOp::Ne,
+                    "gt" => ComparisonOp::Gt,
+                    "ge" => ComparisonOp::Ge,
+                    "lt" => ComparisonOp::Lt,
+                    "le" => ComparisonOp::Le,
+                    other => {
+                        return Err(ExprError::ParseError(format!(
+                            "unsupported comparison method: {other}"
+                        )));
+                    }
+                };
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "other" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected {method}() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let right = parse_or(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "expected ')' after {method}() argument"
+                    )));
+                }
+                expr = Expr::Compare {
+                    left: Box::new(expr),
+                    right: Box::new(right),
+                    op,
                 };
                 *pos = arg_pos + 1;
             }
@@ -3432,6 +3471,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_comparison_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.ge(other=b + 1)")?;
+        let Expr::Compare { left, right, op } = expr else {
+            return Err(ExprError::ParseError("expected Compare expression".into()));
+        };
+        assert_eq!(op, ComparisonOp::Ge);
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(matches!(right.as_ref(), Expr::Add { .. }));
+        Ok(())
+    }
+
+    #[test]
     fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.isin([1, 3,])")?;
         let Expr::IsIn {
@@ -4164,6 +4220,58 @@ mod tests {
             keyword_filtered.index().labels(),
             &[1_i64.into(), 2_i64.into()]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_comparison_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(2)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let eq_scalar = super::eval_str("a.eq(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            eq_scalar.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let ne_scalar = super::eval_str("a.ne(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            ne_scalar.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let eq_column = super::eval_str("a.eq(b)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            eq_column.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let filtered = super::query_str("a.gt(1) and a.le(3)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[1_i64.into(), 2_i64.into()]);
+
+        let keyword_filtered = super::query_str(
+            "a.ge(other=2) and a.lt(other=3)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(keyword_filtered.index().labels(), &[1_i64.into()]);
         Ok(())
     }
 

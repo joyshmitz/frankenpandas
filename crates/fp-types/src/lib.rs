@@ -74,6 +74,8 @@ pub enum DType {
     Utf8,
     Categorical,
     Timedelta64,
+    /// Nanosecond-precision datetime since Unix epoch. Matches pandas `datetime64[ns]`.
+    Datetime64,
     Sparse,
 }
 
@@ -125,6 +127,9 @@ pub enum Scalar {
     #[serde(alias = "string", alias = "str")]
     Utf8(String),
     Timedelta64(i64),
+    /// Nanoseconds since Unix epoch. Matches pandas `datetime64[ns]`.
+    /// Uses `Timestamp::NAT` (i64::MIN) for missing values.
+    Datetime64(i64),
 }
 
 impl std::fmt::Display for Scalar {
@@ -138,6 +143,13 @@ impl std::fmt::Display for Scalar {
             Self::Float64(v) => write!(f, "{v}"),
             Self::Utf8(s) => write!(f, "{s}"),
             Self::Timedelta64(nanos) => write!(f, "{}", Timedelta::format(*nanos)),
+            Self::Datetime64(nanos) => {
+                if *nanos == Timestamp::NAT {
+                    write!(f, "NaT")
+                } else {
+                    write!(f, "Timestamp[{nanos}]")
+                }
+            }
         }
     }
 }
@@ -191,6 +203,7 @@ impl Scalar {
             Self::Float64(_) => DType::Float64,
             Self::Utf8(_) => DType::Utf8,
             Self::Timedelta64(_) => DType::Timedelta64,
+            Self::Datetime64(_) => DType::Datetime64,
         }
     }
 
@@ -200,6 +213,7 @@ impl Scalar {
             Self::Null(_) => true,
             Self::Float64(v) => v.is_nan(),
             Self::Timedelta64(v) => *v == Timedelta::NAT,
+            Self::Datetime64(v) => *v == Timestamp::NAT,
             _ => false,
         }
     }
@@ -214,6 +228,7 @@ impl Scalar {
         match dtype {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
+            DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool | DType::Int64 | DType::Utf8 | DType::Categorical | DType::Sparse => {
                 Self::Null(NullKind::Null)
@@ -303,6 +318,13 @@ impl Scalar {
                     a.cmp(b)
                 }
             }
+            (Self::Datetime64(a), Self::Datetime64(b)) => {
+                if *a == Timestamp::NAT || *b == Timestamp::NAT {
+                    std::cmp::Ordering::Equal
+                } else {
+                    a.cmp(b)
+                }
+            }
             // Cross-numeric comparison
             (Self::Int64(a), Self::Float64(b)) => (*a as f64)
                 .partial_cmp(b)
@@ -331,6 +353,13 @@ impl Scalar {
             Self::Timedelta64(v) => Err(TypeError::NonNumericValue {
                 value: Timedelta::format(*v),
                 dtype: DType::Timedelta64,
+            }),
+            Self::Datetime64(v) if *v == Timestamp::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Datetime64(v) => Err(TypeError::NonNumericValue {
+                value: format!("Timestamp[{v}]"),
+                dtype: DType::Datetime64,
             }),
         }
     }
@@ -361,7 +390,7 @@ pub enum TypeError {
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Categorical, Float64, Int64, Null, Sparse, Timedelta64};
+    use DType::{Bool, Categorical, Datetime64, Float64, Int64, Null, Sparse, Timedelta64};
 
     let out = match (left, right) {
         (a, b) if a == b => a,
@@ -371,6 +400,7 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
         (Timedelta64, Timedelta64) => Timedelta64,
+        (Datetime64, Datetime64) => Datetime64,
         (Sparse, _) | (_, Sparse) => return Err(TypeError::IncompatibleDtypes { left, right }),
         _ => return Err(TypeError::IncompatibleDtypes { left, right }),
     };
@@ -382,6 +412,7 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     let mut current = DType::Null;
     let mut saw_utf8 = false;
     let mut saw_timedelta = false;
+    let mut saw_datetime = false;
     let mut saw_non_utf8_non_null = false;
 
     for value in values {
@@ -396,6 +427,17 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
                     return Err(TypeError::IncompatibleDtypes {
                         left: current,
                         right: DType::Timedelta64,
+                    });
+                }
+            }
+            DType::Datetime64 => {
+                saw_datetime = true;
+                if current == DType::Null {
+                    current = DType::Datetime64;
+                } else if current != DType::Datetime64 {
+                    return Err(TypeError::IncompatibleDtypes {
+                        left: current,
+                        right: DType::Datetime64,
                     });
                 }
             }
@@ -414,6 +456,12 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
         if saw_timedelta && saw_non_utf8_non_null {
             return Err(TypeError::IncompatibleDtypes {
                 left: DType::Timedelta64,
+                right: current,
+            });
+        }
+        if saw_datetime && saw_non_utf8_non_null {
+            return Err(TypeError::IncompatibleDtypes {
+                left: DType::Datetime64,
                 right: current,
             });
         }
@@ -488,6 +536,10 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
+        DType::Datetime64 => match &value {
+            Scalar::Int64(v) => Ok(Scalar::Datetime64(*v)),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
         DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
@@ -504,6 +556,8 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Utf8(s) => s,
         Scalar::Timedelta64(v) if v == Timedelta::NAT => "NaT".to_owned(),
         Scalar::Timedelta64(v) => Timedelta::format(v),
+        Scalar::Datetime64(v) if v == Timestamp::NAT => "NaT".to_owned(),
+        Scalar::Datetime64(v) => format!("Timestamp[{v}]"),
     }
 }
 
@@ -1939,6 +1993,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         FloatBits(u64),
         Utf8(&'a str),
         Timedelta64(i64),
+        Datetime64(i64),
     }
 
     let mut seen = HashSet::new();
@@ -1955,6 +2010,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
             }
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
             Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
+            Scalar::Datetime64(v) => ScalarKey::Datetime64(*v),
             Scalar::Null(_) => continue,
         };
         seen.insert(key);

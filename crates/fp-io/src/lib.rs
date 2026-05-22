@@ -122,7 +122,7 @@ use dta::stata::{
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
-use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
+use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar_owned};
 #[cfg(feature = "hdf5")]
 use hdf5::File as Hdf5File;
 use orc_rust::{
@@ -707,12 +707,35 @@ impl Default for LatexWriteOptions {
 pub struct HtmlWriteOptions {
     /// If true, include the index as the first column. Default: true.
     pub include_index: bool,
+    /// String written for missing values. Matches pandas `na_rep`.
+    /// Default: `"NaN"`.
+    pub na_rep: String,
+    /// Additional CSS classes appended to pandas' default `dataframe` class.
+    /// Entries may contain whitespace-separated class names.
+    pub classes: Vec<String>,
+    /// Optional `id` attribute for the `<table>` element.
+    pub table_id: Option<String>,
+    /// Optional border value. `Some(0)` and `None` omit the border attribute.
+    pub border: Option<u32>,
+    /// Optional header text alignment. Defaults to pandas' `"right"`.
+    pub justify: Option<String>,
+    /// Escape HTML-sensitive characters in headers, index labels, and cells.
+    pub escape: bool,
+    /// Convert URL-like string values to anchors.
+    pub render_links: bool,
 }
 
 impl Default for HtmlWriteOptions {
     fn default() -> Self {
         Self {
             include_index: true,
+            na_rep: "NaN".to_owned(),
+            classes: Vec::new(),
+            table_id: None,
+            border: Some(1),
+            justify: None,
+            escape: true,
+            render_links: false,
         }
     }
 }
@@ -1048,11 +1071,193 @@ pub fn write_html_string_with_options(
         let materialized = materialize_named_row_multiindex_columns(frame)?;
         let nested_options = HtmlWriteOptions {
             include_index: false,
+            ..options.clone()
         };
         return write_html_string_with_options(&materialized, &nested_options);
     }
 
-    Ok(frame.to_html(options.include_index))
+    write_html_table_string(frame, options)
+}
+
+fn write_html_table_string(
+    frame: &DataFrame,
+    options: &HtmlWriteOptions,
+) -> Result<String, IoError> {
+    let mut out = String::new();
+    push_html_table_open(&mut out, options);
+    out.push_str("  <thead>\n    <tr style=\"text-align: ");
+    out.push_str(&escape_html_attr(
+        options.justify.as_deref().unwrap_or("right"),
+    ));
+    out.push_str(";\">\n");
+
+    if options.include_index {
+        out.push_str("      <th></th>\n");
+    }
+    for name in frame.column_names() {
+        out.push_str("      <th>");
+        out.push_str(&html_text(&name, options.escape));
+        out.push_str("</th>\n");
+    }
+    out.push_str("    </tr>\n  </thead>\n  <tbody>\n");
+
+    for row_idx in 0..frame.index().len() {
+        out.push_str("    <tr>\n");
+        if options.include_index {
+            out.push_str("      <th>");
+            out.push_str(&html_index_label_string(frame, row_idx, options.escape)?);
+            out.push_str("</th>\n");
+        }
+        for name in frame.column_names() {
+            let value = frame.column(&name).and_then(|column| column.value(row_idx));
+            out.push_str("      <td>");
+            match value {
+                Some(scalar) => out.push_str(&html_scalar_string(scalar, options)),
+                None => out.push_str(&html_text(&options.na_rep, options.escape)),
+            }
+            out.push_str("</td>\n");
+        }
+        out.push_str("    </tr>\n");
+    }
+
+    out.push_str("  </tbody>\n</table>");
+    Ok(out)
+}
+
+fn push_html_table_open(out: &mut String, options: &HtmlWriteOptions) {
+    out.push_str("<table");
+    if let Some(border) = options.border.filter(|border| *border > 0) {
+        out.push_str(" border=\"");
+        out.push_str(&border.to_string());
+        out.push('"');
+    }
+    out.push_str(" class=\"");
+    out.push_str(&html_class_attr(&options.classes));
+    out.push('"');
+    if let Some(table_id) = options
+        .table_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|table_id| !table_id.is_empty())
+    {
+        out.push_str(" id=\"");
+        out.push_str(&escape_html_attr(table_id));
+        out.push('"');
+    }
+    out.push_str(">\n");
+}
+
+fn html_class_attr(classes: &[String]) -> String {
+    std::iter::once("dataframe".to_owned())
+        .chain(
+            classes
+                .iter()
+                .flat_map(|class| class.split_whitespace())
+                .filter(|class| !class.is_empty())
+                .map(escape_html_attr),
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn html_index_label_string(
+    frame: &DataFrame,
+    row_idx: usize,
+    escape: bool,
+) -> Result<String, IoError> {
+    let label = frame
+        .index()
+        .labels()
+        .get(row_idx)
+        .ok_or_else(|| IoError::Html(format!("missing index label at row {row_idx}")))?;
+    let raw = match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+    };
+    Ok(html_text(&raw, escape))
+}
+
+fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
+    match scalar {
+        Scalar::Null(_) => html_text(&options.na_rep, options.escape),
+        Scalar::Bool(value) => html_text(if *value { "True" } else { "False" }, options.escape),
+        Scalar::Int64(value) => value.to_string(),
+        Scalar::Float64(value) => {
+            if value.is_nan() {
+                html_text(&options.na_rep, options.escape)
+            } else if value.fract() == 0.0 {
+                format!("{value:.1}")
+            } else {
+                value.to_string()
+            }
+        }
+        Scalar::Utf8(value) => {
+            if options.render_links && is_html_renderable_link(value) {
+                let label = html_text(value, options.escape);
+                format!(
+                    "<a href=\"{}\" target=\"_blank\">{label}</a>",
+                    escape_html_attr(value)
+                )
+            } else {
+                html_text(value, options.escape)
+            }
+        }
+        Scalar::Timedelta64(value) => {
+            if *value == Timedelta::NAT {
+                html_text(&options.na_rep, options.escape)
+            } else {
+                html_text(&Timedelta::format(*value), options.escape)
+            }
+        }
+        Scalar::Datetime64(value) => {
+            if *value == Timestamp::NAT {
+                html_text(&options.na_rep, options.escape)
+            } else {
+                html_text(&format_datetime_ns(*value), options.escape)
+            }
+        }
+    }
+}
+
+fn html_text(value: &str, escape: bool) -> String {
+    if escape {
+        escape_html_text(value)
+    } else {
+        value.to_owned()
+    }
+}
+
+fn is_html_renderable_link(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || value.starts_with("ftp://")
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn escape_html_attr(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Parse a DataFrame from the first HTML table in a document string.
@@ -1963,6 +2168,13 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
                 Some(Timedelta::format(*value))
             }
         }
+        Scalar::Datetime64(value) => {
+            if *value == Timestamp::NAT {
+                None
+            } else {
+                Some(format_datetime_ns(*value))
+            }
+        }
     }
 }
 
@@ -2214,6 +2426,13 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
                 Timedelta::format(*v)
             }
         }
+        Scalar::Datetime64(v) => {
+            if *v == Timestamp::NAT {
+                String::new()
+            } else {
+                format_datetime_ns(*v)
+            }
+        }
     }
 }
 
@@ -2426,7 +2645,7 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
                 Scalar::Null(_) | Scalar::Int64(_) | Scalar::Float64(_) => {
                     parsed_values.push(None);
                 }
-                Scalar::Bool(_) | Scalar::Timedelta64(_) => {
+                Scalar::Bool(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
                     saw_text_float = false;
                     parsed_values.clear();
                     break;
@@ -2555,7 +2774,9 @@ fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
                 saw_float = true;
             }
             Scalar::Null(_) => saw_missing = true,
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
+                return false;
+            }
         }
     }
 
@@ -2865,6 +3086,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                         fp_index::IndexLabel::Utf8("<NaT>".to_owned())
                     } else {
                         fp_index::IndexLabel::Utf8(Timedelta::format(v))
+                    }
+                }
+                Scalar::Datetime64(v) => {
+                    if v == Timestamp::NAT {
+                        fp_index::IndexLabel::Utf8("<NaT>".to_owned())
+                    } else {
+                        fp_index::IndexLabel::Utf8(format_datetime_ns(v))
                     }
                 }
             })
@@ -3305,6 +3533,13 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
                 serde_json::Value::String(Timedelta::format(*v))
             }
         }
+        Scalar::Datetime64(v) => {
+            if *v == Timestamp::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(format_datetime_ns(*v))
+            }
+        }
     }
 }
 
@@ -3317,7 +3552,9 @@ fn column_promotes_int_json_values_to_float(values: &[Scalar]) -> bool {
             Scalar::Int64(_) => saw_int = true,
             Scalar::Null(_) => saw_missing = true,
             Scalar::Float64(_) => {}
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
+                return false;
+            }
         }
     }
 
@@ -4271,6 +4508,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Bool => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
+        DType::Datetime64 => ArrowDataType::Int64, // store as nanoseconds
         DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
     }
 }
@@ -4333,6 +4571,23 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
                 match value {
                     Scalar::Timedelta64(nanos) => {
                         if *nanos == Timedelta::NAT {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(*nanos);
+                        }
+                    }
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Datetime64 => {
+            let mut builder = Int64Builder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Datetime64(nanos) => {
+                        if *nanos == Timestamp::NAT {
                             builder.append_null();
                         } else {
                             builder.append_value(*nanos);
@@ -5423,6 +5678,13 @@ fn write_excel_scalar(
                 worksheet
                     .write_string(excel_row, excel_col, Timedelta::format(*v))
                     .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
+            }
+        }
+        Scalar::Datetime64(v) => {
+            if *v != Timestamp::NAT {
+                worksheet
+                    .write_string(excel_row, excel_col, format_datetime_ns(*v))
+                    .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
         }
         Scalar::Float64(_) | Scalar::Null(_) => {}
@@ -6682,6 +6944,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Bool => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
+        DType::Datetime64 => "INTEGER",  // store as nanoseconds
         DType::Sparse => "TEXT",
     }
 }
@@ -6728,6 +6991,13 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
         Scalar::Null(_) => rusqlite::types::Value::Null,
         Scalar::Timedelta64(v) => {
             if *v == Timedelta::NAT {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Integer(*v)
+            }
+        }
+        Scalar::Datetime64(v) => {
+            if *v == Timestamp::NAT {
                 rusqlite::types::Value::Null
             } else {
                 rusqlite::types::Value::Integer(*v)
@@ -10197,6 +10467,7 @@ mod tests {
             &frame,
             &HtmlWriteOptions {
                 include_index: false,
+                ..HtmlWriteOptions::default()
             },
         )
         .expect("html");
@@ -10204,6 +10475,98 @@ mod tests {
         assert_eq!(out, frame.to_html(false));
         assert!(!out.contains("<th>r&amp;1</th>"));
         assert!(out.contains("<td>A|B</td>"));
+    }
+
+    #[test]
+    fn html_table_writer_supports_pandas_pure_string_options_u892h() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "url&col".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("https://example.test/a?x=1&y=2".to_owned()),
+                Scalar::Utf8("<b>".to_owned()),
+            ])
+            .expect("url column"),
+        );
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)])
+                .expect("value column"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Utf8("r&1".to_owned()),
+                IndexLabel::Utf8("r2".to_owned()),
+            ]),
+            columns,
+            vec!["url&col".to_owned(), "value".to_owned()],
+        )
+        .expect("html options frame");
+
+        let out = write_html_string_with_options(
+            &frame,
+            &HtmlWriteOptions {
+                include_index: true,
+                na_rep: "<NA>".to_owned(),
+                classes: vec!["table table-sm".to_owned(), "fp".to_owned()],
+                table_id: Some("report&1".to_owned()),
+                border: Some(0),
+                justify: Some("left".to_owned()),
+                escape: true,
+                render_links: true,
+            },
+        )
+        .expect("html options");
+
+        assert!(
+            out.starts_with("<table class=\"dataframe table table-sm fp\" id=\"report&amp;1\">")
+        );
+        assert!(!out.contains("border=\""));
+        assert!(out.contains("<tr style=\"text-align: left;\">"));
+        assert!(out.contains("<th>url&amp;col</th>"));
+        assert!(out.contains("<th>r&amp;1</th>"));
+        assert!(out.contains("<td>&lt;NA&gt;</td>"));
+        assert!(out.contains(
+            "<a href=\"https://example.test/a?x=1&amp;y=2\" target=\"_blank\">https://example.test/a?x=1&amp;y=2</a>"
+        ));
+        assert!(out.contains("<td>&lt;b&gt;</td>"));
+    }
+
+    #[test]
+    fn html_table_writer_can_disable_escaping_u892h() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "raw<th>".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("<b>".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("raw column"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Utf8("r&1".to_owned()),
+                IndexLabel::Int64(2),
+            ]),
+            columns,
+            vec!["raw<th>".to_owned()],
+        )
+        .expect("raw html frame");
+
+        let out = write_html_string_with_options(
+            &frame,
+            &HtmlWriteOptions {
+                na_rep: "<NA>".to_owned(),
+                escape: false,
+                ..HtmlWriteOptions::default()
+            },
+        )
+        .expect("raw html options");
+
+        assert!(out.contains("<th>raw<th></th>"));
+        assert!(out.contains("<th>r&1</th>"));
+        assert!(out.contains("<td><b></td>"));
+        assert!(out.contains("<td><NA></td>"));
     }
 
     #[test]
@@ -10233,6 +10596,7 @@ mod tests {
         ));
         let no_index_options = HtmlWriteOptions {
             include_index: false,
+            ..HtmlWriteOptions::default()
         };
         frame
             .to_html_file_with_options(&no_index_path, &no_index_options)
@@ -12844,6 +13208,7 @@ mod tests {
         );
         let html_options = HtmlWriteOptions {
             include_index: false,
+            ..HtmlWriteOptions::default()
         };
         assert_eq!(
             frame
@@ -14516,7 +14881,7 @@ mod tests {
 
         fn dtype_sql(&self, dtype: DType) -> &'static str {
             match dtype {
-                DType::Int64 | DType::Bool | DType::Timedelta64 => "BIGINT",
+                DType::Int64 | DType::Bool | DType::Timedelta64 | DType::Datetime64 => "BIGINT",
                 DType::Float64 => "DOUBLE PRECISION",
                 DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => "TEXT",
             }
@@ -18164,18 +18529,17 @@ mod tests {
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn read_sql_dtype_override_unsupported_cast_returns_typed_error() {
-        // fp_types::cast_scalar_owned doesn't currently support Int64→Utf8
-        // (that gap is tracked separately). This test asserts that when the
-        // cast is unsupported, dtype override surfaces a typed IoError::Sql
-        // with diagnostic context, NOT a panic and not a silent skip.
+        // This test asserts that when a dtype override cast is unsupported,
+        // SQL IO surfaces a typed IoError::Sql with diagnostic context, NOT a
+        // panic and not a silent skip.
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(
             &conn,
-            "CREATE TABLE labels (id INTEGER); INSERT INTO labels VALUES (10), (20);",
+            "CREATE TABLE labels (id TEXT); INSERT INTO labels VALUES ('yes'), ('no');",
         )
         .unwrap();
         let mut dtype_map = BTreeMap::new();
-        dtype_map.insert("id".to_owned(), DType::Utf8);
+        dtype_map.insert("id".to_owned(), DType::Bool);
         let err = read_sql_with_options(
             &conn,
             "SELECT id FROM labels ORDER BY id",
@@ -18197,7 +18561,7 @@ mod tests {
                     "unexpected error message: {message}"
                 );
                 assert!(
-                    message.contains("Utf8"),
+                    message.contains("Bool"),
                     "unexpected error message: {message}"
                 );
             }

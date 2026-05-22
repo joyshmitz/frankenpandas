@@ -55,10 +55,10 @@
 //!   level storage.
 
 use fp_types::{
-    DType, NullKind, Scalar, SparseDType, Timedelta, TypeError, cast_scalar, cast_scalar_owned,
-    common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin,
-    nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod,
-    nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, SparseDType, Timedelta, Timestamp, TypeError, cast_scalar,
+    cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax,
+    nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique,
+    nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -330,6 +330,7 @@ pub enum ColumnData {
     Bool(Vec<bool>),
     Utf8(Vec<String>),
     Timedelta64(Vec<i64>),
+    Datetime64(Vec<i64>),
 }
 
 impl ColumnData {
@@ -408,6 +409,17 @@ impl ColumnData {
                     .collect();
                 Self::Timedelta64(data)
             }
+            DType::Datetime64 => {
+                let data: Vec<i64> = values
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Datetime64(n) => *n,
+                        Scalar::Int64(i) => *i,
+                        _ => Timestamp::NAT,
+                    })
+                    .collect();
+                Self::Datetime64(data)
+            }
         }
     }
 
@@ -470,6 +482,17 @@ impl ColumnData {
                     }
                 })
                 .collect(),
+            Self::Datetime64(data) => data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if !validity.get(i) || *v == Timestamp::NAT {
+                        Scalar::Datetime64(Timestamp::NAT)
+                    } else {
+                        Scalar::Datetime64(*v)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -481,6 +504,7 @@ impl ColumnData {
             Self::Bool(d) => d.len(),
             Self::Utf8(d) => d.len(),
             Self::Timedelta64(d) => d.len(),
+            Self::Datetime64(d) => d.len(),
         }
     }
 
@@ -2109,6 +2133,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
         let mut seen: HashSet<Key<'_>> = HashSet::new();
         for v in &self.values {
@@ -2124,6 +2149,7 @@ impl Column {
                 }
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Datetime64(v) => Key::Datetime64(*v),
                 Scalar::Null(_) => continue,
             };
             if !seen.insert(key) {
@@ -2617,6 +2643,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -2631,6 +2658,7 @@ impl Column {
                 }
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Datetime64(v) => Key::Datetime64(*v),
                 Scalar::Null(_) => return None,
             })
         }
@@ -2958,6 +2986,7 @@ impl Column {
                 Scalar::Float64(x) => *x != 0.0 && !x.is_nan(),
                 Scalar::Utf8(s) => !s.is_empty(),
                 Scalar::Timedelta64(x) => *x != 0,
+                Scalar::Datetime64(x) => *x != Timestamp::NAT,
                 Scalar::Null(_) => false,
             };
             if truthy {
@@ -3394,6 +3423,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
         fn key_of(v: &Scalar) -> Key<'_> {
             if v.is_missing() {
@@ -3408,6 +3438,7 @@ impl Column {
                 }
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Datetime64(v) => Key::Datetime64(*v),
                 Scalar::Null(_) => Key::Null,
             }
         }
@@ -3483,6 +3514,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
         fn key_of(s: &Scalar) -> Option<LocalKey<'_>> {
             match s {
@@ -3503,6 +3535,13 @@ impl Column {
                         None
                     } else {
                         Some(LocalKey::Timedelta64(*t))
+                    }
+                }
+                Scalar::Datetime64(t) => {
+                    if *t == Timestamp::NAT {
+                        None
+                    } else {
+                        Some(LocalKey::Datetime64(*t))
                     }
                 }
             }
@@ -3725,6 +3764,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -3739,6 +3779,7 @@ impl Column {
                 }
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Datetime64(v) => Key::Datetime64(*v),
                 Scalar::Null(_) => return None,
             })
         }
@@ -3775,6 +3816,7 @@ impl Column {
             FloatBits(u64),
             Utf8(&'a str),
             Timedelta64(i64),
+            Datetime64(i64),
         }
 
         let mut seen: HashSet<Key<'_>> = HashSet::new();
@@ -3792,6 +3834,7 @@ impl Column {
                 }
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Datetime64(v) => Key::Datetime64(*v),
                 Scalar::Null(_) => continue,
             };
             if seen.insert(key) {

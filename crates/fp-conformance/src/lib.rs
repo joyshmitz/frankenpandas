@@ -128,7 +128,7 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, Timedelta, cast_scalar, cast_scalar_owned, common_dtype, dropna,
+    DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar, cast_scalar_owned, common_dtype, dropna,
     fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
@@ -6298,6 +6298,9 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
         DType::Sparse => Scalar::Null(NullKind::Null),
         DType::Timedelta64 => {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
+        }
+        DType::Datetime64 => {
+            Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000)
         }
     }
 }
@@ -17099,6 +17102,12 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                     return Err("groupby composite key component cannot be NaT".to_owned());
                 }
                 format!("td:{v}")
+            }
+            Scalar::Datetime64(v) => {
+                if *v == Timestamp::NAT {
+                    return Err("groupby composite key component cannot be NaT".to_owned());
+                }
+                format!("dt:{v}")
             }
             Scalar::Null(_) => {
                 return Err("groupby composite key component cannot be null".to_owned());

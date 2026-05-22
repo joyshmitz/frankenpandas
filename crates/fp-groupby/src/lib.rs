@@ -69,7 +69,7 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, Timedelta};
+use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +366,7 @@ fn emit_groupby_result<'a>(
             | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         });
         out_values.push(Scalar::Float64(sum));
     }
@@ -382,6 +383,7 @@ enum GroupKeyRef<'a> {
     Utf8(&'a str),
     Null(NullKind),
     Timedelta64(i64),
+    Datetime64(i64),
 }
 
 impl<'a> GroupKeyRef<'a> {
@@ -404,6 +406,13 @@ impl<'a> GroupKeyRef<'a> {
                     Self::Null(NullKind::NaT)
                 } else {
                     Self::Timedelta64(*v)
+                }
+            }
+            Scalar::Datetime64(v) => {
+                if *v == Timestamp::NAT {
+                    Self::Null(NullKind::NaT)
+                } else {
+                    Self::Datetime64(*v)
                 }
             }
         }
@@ -507,6 +516,7 @@ fn groupby_sum_timedelta64(
             | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         });
         out_values.push(Scalar::Timedelta64(sum));
     }
@@ -809,6 +819,7 @@ pub fn groupby_agg(
             }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         });
 
         let agg_value = match func {
@@ -1023,6 +1034,7 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
         }
         Scalar::Null(_) => 0,
         Scalar::Timedelta64(v) => *v as u64,
+        Scalar::Datetime64(v) => *v as u64,
     }
 }
 

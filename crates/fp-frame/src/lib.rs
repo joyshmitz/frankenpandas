@@ -193,6 +193,7 @@ fn scalar_plot_label(value: &Scalar) -> String {
         Scalar::Float64(value) => value.to_string(),
         Scalar::Utf8(value) => value.clone(),
         Scalar::Timedelta64(value) => Timedelta::format(*value),
+        Scalar::Datetime64(value) => format_datetime_ns(*value),
     }
 }
 
@@ -329,7 +330,11 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
 fn dtype_memory_width(dtype: DType) -> usize {
     match dtype {
         DType::Bool => 1,
-        DType::Int64 | DType::Float64 | DType::Categorical | DType::Timedelta64 => 8,
+        DType::Int64
+        | DType::Float64
+        | DType::Categorical
+        | DType::Timedelta64
+        | DType::Datetime64 => 8,
         DType::Utf8 => std::mem::size_of::<usize>(),
         DType::Null | DType::Sparse => 0,
     }
@@ -458,6 +463,7 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         // Keep float labels as textual index labels for current IndexLabel surface.
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
         Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+        Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
         Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
     }
 }
@@ -578,6 +584,7 @@ enum ScalarKey<'a> {
     FloatBits(u64),
     Utf8(&'a str),
     Timedelta64(i64),
+    Datetime64(i64),
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
@@ -602,6 +609,13 @@ fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
                 ScalarKey::Null(NullKind::NaT)
             } else {
                 ScalarKey::Timedelta64(*v)
+            }
+        }
+        Scalar::Datetime64(v) => {
+            if *v == Timedelta::NAT {
+                ScalarKey::Null(NullKind::NaT)
+            } else {
+                ScalarKey::Datetime64(*v)
             }
         }
     }
@@ -652,6 +666,7 @@ struct IsinIndex<'a> {
     bools: HashSet<bool>,
     utf8s: HashSet<&'a str>,
     timedeltas: HashSet<i64>,
+    datetimes: HashSet<i64>,
     any_missing: bool,
 }
 
@@ -663,6 +678,7 @@ impl<'a> IsinIndex<'a> {
             bools: HashSet::new(),
             utf8s: HashSet::new(),
             timedeltas: HashSet::new(),
+            datetimes: HashSet::new(),
             any_missing: false,
         };
         for tv in test_values {
@@ -685,6 +701,9 @@ impl<'a> IsinIndex<'a> {
                 }
                 Scalar::Timedelta64(t) => {
                     idx.timedeltas.insert(*t);
+                }
+                Scalar::Datetime64(t) => {
+                    idx.datetimes.insert(*t);
                 }
                 Scalar::Null(_) => {}
             }
@@ -752,6 +771,7 @@ impl<'a> IsinIndex<'a> {
             }
             Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
             Scalar::Timedelta64(t) => self.timedeltas.contains(t),
+            Scalar::Datetime64(t) => self.datetimes.contains(t),
             Scalar::Null(_) => false,
         }
     }
@@ -820,6 +840,7 @@ enum ModeKey<'a> {
     Null,
     Utf8(&'a str),
     Timedelta(i64),
+    Datetime(i64),
 }
 
 fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
@@ -843,6 +864,7 @@ fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
         }
         Scalar::Utf8(s) => ModeKey::Utf8(s.as_str()),
         Scalar::Timedelta64(ns) => ModeKey::Timedelta(*ns),
+        Scalar::Datetime64(ns) => ModeKey::Datetime(*ns),
     }
 }
 
@@ -963,7 +985,7 @@ fn null_kind_rank(kind: NullKind) -> u8 {
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
-    use ScalarKey::{Bool, FloatBits, Int64, Null, Timedelta64, Utf8};
+    use ScalarKey::{Bool, Datetime64, FloatBits, Int64, Null, Timedelta64, Utf8};
     match (a, b) {
         (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
         (Null(_), _) => Ordering::Greater,
@@ -975,6 +997,7 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
         }
         (Utf8(a_val), Utf8(b_val)) => a_val.cmp(b_val),
         (Timedelta64(a_val), Timedelta64(b_val)) => a_val.cmp(b_val),
+        (Datetime64(a_val), Datetime64(b_val)) => a_val.cmp(b_val),
         (Bool(a_val), Int64(b_val)) => {
             let ord = i64::from(*a_val).cmp(b_val);
             if ord == Ordering::Equal {
@@ -1025,6 +1048,8 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
         }
         (Timedelta64(_), _) => Ordering::Greater,
         (_, Timedelta64(_)) => Ordering::Less,
+        (Datetime64(_), _) => Ordering::Greater,
+        (_, Datetime64(_)) => Ordering::Less,
         (Utf8(_), _) => Ordering::Greater,
         (_, Utf8(_)) => Ordering::Less,
     }
@@ -1101,6 +1126,8 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
         Scalar::Utf8(v) => Value::String(v.clone()),
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => Value::Null,
         Scalar::Timedelta64(v) => Value::String(Timedelta::format(*v)),
+        Scalar::Datetime64(v) if *v == Timedelta::NAT => Value::Null,
+        Scalar::Datetime64(v) => Value::String(format_datetime_ns(*v)),
     }
 }
 
@@ -1153,6 +1180,7 @@ fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
         DType::Float64 => "number",
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
+        DType::Datetime64 => "datetime",
         DType::Null | DType::Sparse => "any",
     }
 }
@@ -1613,6 +1641,15 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
                 Err(_) => Scalar::Timedelta64(Timedelta::NAT),
             },
             _ => Scalar::Timedelta64(Timedelta::NAT),
+        },
+        DType::Datetime64 => match val {
+            Scalar::Datetime64(_) => val.clone(),
+            Scalar::Int64(n) => Scalar::Datetime64(*n),
+            Scalar::Utf8(_s) => {
+                // TODO: parse datetime string
+                Scalar::Datetime64(Timedelta::NAT)
+            }
+            _ => Scalar::Datetime64(Timedelta::NAT),
         },
     }
 }
@@ -2127,6 +2164,7 @@ impl Series {
                 }
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             };
             lines.push(format!("{lbl_str:<label_width$}    {val_str}"));
         }
@@ -5534,6 +5572,7 @@ impl Series {
             Scalar::Float64(v) => !v.is_nan() && *v != 0.0,
             Scalar::Utf8(v) => !v.is_empty(),
             Scalar::Timedelta64(v) => *v != Timedelta::NAT && *v != 0,
+            Scalar::Datetime64(v) => *v != Timedelta::NAT && *v != 0,
         }
     }
 
@@ -8561,6 +8600,8 @@ impl Series {
                 Scalar::Utf8(s) => csv_escape(s, sep),
                 Scalar::Timedelta64(v) if *v == Timedelta::NAT => String::new(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => String::new(),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             }
         }
 
@@ -10071,6 +10112,10 @@ impl Series {
                         return Scalar::Null(NullKind::NaT);
                     }
                     Scalar::Timedelta64(n) => Timedelta::format(*n),
+                    Scalar::Datetime64(n) if *n == Timedelta::NAT => {
+                        return Scalar::Null(NullKind::NaT);
+                    }
+                    Scalar::Datetime64(n) => format_datetime_ns(*n),
                     Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
                 };
                 mapping
@@ -21645,6 +21690,15 @@ pub fn to_timedelta_with_options(
                 ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
                 ToTimedeltaErrors::Ignore => val.clone(),
             },
+            Scalar::Datetime64(_) => match options.errors {
+                ToTimedeltaErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(
+                        "cannot convert datetime to timedelta".to_owned(),
+                    ));
+                }
+                ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                ToTimedeltaErrors::Ignore => val.clone(),
+            },
         };
         converted.push(result);
     }
@@ -24120,6 +24174,13 @@ impl DataFrame {
                                         col_names[idx]
                                     ))
                                 })?,
+                            DType::Datetime64 => {
+                                // TODO: parse datetime string
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "cannot parse datetime value '{raw}' in column '{}'",
+                                    col_names[idx]
+                                )));
+                            }
                         }
                     }
                 } else if is_na {
@@ -24175,6 +24236,7 @@ impl DataFrame {
                     Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
                     Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
+                    Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
                 })
                 .collect::<Vec<_>>();
 
@@ -25127,6 +25189,7 @@ impl DataFrame {
                             Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
                             Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+                            Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
                         })
                         .unwrap_or(IndexLabel::Utf8(String::new()))
                 })
@@ -25810,6 +25873,7 @@ impl DataFrame {
                         Scalar::Float64(f) => Scalar::Utf8(format!("{f}")),
                         Scalar::Utf8(s) => Scalar::Utf8(s),
                         Scalar::Timedelta64(v) => Scalar::Utf8(Timedelta::format(v)),
+                        Scalar::Datetime64(v) => Scalar::Utf8(format_datetime_ns(v)),
                     })
                     .collect();
                 Series::from_values(name, labels, utf8_values)
@@ -30134,6 +30198,7 @@ impl DataFrame {
                 }
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             }
         }
 
@@ -30232,6 +30297,7 @@ impl DataFrame {
                 }
                 Scalar::Utf8(s) => escape_html(s),
                 Scalar::Timedelta64(v) => escape_html(&Timedelta::format(*v)),
+                Scalar::Datetime64(v) => escape_html(&format_datetime_ns(*v)),
             }
         }
 
@@ -30677,6 +30743,8 @@ impl DataFrame {
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
+                    Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
+                    Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
                 }
             }
             out.push('\n');
@@ -30757,6 +30825,8 @@ impl DataFrame {
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
+                    Scalar::Datetime64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
+                    Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
                 }
             }
             out.push('\n');
@@ -31013,6 +31083,7 @@ impl DataFrame {
                 }
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             }
         }
 
@@ -31143,6 +31214,7 @@ impl DataFrame {
                 }
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             }
         }
 
@@ -31212,6 +31284,7 @@ impl DataFrame {
                 }
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
+                Scalar::Datetime64(v) => format_datetime_ns(*v),
             }
         }
 
@@ -33314,6 +33387,7 @@ impl DataFrame {
                     Scalar::Float64(v) => *v != 0.0 && !v.is_nan(),
                     Scalar::Utf8(s) => !s.is_empty(),
                     Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
+                    Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
                 }
             });
             values.push(Scalar::Bool(result));
@@ -33339,6 +33413,7 @@ impl DataFrame {
                     Scalar::Float64(v) => *v != 0.0 && !v.is_nan(),
                     Scalar::Utf8(s) => !s.is_empty(),
                     Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
+                    Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
                 }
             });
             values.push(Scalar::Bool(result));
@@ -33377,10 +33452,10 @@ impl DataFrame {
             if all_td {
                 let mut td_vals: Vec<f64> = Vec::new();
                 for name in &self.column_order {
-                    if let Scalar::Timedelta64(ns) = &self.columns[name].values()[row_idx] {
-                        if *ns != Timedelta::NAT {
-                            td_vals.push(*ns as f64);
-                        }
+                    if let Scalar::Timedelta64(ns) = &self.columns[name].values()[row_idx]
+                        && *ns != Timedelta::NAT
+                    {
+                        td_vals.push(*ns as f64);
                     }
                 }
                 if td_vals.is_empty() {

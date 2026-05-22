@@ -7647,6 +7647,18 @@ impl Series {
         )
     }
 
+    /// Difference computed only over valid (non-missing) values.
+    ///
+    /// Matches the pandas idiom `s.dropna().diff().reindex(s.index)`.
+    /// Missing values propagate; the first valid value yields NaN.
+    pub fn diff_valid(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.diff_valid()?,
+        )
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing

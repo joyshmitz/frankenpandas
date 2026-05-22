@@ -17328,6 +17328,38 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Variance of elements within each list (sample, ddof=1).
+    pub fn var(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let nums: Vec<f64> = list
+                            .iter()
+                            .filter_map(|v| match v {
+                                Scalar::Int64(n) => Some(*n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
+                                _ => None,
+                            })
+                            .collect();
+                        if nums.len() < 2 {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                        let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                            / (nums.len() - 1) as f64;
+                        Scalar::Float64(var)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91021,5 +91053,29 @@ mod test_select_columns_perf_76e1fd {
             _ => panic!("expected Float64"),
         };
         assert!((v1 - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_list_accessor_var() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 3]".into()),
+                Scalar::Utf8("[10, 20]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().var().unwrap();
+        let v0 = match result.column().values()[0] {
+            Scalar::Float64(f) => f,
+            _ => panic!("expected Float64"),
+        };
+        assert!((v0 - 1.0).abs() < 1e-10);
+        let v1 = match result.column().values()[1] {
+            Scalar::Float64(f) => f,
+            _ => panic!("expected Float64"),
+        };
+        assert!((v1 - 50.0).abs() < 1e-10);
     }
 }

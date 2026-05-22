@@ -1758,6 +1758,26 @@ impl Column {
         left.binary_numeric(self, ArithmeticOp::Pow)
     }
 
+    /// Alias for pow, matching NumPy naming.
+    pub fn power(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.pow(right)
+    }
+
+    /// Alias for mod, matching NumPy naming.
+    pub fn remainder(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.r#mod(right)
+    }
+
+    /// Alias for floordiv, matching NumPy naming.
+    pub fn floor_divide(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.floordiv(right)
+    }
+
+    /// Alias for div, matching NumPy naming.
+    pub fn true_divide(&self, right: &Self) -> Result<Self, ColumnError> {
+        self.div(right)
+    }
+
     /// Element-wise arctangent of y/x.
     pub fn atan2(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {

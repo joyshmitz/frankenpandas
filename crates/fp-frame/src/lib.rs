@@ -6438,6 +6438,40 @@ impl Series {
         )
     }
 
+    /// Spacing to next representable float.
+    ///
+    /// Matches `np.spacing(s)`. Returns ULP (unit in last place) for each element.
+    pub fn spacing(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.spacing()?,
+        )
+    }
+
+    /// Digitize: bin indices for each element.
+    ///
+    /// Matches `np.digitize(s, bins, right)`. Returns index of bin each element
+    /// falls into.
+    pub fn digitize(&self, bins: &Self, right: bool) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.digitize(bins.column(), right)?,
+        )
+    }
+
+    /// Linear interpolation to fill missing values.
+    ///
+    /// Matches `pd.Series.interpolate(method='linear')`.
+    pub fn interpolate_linear(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.interpolate_linear()?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -92740,5 +92774,55 @@ mod test_select_columns_perf_76e1fd {
         let s2 = Series::from_pairs("b", vec![(0_i64.into(), Scalar::Float64(0.0))]).unwrap();
         let result = s1.logaddexp2(&s2).unwrap();
         assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_spacing() {
+        let s = Series::from_pairs("x", vec![(0_i64.into(), Scalar::Float64(1.0))]).unwrap();
+        let result = s.spacing().unwrap();
+        let expected = f64::EPSILON;
+        assert!((result.values()[0].to_f64().unwrap() - expected).abs() < expected);
+    }
+
+    #[test]
+    fn series_digitize() {
+        let vals = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(0.5)),
+                (1_i64.into(), Scalar::Float64(1.5)),
+                (2_i64.into(), Scalar::Float64(2.5)),
+            ],
+        )
+        .unwrap();
+        let bins = Series::from_pairs(
+            "bins",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = vals.digitize(&bins, false).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(0));
+        assert_eq!(result.values()[1], Scalar::Int64(1));
+        assert_eq!(result.values()[2], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_interpolate_linear() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Float64)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.interpolate_linear().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(2.0));
+        assert_eq!(result.values()[2], Scalar::Float64(3.0));
     }
 }

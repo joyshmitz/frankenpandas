@@ -8768,6 +8768,35 @@ impl Series {
         }
     }
 
+    /// Convert a flat-index Series into an xarray-like DataArray snapshot.
+    ///
+    /// Matches the practical `pd.Series.to_xarray()` shape for scalar values:
+    /// the row index becomes the single coordinate/dimension and Series values
+    /// become the one-dimensional data payload.
+    pub fn to_xarray(&self) -> Result<SeriesXArrayDataArray, FrameError> {
+        let dim_name = self.index.name().unwrap_or("index").to_owned();
+        let coords = BTreeMap::from([(
+            dim_name.clone(),
+            self.index
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect(),
+        )]);
+        Ok(SeriesXArrayDataArray {
+            name: if self.name.is_empty() {
+                None
+            } else {
+                Some(self.name.clone())
+            },
+            dims: vec![dim_name.clone()],
+            dim_name,
+            coords,
+            data: self.column.values().to_vec(),
+            dtype: self.column.dtype(),
+        })
+    }
+
     // ── pandas-named string-output IO methods (br-frankenpandas-m785r) ─
     //
     // pandas `Series.to_string()`, `to_markdown()`, and `to_latex()` all
@@ -24375,6 +24404,23 @@ pub struct DataFrameXArrayVariable {
     pub dims: Vec<String>,
     pub data: Vec<Scalar>,
     pub dtype: DType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesXArrayDataArray {
+    pub name: Option<String>,
+    pub dims: Vec<String>,
+    pub dim_name: String,
+    pub coords: BTreeMap<String, Vec<Scalar>>,
+    pub data: Vec<Scalar>,
+    pub dtype: DType,
+}
+
+impl SeriesXArrayDataArray {
+    #[must_use]
+    pub fn coord(&self, name: &str) -> Option<&[Scalar]> {
+        self.coords.get(name).map(Vec::as_slice)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58422,6 +58468,48 @@ mod tests {
         };
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column MultiIndex"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn series_to_xarray_preserves_name_index_and_values() -> Result<(), FrameError> {
+        let series = Series::from_values(
+            "sales",
+            vec!["r0".into(), "r1".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )?
+        .rename_axis("row")?;
+
+        let array = series.to_xarray()?;
+        let expected_coord = vec![Scalar::Utf8("r0".into()), Scalar::Utf8("r1".into())];
+        assert_eq!(array.name, Some("sales".to_owned()));
+        assert_eq!(array.dim_name, "row");
+        assert_eq!(array.dims, vec!["row".to_owned()]);
+        assert_eq!(array.coord("row"), Some(expected_coord.as_slice()));
+        assert_eq!(array.dtype, DType::Int64);
+        assert_eq!(array.data, vec![Scalar::Int64(10), Scalar::Int64(12)]);
+        Ok(())
+    }
+
+    #[test]
+    fn series_to_xarray_defaults_unnamed_axes() -> Result<(), FrameError> {
+        let series = Series::from_values(
+            "",
+            vec![0.into(), 1.into()],
+            vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())],
+        )?;
+
+        let array = series.to_xarray()?;
+        let expected_coord = vec![Scalar::Int64(0), Scalar::Int64(1)];
+        assert_eq!(array.name, None);
+        assert_eq!(array.dim_name, "index");
+        assert_eq!(array.dims, vec!["index".to_owned()]);
+        assert_eq!(array.coord("index"), Some(expected_coord.as_slice()));
+        assert_eq!(array.dtype, DType::Utf8);
+        assert_eq!(
+            array.data,
+            vec![Scalar::Utf8("north".into()), Scalar::Utf8("south".into())]
         );
         Ok(())
     }

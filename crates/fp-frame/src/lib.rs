@@ -86837,6 +86837,35 @@ mod tests {
         assert_text_golden("series_describe_basic_stats.txt", &output);
     }
 
+    #[test]
+    fn dataframe_describe_golden_multicolumn() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let desc = df.describe().unwrap();
+        let output = format!("{desc}");
+        assert_text_golden("dataframe_describe_multicolumn.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -87834,6 +87834,63 @@ mod tests {
         assert_text_golden("dataframe_fillna_basic.txt", &output);
     }
 
+    #[test]
+    fn concat_series_golden_basic() {
+        let s1 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "vals",
+            vec![2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap();
+        let concatenated = super::concat_series(&[&s1, &s2]).unwrap();
+        let output = format!("{concatenated}");
+        assert_text_golden("concat_series_basic.txt", &output);
+    }
+
+    #[test]
+    fn concat_dataframes_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        )
+        .unwrap();
+        let concatenated = super::concat_dataframes(&[&df1, &df2]).unwrap();
+        let output = format!("{concatenated}");
+        assert_text_golden("concat_dataframes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_dropna_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Null(NullKind::NaN)]),
+            ],
+        )
+        .unwrap();
+        let dropped = df.dropna().unwrap();
+        let output = format!("{dropped}");
+        assert_text_golden("dataframe_dropna_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

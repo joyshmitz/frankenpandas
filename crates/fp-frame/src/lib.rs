@@ -89120,6 +89120,71 @@ mod tests {
         assert_text_golden("series_reset_index_basic.txt", &output);
     }
 
+    #[test]
+    fn series_pow_golden_basic() {
+        let s1 = Series::from_values(
+            "base",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "exp",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let result = s1.pow(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_pow_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_min_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(40), Scalar::Int64(20)],
+        ).unwrap();
+        let result = s.min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_max_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(40), Scalar::Int64(20)],
+        ).unwrap();
+        let result = s.max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sum_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+        ).unwrap();
+        let result = s.sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_mean_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)],
+        ).unwrap();
+        let result = s.mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_mean_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

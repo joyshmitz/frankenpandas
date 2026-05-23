@@ -94582,6 +94582,34 @@ mod tests {
         assert_text_golden("series_str_rstrip_chars_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_to_dict_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.to_dict("list").unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_to_dict_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_items_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let items = df.items().unwrap();
+        let output = format!("{items:?}");
+        assert_text_golden("dataframe_items_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

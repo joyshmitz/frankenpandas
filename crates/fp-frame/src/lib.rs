@@ -93607,6 +93607,48 @@ mod tests {
         assert_text_golden("dataframe_to_series_dict_basic.txt", &output);
     }
 
+    #[test]
+    fn series_logspace_golden_basic() {
+        let result = Series::logspace("x", 0.0, 2.0, 5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_logspace_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_geomspace_golden_basic() {
+        let result = Series::geomspace("x", 1.0, 1000.0, 4).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_geomspace_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_hanning_golden_basic() {
+        let result = Series::hanning("w", 5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_hanning_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_hamming_golden_basic() {
+        let result = Series::hamming("w", 5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_hamming_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_blackman_golden_basic() {
+        let result = Series::blackman("w", 5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_blackman_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bartlett_golden_basic() {
+        let result = Series::bartlett("w", 5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bartlett_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

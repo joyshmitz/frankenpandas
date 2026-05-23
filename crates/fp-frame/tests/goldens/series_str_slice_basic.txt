@@ -1,0 +1,4 @@
+0    hel
+1    wor
+2    pan
+Name: words, Length: 3, dtype: Utf8

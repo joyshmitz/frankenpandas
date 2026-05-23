@@ -1,0 +1,4 @@
+0    00001
+1    00042
+2    00123
+Name: nums, Length: 3, dtype: Utf8

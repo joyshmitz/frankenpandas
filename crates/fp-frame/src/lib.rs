@@ -89423,6 +89423,70 @@ mod tests {
         assert_text_golden("dataframe_pct_change_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_slice_golden_basic() {
+        let s = Series::from_values(
+            "words",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Utf8("world".into()),
+                Scalar::Utf8("pandas".into()),
+            ],
+        ).unwrap();
+        let result = s.str().slice(0, Some(3)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_slice_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_zfill_golden_basic() {
+        let s = Series::from_values(
+            "nums",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("1".into()),
+                Scalar::Utf8("42".into()),
+                Scalar::Utf8("123".into()),
+            ],
+        ).unwrap();
+        let result = s.str().zfill(5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_zfill_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_count_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("ababa".into()),
+                Scalar::Utf8("aaa".into()),
+                Scalar::Utf8("xyz".into()),
+            ],
+        ).unwrap();
+        let result = s.str().count("a").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_find_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("world peace".into()),
+                Scalar::Utf8("nothing".into()),
+            ],
+        ).unwrap();
+        let result = s.str().find("world").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_find_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

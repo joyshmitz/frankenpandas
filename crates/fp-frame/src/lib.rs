@@ -87285,6 +87285,19 @@ mod tests {
         assert_text_golden("series_notna_basic.txt", &output);
     }
 
+    #[test]
+    fn series_astype_golden_int_to_float() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let converted = s.astype(DType::Float64).unwrap();
+        let output = format!("{converted}");
+        assert_text_golden("series_astype_int_to_float.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

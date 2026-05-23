@@ -91697,6 +91697,48 @@ mod tests {
         assert_text_golden("dataframe_expanding_var_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_ewm_mean_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.ewm(None, Some(0.3)).mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ewm_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ewm_std_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.ewm(None, Some(0.3)).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ewm_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ewm_var_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.ewm(None, Some(0.3)).var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ewm_var_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

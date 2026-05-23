@@ -1,0 +1,3 @@
+a    3
+b    30
+Name: median, Length: 2, dtype: Float64

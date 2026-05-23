@@ -89269,6 +89269,48 @@ mod tests {
         assert_text_golden("dataframe_var_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_count_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Null(NullKind::Null), Scalar::Int64(4)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Null(NullKind::Null), Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        ).unwrap();
+        let result = df.count().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_median_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+            ],
+        ).unwrap();
+        let result = df.median().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_median_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_prod_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        ).unwrap();
+        let result = df.prod().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_prod_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -95346,6 +95346,56 @@ mod tests {
         assert_text_golden("dataframe_truncate_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_divmod_golden_basic() {
+        let s1 = Series::from_values(
+            "dividend",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(17), Scalar::Int64(23), Scalar::Int64(30)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "divisor",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(5), Scalar::Int64(7), Scalar::Int64(8)],
+        ).unwrap();
+        let (quot, rem) = s1.divmod(&s2).unwrap();
+        let output = format!("quotient:\n{quot}\nremainder:\n{rem}");
+        assert_text_golden("series_divmod_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rdivmod_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(5), Scalar::Int64(7), Scalar::Int64(8)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(17), Scalar::Int64(23), Scalar::Int64(30)],
+        ).unwrap();
+        let (quot, rem) = s1.rdivmod(&s2).unwrap();
+        let output = format!("quotient:\n{quot}\nremainder:\n{rem}");
+        assert_text_golden("series_rdivmod_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_reorder_levels_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Utf8("(a, 1)".to_string()),
+                IndexLabel::Utf8("(b, 2)".to_string()),
+                IndexLabel::Utf8("(c, 3)".to_string()),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.reorder_levels(&[1, 0]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_reorder_levels_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

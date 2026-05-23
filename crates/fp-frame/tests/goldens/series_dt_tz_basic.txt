@@ -1,0 +1,4 @@
+0    +05:00
+1    UTC
+2    -08:00
+Name: ts, Length: 3, dtype: Utf8

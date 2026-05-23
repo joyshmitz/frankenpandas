@@ -94846,6 +94846,69 @@ mod tests {
         assert_text_golden("series_sparse_fill_value_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_dt_tz_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00+05:00".to_owned()),
+                Scalar::Utf8("2024-06-20T14:45:30Z".to_owned()),
+                Scalar::Utf8("2024-12-31T23:59:59-08:00".to_owned()),
+            ],
+        ).unwrap();
+        let tz = s.dt().tz().unwrap();
+        let output = format!("{tz}");
+        assert_text_golden("series_dt_tz_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_timetz_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00+05:00".to_owned()),
+                Scalar::Utf8("2024-06-20T14:45:30Z".to_owned()),
+            ],
+        ).unwrap();
+        let timetz = s.dt().timetz().unwrap();
+        let output = format!("{timetz}");
+        assert_text_golden("series_dt_timetz_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_components_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:45".to_owned()),
+                Scalar::Utf8("2024-12-31T23:59:00".to_owned()),
+            ],
+        ).unwrap();
+        let components = s.dt().components().unwrap();
+        let output = format!("{components}");
+        assert_text_golden("series_dt_components_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_dayofyear_with_null_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-01T00:00:00".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("2024-12-31T23:59:59".to_owned()),
+            ],
+        ).unwrap();
+        let doy = s.dt().dayofyear().unwrap();
+        let output = format!("{doy}");
+        assert_text_golden("series_dt_dayofyear_with_null_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

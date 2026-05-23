@@ -87997,6 +87997,79 @@ mod tests {
         assert_text_golden("series_mask_basic.txt", &output);
     }
 
+    #[test]
+    fn series_cummax_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let result = s.cummax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_cummax_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cummin_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+        let result = s.cummin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_cummin_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cumprod_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let result = s.cumprod().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_cumprod_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_nunique_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        let result = s.nunique();
+        let output = format!("{result}");
+        assert_text_golden("series_nunique_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

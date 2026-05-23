@@ -1,0 +1,5 @@
+          b
+0        10
+1        20
+
+[2 rows x 1 columns]

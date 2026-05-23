@@ -93294,6 +93294,79 @@ mod tests {
         assert_text_golden("dataframe_dot_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_select_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.select_columns(&["a", "c"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_select_columns_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_drop_column_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.drop_column("b").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_drop_column_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_drop_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.drop_columns(&["a", "c"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_drop_columns_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rename_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.rename_columns(&[("a", "x"), ("b", "y")]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rename_columns_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_values_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.values();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_values_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -95241,6 +95241,66 @@ mod tests {
         assert_text_golden("series_array_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_set_axis_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.set_axis(vec![
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Utf8("c".to_owned()),
+        ]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_set_axis_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rename_axis_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.rename_axis("new_index").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_rename_axis_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_set_axis_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.set_axis(vec![
+            IndexLabel::Utf8("x".to_owned()),
+            IndexLabel::Utf8("y".to_owned()),
+        ], 0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_set_axis_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rename_axis_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.rename_axis("row_id").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rename_axis_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

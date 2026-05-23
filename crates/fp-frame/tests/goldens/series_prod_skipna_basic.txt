@@ -1,0 +1,2 @@
+skipna=true: 6
+skipna=false: NaN

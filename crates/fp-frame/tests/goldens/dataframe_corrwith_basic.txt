@@ -1,0 +1,3 @@
+a    1
+b    -1
+Name: corrwith, Length: 2, dtype: Float64

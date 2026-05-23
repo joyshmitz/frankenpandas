@@ -88966,6 +88966,77 @@ mod tests {
         assert_text_golden("series_map_basic.txt", &output);
     }
 
+    #[test]
+    fn series_compare_golden_basic() {
+        let s1 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+            ],
+        ).unwrap();
+        let cmp = s1.compare(&s2).unwrap();
+        let output = format!("{cmp}");
+        assert_text_golden("series_compare_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_agg_golden_basic() {
+        use std::collections::HashMap;
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        )
+        .unwrap();
+        let mut funcs: HashMap<String, Vec<String>> = HashMap::new();
+        funcs.insert("a".to_string(), vec!["sum".to_string(), "mean".to_string()]);
+        funcs.insert("b".to_string(), vec!["sum".to_string(), "mean".to_string()]);
+        let agg = df.agg(&funcs).unwrap();
+        let output = format!("{agg}");
+        assert_text_golden("dataframe_agg_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_filter_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        ).unwrap();
+        let mask = Series::from_values(
+            "mask",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        ).unwrap();
+        let filtered = s.filter(&mask).unwrap();
+        let output = format!("{filtered}");
+        assert_text_golden("series_filter_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

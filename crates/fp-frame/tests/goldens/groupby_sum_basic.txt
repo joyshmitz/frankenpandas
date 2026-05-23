@@ -1,0 +1,5 @@
+         val
+a         40
+b         60
+
+[2 rows x 1 columns]

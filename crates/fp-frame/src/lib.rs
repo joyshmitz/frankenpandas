@@ -94985,6 +94985,74 @@ mod tests {
         assert_text_golden("dataframe_eq_basic.txt", &output);
     }
 
+
+    #[test]
+    fn dataframe_convert_dtypes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Utf8("1".to_owned()), Scalar::Utf8("2".to_owned())]),
+                ("b", vec![Scalar::Utf8("3.14".to_owned()), Scalar::Utf8("2.71".to_owned())]),
+            ],
+        ).unwrap();
+        let result = df.convert_dtypes().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_convert_dtypes_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_infer_objects_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("10".to_owned()), Scalar::Utf8("20".to_owned()), Scalar::Utf8("30".to_owned())],
+        ).unwrap();
+        let result = s.infer_objects().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_infer_objects_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_infer_objects_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Utf8("100".to_owned()), Scalar::Utf8("200".to_owned())]),
+            ],
+        ).unwrap();
+        let result = df.infer_objects().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_infer_objects_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_gt_scalar_df_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)]),
+            ],
+        ).unwrap();
+        let result = df.gt_scalar_df(&Scalar::Int64(3)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_gt_scalar_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_lt_scalar_df_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)]),
+            ],
+        ).unwrap();
+        let result = df.lt_scalar_df(&Scalar::Int64(5)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_lt_scalar_df_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -86884,6 +86884,43 @@ mod tests {
         assert_text_golden("series_value_counts_basic.txt", &output);
     }
 
+    #[test]
+    fn groupby_agg_golden_multicolumn() {
+        let df = DataFrame::from_dict(
+            &["region", "revenue", "qty"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "revenue",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(150.0),
+                    ],
+                ),
+                (
+                    "qty",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(15)],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df
+            .groupby(&["region"])
+            .unwrap()
+            .agg_named(&[("revenue_sum", "revenue", "sum"), ("qty_mean", "qty", "mean")])
+            .unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_agg_multicolumn.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

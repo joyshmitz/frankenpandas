@@ -87213,6 +87213,24 @@ mod tests {
         assert_text_golden("series_shift_basic.txt", &output);
     }
 
+    #[test]
+    fn series_fillna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let filled = s.fillna(&Scalar::Float64(0.0)).unwrap();
+        let output = format!("{filled}");
+        assert_text_golden("series_fillna_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -91763,6 +91763,46 @@ mod tests {
         assert_text_golden("series_ewm_sum_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_transform_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
+                ("b", vec![Scalar::Float64(16.0), Scalar::Float64(25.0), Scalar::Float64(36.0)]),
+            ],
+        ).unwrap();
+        let result = df.transform(|s| {
+            match s {
+                Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
+                other => other.clone(),
+            }
+        }).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_transform_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_where_cond_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let cond = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
+                ("b", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        ).unwrap();
+        let result = df.where_cond(&cond, None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_where_cond_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

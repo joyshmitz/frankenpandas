@@ -1,0 +1,10 @@
+mantissa:
+0    0.5
+1    0.5
+2    0.5
+Name: vals_mantissa, Length: 3, dtype: Float64
+exponent:
+0    2
+1    4
+2    -2
+Name: vals_exponent, Length: 3, dtype: Int64

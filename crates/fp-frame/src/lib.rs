@@ -95981,6 +95981,93 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_ldexp_basic.txt", &output);
     }
+
+    #[test]
+    fn series_fmax_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Null(NullKind::NaN)],
+        ).unwrap();
+        let result = s1.fmax(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_fmax_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_fmin_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Null(NullKind::NaN)],
+        ).unwrap();
+        let result = s1.fmin(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_fmin_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_frexp_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(8.0), Scalar::Float64(0.125)],
+        ).unwrap();
+        let (mant, exp) = s.frexp().unwrap();
+        let output = format!("mantissa:\n{mant}\nexponent:\n{exp}");
+        assert_text_golden("series_frexp_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_modf_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.5), Scalar::Float64(-3.7), Scalar::Float64(4.0)],
+        ).unwrap();
+        let (frac, int) = s.modf().unwrap();
+        let output = format!("frac:\n{frac}\nint:\n{int}");
+        assert_text_golden("series_modf_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_spacing_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(1e10), Scalar::Float64(1e-10)],
+        ).unwrap();
+        let result = s.spacing().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_spacing_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_nextafter_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
+        ).unwrap();
+        let result = s1.nextafter(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_nextafter_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -5649,9 +5649,11 @@ impl Series {
         };
         let effective_lower = lower.filter(|v| !v.is_nan());
         let effective_upper = upper.filter(|v| !v.is_nan());
+        let has_nulls = self.column.values().iter().any(|v| v.is_missing());
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
             && is_integer_bound(lower)
-            && is_integer_bound(upper);
+            && is_integer_bound(upper)
+            && !has_nulls;
 
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {

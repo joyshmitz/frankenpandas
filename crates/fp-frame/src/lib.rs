@@ -87298,6 +87298,25 @@ mod tests {
         assert_text_golden("series_astype_int_to_float.txt", &output);
     }
 
+    #[test]
+    fn series_clip_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(15.0),
+                Scalar::Float64(20.0),
+            ],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(5.0), Some(15.0)).unwrap();
+        let output = format!("{clipped}");
+        assert_text_golden("series_clip_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

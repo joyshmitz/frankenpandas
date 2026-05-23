@@ -95659,6 +95659,90 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("rolling_dataframe_cov_with_basic.txt", &output);
     }
+
+    #[test]
+    fn dataframe_add_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.add_scalar(5.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_add_scalar_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sub_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+            ],
+        ).unwrap();
+        let result = df.sub_scalar(5.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sub_scalar_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mul_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        ).unwrap();
+        let result = df.mul_scalar(10.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mul_scalar_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_div_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+            ],
+        ).unwrap();
+        let result = df.div_scalar(10.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_div_scalar_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pow_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.pow_scalar(2.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pow_scalar_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mod_scalar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(17.0), Scalar::Float64(23.0)]),
+                ("b", vec![Scalar::Float64(7.0), Scalar::Float64(11.0), Scalar::Float64(19.0)]),
+            ],
+        ).unwrap();
+        let result = df.mod_scalar(5.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mod_scalar_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

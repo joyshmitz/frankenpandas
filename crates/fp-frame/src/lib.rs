@@ -93077,6 +93077,60 @@ mod tests {
         assert_text_golden("dataframe_value_counts_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_loc_bool_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.loc_bool(&[true, false, true]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_loc_bool_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iloc_bool_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.iloc_bool(&[false, true, true]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_iloc_bool_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pad_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
+            ],
+        ).unwrap();
+        let result = df.pad(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pad_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_backfill_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.backfill(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_backfill_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

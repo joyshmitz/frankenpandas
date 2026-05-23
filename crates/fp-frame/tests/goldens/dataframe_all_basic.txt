@@ -1,0 +1,3 @@
+a    true
+b    false
+Name: all, Length: 2, dtype: Bool

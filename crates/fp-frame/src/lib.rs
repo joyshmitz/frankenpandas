@@ -92787,6 +92787,83 @@ mod tests {
         assert_text_golden("dataframe_compare_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_any_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(false)]),
+            ],
+        ).unwrap();
+        let result = df.any().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_any_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_all_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)]),
+                ("b", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
+            ],
+        ).unwrap();
+        let result = df.all().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_all_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_equals_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df1.equals(&df2);
+        let output = format!("{result}");
+        assert_text_golden("dataframe_equals_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ndim_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.ndim();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ndim_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_size_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.size();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_size_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

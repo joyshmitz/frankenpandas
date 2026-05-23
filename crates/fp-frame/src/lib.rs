@@ -92574,6 +92574,49 @@ mod tests {
         assert_text_golden("groupby_quantile_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_quantile_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.quantile(0.5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_quantile_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("c", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+            ],
+        ).unwrap();
+        let result = df.select_dtypes(&[DType::Float64], &[]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_select_dtypes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mode_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.mode().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mode_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

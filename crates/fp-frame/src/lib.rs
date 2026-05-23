@@ -95872,6 +95872,115 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_power_basic.txt", &output);
     }
+
+    #[test]
+    fn series_maximum_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
+        ).unwrap();
+        let result = s1.maximum(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_maximum_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_minimum_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
+        ).unwrap();
+        let result = s1.minimum(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_minimum_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_hypot_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(8.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(4.0), Scalar::Float64(12.0), Scalar::Float64(15.0)],
+        ).unwrap();
+        let result = s1.hypot(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_hypot_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arctan2_golden_basic() {
+        let s1 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(-1.0), Scalar::Float64(1.0)],
+        ).unwrap();
+        let result = s1.arctan2(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arctan2_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_copysign_golden_basic() {
+        let s1 = Series::from_values(
+            "mag",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(5.0), Scalar::Float64(-3.0), Scalar::Float64(7.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "sign",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(-1.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
+        ).unwrap();
+        let result = s1.copysign(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_copysign_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_heaviside_golden_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(-1.0), Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        ).unwrap();
+        let result = s.heaviside(0.5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_heaviside_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ldexp_golden_basic() {
+        let s = Series::from_values(
+            "mantissa",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(0.5)],
+        ).unwrap();
+        let result = s.ldexp(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_ldexp_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -95113,6 +95113,44 @@ mod tests {
         assert_text_golden("series_update_basic.txt", &output);
     }
 
+
+    #[test]
+    fn dataframe_keys_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+            vec![IndexLabel::Utf8("x".to_owned()), IndexLabel::Utf8("y".to_owned()), IndexLabel::Utf8("z".to_owned())],
+        ).unwrap();
+        let keys = df.keys();
+        let output = format!("{keys:?}");
+        assert_text_golden("dataframe_keys_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_keys_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned()), IndexLabel::Utf8("c".to_owned())],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let keys = s.keys();
+        let output = format!("{keys:?}");
+        assert_text_golden("series_keys_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ndim_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let ndim = s.ndim();
+        let output = format!("{ndim}");
+        assert_text_golden("series_ndim_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

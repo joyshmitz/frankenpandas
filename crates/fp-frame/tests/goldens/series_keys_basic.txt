@@ -1,0 +1,1 @@
+Index { labels: [Utf8("a"), Utf8("b"), Utf8("c")], name: None, duplicate_cache: OnceLock(<uninit>), sort_order_cache: OnceLock(<uninit>) }

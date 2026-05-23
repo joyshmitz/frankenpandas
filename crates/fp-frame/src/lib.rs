@@ -95821,6 +95821,57 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_mask_series_basic.txt", &output);
     }
+
+    #[test]
+    fn series_fmod_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(10.5), Scalar::Float64(-17.3), Scalar::Float64(25.7)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
+        ).unwrap();
+        let result = s1.fmod(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_fmod_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_remainder_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(10.5), Scalar::Float64(-17.3), Scalar::Float64(25.7)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
+        ).unwrap();
+        let result = s1.remainder(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_remainder_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_power_golden_basic() {
+        let s1 = Series::from_values(
+            "base",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "exp",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(0.5)],
+        ).unwrap();
+        let result = s1.power(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_power_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

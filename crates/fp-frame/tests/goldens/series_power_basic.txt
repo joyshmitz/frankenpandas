@@ -1,0 +1,4 @@
+0    4
+1    27
+2    2
+Name: base, Length: 3, dtype: Float64

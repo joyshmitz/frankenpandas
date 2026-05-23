@@ -89646,6 +89646,74 @@ mod tests {
         assert_text_golden("groupby_first_last_basic.txt", &output);
     }
 
+    #[test]
+    fn series_eq_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.eq(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_eq_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ne_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.ne(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_ne_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_lt_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.lt(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_lt_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_gt_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.gt(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_gt_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

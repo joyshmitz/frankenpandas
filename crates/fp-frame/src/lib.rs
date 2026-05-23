@@ -88687,6 +88687,93 @@ mod tests {
         assert_text_golden("dataframe_iterrows_basic.txt", &output);
     }
 
+    #[test]
+    fn series_rolling_sum_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let rolled = s.rolling(3, None).sum().unwrap();
+        let output = format!("{rolled}");
+        assert_text_golden("series_rolling_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rolling_min_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let rolled = s.rolling(3, None).min().unwrap();
+        let output = format!("{rolled}");
+        assert_text_golden("series_rolling_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rolling_max_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let rolled = s.rolling(3, None).max().unwrap();
+        let output = format!("{rolled}");
+        assert_text_golden("series_rolling_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sample_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+            ],
+        )
+        .unwrap();
+        let sampled = df.sample(Some(3), None, false, Some(42)).unwrap();
+        let output = format!("{sampled}");
+        assert_text_golden("dataframe_sample_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_autocorr_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+            ],
+        ).unwrap();
+        let ac = s.autocorr(1).unwrap();
+        let output = format!("{ac}");
+        assert_text_golden("series_autocorr_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

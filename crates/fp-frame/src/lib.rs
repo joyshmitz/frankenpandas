@@ -94297,6 +94297,91 @@ mod tests {
         assert_text_golden("concat_dataframes_axis1.txt", &output);
     }
 
+    #[test]
+    fn dataframe_resample_sum_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(150.0)]),
+            ],
+            vec![
+                "2024-01-15".into(),
+                "2024-01-20".into(),
+                "2024-02-10".into(),
+            ],
+        ).unwrap();
+        let result = df.resample("M").sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_resample_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_resample_mean_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(50.0)]),
+            ],
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+        ).unwrap();
+        let result = df.resample("M").mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_resample_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_resample_count_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+        ).unwrap();
+        let result = df.resample("M").count().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_resample_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_resample_min_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(50.0), Scalar::Float64(75.0)]),
+            ],
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+        ).unwrap();
+        let result = df.resample("M").min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_resample_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_resample_max_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(50.0), Scalar::Float64(75.0)]),
+            ],
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+        ).unwrap();
+        let result = df.resample("M").max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_resample_max_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

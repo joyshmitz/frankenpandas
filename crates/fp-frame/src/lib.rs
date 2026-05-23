@@ -90501,6 +90501,54 @@ mod tests {
         assert_text_golden("series_reindex_like_basic.txt", &output);
     }
 
+    #[test]
+    fn series_arange_golden_basic() {
+        let s = Series::arange("vals", 0.0, 5.0, 1.0).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_arange_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_linspace_golden_basic() {
+        let s = Series::linspace("vals", 0.0, 10.0, 5).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_linspace_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_zeros_golden_basic() {
+        let s = Series::zeros("vals", 5).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_zeros_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ones_golden_basic() {
+        let s = Series::ones("vals", 5).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_ones_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_full_golden_basic() {
+        let s = Series::full("vals", 4, Scalar::Int64(42)).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_full_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_from_dict_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["name", "value"],
+            vec![
+                ("name", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("c".into())]),
+                ("value", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        ).unwrap();
+        let output = format!("{df}");
+        assert_text_golden("dataframe_from_dict_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

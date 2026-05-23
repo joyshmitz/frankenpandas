@@ -87249,6 +87249,42 @@ mod tests {
         assert_text_golden("series_dropna_basic.txt", &output);
     }
 
+    #[test]
+    fn series_isna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let mask = s.isna().unwrap();
+        let output = format!("{mask}");
+        assert_text_golden("series_isna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_notna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let mask = s.notna().unwrap();
+        let output = format!("{mask}");
+        assert_text_golden("series_notna_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

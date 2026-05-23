@@ -90249,6 +90249,94 @@ mod tests {
         assert_text_golden("dataframe_unstack_basic.txt", &output);
     }
 
+    #[test]
+    fn series_ffill_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        ).unwrap();
+        let result = s.ffill(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_ffill_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bfill_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let result = s.bfill(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bfill_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_interpolate_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let result = s.interpolate().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_interpolate_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_allclose_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.00001), Scalar::Float64(2.00001), Scalar::Float64(3.00001)],
+        ).unwrap();
+        let close = s1.allclose(&s2, 1e-4, 1e-4).unwrap();
+        let not_close = s1.allclose(&s2, 1e-8, 1e-8).unwrap();
+        let output = format!("close: {close}, not_close: {not_close}");
+        assert_text_golden("series_allclose_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_swaplevel_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Utf8("A, x".into()),
+                IndexLabel::Utf8("A, y".into()),
+                IndexLabel::Utf8("B, x".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s.swaplevel();
+        let output = format!("{result}");
+        assert_text_golden("series_swaplevel_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

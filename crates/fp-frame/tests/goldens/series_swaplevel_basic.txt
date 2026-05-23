@@ -1,0 +1,4 @@
+A, x    1
+A, y    2
+B, x    3
+Name: vals, Length: 3, dtype: Int64

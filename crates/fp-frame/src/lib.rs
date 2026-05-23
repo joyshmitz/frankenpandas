@@ -92864,6 +92864,33 @@ mod tests {
         assert_text_golden("dataframe_size_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_squeeze_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.squeeze(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_squeeze_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_nunique_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.nunique().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_nunique_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

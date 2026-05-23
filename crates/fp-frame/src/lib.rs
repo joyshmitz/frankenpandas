@@ -92905,6 +92905,65 @@ mod tests {
         assert_text_golden("dataframe_shift_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_take_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.take(&[0, 2, 3], 0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_take_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_filter_rows_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let mask = Series::from_values(
+            "mask",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let result = df.filter_rows(&mask).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_filter_rows_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_first_valid_index_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.first_valid_index();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_first_valid_index_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_last_valid_index_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Null(NullKind::Null)]),
+            ],
+        ).unwrap();
+        let result = df.last_valid_index();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_last_valid_index_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

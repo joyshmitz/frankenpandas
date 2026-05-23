@@ -86921,6 +86921,46 @@ mod tests {
         assert_text_golden("groupby_agg_multicolumn.txt", &output);
     }
 
+    #[test]
+    fn dataframe_corr_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(8.0),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let corr = df.corr().unwrap();
+        let output = format!("{corr}");
+        assert_text_golden("dataframe_corr_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

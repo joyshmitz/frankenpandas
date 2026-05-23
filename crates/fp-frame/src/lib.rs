@@ -88286,6 +88286,81 @@ mod tests {
         assert_text_golden("series_prod_basic.txt", &output);
     }
 
+    #[test]
+    fn groupby_std_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().std().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_var_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().var().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_var_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_median_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().median().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_median_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_first_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().first().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_first_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_last_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().last().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_last_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

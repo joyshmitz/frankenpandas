@@ -89487,6 +89487,74 @@ mod tests {
         assert_text_golden("series_str_find_basic.txt", &output);
     }
 
+    #[test]
+    fn series_expanding_mean_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        ).unwrap();
+        let result = s.expanding(None).mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_expanding_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_expanding_std_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        ).unwrap();
+        let result = s.expanding(None).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_expanding_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_expanding_min_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+                Scalar::Int64(8),
+                Scalar::Int64(2),
+            ],
+        ).unwrap();
+        let result = s.expanding(None).min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_expanding_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_expanding_max_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+                Scalar::Int64(8),
+                Scalar::Int64(2),
+            ],
+        ).unwrap();
+        let result = s.expanding(None).max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_expanding_max_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

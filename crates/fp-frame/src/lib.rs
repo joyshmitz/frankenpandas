@@ -95151,6 +95151,58 @@ mod tests {
         assert_text_golden("series_ndim_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_get_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned()), IndexLabel::Utf8("c".to_owned())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.get(&IndexLabel::Utf8("b".to_owned()));
+        let output = format!("{result:?}");
+        assert_text_golden("series_get_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_get_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        ).unwrap();
+        let result = df.get("b").unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_get_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_iat_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.iat(1).unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_iat_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_item_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(42)],
+        ).unwrap();
+        let result = s.item().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_item_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

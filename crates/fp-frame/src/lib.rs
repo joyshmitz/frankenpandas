@@ -93367,6 +93367,76 @@ mod tests {
         assert_text_golden("dataframe_values_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_num_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(2.0)]),
+                ("c", vec![Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.num_columns();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_num_columns_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_column_names_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["x", "y", "z"],
+            vec![
+                ("x", vec![Scalar::Float64(1.0)]),
+                ("y", vec![Scalar::Float64(2.0)]),
+                ("z", vec![Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.column_names();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_column_names_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_len_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.len();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_len_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_is_empty_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0)]),
+            ],
+        ).unwrap();
+        let result = df.is_empty();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_is_empty_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_product_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+            ],
+        ).unwrap();
+        let result = df.product().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_product_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

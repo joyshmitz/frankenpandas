@@ -91295,6 +91295,104 @@ mod tests {
         assert_text_golden("dataframe_radians_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_cbrt_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(8.0), Scalar::Float64(27.0)]),
+                ("b", vec![Scalar::Float64(64.0), Scalar::Float64(125.0), Scalar::Float64(-8.0)]),
+            ],
+        ).unwrap();
+        let result = df.cbrt().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cbrt_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sign_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(-3.0), Scalar::Float64(0.0)]),
+            ],
+        ).unwrap();
+        let result = df.sign().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sign_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_signbit_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(-3.0), Scalar::Float64(-0.0)]),
+            ],
+        ).unwrap();
+        let result = df.signbit().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_signbit_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_square_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(-2.0), Scalar::Float64(4.0), Scalar::Float64(-5.0)]),
+            ],
+        ).unwrap();
+        let result = df.square().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_square_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rint_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.4), Scalar::Float64(2.5), Scalar::Float64(3.6)]),
+                ("b", vec![Scalar::Float64(-1.5), Scalar::Float64(4.5), Scalar::Float64(-5.5)]),
+            ],
+        ).unwrap();
+        let result = df.rint().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rint_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_neg_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+            ],
+        ).unwrap();
+        let result = df.neg().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_neg_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_reciprocal_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(0.5)]),
+            ],
+        ).unwrap();
+        let result = df.reciprocal().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_reciprocal_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

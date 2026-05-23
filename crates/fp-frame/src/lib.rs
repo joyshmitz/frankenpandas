@@ -89311,6 +89311,118 @@ mod tests {
         assert_text_golden("dataframe_prod_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_idxmin_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)]),
+            ],
+        ).unwrap();
+        let result = df.idxmin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_idxmin_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_idxmax_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)]),
+            ],
+        ).unwrap();
+        let result = df.idxmax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_idxmax_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cumsum_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        ).unwrap();
+        let result = df.cumsum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cumsum_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cumprod_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        ).unwrap();
+        let result = df.cumprod().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cumprod_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cummax_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.cummax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cummax_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cummin_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.cummin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cummin_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_diff_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(6), Scalar::Int64(10)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(25), Scalar::Int64(35)]),
+            ],
+        ).unwrap();
+        let result = df.diff(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_diff_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pct_change_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(100.0), Scalar::Float64(110.0), Scalar::Float64(121.0)]),
+                ("b", vec![Scalar::Float64(50.0), Scalar::Float64(55.0), Scalar::Float64(60.5)]),
+            ],
+        ).unwrap();
+        let result = df.pct_change(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pct_change_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

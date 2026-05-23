@@ -35204,10 +35204,25 @@ impl DataFrame {
 
         for (name, modes) in column_modes {
             let mut values = modes.column().values().to_vec();
+            let needs_padding = values.len() < max_modes;
             while values.len() < max_modes {
                 values.push(Scalar::Null(NullKind::NaN));
             }
-            result_cols.insert(name, build_mode_column(values)?);
+            // Per pandas parity: when NaN padding is added to Int64 columns,
+            // the result dtype should be Float64 (pandas uses NaN which
+            // requires floating-point representation).
+            if needs_padding && modes.column().dtype() == DType::Int64 {
+                let float_values: Vec<Scalar> = values
+                    .into_iter()
+                    .map(|v| match v {
+                        Scalar::Int64(i) => Scalar::Float64(i as f64),
+                        other => other,
+                    })
+                    .collect();
+                result_cols.insert(name, Column::new(DType::Float64, float_values)?);
+            } else {
+                result_cols.insert(name, build_mode_column(values)?);
+            }
         }
 
         let labels: Vec<IndexLabel> = (0..max_modes).map(|i| (i as i64).into()).collect();
@@ -70451,10 +70466,10 @@ mod tests {
     }
 
     #[test]
-    fn df_mode_preserves_int64_when_padding_with_null() {
-        // DISC-011: Nullable extension Int64 dtype parity. Column 'a' has two
-        // tied modes (max_modes=2) while column 'b' has single mode. With
-        // extension Int64, column 'b' preserves Int64 dtype with null padding.
+    fn df_mode_uses_float64_when_nan_padding_needed() {
+        // Pandas parity: when NaN padding is needed (because one column has
+        // fewer modes than another), Int64 columns are promoted to Float64.
+        // This supersedes DISC-011 extension-dtype preservation in this case.
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
@@ -70484,12 +70499,14 @@ mod tests {
         assert_eq!(result.len(), 2);
         let col_a = &result.columns()["a"];
         let col_b = &result.columns()["b"];
+        // Column 'a' has no padding needed (2 modes, max_modes=2), keeps Int64
         assert_eq!(col_a.dtype(), DType::Int64);
-        assert_eq!(col_b.dtype(), DType::Int64, "b stays Int64 (DISC-011)");
+        // Column 'b' needs NaN padding (1 mode < max_modes=2), becomes Float64
+        assert_eq!(col_b.dtype(), DType::Float64, "b is Float64 for pandas parity");
         assert_eq!(col_a.values()[0], Scalar::Int64(1));
         assert_eq!(col_a.values()[1], Scalar::Int64(2));
-        assert_eq!(col_b.values()[0], Scalar::Int64(3));
-        assert!(col_b.values()[1].is_missing(), "b padding must be null");
+        assert_eq!(col_b.values()[0], Scalar::Float64(3.0));
+        assert!(col_b.values()[1].is_missing(), "b padding must be NaN");
     }
 
     #[test]

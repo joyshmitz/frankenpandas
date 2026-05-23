@@ -87159,6 +87159,24 @@ mod tests {
         assert_text_golden("series_cumsum_basic.txt", &output);
     }
 
+    #[test]
+    fn series_diff_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(12.0),
+                Scalar::Float64(15.0),
+                Scalar::Float64(17.0),
+            ],
+        )
+        .unwrap();
+        let diffed = s.diff(1).unwrap();
+        let output = format!("{diffed}");
+        assert_text_golden("series_diff_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

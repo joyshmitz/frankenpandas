@@ -95203,6 +95203,44 @@ mod tests {
         assert_text_golden("series_item_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_asof_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![1_i64.into(), 2_i64.into(), 4_i64.into(), 5_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)],
+        ).unwrap();
+        let result = s.asof(&3_i64.into());
+        let output = format!("{result:?}");
+        assert_text_golden("series_asof_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_asof_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(40.0)]),
+            ],
+            vec![1_i64.into(), 2_i64.into(), 4_i64.into()],
+        ).unwrap();
+        let result = df.asof(&3_i64.into(), None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_asof_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_array_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let arr = s.array();
+        let output = format!("{arr:?}");
+        assert_text_golden("series_array_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

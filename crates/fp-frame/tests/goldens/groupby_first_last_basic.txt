@@ -1,0 +1,12 @@
+first:
+         val
+a          1
+b         10
+
+[2 rows x 1 columns]
+last:
+         val
+a          2
+b         20
+
+[2 rows x 1 columns]

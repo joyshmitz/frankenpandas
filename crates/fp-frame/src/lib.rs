@@ -89619,6 +89619,33 @@ mod tests {
         assert_text_golden("dataframe_rolling_std_basic.txt", &output);
     }
 
+    #[test]
+    fn series_count_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Null(NullKind::Null), Scalar::Int64(30), Scalar::Int64(40)],
+        ).unwrap();
+        let result = s.count();
+        let output = format!("{result}");
+        assert_text_golden("series_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_first_last_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let first = df.groupby(&["key"]).unwrap().first().unwrap();
+        let last = df.groupby(&["key"]).unwrap().last().unwrap();
+        let output = format!("first:\n{first}\nlast:\n{last}");
+        assert_text_golden("groupby_first_last_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

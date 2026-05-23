@@ -92325,6 +92325,69 @@ mod tests {
         assert_text_golden("dataframe_replace_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_rank_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(10.0)]),
+            ],
+        ).unwrap();
+        let result = df.rank("average", true, "keep").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rank_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_astype_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.astype(DType::Int64).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_astype_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mask_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let cond = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
+                ("b", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        ).unwrap();
+        let result = df.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mask_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pipe_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.pipe(|d| d.head(2)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pipe_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

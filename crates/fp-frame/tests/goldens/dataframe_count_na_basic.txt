@@ -1,0 +1,3 @@
+a    1
+b    2
+Name: count_na, Length: 2, dtype: Int64

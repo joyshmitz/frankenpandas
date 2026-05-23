@@ -93131,6 +93131,92 @@ mod tests {
         assert_text_golden("dataframe_backfill_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_from_series_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+        ).unwrap();
+        let result = DataFrame::from_series(vec![s1, s2]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_from_series_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_empty_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.empty();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_empty_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_dtypes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.dtypes().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_dtypes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_count_na_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.count_na().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_count_na_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iloc_row_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.iloc_row(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_iloc_row_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_dropna_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]),
+            ],
+        ).unwrap();
+        let result = df.dropna_columns().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_dropna_columns_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

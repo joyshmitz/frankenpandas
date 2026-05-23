@@ -95530,6 +95530,84 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("dataframe_corrwith_basic.txt", &output);
     }
+
+    #[test]
+    fn series_mean_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
+        ).unwrap();
+        let with_skip = s.mean_skipna(true).unwrap();
+        let without_skip = s.mean_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_mean_skipna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_std_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
+        ).unwrap();
+        let with_skip = s.std_skipna(true).unwrap();
+        let without_skip = s.std_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_std_skipna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_var_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
+        ).unwrap();
+        let with_skip = s.var_skipna(true).unwrap();
+        let without_skip = s.var_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_var_skipna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_min_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
+        ).unwrap();
+        let with_skip = s.min_skipna(true).unwrap();
+        let without_skip = s.min_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_min_skipna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_max_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
+        ).unwrap();
+        let with_skip = s.max_skipna(true).unwrap();
+        let without_skip = s.max_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_max_skipna_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_median_skipna_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
+        ).unwrap();
+        let with_skip = s.median_skipna(true).unwrap();
+        let without_skip = s.median_skipna(false).unwrap();
+        let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
+        assert_text_golden("series_median_skipna_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

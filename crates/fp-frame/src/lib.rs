@@ -88774,6 +88774,75 @@ mod tests {
         assert_text_golden("series_autocorr_basic.txt", &output);
     }
 
+    #[test]
+    fn series_duplicated_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        ).unwrap();
+        let dups = s.duplicated().unwrap();
+        let output = format!("{dups}");
+        assert_text_golden("series_duplicated_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rolling_std_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let rolled = s.rolling(3, None).std().unwrap();
+        let output = format!("{rolled}");
+        assert_text_golden("series_rolling_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ewm_std_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        ).unwrap();
+        let ewm_std = s.ewm(Some(3.0), None).std().unwrap();
+        let output = format!("{ewm_std}");
+        assert_text_golden("series_ewm_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_duplicated_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+        let dups = df.duplicated(None, DuplicateKeep::First).unwrap();
+        let output = format!("{dups}");
+        assert_text_golden("dataframe_duplicated_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

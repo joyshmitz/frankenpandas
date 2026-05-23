@@ -92964,6 +92964,119 @@ mod tests {
         assert_text_golden("dataframe_last_valid_index_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_add_prefix_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.add_prefix("col_").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_add_prefix_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_add_suffix_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.add_suffix("_val").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_add_suffix_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ffill_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
+            ],
+        ).unwrap();
+        let result = df.ffill(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ffill_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_bfill_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.bfill(None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_bfill_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_combine_first_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.combine_first(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_combine_first_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_interpolate_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.interpolate().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_interpolate_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iloc_slice_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.iloc_slice(Some(1), Some(3)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_iloc_slice_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_value_counts_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()), Scalar::Utf8("x".into()), Scalar::Utf8("x".into())]),
+            ],
+        ).unwrap();
+        let result = df.value_counts().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_value_counts_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

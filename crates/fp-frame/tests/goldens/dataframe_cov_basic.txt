@@ -1,0 +1,5 @@
+           x    y
+x        2.5  1.5
+y        1.5  1.5
+
+[2 rows x 2 columns]

@@ -86961,6 +86961,39 @@ mod tests {
         assert_text_golden("dataframe_corr_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_cov_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let cov = df.cov().unwrap();
+        let output = format!("{cov}");
+        assert_text_golden("dataframe_cov_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

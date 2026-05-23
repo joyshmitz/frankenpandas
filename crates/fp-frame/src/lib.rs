@@ -88891,6 +88891,81 @@ mod tests {
         assert_text_golden("series_searchsorted_basic.txt", &output);
     }
 
+    #[test]
+    fn series_corr_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+            ],
+        ).unwrap();
+        let corr = s1.corr(&s2).unwrap();
+        let output = format!("{corr:.4}");
+        assert_text_golden("series_corr_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cov_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        ).unwrap();
+        let cov = s1.cov(&s2).unwrap();
+        let output = format!("{cov:.4}");
+        assert_text_golden("series_cov_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_map_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ],
+        ).unwrap();
+        let mapping = vec![
+            (Scalar::Int64(1), Scalar::Utf8("one".into())),
+            (Scalar::Int64(2), Scalar::Utf8("two".into())),
+            (Scalar::Int64(3), Scalar::Utf8("three".into())),
+        ];
+        let mapped = s.map(&mapping).unwrap();
+        let output = format!("{mapped}");
+        assert_text_golden("series_map_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
@@ -96204,4 +96279,5 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(s.len(), 3);
         assert!((s.values()[1].to_f64().unwrap() - 42.0).abs() < 1e-10);
     }
+
 }

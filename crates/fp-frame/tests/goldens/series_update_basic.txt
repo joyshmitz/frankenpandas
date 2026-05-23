@@ -1,0 +1,4 @@
+0    10
+1    99
+2    30
+Name: val, Length: 3, dtype: Int64

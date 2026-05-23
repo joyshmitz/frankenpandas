@@ -1,0 +1,5 @@
+popped: Int64(20)
+remaining:
+0    10
+2    30
+Name: val, Length: 2, dtype: Int64

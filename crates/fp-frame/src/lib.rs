@@ -95053,6 +95053,66 @@ mod tests {
         assert_text_golden("dataframe_lt_scalar_df_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_pop_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let (popped, remaining) = s.pop(&1_i64.into()).unwrap();
+        let output = format!("popped: {popped:?}\nremaining:\n{remaining}");
+        assert_text_golden("series_pop_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pop_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        ).unwrap();
+        let (popped, remaining) = df.pop("b").unwrap();
+        let output = format!("popped:\n{popped}\nremaining:\n{remaining}");
+        assert_text_golden("dataframe_pop_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_insert_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        ).unwrap();
+        let new_col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
+        let result = df.insert(1, "b", new_col).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_insert_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_update_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let other = Series::from_values(
+            "val",
+            vec![1_i64.into()],
+            vec![Scalar::Int64(99)],
+        ).unwrap();
+        let result = s.update(&other).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_update_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

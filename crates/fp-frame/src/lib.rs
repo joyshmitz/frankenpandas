@@ -94610,6 +94610,33 @@ mod tests {
         assert_text_golden("dataframe_items_basic.txt", &output);
     }
 
+    #[test]
+    fn series_agg_multi_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let result = s.agg(&["sum", "mean", "min", "max"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_agg_multi_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_agg_list_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.agg_list(&["sum", "mean"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_agg_list_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

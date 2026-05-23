@@ -1,0 +1,2 @@
+2024-01    20
+Name: val, Length: 1, dtype: Float64

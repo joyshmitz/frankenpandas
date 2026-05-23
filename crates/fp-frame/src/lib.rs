@@ -94037,6 +94037,206 @@ mod tests {
         assert_text_golden("groupby_pct_change_basic.txt", &output);
     }
 
+    #[test]
+    fn resample_sum_golden_basic() {
+        let s = Series::from_values(
+            "sales",
+            vec![
+                "2024-01-15".into(),
+                "2024-01-20".into(),
+                "2024-02-10".into(),
+            ],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(150.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_mean_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(50.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_count_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").count().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_min_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(50.0),
+                Scalar::Float64(75.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_max_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(50.0),
+                Scalar::Float64(75.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_first_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(300.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").first().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_first_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_last_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(300.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").last().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_last_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_std_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_var_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+                "2024-02-15".into(),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_var_basic.txt", &output);
+    }
+
+    #[test]
+    fn resample_median_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-05".into(),
+                "2024-01-15".into(),
+                "2024-01-25".into(),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        ).unwrap();
+        let result = s.resample("M").median().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("resample_median_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

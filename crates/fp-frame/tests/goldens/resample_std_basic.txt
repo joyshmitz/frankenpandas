@@ -1,0 +1,3 @@
+2024-01    7.0710678118654755
+2024-02    NaN
+Name: val, Length: 2, dtype: Float64

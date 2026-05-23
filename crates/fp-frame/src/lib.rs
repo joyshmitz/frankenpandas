@@ -90421,6 +90421,86 @@ mod tests {
         assert_text_golden("series_log2_basic.txt", &output);
     }
 
+    #[test]
+    fn series_percentile_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        ).unwrap();
+        let p50 = s.percentile(50.0);
+        let p25 = s.percentile(25.0);
+        let output = format!("p50: {p50:?}, p25: {p25:?}");
+        assert_text_golden("series_percentile_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_apply_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s.apply(|v| match v {
+            Scalar::Int64(n) => Scalar::Int64(n * 2),
+            other => other.clone(),
+        }).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_apply_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_pipe_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(4.0), Scalar::Float64(9.0), Scalar::Float64(16.0)],
+        ).unwrap();
+        let result = s.pipe(|series| {
+            series.sqrt()
+        }).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_pipe_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_transform_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.transform(|v| match v {
+            Scalar::Int64(n) => Scalar::Int64(n / 10),
+            other => other.clone(),
+        }).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_transform_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_reindex_like_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![IndexLabel::Utf8("y".into()), IndexLabel::Utf8("z".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        ).unwrap();
+        let result = s1.reindex_like(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_reindex_like_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

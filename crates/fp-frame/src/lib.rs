@@ -87086,6 +87086,25 @@ mod tests {
         assert_text_golden("dataframe_stack_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_melt_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["id", "x", "y"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Utf8("A".into()), Scalar::Utf8("B".into())],
+                ),
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("y", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let melted = df.melt(&["id"], &["x", "y"], None, None).unwrap();
+        let output = format!("{melted}");
+        assert_text_golden("dataframe_melt_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

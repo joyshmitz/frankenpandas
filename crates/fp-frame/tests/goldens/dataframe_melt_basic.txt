@@ -1,0 +1,7 @@
+         id  variable  value
+0         A         x      1
+1         B         x      2
+2         A         y      3
+3         B         y      4
+
+[4 rows x 3 columns]

@@ -91070,6 +91070,132 @@ mod tests {
         assert_text_golden("dataframe_tan_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_sqrt_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
+                ("b", vec![Scalar::Float64(16.0), Scalar::Float64(25.0), Scalar::Float64(36.0)]),
+            ],
+        ).unwrap();
+        let result = df.sqrt().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sqrt_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_log2_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(8.0), Scalar::Float64(16.0), Scalar::Float64(32.0)]),
+            ],
+        ).unwrap();
+        let result = df.log2().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_log2_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_log10_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(10.0), Scalar::Float64(100.0)]),
+                ("b", vec![Scalar::Float64(1000.0), Scalar::Float64(10000.0), Scalar::Float64(100000.0)]),
+            ],
+        ).unwrap();
+        let result = df.log10().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_log10_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sinh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.sinh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sinh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cosh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.cosh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cosh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_tanh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.tanh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_tanh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_arcsin_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(-0.5), Scalar::Float64(-1.0), Scalar::Float64(0.25)]),
+            ],
+        ).unwrap();
+        let result = df.arcsin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arcsin_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_arccos_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(-0.5), Scalar::Float64(-1.0), Scalar::Float64(0.25)]),
+            ],
+        ).unwrap();
+        let result = df.arccos().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arccos_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_arctan_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.arctan().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arctan_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

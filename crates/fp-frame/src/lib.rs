@@ -92617,6 +92617,61 @@ mod tests {
         assert_text_golden("dataframe_mode_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_set_index_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("c".into())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.set_index("key", true).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_set_index_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_reset_index_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.reset_index(false).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_reset_index_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sort_index_golden_basic() {
+        let mut df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("val", vec![Scalar::Float64(30.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        df = df.set_index("key", true).unwrap();
+        let result = df.sort_index(true).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sort_index_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_reindex_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.reindex(vec![2_i64.into(), 0_i64.into(), 1_i64.into()]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_reindex_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

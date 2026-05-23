@@ -94909,6 +94909,82 @@ mod tests {
         assert_text_golden("series_dt_dayofyear_with_null_basic.txt", &output);
     }
 
+
+    #[test]
+    fn dataframe_swaplevel_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+            vec![IndexLabel::Utf8("(x, 1)".to_owned()), IndexLabel::Utf8("(y, 2)".to_owned())],
+        ).unwrap();
+        let result = df.swaplevel();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_swaplevel_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_align_golden_basic() {
+        let df1 = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+        ).unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+            vec![1_i64.into(), 3_i64.into()],
+        ).unwrap();
+        let (aligned1, aligned2) = df1.align(&df2, AlignMode::Outer).unwrap();
+        let output = format!("aligned1:\n{aligned1}\naligned2:\n{aligned2}");
+        assert_text_golden("dataframe_align_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ne_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)]),
+            ],
+        ).unwrap();
+        let result = df1.ne(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ne_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_eq_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)]),
+            ],
+        ).unwrap();
+        let result = df1.eq(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_eq_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -1,0 +1,5 @@
+          a   b
+(1, x)    1  10
+(2, y)    2  20
+
+[2 rows x 2 columns]

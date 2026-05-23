@@ -1,0 +1,5 @@
+         x  y
+A        1  2
+B        3  4
+
+[2 rows x 2 columns]

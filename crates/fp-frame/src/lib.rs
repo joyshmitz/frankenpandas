@@ -90148,6 +90148,107 @@ mod tests {
         assert_text_golden("series_str_split_get_basic.txt", &output);
     }
 
+    #[test]
+    fn series_squeeze_golden_basic() {
+        let s_single = Series::from_values(
+            "single",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(42)],
+        ).unwrap();
+        let s_multi = Series::from_values(
+            "multi",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        ).unwrap();
+        let single_result = s_single.squeeze();
+        let multi_result = s_multi.squeeze();
+        let output = format!("single: {:?}, multi_is_series: {}", single_result, multi_result.is_err());
+        assert_text_golden("series_squeeze_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_to_list_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.to_list();
+        let output = format!("{result:?}");
+        assert_text_golden("series_to_list_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_to_numpy_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.5), Scalar::Float64(3.5)],
+        ).unwrap();
+        let result = s.to_numpy();
+        let output = format!("{result:?}");
+        assert_text_golden("series_to_numpy_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_memory_usage_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let mem = s.memory_usage();
+        let output = format!("memory_usage > 0: {}", mem > 0);
+        assert_text_golden("series_memory_usage_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_nbytes_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let nb = s.nbytes();
+        let output = format!("nbytes > 0: {}", nb > 0);
+        assert_text_golden("series_nbytes_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_unstack_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Utf8("A, x".into()),
+                IndexLabel::Utf8("A, y".into()),
+                IndexLabel::Utf8("B, x".into()),
+                IndexLabel::Utf8("B, y".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+        ).unwrap();
+        let result = s.unstack().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_unstack_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_unstack_golden_basic() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("A|x".into()),
+            IndexLabel::Utf8("A|y".into()),
+            IndexLabel::Utf8("B|x".into()),
+            IndexLabel::Utf8("B|y".into()),
+        ]);
+        let mut cols = BTreeMap::new();
+        cols.insert("value".to_string(), Column::from_values(vec![
+            Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)
+        ]).unwrap());
+        let df = DataFrame::new_with_column_order(index, cols, vec!["value".to_string()]).unwrap();
+        let result = df.unstack().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_unstack_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

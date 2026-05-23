@@ -1,0 +1,1 @@
+single: Ok(Int64(42)), multi_is_series: true

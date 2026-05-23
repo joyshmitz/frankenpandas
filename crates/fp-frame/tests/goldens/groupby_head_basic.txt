@@ -1,0 +1,6 @@
+         key  val
+0          a    1
+1          a    2
+3          b   10
+
+[3 rows x 2 columns]

@@ -1,0 +1,7 @@
+         val
+0          2
+1          1
+2          1
+3          2
+
+[4 rows x 1 columns]

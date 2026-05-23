@@ -93857,6 +93857,186 @@ mod tests {
         assert_text_golden("dataframe_pct_change_axis1_basic.txt", &output);
     }
 
+    #[test]
+    fn groupby_transform_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.transform("sum").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_transform_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_cumsum_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.cumsum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_cumsum_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_cumprod_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.cumprod().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_cumprod_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_cummax_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.cummax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_cummax_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_cummin_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.cummin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_cummin_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_rank_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.rank("average", true, "keep").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_rank_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_shift_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.shift(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_shift_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_diff_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.diff(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_diff_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_nth_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.nth(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_nth_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_head_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.head(2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_head_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_tail_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.tail(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_tail_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_pct_change_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(100.0), Scalar::Float64(150.0)]),
+            ],
+        ).unwrap();
+        let gb = df.groupby(&["key"]).unwrap();
+        let result = gb.pct_change(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_pct_change_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

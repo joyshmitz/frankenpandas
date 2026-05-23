@@ -92532,6 +92532,48 @@ mod tests {
         assert_text_golden("dataframe_expanding_kurt_basic.txt", &output);
     }
 
+    #[test]
+    fn groupby_idxmin_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.groupby(&["grp"]).unwrap().idxmin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_idxmin_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_idxmax_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.groupby(&["grp"]).unwrap().idxmax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_idxmax_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_quantile_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.groupby(&["grp"]).unwrap().quantile(0.5).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_quantile_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

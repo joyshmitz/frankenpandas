@@ -94382,6 +94382,52 @@ mod tests {
         assert_text_golden("dataframe_resample_max_basic.txt", &output);
     }
 
+    #[test]
+    fn series_and_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s1.and(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_and_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_or_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s1.or(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_or_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_not_golden_basic() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let result = s.not().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_not_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -1,0 +1,4 @@
+0    false
+1    true
+2    false
+Name: ~a, Length: 3, dtype: Bool

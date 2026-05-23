@@ -94536,6 +94536,52 @@ mod tests {
         assert_text_golden("series_dt_dayofweek_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_split_df_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a,b,c".to_owned()),
+                Scalar::Utf8("x,y".to_owned()),
+                Scalar::Utf8("p,q,r,s".to_owned()),
+            ],
+        ).unwrap();
+        let result = s.str().split_df(",").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_split_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_lstrip_chars_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("xxhello".to_owned()),
+                Scalar::Utf8("xxxworld".to_owned()),
+            ],
+        ).unwrap();
+        let result = s.str().lstrip_chars("x").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_lstrip_chars_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_rstrip_chars_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("helloxx".to_owned()),
+                Scalar::Utf8("worldxxx".to_owned()),
+            ],
+        ).unwrap();
+        let result = s.str().rstrip_chars("x").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_rstrip_chars_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

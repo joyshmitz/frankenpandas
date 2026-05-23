@@ -95301,6 +95301,51 @@ mod tests {
         assert_text_golden("dataframe_rename_axis_basic.txt", &output);
     }
 
+
+    #[test]
+    fn dataframe_reindex_like_golden_basic() {
+        let df1 = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+            vec![IndexLabel::Utf8("x".to_owned()), IndexLabel::Utf8("y".to_owned())],
+        ).unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+            vec![IndexLabel::Utf8("y".to_owned()), IndexLabel::Utf8("z".to_owned()), IndexLabel::Utf8("x".to_owned())],
+        ).unwrap();
+        let result = df1.reindex_like(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_reindex_like_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_truncate_golden_basic() {
+        let s = Series::from_values(
+            "val",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into(), 5_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)],
+        ).unwrap();
+        let result = s.truncate(Some(&2_i64.into()), Some(&4_i64.into())).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_truncate_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_truncate_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+        ).unwrap();
+        let result = df.truncate(Some(&2_i64.into()), Some(&3_i64.into())).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_truncate_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

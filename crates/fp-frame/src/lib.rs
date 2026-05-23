@@ -87489,6 +87489,81 @@ mod tests {
         assert_text_golden("series_drop_duplicates_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_head_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+            ],
+        )
+        .unwrap();
+        let h = df.head(3).unwrap();
+        let output = format!("{h}");
+        assert_text_golden("dataframe_head_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_tail_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+            ],
+        )
+        .unwrap();
+        let t = df.tail(3).unwrap();
+        let output = format!("{t}");
+        assert_text_golden("dataframe_tail_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_nlargest_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(50), Scalar::Int64(20), Scalar::Int64(40)]),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+            ],
+        )
+        .unwrap();
+        let top3 = df.nlargest(3, "a").unwrap();
+        let output = format!("{top3}");
+        assert_text_golden("dataframe_nlargest_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_nsmallest_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(50), Scalar::Int64(20), Scalar::Int64(40)]),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+            ],
+        )
+        .unwrap();
+        let bot3 = df.nsmallest(3, "a").unwrap();
+        let output = format!("{bot3}");
+        assert_text_golden("dataframe_nsmallest_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let dd = df.drop_duplicates().unwrap();
+        let output = format!("{dd}");
+        assert_text_golden("dataframe_drop_duplicates_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -1,0 +1,4 @@
+0    5
+1    5
+2    6
+Name: x/y, Length: 3, dtype: Float64

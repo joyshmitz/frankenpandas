@@ -89037,6 +89037,89 @@ mod tests {
         assert_text_golden("series_filter_basic.txt", &output);
     }
 
+    #[test]
+    fn series_add_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s1.add(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_add_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sub_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.sub(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_sub_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_mul_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
+        ).unwrap();
+        let result = s1.mul(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_mul_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_div_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0)],
+        ).unwrap();
+        let result = s1.div(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_div_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_reset_index_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.reset_index(false).unwrap();
+        let output = match result {
+            super::SeriesResetIndexResult::DataFrame(df) => format!("{df}"),
+            super::SeriesResetIndexResult::Series(s) => format!("{s}"),
+        };
+        assert_text_golden("series_reset_index_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

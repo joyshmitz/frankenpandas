@@ -92704,6 +92704,48 @@ mod tests {
         assert_text_golden("dataframe_drop_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_loc_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.loc(&[0_i64.into(), 2_i64.into()]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_loc_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iloc_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.iloc(&[0, 2]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_iloc_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_loc_row_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.loc_row(&1_i64.into()).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_loc_row_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

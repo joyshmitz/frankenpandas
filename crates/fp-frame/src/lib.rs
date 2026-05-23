@@ -88622,6 +88622,71 @@ mod tests {
         assert_text_golden("series_repeat_basic.txt", &output);
     }
 
+    #[test]
+    fn series_combine_first_golden_basic() {
+        let s1 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.0),
+            ],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        ).unwrap();
+        let combined = s1.combine_first(&s2).unwrap();
+        let output = format!("{combined}");
+        assert_text_golden("series_combine_first_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dot_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(6.0),
+            ],
+        ).unwrap();
+        let dot_product = s1.dot(&s2).unwrap();
+        let output = format!("{dot_product}");
+        assert_text_golden("series_dot_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iterrows_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let rows: Vec<_> = df.iterrows();
+        let output = format!("{rows:?}");
+        assert_text_golden("dataframe_iterrows_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

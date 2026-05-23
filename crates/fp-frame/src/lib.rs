@@ -95396,6 +95396,55 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_reorder_levels_basic.txt", &output);
     }
+
+    #[test]
+    fn series_broadcast_golden_basic() {
+        let s = Series::broadcast(
+            "fill",
+            Scalar::Int64(42),
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+        ).unwrap();
+        let output = format!("{s}");
+        assert_text_golden("series_broadcast_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ravel_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.ravel();
+        let output = format!("{result:?}");
+        assert_text_golden("series_ravel_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_view_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.view();
+        let output = format!("{result}");
+        assert_text_golden("series_view_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_lookup_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        ).unwrap();
+        let result = df.lookup(&[0_i64.into(), 1_i64.into(), 2_i64.into()], &["a", "b", "a"]).unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_lookup_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

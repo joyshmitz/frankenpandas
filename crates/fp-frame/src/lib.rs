@@ -92891,6 +92891,20 @@ mod tests {
         assert_text_golden("dataframe_nunique_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_shift_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.shift(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_shift_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -94428,6 +94428,44 @@ mod tests {
         assert_text_golden("series_not_basic.txt", &output);
     }
 
+    #[test]
+    fn cut_golden_basic() {
+        use super::cut;
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(25.0),
+                Scalar::Float64(50.0),
+                Scalar::Float64(75.0),
+                Scalar::Float64(100.0),
+            ],
+        ).unwrap();
+        let result = cut(&s, 4).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("cut_basic.txt", &output);
+    }
+
+    #[test]
+    fn qcut_golden_basic() {
+        use super::qcut;
+        let s = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(25.0),
+                Scalar::Float64(50.0),
+                Scalar::Float64(75.0),
+                Scalar::Float64(100.0),
+            ],
+        ).unwrap();
+        let result = qcut(&s, 4).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("qcut_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

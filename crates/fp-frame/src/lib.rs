@@ -88430,6 +88430,69 @@ mod tests {
         assert_text_golden("series_argmin_basic.txt", &output);
     }
 
+    #[test]
+    fn series_factorize_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        ).unwrap();
+        let (codes, uniques) = s.factorize().unwrap();
+        let output = format!("codes:\n{codes}\nuniques:\n{uniques}");
+        assert_text_golden("series_factorize_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_crosstab_golden_basic() {
+        let index = Series::from_values(
+            "index",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        ).unwrap();
+        let columns = Series::from_values(
+            "columns",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+            ],
+        ).unwrap();
+        let ct = DataFrame::crosstab(&index, &columns).unwrap();
+        let output = format!("{ct}");
+        assert_text_golden("dataframe_crosstab_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sample_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        ).unwrap();
+        let sampled = s.sample(Some(3), None, false, Some(42)).unwrap();
+        let output = format!("{sampled}");
+        assert_text_golden("series_sample_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

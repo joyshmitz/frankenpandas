@@ -1,0 +1,12 @@
+codes:
+0    0
+1    1
+2    0
+3    2
+4    1
+Name: vals, Length: 5, dtype: Int64
+uniques:
+0    a
+1    b
+2    c
+Name: uniques, Length: 3, dtype: Utf8

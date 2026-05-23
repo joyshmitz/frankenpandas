@@ -89555,6 +89555,70 @@ mod tests {
         assert_text_golden("series_expanding_max_basic.txt", &output);
     }
 
+    #[test]
+    fn series_rolling_var_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(8.0),
+            ],
+        ).unwrap();
+        let result = s.rolling(3, None).var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_rolling_var_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rolling_median_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ],
+        ).unwrap();
+        let result = s.rolling(3, None).median().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_rolling_median_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_sum_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(2, None).sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_std_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(2, None).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_std_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

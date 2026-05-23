@@ -1,8 +1,9 @@
-DataFrame: 2 rows x 1 columns
+DataFrame: 2 rows x 2 columns
 Index: 2 entries
 
 Column               Non-Null   Dtype     
 ------               --------   -----     
 a                    2          Float64
+b                    2          Int64
 
-Memory usage: 32 bytes
+Memory usage: 48 bytes

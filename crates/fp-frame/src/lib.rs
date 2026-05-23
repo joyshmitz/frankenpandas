@@ -93538,6 +93538,75 @@ mod tests {
         assert_text_golden("dataframe_idxmax_axis1_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_fillna_method_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
+            ],
+        ).unwrap();
+        let result = df.fillna_method("ffill").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_fillna_method_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_info_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.info();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_info_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_to_numpy_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.to_numpy();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_to_numpy_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_to_string_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.to_string();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_to_string_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_to_series_dict_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.to_series_dict();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_to_series_dict_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

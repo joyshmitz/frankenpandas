@@ -105931,6 +105931,180 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_str_normalize_basic.txt", &output);
     }
+
+    // ── IO Round-Trip Conformance Tests ──
+    // These tests verify that to_csv -> from_csv produces identical data.
+    // Golden outputs captured from pandas 2.2.3.
+
+    #[test]
+    fn io_roundtrip_csv_int_basic() {
+        let original = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+        )
+        .unwrap();
+        let csv = original.to_csv(',', false);
+        let roundtrip = DataFrame::from_csv(&csv, ',').unwrap();
+        let output = format!("{roundtrip}");
+        assert_text_golden("io_roundtrip_csv_int_basic.txt", &output);
+    }
+
+    #[test]
+    fn io_roundtrip_csv_float_basic() {
+        let original = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+                ("y", vec![Scalar::Float64(3.5), Scalar::Float64(4.5)]),
+            ],
+        )
+        .unwrap();
+        let csv = original.to_csv(',', false);
+        let roundtrip = DataFrame::from_csv(&csv, ',').unwrap();
+        let output = format!("{roundtrip}");
+        assert_text_golden("io_roundtrip_csv_float_basic.txt", &output);
+    }
+
+    #[test]
+    fn io_roundtrip_csv_mixed_types() {
+        let original = DataFrame::from_dict(
+            &["name", "value", "flag"],
+            vec![
+                (
+                    "name",
+                    vec![Scalar::Utf8("alice".into()), Scalar::Utf8("bob".into())],
+                ),
+                ("value", vec![Scalar::Float64(10.5), Scalar::Float64(20.5)]),
+                ("flag", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+        let csv = original.to_csv(',', false);
+        let roundtrip = DataFrame::from_csv(&csv, ',').unwrap();
+        let output = format!("{roundtrip}");
+        assert_text_golden("io_roundtrip_csv_mixed_types.txt", &output);
+    }
+
+    // ── Rolling Window Conformance Tests ──
+
+    #[test]
+    fn rolling_sum_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(3, None).sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn rolling_mean_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(2, None).mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_mean_basic.txt", &output);
+    }
+
+    // ── Expanding Window Conformance Tests ──
+
+    #[test]
+    fn expanding_sum_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(None).sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("expanding_sum_basic.txt", &output);
+    }
+
+    // ── Reshape Conformance Tests ──
+
+    #[test]
+    fn pivot_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["row", "col", "val"],
+            vec![
+                (
+                    "row",
+                    vec![
+                        Scalar::Utf8("r1".into()),
+                        Scalar::Utf8("r1".into()),
+                        Scalar::Utf8("r2".into()),
+                        Scalar::Utf8("r2".into()),
+                    ],
+                ),
+                (
+                    "col",
+                    vec![
+                        Scalar::Utf8("c1".into()),
+                        Scalar::Utf8("c2".into()),
+                        Scalar::Utf8("c1".into()),
+                        Scalar::Utf8("c2".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.pivot("row", "col", "val").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("pivot_basic.txt", &output);
+    }
+
+    #[test]
+    fn melt_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["id", "a", "b"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .unwrap();
+        let result = df.melt(&["id"], &["a", "b"], Some("variable"), Some("value")).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("melt_basic.txt", &output);
+    }
 }
 
 #[cfg(test)]

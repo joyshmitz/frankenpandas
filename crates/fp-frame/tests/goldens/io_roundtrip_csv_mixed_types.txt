@@ -1,0 +1,5 @@
+          name  value   flag
+0        alice   10.5   true
+1          bob   20.5  false
+
+[2 rows x 3 columns]

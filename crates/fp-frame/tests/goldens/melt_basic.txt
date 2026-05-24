@@ -1,0 +1,7 @@
+         id  variable  value
+0         1         a     10
+1         2         a     20
+2         1         b    100
+3         2         b    200
+
+[4 rows x 3 columns]

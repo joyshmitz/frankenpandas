@@ -1,0 +1,5 @@
+data
+hello\,world
+line\
+break
+quote\"char

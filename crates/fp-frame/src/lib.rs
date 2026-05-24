@@ -1195,6 +1195,19 @@ fn csv_quote_always(value: &str) -> String {
     escaped
 }
 
+/// Escape special CSV characters using an escape character (for QUOTE_NONE mode).
+/// Escapes: separator, double-quote, newline, carriage return.
+fn csv_escape_with_char(value: &str, sep: char, escapechar: char) -> String {
+    let mut result = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == sep || ch == '"' || ch == '\n' || ch == '\r' || ch == escapechar {
+            result.push(escapechar);
+        }
+        result.push(ch);
+    }
+    result
+}
+
 fn scalar_to_json_value(value: &Scalar) -> Value {
     match value {
         Scalar::Null(_) => Value::Null,
@@ -10247,13 +10260,31 @@ impl Series {
         quoting: CsvQuoting,
         header: bool,
     ) -> String {
+        self.to_csv_full(sep, include_index, na_rep, quoting, header, None)
+    }
+
+    /// Serialize the Series to a CSV string with full control over all options.
+    ///
+    /// - `escapechar`: when using CsvQuoting::None, escape special characters with this
+    pub fn to_csv_full(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        quoting: CsvQuoting,
+        header: bool,
+        escapechar: Option<char>,
+    ) -> String {
         let quote_str = |s: &str, is_numeric: bool| -> String {
             match quoting {
                 CsvQuoting::Minimal => csv_escape(s, sep),
                 CsvQuoting::All => csv_quote_always(s),
                 CsvQuoting::NonNumeric if is_numeric => s.to_owned(),
                 CsvQuoting::NonNumeric => csv_quote_always(s),
-                CsvQuoting::None => s.to_owned(),
+                CsvQuoting::None => match escapechar {
+                    Some(esc) => csv_escape_with_char(s, sep, esc),
+                    None => s.to_owned(),
+                },
             }
         };
 
@@ -33402,6 +33433,22 @@ impl DataFrame {
         quoting: CsvQuoting,
         header: bool,
     ) -> Result<String, FrameError> {
+        self.to_csv_full(sep, include_index, na_rep, columns, quoting, header, None)
+    }
+
+    /// Export DataFrame to CSV string with full control over all options.
+    ///
+    /// - `escapechar`: when using CsvQuoting::None, escape special characters with this
+    pub fn to_csv_full(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        quoting: CsvQuoting,
+        header: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
                 for &c in cols {
@@ -33422,7 +33469,10 @@ impl DataFrame {
                 CsvQuoting::All => csv_quote_always(s),
                 CsvQuoting::NonNumeric if is_numeric => s.to_owned(),
                 CsvQuoting::NonNumeric => csv_quote_always(s),
-                CsvQuoting::None => s.to_owned(),
+                CsvQuoting::None => match escapechar {
+                    Some(esc) => csv_escape_with_char(s, sep, esc),
+                    None => s.to_owned(),
+                },
             }
         };
 
@@ -101106,6 +101156,42 @@ mod tests {
             .unwrap();
         let normalized = output.trim_end_matches('\n');
         assert_text_golden("dataframe_to_csv_no_header_basic.txt", normalized);
+    }
+
+    #[test]
+    fn series_to_csv_quote_none_escapechar_golden_basic() {
+        let s = Series::from_pairs(
+            "data",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello,world".to_string())),
+                (1_i64.into(), Scalar::Utf8("line\nbreak".to_string())),
+                (2_i64.into(), Scalar::Utf8("quote\"char".to_string())),
+            ],
+        )
+        .unwrap();
+        let output = s.to_csv_full(',', false, "", CsvQuoting::None, true, Some('\\'));
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("series_to_csv_escapechar_basic.txt", normalized);
+    }
+
+    #[test]
+    fn dataframe_to_csv_quote_none_escapechar_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["text"],
+            vec![(
+                "text",
+                vec![
+                    Scalar::Utf8("a,b".to_string()),
+                    Scalar::Utf8("c\nd".to_string()),
+                ],
+            )],
+        )
+        .unwrap();
+        let output = df
+            .to_csv_full(',', false, "", None, CsvQuoting::None, true, Some('\\'))
+            .unwrap();
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_csv_escapechar_basic.txt", normalized);
     }
 
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────

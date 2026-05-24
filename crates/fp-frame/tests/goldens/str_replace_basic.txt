@@ -1,0 +1,3 @@
+0    hello world
+1    baz bar baz
+Name: text, Length: 2, dtype: Utf8

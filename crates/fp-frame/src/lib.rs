@@ -106105,6 +106105,238 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("melt_basic.txt", &output);
     }
+
+    // ── String Accessor Conformance Tests ──
+
+    #[test]
+    fn str_upper_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello".into())),
+                (1_i64.into(), Scalar::Utf8("World".into())),
+                (2_i64.into(), Scalar::Utf8("RUST".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().upper().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_upper_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_lower_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("HELLO".into())),
+                (1_i64.into(), Scalar::Utf8("World".into())),
+                (2_i64.into(), Scalar::Utf8("rust".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().lower().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_lower_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_len_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello".into())),
+                (1_i64.into(), Scalar::Utf8("é".into())),
+                (2_i64.into(), Scalar::Utf8("".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().len().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_len_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_strip_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("  hello  ".into())),
+                (1_i64.into(), Scalar::Utf8("\tworld\n".into())),
+                (2_i64.into(), Scalar::Utf8("no_ws".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().strip().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_strip_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_contains_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello world".into())),
+                (1_i64.into(), Scalar::Utf8("foo bar".into())),
+                (2_i64.into(), Scalar::Utf8("hello again".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().contains("hello").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_contains_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_startswith_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello world".into())),
+                (1_i64.into(), Scalar::Utf8("foo bar".into())),
+                (2_i64.into(), Scalar::Utf8("hello again".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().startswith("hello").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_startswith_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_endswith_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello world".into())),
+                (1_i64.into(), Scalar::Utf8("foo bar".into())),
+                (2_i64.into(), Scalar::Utf8("world again".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().endswith("world").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_endswith_basic.txt", &output);
+    }
+
+    #[test]
+    fn str_replace_golden_basic() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hello world".into())),
+                (1_i64.into(), Scalar::Utf8("foo bar foo".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().replace("foo", "baz").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("str_replace_basic.txt", &output);
+    }
+
+    // ── IO with Nulls Conformance Tests ──
+
+    #[test]
+    fn io_csv_with_nulls_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()), Scalar::Null(NullKind::Null)]),
+            ],
+        )
+        .unwrap();
+        let csv = df.to_csv(',', true);
+        assert_text_golden("io_csv_with_nulls.txt", &csv);
+    }
+
+    #[test]
+    fn io_csv_with_nan_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(f64::NAN), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+        let csv = df.to_csv(',', true);
+        assert_text_golden("io_csv_with_nan.txt", &csv);
+    }
+
+    // ── Rolling Window Edge Cases ──
+
+    #[test]
+    fn rolling_sum_with_nulls_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Null)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(2, None).sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_sum_with_nulls.txt", &output);
+    }
+
+    #[test]
+    fn rolling_min_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(1.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(3, None).min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn rolling_max_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(1.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(3, None).max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn rolling_std_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling(3, None).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rolling_std_basic.txt", &output);
+    }
+
 }
 
 #[cfg(test)]

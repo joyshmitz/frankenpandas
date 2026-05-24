@@ -20344,6 +20344,13 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Check if each string is composed of ASCII characters only.
+    ///
+    /// Matches `pd.Series.str.isascii()`.
+    pub fn isascii(&self) -> Result<Series, FrameError> {
+        self.apply_str(|s| Scalar::Bool(s.is_ascii()), self.series.name())
+    }
+
     /// Check if each string is composed of whitespace only.
     ///
     /// Matches `pd.Series.str.isspace()`.
@@ -62339,6 +62346,27 @@ mod tests {
         assert_eq!(result.values()[5], Scalar::Bool(true));
     }
 
+    #[test]
+    fn str_isascii() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("hello".to_owned()),
+                Scalar::Utf8("héllo".to_owned()),
+                Scalar::Utf8("123".to_owned()),
+                Scalar::Utf8("日本語".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let result = s.str().isascii().unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true)); // "hello" is ASCII
+        assert_eq!(result.values()[1], Scalar::Bool(false)); // "héllo" has non-ASCII
+        assert_eq!(result.values()[2], Scalar::Bool(true)); // "123" is ASCII
+        assert_eq!(result.values()[3], Scalar::Bool(false)); // Japanese is non-ASCII
+    }
+
     // --- Series binary ops with fill_value tests ---
 
     #[test]
@@ -101066,7 +101094,7 @@ mod tests {
             vec![
                 Scalar::Utf8("hello".to_string()),
                 Scalar::Int64(42),
-                Scalar::Float64(3.14),
+                Scalar::Float64(3.15),
             ],
         )
         .unwrap();

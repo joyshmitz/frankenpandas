@@ -105676,6 +105676,66 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_str_center_basic.txt", &output);
     }
+
+    #[test]
+    fn golden_series_str_ljust() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hi".to_string())),
+                (1_i64.into(), Scalar::Utf8("rust".to_string())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().ljust(8, '-').unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_ljust_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_str_rjust() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hi".to_string())),
+                (1_i64.into(), Scalar::Utf8("rust".to_string())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().rjust(8, '*').unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_rjust_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_str_wrap() {
+        let s = Series::from_pairs(
+            "text",
+            vec![(
+                0_i64.into(),
+                Scalar::Utf8("This is a long line that should wrap".to_string()),
+            )],
+        )
+        .unwrap();
+        let result = s.str().wrap(15).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_wrap_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_str_normalize() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("é".to_string())),
+                (0_i64.into(), Scalar::Utf8("e\u{0301}".to_string())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().normalize("NFC").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_normalize_basic.txt", &output);
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,3 @@
+0    é
+0    é
+Name: text, Length: 2, dtype: Utf8

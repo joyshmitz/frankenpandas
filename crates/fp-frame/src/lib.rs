@@ -101194,6 +101194,17 @@ mod tests {
         assert_text_golden("dataframe_to_csv_escapechar_basic.txt", normalized);
     }
 
+    #[test]
+    fn series_to_csv_escapechar_escapes_itself() {
+        let s = Series::from_pairs(
+            "data",
+            vec![(0_i64.into(), Scalar::Utf8("a\\b,c".to_string()))],
+        )
+        .unwrap();
+        let output = s.to_csv_full(',', false, "", CsvQuoting::None, false, Some('\\'));
+        assert_eq!(output, "a\\\\b\\,c\n");
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

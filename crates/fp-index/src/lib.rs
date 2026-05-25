@@ -6318,6 +6318,109 @@ impl PeriodIndex {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    // ── Per br-frankenpandas-qigpe: date-part accessors (19 methods) ──
+
+    /// Year component for each period, matching `pd.PeriodIndex.year`.
+    pub fn year(&self) -> Result<Vec<Option<i32>>, IndexError> {
+        Ok(self.start_time()?.year())
+    }
+
+    /// Month component (1-12), matching `pd.PeriodIndex.month`.
+    pub fn month(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.month())
+    }
+
+    /// Day of month (1-31), matching `pd.PeriodIndex.day`.
+    pub fn day(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.day())
+    }
+
+    /// Hour (0-23), matching `pd.PeriodIndex.hour`.
+    pub fn hour(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.hour())
+    }
+
+    /// Minute (0-59), matching `pd.PeriodIndex.minute`.
+    pub fn minute(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.minute())
+    }
+
+    /// Second (0-59), matching `pd.PeriodIndex.second`.
+    pub fn second(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.second())
+    }
+
+    /// Quarter (1-4), matching `pd.PeriodIndex.quarter`.
+    pub fn quarter(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.quarter())
+    }
+
+    /// Day of week (0=Monday, 6=Sunday), matching `pd.PeriodIndex.weekday`.
+    pub fn weekday(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.weekday())
+    }
+
+    /// Day of week (0=Monday, 6=Sunday), alias for weekday.
+    /// Matches `pd.PeriodIndex.dayofweek`.
+    pub fn dayofweek(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.weekday()
+    }
+
+    /// Day of week (0=Monday, 6=Sunday), alias for weekday.
+    /// Matches `pd.PeriodIndex.day_of_week`.
+    pub fn day_of_week(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.weekday()
+    }
+
+    /// Day of year (1-366), matching `pd.PeriodIndex.dayofyear`.
+    pub fn dayofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.dayofyear())
+    }
+
+    /// Day of year (1-366), alias for dayofyear.
+    /// Matches `pd.PeriodIndex.day_of_year`.
+    pub fn day_of_year(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.dayofyear()
+    }
+
+    /// Days in month (28-31), matching `pd.PeriodIndex.days_in_month`.
+    pub fn days_in_month(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.daysinmonth())
+    }
+
+    /// Days in month (28-31), alias for days_in_month.
+    /// Matches `pd.PeriodIndex.daysinmonth`.
+    pub fn daysinmonth(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.days_in_month()
+    }
+
+    /// ISO week number (1-53), matching `pd.PeriodIndex.week`.
+    pub fn week(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.week())
+    }
+
+    /// ISO week number (1-53), alias for week.
+    /// Matches `pd.PeriodIndex.weekofyear`.
+    pub fn weekofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.week()
+    }
+
+    /// Whether year is a leap year, matching `pd.PeriodIndex.is_leap_year`.
+    pub fn is_leap_year(&self) -> Result<Vec<Option<bool>>, IndexError> {
+        Ok(self.start_time()?.is_leap_year())
+    }
+
+    /// Frequency resolution string, matching `pd.PeriodIndex.resolution`.
+    #[must_use]
+    pub fn resolution(&self) -> Option<&'static str> {
+        self.values.first().map(|p| p.freq.resolution())
+    }
+
+    /// Format each period as a string with strftime, matching `pd.PeriodIndex.strftime`.
+    pub fn strftime(&self, fmt: &str) -> Result<Vec<Option<String>>, IndexError> {
+        Ok(self.start_time()?.strftime(fmt))
+    }
+
     fn ensure_homogeneous_freq(&self) -> Result<Option<PeriodFreq>, IndexError> {
         let mut iter = self.values.iter();
         let Some(first) = iter.next() else {

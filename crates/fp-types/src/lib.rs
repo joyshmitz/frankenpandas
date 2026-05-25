@@ -4038,6 +4038,22 @@ impl PeriodFreq {
             Self::Secondly => "s",
         }
     }
+
+    /// Per br-frankenpandas-qigpe: resolution string for PeriodIndex.resolution.
+    #[must_use]
+    pub const fn resolution(self) -> &'static str {
+        match self {
+            Self::Annual => "A-DEC",
+            Self::Quarterly => "Q-DEC",
+            Self::Monthly => "M",
+            Self::Weekly => "W-SUN",
+            Self::Daily => "D",
+            Self::Business => "B",
+            Self::Hourly => "H",
+            Self::Minutely => "T",
+            Self::Secondly => "S",
+        }
+    }
 }
 
 impl std::fmt::Display for PeriodFreq {

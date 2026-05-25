@@ -2801,6 +2801,19 @@ impl Series {
             ));
         }
 
+        // Pandas promotes to Float64 when alignment introduces missing values,
+        // so NaN can be used as the missing sentinel (Int64 has no NaN).
+        let has_alignment_gaps = left_positions.iter().any(Option::is_none)
+            || right_positions.iter().any(Option::is_none);
+        let (left, right) = if has_alignment_gaps
+            && matches!(left.dtype(), DType::Int64 | DType::Bool)
+            && matches!(right.dtype(), DType::Int64 | DType::Bool)
+        {
+            (left.astype(DType::Float64)?, right.astype(DType::Float64)?)
+        } else {
+            (left, right)
+        };
+
         let column = left.binary_numeric(&right, op)?;
 
         let op_symbol = match op {
@@ -43793,9 +43806,9 @@ mod tests {
         assert_eq!(
             out.values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(34)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(34.0)
             ]
         );
     }
@@ -44253,10 +44266,10 @@ mod tests {
         assert_eq!(
             out.values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(15),
-                Scalar::Int64(23),
-                Scalar::Null(NullKind::Null)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(15.0),
+                Scalar::Float64(23.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(out.name(), "x-y");
@@ -44267,14 +44280,14 @@ mod tests {
         let (left, right) = make_pair();
         let out = hardened_mul(&left, &right);
 
-        // Overlap at 2 (20*5=100) and 3 (30*7=210).
+        // Overlap at 2 (20*5=100) and 3 (30*7=210). Float64 due to alignment gaps.
         assert_eq!(
             out.values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(100),
-                Scalar::Int64(210),
-                Scalar::Null(NullKind::Null)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(100.0),
+                Scalar::Float64(210.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(out.name(), "x*y");
@@ -44419,12 +44432,12 @@ mod tests {
         assert_eq!(
             out.values(),
             &[
-                Scalar::Int64(11),
-                Scalar::Int64(21),
-                Scalar::Int64(12),
-                Scalar::Int64(22),
-                Scalar::Null(NullKind::Null),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(11.0),
+                Scalar::Float64(21.0),
+                Scalar::Float64(12.0),
+                Scalar::Float64(22.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN)
             ]
         );
     }

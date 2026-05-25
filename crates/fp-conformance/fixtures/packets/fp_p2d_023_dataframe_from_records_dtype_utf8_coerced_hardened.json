@@ -1,6 +1,6 @@
 {
   "packet_id": "FP-P2D-023",
-  "case_id": "dataframe_from_records_dtype_utf8_error_hardened",
+  "case_id": "dataframe_from_records_dtype_utf8_coerced_hardened",
   "mode": "hardened",
   "operation": "dataframe_from_records",
   "fixture_provenance": {
@@ -14,5 +14,14 @@
       "a": { "kind": "int64", "value": 1 }
     }
   ],
-  "expected_error_contains": "cannot cast scalar of dtype Int64 to Utf8"
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "utf8", "value": "1" }
+      ]
+    }
+  }
 }

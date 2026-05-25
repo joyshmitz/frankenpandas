@@ -43689,8 +43689,12 @@ mod tests {
         if expected.ends_with('\n') {
             expected.pop();
         }
+        let mut actual_normalized = actual.to_string();
+        if actual_normalized.ends_with('\n') {
+            actual_normalized.pop();
+        }
         assert_eq!(
-            actual,
+            actual_normalized,
             expected,
             "golden mismatch for {}",
             golden_path.display()

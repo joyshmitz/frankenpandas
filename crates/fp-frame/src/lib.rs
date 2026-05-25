@@ -9939,6 +9939,64 @@ impl Series {
         DataFrame::new_with_column_order(self.index.clone(), columns, vec![col_name])
     }
 
+    /// Conform the index to a datetime frequency.
+    ///
+    /// Matches `pd.Series.asfreq(freq)` for datetime-like indexes.
+    /// Missing rows introduced by the new frequency are filled with NaN.
+    pub fn asfreq(&self, freq: &str) -> Result<Self, FrameError> {
+        self.asfreq_with_options(freq, None, None)
+    }
+
+    /// Conform the index to a datetime frequency with optional fill.
+    ///
+    /// Matches `pd.Series.asfreq(freq, method=..., fill_value=...)`.
+    pub fn asfreq_with_options(
+        &self,
+        freq: &str,
+        method: Option<&str>,
+        fill_value: Option<Scalar>,
+    ) -> Result<Self, FrameError> {
+        let df = self.to_frame(Some(&self.name))?;
+        let result = df.asfreq_with_options(freq, method, fill_value)?;
+        result.squeeze_to_series(1).map_err(|_| {
+            FrameError::CompatibilityRejected("asfreq result could not be squeezed".to_owned())
+        })
+    }
+
+    /// Convert datetime-like index to period-string representation.
+    ///
+    /// Matches `pd.Series.to_period(freq)` for the supported frequencies.
+    pub fn to_period(&self, freq: &str) -> Result<Self, FrameError> {
+        let df = self.to_frame(Some(&self.name))?;
+        let result = df.to_period(freq)?;
+        result.squeeze_to_series(1).map_err(|_| {
+            FrameError::CompatibilityRejected("to_period result could not be squeezed".to_owned())
+        })
+    }
+
+    /// Convert Series to xarray DataArray representation.
+    ///
+    /// Matches the practical `pd.Series.to_xarray()` shape: the index
+    /// becomes the single coordinate/dimension, and the Series values
+    /// become the data array.
+    pub fn to_xarray(&self) -> Result<SeriesXArrayDataArray, FrameError> {
+        let dim_name = self.index.name().unwrap_or("index").to_owned();
+        let coords = self
+            .index
+            .labels()
+            .iter()
+            .map(DataFrame::index_label_to_scalar)
+            .collect();
+        Ok(SeriesXArrayDataArray {
+            dim_name: dim_name.clone(),
+            coords: BTreeMap::from([(dim_name.clone(), coords)]),
+            dims: vec![dim_name],
+            data: self.column.values().to_vec(),
+            dtype: self.column.dtype(),
+            name: Some(self.name.clone()),
+        })
+    }
+
     /// Generate descriptive statistics for a numeric Series.
     ///
     /// Matches `pd.Series.describe()`. Returns a Series with index
@@ -25564,6 +25622,27 @@ impl DataFrameXArrayDataset {
     #[must_use]
     pub fn data_var(&self, name: &str) -> Option<&DataFrameXArrayVariable> {
         self.data_vars.get(name)
+    }
+}
+
+/// xarray DataArray representation of a Series.
+///
+/// Matches the shape returned by `pd.Series.to_xarray()`: a single 1-D
+/// array with the Series index as its coordinate/dimension.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesXArrayDataArray {
+    pub dim_name: String,
+    pub coords: BTreeMap<String, Vec<Scalar>>,
+    pub dims: Vec<String>,
+    pub data: Vec<Scalar>,
+    pub dtype: DType,
+    pub name: Option<String>,
+}
+
+impl SeriesXArrayDataArray {
+    #[must_use]
+    pub fn coord(&self, name: &str) -> Option<&[Scalar]> {
+        self.coords.get(name).map(Vec::as_slice)
     }
 }
 
@@ -110331,5 +110410,71 @@ mod test_select_columns_perf_76e1fd {
         let s = Series::full("x", 3, Scalar::Float64(42.0)).unwrap();
         assert_eq!(s.len(), 3);
         assert!((s.values()[1].to_f64().unwrap() - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_to_period_converts_datetime_index_to_month_labels() {
+        let idx = vec![
+            IndexLabel::Utf8("2024-01-15".into()),
+            IndexLabel::Utf8("2024-02-20".into()),
+            IndexLabel::Utf8("2024-03-10".into()),
+        ];
+        let s = Series::new(
+            "vals".to_owned(),
+            Index::new(idx),
+            Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let result = s.to_period("M").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.index().labels()[0], IndexLabel::Utf8("2024-01".into()));
+        assert_eq!(result.index().labels()[1], IndexLabel::Utf8("2024-02".into()));
+        assert_eq!(result.index().labels()[2], IndexLabel::Utf8("2024-03".into()));
+    }
+
+    #[test]
+    fn series_asfreq_reindexes_to_daily_frequency() {
+        let idx = vec![
+            IndexLabel::Utf8("2024-01-01".into()),
+            IndexLabel::Utf8("2024-01-03".into()),
+        ];
+        let s = Series::new(
+            "vals".to_owned(),
+            Index::new(idx),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(3.0)]).unwrap(),
+        )
+        .unwrap();
+        let result = s.asfreq("D").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.index().labels()[1],
+            IndexLabel::Utf8("2024-01-02".into())
+        );
+        assert!(result.values()[1].is_missing());
+    }
+
+    #[test]
+    fn series_to_xarray_produces_valid_dataarray() {
+        let idx = vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+        ];
+        let s = Series::new(
+            "vals".to_owned(),
+            Index::new(idx).rename_index(Some("idx")),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).unwrap(),
+        )
+        .unwrap();
+        let xa = s.to_xarray().unwrap();
+        assert_eq!(xa.dim_name, "idx");
+        assert_eq!(xa.dims, vec!["idx"]);
+        assert_eq!(xa.data.len(), 2);
+        assert_eq!(xa.name, Some("vals".to_owned()));
+        assert!(xa.coord("idx").is_some());
     }
 }

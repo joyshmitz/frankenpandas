@@ -4297,6 +4297,24 @@ pub fn write_hdf(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     write_hdf_with_options(frame, path, &HdfWriteOptions::default())
 }
 
+/// Write a Series to the default HDF5 key.
+///
+/// Converts the Series to a single-column DataFrame and writes it.
+pub fn write_hdf_series(series: &Series, path: &Path) -> Result<(), IoError> {
+    let frame = series
+        .to_frame(Some(series.name()))
+        .map_err(|e| IoError::Hdf5(format!("Series to DataFrame conversion: {e}")))?;
+    write_hdf(&frame, path)
+}
+
+/// Write a Series to an explicit HDF5 key.
+pub fn write_hdf_series_key(series: &Series, path: &Path, key: &str) -> Result<(), IoError> {
+    let frame = series
+        .to_frame(Some(series.name()))
+        .map_err(|e| IoError::Hdf5(format!("Series to DataFrame conversion: {e}")))?;
+    write_hdf_key(&frame, path, key)
+}
+
 /// Write a DataFrame to an explicit HDF5 key.
 pub fn write_hdf_key(frame: &DataFrame, path: &Path, key: &str) -> Result<(), IoError> {
     write_hdf_with_options(

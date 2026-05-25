@@ -1,0 +1,20 @@
+{
+  "schema_version": "v3",
+  "engine": {
+    "name": "frankenpandas",
+    "version": "0.1.0",
+    "platform": "linux-x86_64",
+    "compiled_flags": ["release-perf", "lto"]
+  },
+  "timestamp": "2026-05-25T00:00:00Z",
+  "results": [],
+  "summary": {
+    "total_workloads": 0,
+    "valid_workloads": 0,
+    "dropped_high_cv": 0,
+    "category_scores": {},
+    "weighted_score": 1.0,
+    "claim_validated": false,
+    "note": "Initial empty baseline - populate with: python scripts/perf_ratchet.py --update-baseline <results.json>"
+  }
+}

@@ -70,5 +70,6 @@ unicode-normalization = "0.1.25"
 inherits = "release"
 lto = "thin"
 codegen-units = 1
-debug = false
+debug = "line-tables-only"
+strip = false
 opt-level = 3

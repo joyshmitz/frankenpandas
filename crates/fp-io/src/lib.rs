@@ -7918,6 +7918,424 @@ fn sql_column_definition<C: SqlConnection>(
     ))
 }
 
+// ============================================================================
+// PostgreSQL SqlConnection Implementation (feature = "sql-postgresql")
+// ============================================================================
+
+#[cfg(any(feature = "sql-postgresql", feature = "sql-mysql"))]
+use std::cell::RefCell;
+
+/// Wrapper around `postgres::Client` providing interior mutability for the
+/// `SqlConnection` trait (which requires `&self`).
+#[cfg(feature = "sql-postgresql")]
+pub struct PostgresConnection {
+    client: RefCell<postgres::Client>,
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl PostgresConnection {
+    pub fn new(client: postgres::Client) -> Self {
+        Self {
+            client: RefCell::new(client),
+        }
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl SqlConnection for PostgresConnection {
+    fn query(&self, query_str: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        use postgres::types::ToSql;
+
+        let pg_params: Vec<Box<dyn ToSql + Sync>> = params
+            .iter()
+            .map(|s| -> Box<dyn ToSql + Sync> {
+                match s {
+                    Scalar::Null(_) => Box::new(Option::<i64>::None),
+                    Scalar::Bool(b) => Box::new(*b),
+                    Scalar::Int64(i) => Box::new(*i),
+                    Scalar::Float64(f) => Box::new(*f),
+                    Scalar::Utf8(s) => Box::new(s.clone()),
+                    _ => Box::new(Option::<i64>::None),
+                }
+            })
+            .collect();
+
+        let param_refs: Vec<&(dyn ToSql + Sync)> = pg_params.iter().map(|b| b.as_ref()).collect();
+        let rows = self
+            .client
+            .borrow_mut()
+            .query(query_str, &param_refs)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL query failed: {e}")))?;
+
+        if rows.is_empty() {
+            return Ok(SqlQueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+
+        let columns: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect();
+
+        let mut out_rows = Vec::new();
+        for row in &rows {
+            let mut values = Vec::new();
+            for idx in 0..row.len() {
+                let value = pg_value_to_scalar(row, idx);
+                values.push(value);
+            }
+            out_rows.push(values);
+        }
+
+        Ok(SqlQueryResult {
+            columns,
+            rows: out_rows,
+        })
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+        self.client
+            .borrow_mut()
+            .batch_execute(sql)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL batch execute failed: {e}")))
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
+        let rows = self
+            .client
+            .borrow_mut()
+            .query(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = $1 LIMIT 1",
+                &[&table_name],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
+        Ok(!rows.is_empty())
+    }
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+        let mut client = self.client.borrow_mut();
+        for row in rows {
+            let pg_params: Vec<Box<dyn postgres::types::ToSql + Sync>> = row
+                .iter()
+                .map(|s| -> Box<dyn postgres::types::ToSql + Sync> {
+                    match s {
+                        Scalar::Null(_) => Box::new(Option::<i64>::None),
+                        Scalar::Bool(b) => Box::new(*b),
+                        Scalar::Int64(i) => Box::new(*i),
+                        Scalar::Float64(f) => Box::new(*f),
+                        Scalar::Utf8(s) => Box::new(s.clone()),
+                        _ => Box::new(Option::<i64>::None),
+                    }
+                })
+                .collect();
+            let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                pg_params.iter().map(|b| b.as_ref()).collect();
+            client
+                .execute(insert_sql, &param_refs)
+                .map_err(|e| IoError::Sql(format!("PostgreSQL insert failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str {
+        match dtype {
+            DType::Bool | DType::BoolNullable => "BOOLEAN",
+            DType::Int64 | DType::Int64Nullable => "BIGINT",
+            DType::Float64 => "DOUBLE PRECISION",
+            DType::Utf8 => "TEXT",
+            DType::Datetime64 => "TIMESTAMP",
+            DType::Timedelta64 => "INTERVAL",
+            _ => "TEXT",
+        }
+    }
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str {
+        pg_sql_dtype_from_index(index)
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "postgresql"
+    }
+
+    fn parameter_marker(&self, ordinal: usize) -> String {
+        format!("${ordinal}")
+    }
+
+    fn supports_returning(&self) -> bool {
+        true
+    }
+
+    fn max_param_count(&self) -> Option<usize> {
+        Some(65535)
+    }
+
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+
+    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+        if ident.contains('\0') {
+            return Err(IoError::Sql("invalid identifier: NUL byte".to_owned()));
+        }
+        Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+    }
+
+    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        let schema = schema.unwrap_or("public");
+        let rows = self
+            .client
+            .borrow_mut()
+            .query(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name",
+                &[&schema],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL list_tables failed: {e}")))?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+        let rows = self
+            .client
+            .borrow_mut()
+            .query(
+                "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
+                &[],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL list_schemas failed: {e}")))?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn pg_sql_dtype_from_index(index: &Index) -> &'static str {
+    for label in index.labels() {
+        match label {
+            IndexLabel::Int64(_) => return "BIGINT",
+            IndexLabel::Utf8(_) => return "TEXT",
+            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "INTERVAL",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMP",
+            _ => {}
+        }
+    }
+    "TEXT"
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn pg_value_to_scalar(row: &postgres::Row, idx: usize) -> Scalar {
+    if let Ok(Some(v)) = row.try_get::<_, Option<bool>>(idx) {
+        return Scalar::Bool(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(idx) {
+        return Scalar::Int64(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(idx) {
+        return Scalar::Int64(i64::from(v));
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(idx) {
+        return Scalar::Float64(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<f32>>(idx) {
+        return Scalar::Float64(f64::from(v));
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
+        return Scalar::Utf8(v);
+    }
+    Scalar::Null(crate::NullKind::Null)
+}
+
+// ============================================================================
+// MySQL SqlConnection Implementation (feature = "sql-mysql")
+// ============================================================================
+
+/// Wrapper around `mysql::Conn` providing interior mutability for the
+/// `SqlConnection` trait (which requires `&self`).
+#[cfg(feature = "sql-mysql")]
+pub struct MysqlConnection {
+    conn: RefCell<mysql::Conn>,
+}
+
+#[cfg(feature = "sql-mysql")]
+impl MysqlConnection {
+    pub fn new(conn: mysql::Conn) -> Self {
+        Self {
+            conn: RefCell::new(conn),
+        }
+    }
+}
+
+#[cfg(feature = "sql-mysql")]
+impl SqlConnection for MysqlConnection {
+    fn query(&self, query_str: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        use mysql::prelude::*;
+
+        let mysql_params: Vec<mysql::Value> = params.iter().map(scalar_to_mysql_value).collect();
+        let result: Vec<mysql::Row> = self
+            .conn
+            .borrow_mut()
+            .exec(query_str, mysql_params)
+            .map_err(|e| IoError::Sql(format!("MySQL query failed: {e}")))?;
+
+        if result.is_empty() {
+            return Ok(SqlQueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+
+        let columns: Vec<String> = result[0]
+            .columns_ref()
+            .iter()
+            .map(|c| c.name_str().to_string())
+            .collect();
+
+        let mut out_rows = Vec::new();
+        for row in &result {
+            let mut values = Vec::new();
+            for idx in 0..row.len() {
+                let value = mysql_value_to_scalar(row.get(idx));
+                values.push(value);
+            }
+            out_rows.push(values);
+        }
+
+        Ok(SqlQueryResult {
+            columns,
+            rows: out_rows,
+        })
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+        use mysql::prelude::*;
+        let mut conn = self.conn.borrow_mut();
+        for statement in sql.split(';').filter(|s| !s.trim().is_empty()) {
+            conn.query_drop(statement)
+                .map_err(|e| IoError::Sql(format!("MySQL execute failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
+        use mysql::prelude::*;
+        let result: Option<(i32,)> = self
+            .conn
+            .borrow_mut()
+            .exec_first(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1",
+                (table_name,),
+            )
+            .map_err(|e| IoError::Sql(format!("MySQL table_exists failed: {e}")))?;
+        Ok(result.is_some())
+    }
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+        use mysql::prelude::*;
+        let mut conn = self.conn.borrow_mut();
+        for row in rows {
+            let params: Vec<mysql::Value> = row.iter().map(scalar_to_mysql_value).collect();
+            conn.exec_drop(insert_sql, params)
+                .map_err(|e| IoError::Sql(format!("MySQL insert failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str {
+        match dtype {
+            DType::Bool | DType::BoolNullable => "TINYINT(1)",
+            DType::Int64 | DType::Int64Nullable => "BIGINT",
+            DType::Float64 => "DOUBLE",
+            DType::Utf8 => "TEXT",
+            DType::Datetime64 => "DATETIME",
+            DType::Timedelta64 => "TIME",
+            _ => "TEXT",
+        }
+    }
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str {
+        mysql_sql_dtype_from_index(index)
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "mysql"
+    }
+
+    fn parameter_marker(&self, _ordinal: usize) -> String {
+        "?".to_owned()
+    }
+
+    fn supports_returning(&self) -> bool {
+        false
+    }
+
+    fn max_param_count(&self) -> Option<usize> {
+        Some(65535)
+    }
+
+    fn max_identifier_length(&self) -> Option<usize> {
+        Some(64)
+    }
+
+    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+        if ident.contains('\0') {
+            return Err(IoError::Sql("invalid identifier: NUL byte".to_owned()));
+        }
+        Ok(format!("`{}`", ident.replace('`', "``")))
+    }
+
+    fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        use mysql::prelude::*;
+        let rows: Vec<(String,)> = self
+            .conn
+            .borrow_mut()
+            .query("SHOW TABLES")
+            .map_err(|e| IoError::Sql(format!("MySQL list_tables failed: {e}")))?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+}
+
+#[cfg(feature = "sql-mysql")]
+fn mysql_sql_dtype_from_index(index: &Index) -> &'static str {
+    for label in index.labels() {
+        match label {
+            IndexLabel::Int64(_) => return "BIGINT",
+            IndexLabel::Utf8(_) => return "VARCHAR(255)",
+            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "TIME",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "DATETIME",
+            _ => {}
+        }
+    }
+    "VARCHAR(255)"
+}
+
+#[cfg(feature = "sql-mysql")]
+fn scalar_to_mysql_value(s: &Scalar) -> mysql::Value {
+    match s {
+        Scalar::Null(_) => mysql::Value::NULL,
+        Scalar::Bool(b) => mysql::Value::from(*b),
+        Scalar::Int64(i) => mysql::Value::from(*i),
+        Scalar::Float64(f) => mysql::Value::from(*f),
+        Scalar::Utf8(s) => mysql::Value::from(s.as_str()),
+        _ => mysql::Value::NULL,
+    }
+}
+
+#[cfg(feature = "sql-mysql")]
+fn mysql_value_to_scalar(v: Option<mysql::Value>) -> Scalar {
+    match v {
+        None | Some(mysql::Value::NULL) => Scalar::Null(crate::NullKind::Null),
+        Some(mysql::Value::Bytes(b)) => {
+            Scalar::Utf8(String::from_utf8_lossy(&b).into_owned())
+        }
+        Some(mysql::Value::Int(i)) => Scalar::Int64(i),
+        Some(mysql::Value::UInt(u)) => Scalar::Int64(u as i64),
+        Some(mysql::Value::Float(f)) => Scalar::Float64(f as f64),
+        Some(mysql::Value::Double(d)) => Scalar::Float64(d),
+        _ => Scalar::Null(crate::NullKind::Null),
+    }
+}
+
 #[cfg(test)]
 fn sql_create_table_query<C: SqlConnection>(
     conn: &C,
@@ -15704,7 +16122,7 @@ mod tests {
 
         fn dtype_sql(&self, dtype: DType) -> &'static str {
             match dtype {
-                DType::Int64 | DType::Bool | DType::Timedelta64 | DType::Datetime64 => "BIGINT",
+                DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable | DType::Timedelta64 | DType::Datetime64 => "BIGINT",
                 DType::Float64 => "DOUBLE PRECISION",
                 DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse | DType::Period | DType::Interval => "TEXT",
             }

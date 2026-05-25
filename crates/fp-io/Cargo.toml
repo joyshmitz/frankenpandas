@@ -29,6 +29,8 @@ parquet = { workspace = true }
 quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
+postgres = { workspace = true, optional = true }
+mysql = { workspace = true, optional = true }
 scraper = { workspace = true }
 serde-pickle = { workspace = true }
 serde_json = { workspace = true }
@@ -43,5 +45,5 @@ targets = ["x86_64-unknown-linux-gnu"]
 default = ["sql-sqlite", "hdf5"]
 hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
-sql-postgresql = []
-sql-mysql = []
+sql-postgresql = ["dep:postgres"]
+sql-mysql = ["dep:mysql"]

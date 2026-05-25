@@ -45,6 +45,8 @@ dta = "0.6.0"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 orc-rust = "0.8.0"
 parquet = { version = "58.3.0", default-features = false, features = ["arrow", "snap"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+mysql = "26.0"
 pyo3 = { version = "0.23", features = ["extension-module"] }
 quick-xml = "0.40.1"
 regex = "1.12.3"

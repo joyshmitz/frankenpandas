@@ -32520,6 +32520,20 @@ impl DataFrame {
         for col_name in &col_order {
             let self_col = self.columns.get(col_name);
             let other_col = other.columns.get(col_name);
+
+            // Compute common dtype upfront for associativity (br-frankenpandas-1uw2u):
+            // The result dtype must be the common dtype of BOTH source columns,
+            // not inferred from which values happen to be selected. This ensures
+            // (A.combine_first(B)).combine_first(C) == A.combine_first(B.combine_first(C))
+            let target_dtype = match (self_col, other_col) {
+                (Some(sc), Some(oc)) => {
+                    fp_types::common_dtype(sc.dtype(), oc.dtype()).unwrap_or(DType::Float64)
+                }
+                (Some(sc), None) => sc.dtype(),
+                (None, Some(oc)) => oc.dtype(),
+                (None, None) => DType::Float64,
+            };
+
             let vals: Vec<Scalar> = union_labels
                 .iter()
                 .map(|label| {
@@ -32541,7 +32555,10 @@ impl DataFrame {
                     Scalar::Null(NullKind::NaN)
                 })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+
+            // Create column with explicit target dtype to ensure associativity
+            let col = Column::new(target_dtype, vals)?;
+            result_cols.insert(col_name.clone(), col);
         }
 
         // Per br-frankenpandas-25zlp: pandas combine_first preserves shared

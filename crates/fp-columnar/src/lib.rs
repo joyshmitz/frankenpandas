@@ -358,7 +358,7 @@ impl ColumnData {
                     .collect();
                 Self::Float64(data)
             }
-            DType::Int64 => {
+            DType::Int64 | DType::Int64Nullable => {
                 let data: Vec<i64> = values
                     .iter()
                     .map(|v| match v {
@@ -379,7 +379,7 @@ impl ColumnData {
                     .collect();
                 Self::Int64(data)
             }
-            DType::Bool => {
+            DType::Bool | DType::BoolNullable => {
                 let data: Vec<bool> = values
                     .iter()
                     .map(|v| match v {
@@ -4584,8 +4584,9 @@ impl Column {
     #[must_use]
     pub fn itemsize(&self) -> usize {
         match self.dtype() {
-            DType::Bool => 1,
+            DType::Bool | DType::BoolNullable => 1,
             DType::Int64
+            | DType::Int64Nullable
             | DType::Float64
             | DType::Datetime64
             | DType::Timedelta64

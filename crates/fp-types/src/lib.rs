@@ -69,7 +69,13 @@ use thiserror::Error;
 pub enum DType {
     Null,
     Bool,
+    /// Nullable boolean extension dtype. Matches pandas `BooleanDtype()`.
+    #[serde(rename = "boolean")]
+    BoolNullable,
     Int64,
+    /// Nullable Int64 extension dtype. Matches pandas `Int64Dtype()` / `pd.NA`.
+    #[serde(rename = "Int64")]
+    Int64Nullable,
     Float64,
     #[serde(alias = "string", alias = "str")]
     Utf8,
@@ -88,13 +94,13 @@ impl DType {
     /// Returns true if the dtype is numeric (integer or floating point).
     #[must_use]
     pub const fn is_numeric(&self) -> bool {
-        matches!(self, Self::Int64 | Self::Float64)
+        matches!(self, Self::Int64 | Self::Int64Nullable | Self::Float64)
     }
 
     /// Returns true if the dtype is an integer type.
     #[must_use]
     pub const fn is_integer(&self) -> bool {
-        matches!(self, Self::Int64)
+        matches!(self, Self::Int64 | Self::Int64Nullable)
     }
 
     /// Returns true if the dtype is a floating point type.
@@ -106,7 +112,7 @@ impl DType {
     /// Returns true if the dtype is boolean.
     #[must_use]
     pub const fn is_bool(&self) -> bool {
-        matches!(self, Self::Bool)
+        matches!(self, Self::Bool | Self::BoolNullable)
     }
 
     /// Returns true if the dtype is object/string type.
@@ -158,7 +164,9 @@ impl DType {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Bool => "bool",
+            Self::BoolNullable => "boolean",
             Self::Int64 => "int64",
+            Self::Int64Nullable => "Int64",
             Self::Float64 => "float64",
             Self::Utf8 => "object",
             Self::Datetime64 => "datetime64[ns]",
@@ -177,8 +185,8 @@ impl DType {
     #[must_use]
     pub const fn kind(&self) -> char {
         match self {
-            Self::Bool => 'b',
-            Self::Int64 => 'i',
+            Self::Bool | Self::BoolNullable => 'b',
+            Self::Int64 | Self::Int64Nullable => 'i',
             Self::Float64 => 'f',
             Self::Utf8 => 'O',
             Self::Datetime64 => 'M',
@@ -197,21 +205,66 @@ impl DType {
     #[must_use]
     pub const fn itemsize(&self) -> usize {
         match self {
-            Self::Bool => 1,
-            Self::Int64 | Self::Float64 | Self::Datetime64 | Self::Timedelta64 | Self::Period => 8,
+            Self::Bool | Self::BoolNullable => 1,
+            Self::Int64
+            | Self::Int64Nullable
+            | Self::Float64
+            | Self::Datetime64
+            | Self::Timedelta64
+            | Self::Period => 8,
             Self::Utf8 | Self::Categorical | Self::Interval | Self::Sparse | Self::Null => 8,
         }
     }
 
-    /// Returns true if this is an extension dtype (categorical, sparse, period, interval).
+    /// Returns true if this is an extension dtype (categorical, sparse, period, interval, nullable).
     ///
     /// Matches `pd.api.types.is_extension_array_dtype()`.
     #[must_use]
     pub const fn is_extension(&self) -> bool {
         matches!(
             self,
-            Self::Categorical | Self::Sparse | Self::Period | Self::Interval
+            Self::Categorical
+                | Self::Sparse
+                | Self::Period
+                | Self::Interval
+                | Self::Int64Nullable
+                | Self::BoolNullable
         )
+    }
+
+    /// Returns true if this is a nullable extension dtype (Int64, boolean).
+    ///
+    /// Nullable extension dtypes preserve their dtype when nulls are introduced,
+    /// unlike numpy dtypes which promote to float64.
+    #[must_use]
+    pub const fn is_nullable(&self) -> bool {
+        matches!(self, Self::Int64Nullable | Self::BoolNullable)
+    }
+
+    /// Returns the non-nullable equivalent dtype.
+    ///
+    /// For nullable extension dtypes, returns the numpy equivalent.
+    /// For non-nullable dtypes, returns self.
+    #[must_use]
+    pub const fn to_non_nullable(&self) -> Self {
+        match self {
+            Self::Int64Nullable => Self::Int64,
+            Self::BoolNullable => Self::Bool,
+            other => *other,
+        }
+    }
+
+    /// Returns the nullable equivalent dtype.
+    ///
+    /// For numpy int64/bool, returns the nullable extension dtype.
+    /// For already-nullable or other dtypes, returns self.
+    #[must_use]
+    pub const fn to_nullable(&self) -> Self {
+        match self {
+            Self::Int64 => Self::Int64Nullable,
+            Self::Bool => Self::BoolNullable,
+            other => *other,
+        }
     }
 
     /// Returns true if this is a signed integer type.
@@ -219,7 +272,7 @@ impl DType {
     /// Matches `pd.api.types.is_signed_integer_dtype()`.
     #[must_use]
     pub const fn is_signed_integer(&self) -> bool {
-        matches!(self, Self::Int64)
+        matches!(self, Self::Int64 | Self::Int64Nullable)
     }
 
     /// Returns true if this is a string/object dtype.
@@ -252,8 +305,8 @@ impl DType {
     #[must_use]
     pub const fn char(&self) -> char {
         match self {
-            Self::Bool => '?',
-            Self::Int64 => 'l',
+            Self::Bool | Self::BoolNullable => '?',
+            Self::Int64 | Self::Int64Nullable => 'l',
             Self::Float64 => 'd',
             Self::Utf8 => 'O',
             Self::Datetime64 => 'M',
@@ -268,8 +321,8 @@ impl DType {
     #[must_use]
     pub const fn num(&self) -> i32 {
         match self {
-            Self::Bool => 0,
-            Self::Int64 => 7,
+            Self::Bool | Self::BoolNullable => 0,
+            Self::Int64 | Self::Int64Nullable => 7,
             Self::Float64 => 12,
             Self::Utf8 => 17,
             Self::Datetime64 => 21,
@@ -292,8 +345,8 @@ impl DType {
     #[must_use]
     pub const fn str_repr(&self) -> &'static str {
         match self {
-            Self::Bool => "|b1",
-            Self::Int64 => "<i8",
+            Self::Bool | Self::BoolNullable => "|b1",
+            Self::Int64 | Self::Int64Nullable => "<i8",
             Self::Float64 => "<f8",
             Self::Utf8 => "|O8",
             Self::Datetime64 => "<M8[ns]",
@@ -525,7 +578,9 @@ impl Scalar {
             DType::Period => Self::Period(i64::MIN),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool
+            | DType::BoolNullable
             | DType::Int64
+            | DType::Int64Nullable
             | DType::Utf8
             | DType::Categorical
             | DType::Interval
@@ -796,17 +851,34 @@ pub enum TypeError {
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Categorical, Datetime64, Float64, Int64, Null, Sparse, Timedelta64};
+    use DType::{
+        Bool, BoolNullable, Categorical, Datetime64, Float64, Int64, Int64Nullable, Null, Sparse,
+        Timedelta64,
+    };
 
     let out = match (left, right) {
         (a, b) if a == b => a,
         (Null, other) | (other, Null) => other,
         (Categorical, Categorical) => Categorical,
+
+        // Bool promotions (nullable absorbs non-nullable)
         (Bool, Int64) | (Int64, Bool) => Int64,
+        (Bool, Int64Nullable) | (Int64Nullable, Bool) => Int64Nullable,
+        (BoolNullable, Int64) | (Int64, BoolNullable) => Int64Nullable,
+        (BoolNullable, Int64Nullable) | (Int64Nullable, BoolNullable) => Int64Nullable,
+        (Bool, BoolNullable) | (BoolNullable, Bool) => BoolNullable,
         (Bool, Float64) | (Float64, Bool) => Float64,
+        (BoolNullable, Float64) | (Float64, BoolNullable) => Float64,
+
+        // Int64 promotions (nullable absorbs non-nullable)
         (Int64, Float64) | (Float64, Int64) => Float64,
+        (Int64Nullable, Float64) | (Float64, Int64Nullable) => Float64,
+        (Int64, Int64Nullable) | (Int64Nullable, Int64) => Int64Nullable,
+
+        // Datetime/Timedelta
         (Timedelta64, Timedelta64) => Timedelta64,
         (Datetime64, Datetime64) => Datetime64,
+
         (Sparse, _) | (_, Sparse) => return Err(TypeError::IncompatibleDtypes { left, right }),
         _ => return Err(TypeError::IncompatibleDtypes { left, right }),
     };
@@ -887,6 +959,18 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     if from == target {
         return Ok(value);
     }
+    // Int64 <-> Int64Nullable: same representation, just different dtype tracking
+    if (from == DType::Int64 && target == DType::Int64Nullable)
+        || (from == DType::Int64Nullable && target == DType::Int64)
+    {
+        return Ok(value);
+    }
+    // Bool <-> BoolNullable: same representation
+    if (from == DType::Bool && target == DType::BoolNullable)
+        || (from == DType::BoolNullable && target == DType::Bool)
+    {
+        return Ok(value);
+    }
     if target == DType::Utf8 {
         return Ok(Scalar::Utf8(scalar_to_string_for_astype(value)));
     }
@@ -898,7 +982,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     // arms are omitted from the match below.
     match target {
         DType::Null => Ok(Scalar::Null(NullKind::Null)),
-        DType::Bool => match &value {
+        DType::Bool | DType::BoolNullable => match &value {
             Scalar::Int64(v) => match *v {
                 0 => Ok(Scalar::Bool(false)),
                 1 => Ok(Scalar::Bool(true)),
@@ -915,7 +999,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             }
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Int64 => match &value {
+        DType::Int64 | DType::Int64Nullable => match &value {
             Scalar::Bool(v) => Ok(Scalar::Int64(i64::from(*v))),
             Scalar::Float64(v) => {
                 if !v.is_finite() || *v != v.trunc() {

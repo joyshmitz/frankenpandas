@@ -334,8 +334,9 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
 
 fn dtype_memory_width(dtype: DType) -> usize {
     match dtype {
-        DType::Bool => 1,
+        DType::Bool | DType::BoolNullable => 1,
         DType::Int64
+        | DType::Int64Nullable
         | DType::Float64
         | DType::Categorical
         | DType::Timedelta64
@@ -1271,8 +1272,8 @@ fn multiindex_tuple_to_string(labels: &[&IndexLabel]) -> String {
 
 fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
     match dtype {
-        DType::Bool => "boolean",
-        DType::Int64 => "integer",
+        DType::Bool | DType::BoolNullable => "boolean",
+        DType::Int64 | DType::Int64Nullable => "integer",
         DType::Float64 => "number",
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
@@ -1816,7 +1817,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
             Ok(f) => Scalar::Float64(f),
             Err(_) => Scalar::Null(NullKind::NaN),
         },
-        DType::Int64 => match val {
+        DType::Int64 | DType::Int64Nullable => match val {
             Scalar::Int64(_) => val.clone(),
             // Per br-frankenpandas-lo7bq: pandas raises OverflowError /
             // IntCastingNaNError on astype('int64') of non-finite or
@@ -1840,7 +1841,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
         },
         DType::Utf8 => Scalar::Utf8(format!("{val}")),
         DType::Categorical => Scalar::Utf8(format!("{val}")),
-        DType::Bool => match val {
+        DType::Bool | DType::BoolNullable => match val {
             Scalar::Bool(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Bool(*n != 0),
             Scalar::Float64(f) => Scalar::Bool(*f != 0.0),
@@ -26844,7 +26845,7 @@ impl DataFrame {
                     } else {
                         match dtype {
                             DType::Null => Scalar::Null(NullKind::Null),
-                            DType::Bool => {
+                            DType::Bool | DType::BoolNullable => {
                                 if raw.eq_ignore_ascii_case("true") || raw == "1" {
                                     Scalar::Bool(true)
                                 } else if raw.eq_ignore_ascii_case("false") || raw == "0" {
@@ -26856,7 +26857,7 @@ impl DataFrame {
                                     )));
                                 }
                             }
-                            DType::Int64 => {
+                            DType::Int64 | DType::Int64Nullable => {
                                 raw.parse::<i64>().map(Scalar::Int64).map_err(|_| {
                                     FrameError::CompatibilityRejected(format!(
                                         "cannot parse int64 value '{raw}' in column '{}'",

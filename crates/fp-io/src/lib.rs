@@ -4549,11 +4549,11 @@ pub fn read_jsonl(path: &Path) -> Result<DataFrame, IoError> {
 /// Convert an fp-types DType to an Arrow DataType.
 fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
     match dtype {
-        DType::Int64 => ArrowDataType::Int64,
+        DType::Int64 | DType::Int64Nullable => ArrowDataType::Int64,
         DType::Float64 => ArrowDataType::Float64,
         DType::Utf8 => ArrowDataType::Utf8,
         DType::Categorical => ArrowDataType::Utf8,
-        DType::Bool => ArrowDataType::Boolean,
+        DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
         DType::Datetime64 => ArrowDataType::Int64, // store as nanoseconds
@@ -4565,7 +4565,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
 
 fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
     let arr: Arc<dyn Array> = match column.dtype() {
-        DType::Int64 => {
+        DType::Int64 | DType::Int64Nullable => {
             let mut builder = Int64Builder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -4593,7 +4593,7 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Bool => {
+        DType::Bool | DType::BoolNullable => {
             let mut builder = BooleanBuilder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -7027,11 +7027,11 @@ pub trait SqlConnection {
 #[cfg(feature = "sql-sqlite")]
 fn dtype_to_sql(dtype: DType) -> &'static str {
     match dtype {
-        DType::Int64 => "INTEGER",
+        DType::Int64 | DType::Int64Nullable => "INTEGER",
         DType::Float64 => "REAL",
         DType::Utf8 => "TEXT",
         DType::Categorical => "TEXT",
-        DType::Bool => "INTEGER",
+        DType::Bool | DType::BoolNullable => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
         DType::Datetime64 => "INTEGER",  // store as nanoseconds

@@ -11,30 +11,41 @@
   "left": {
     "name": "times",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "2024-01-15T00:00:00" },
-      { "kind": "utf8", "value": "2024-01-15T01:00:00" },
-      { "kind": "utf8", "value": "2024-01-15T01:30:00" },
-      { "kind": "utf8", "value": "2024-01-15T12:34:56" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T00:00:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T01:00:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T01:30:00"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-15T12:34:56"
+      }
     ]
   },
-  "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 3600 },
-      { "kind": "int64", "value": 5400 },
-      { "kind": "int64", "value": 45296 }
-    ]
-  }
+  "expected_error_contains": "total_seconds"
 }

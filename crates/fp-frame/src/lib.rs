@@ -13607,6 +13607,119 @@ impl OnlineEwm {
     }
 }
 
+/// Parse a pandas-style resample frequency string into `(multiplier, unit)`.
+///
+/// `"2D" -> (2, "D")`, `"D" -> (1, "D")`, `"M" -> (1, "M")`, `"15min"` is not
+/// yet a supported unit here so it round-trips as `(15, "min")` for the caller
+/// to validate. Returns `None` for empty / non-positive multipliers.
+///
+/// Per gauntlet CONF-RC2.
+fn parse_resample_freq(freq: &str) -> Option<(i64, String)> {
+    let trimmed = freq.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let split = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (num, unit) = trimmed.split_at(split);
+    let mult = if num.is_empty() {
+        1
+    } else {
+        num.parse::<i64>().ok()?
+    };
+    if mult < 1 || unit.is_empty() {
+        return None;
+    }
+    Some((mult, unit.to_string()))
+}
+
+/// Convert a datelike index label to a `NaiveDate` (day resolution) for
+/// origin-anchored N-day resample bucketing. Per gauntlet CONF-RC2.
+fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
+    match label {
+        IndexLabel::Utf8(s) => {
+            let date_part = s
+                .split('T')
+                .next()
+                .unwrap_or(s)
+                .split(' ')
+                .next()
+                .unwrap_or(s);
+            NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()
+        }
+        IndexLabel::Datetime64(ns) => {
+            let secs = ns.div_euclid(1_000_000_000);
+            DateTime::from_timestamp(secs, 0).map(|dt| dt.naive_utc().date())
+        }
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => None,
+    }
+}
+
+/// Shared resample grouping used by Series and DataFrame resample paths.
+///
+/// For unit frequencies (`"D"`, `"M"`, `"Y"`/`"A"`) this reproduces the
+/// original calendar-string bucketing byte-for-byte. For N-day multiples
+/// (`"2D"`, `"3D"`, ...) it produces origin-anchored bins labelled by the bin
+/// start date, matching `pandas.resample("2D")` (anchored at the first
+/// timestamp, label = left edge). Per gauntlet CONF-RC2.
+fn resample_build_groups(
+    labels: &[IndexLabel],
+    freq: &str,
+) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
+
+    // Fast path: unit frequency -> unchanged calendar bucketing.
+    if mult <= 1 || unit != "D" {
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let Some(key) = Resample::bucket_key(label, &unit) {
+                if !groups.contains_key(&key) {
+                    order.push(key.clone());
+                }
+                groups.entry(key).or_default().push(i);
+            }
+        }
+        return (order, groups);
+    }
+
+    // N-day multiple: origin-anchored bins, labelled by the bin-start date.
+    let day_ords: Vec<Option<i64>> = labels
+        .iter()
+        .map(|l| resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())))
+        .collect();
+    let origin = match day_ords.iter().filter_map(|o| *o).min() {
+        Some(o) => o,
+        None => return (Vec::new(), std::collections::HashMap::new()),
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut bin_start_of_key: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, ord) in day_ords.iter().enumerate() {
+        let Some(ord) = *ord else { continue };
+        let bin_index = (ord - origin).div_euclid(mult);
+        let bin_start = origin + bin_index * mult;
+        let Some(start_date) = NaiveDate::from_num_days_from_ce_opt(
+            i32::try_from(bin_start).unwrap_or(i32::MAX),
+        ) else {
+            continue;
+        };
+        let key = start_date.format("%Y-%m-%d").to_string();
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            bin_start_of_key.insert(key.clone(), bin_start);
+        }
+        groups.entry(key).or_default().push(i);
+    }
+    // pandas returns resample bins in chronological order.
+    order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
+    (order, groups)
+}
+
 /// Time-based resampling view over a Series.
 ///
 /// Created by `Series::resample(freq)`. Groups values by time buckets
@@ -13622,10 +13735,17 @@ impl Resample<'_> {
     /// back to daily bucketing for any unknown input — pandas raises
     /// ValueError instead.
     fn validate(&self) -> Result<(), FrameError> {
-        match self.freq.as_str() {
-            "Y" | "A" | "M" | "D" => Ok(()),
-            other => Err(FrameError::CompatibilityRejected(format!(
-                "resample: invalid frequency '{other}'; supported: Y, A, M, D"
+        // Per gauntlet CONF-RC2: accept integer-multiplied frequency aliases
+        // (e.g. "2D", "3D") in addition to the unit forms, matching pandas
+        // `resample("2D")`. Multipliers > 1 are currently supported for the
+        // day unit only; multiplied calendar units (2M / 2Y) reject with a
+        // clear message rather than silently mis-bucketing.
+        match parse_resample_freq(&self.freq) {
+            Some((1, unit)) if matches!(unit.as_str(), "Y" | "A" | "M" | "D") => Ok(()),
+            Some((mult, unit)) if mult > 1 && unit == "D" => Ok(()),
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "resample: invalid frequency '{}'; supported: Y, A, M, D and N-day multiples (e.g. 2D)",
+                self.freq
             ))),
         }
     }
@@ -13663,20 +13783,7 @@ impl Resample<'_> {
 
     /// Build groups: returns (bucket_keys_in_order, bucket->row_indices).
     fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
-        let labels = self.series.index().labels();
-        let mut order: Vec<String> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let Some(key) = Self::bucket_key(label, &self.freq) {
-                if !groups.contains_key(&key) {
-                    order.push(key.clone());
-                }
-                groups.entry(key).or_default().push(i);
-            }
-        }
-        (order, groups)
+        resample_build_groups(self.series.index().labels(), &self.freq)
     }
 
     /// Aggregate each time bucket using a function.
@@ -14809,19 +14916,10 @@ pub struct DataFrameResample<'a> {
 
 impl DataFrameResample<'_> {
     fn build_groups(&self) -> (Vec<String>, HashMap<String, Vec<usize>>) {
-        let mut order = Vec::new();
-        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-
-        for (idx, label) in self.df.index.labels().iter().enumerate() {
-            if let Some(key) = Resample::bucket_key(label, &self.freq) {
-                if !groups.contains_key(&key) {
-                    order.push(key.clone());
-                }
-                groups.entry(key).or_default().push(idx);
-            }
-        }
-
-        (order, groups)
+        // Per gauntlet CONF-RC2: share the origin-anchored N-day bucketing
+        // with the Series resample path so multiplied frequencies (e.g. "2D")
+        // bucket identically here.
+        resample_build_groups(self.df.index.labels(), &self.freq)
     }
 
     fn numeric_column_names(&self) -> Vec<String> {
@@ -22175,21 +22273,17 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.total_seconds()` (for time components).
     pub fn total_seconds(&self) -> Result<Series, FrameError> {
+        // Per gauntlet CONF-RC4a: `Timedelta.total_seconds()` is the full
+        // duration in seconds as a Float64 (matching pandas). The previous
+        // implementation parsed the value as a *datetime* and summed only
+        // hour/minute/second components — silently dropping the days component
+        // (so "1 days" => 0) and emitting Int64 instead of Float64.
         self.extract_component(
-            |s| {
-                let h = match Self::parse_datetime_component(s, 3) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                let mi = match Self::parse_datetime_component(s, 4) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                let sec = match Self::parse_datetime_component(s, 5) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                Scalar::Int64(h * 3600 + mi * 60 + sec)
+            |s| match Timedelta::parse(s) {
+                Ok(ns) if ns != Timedelta::NAT => {
+                    Scalar::Float64(Timedelta::total_seconds(ns))
+                }
+                _ => Scalar::Null(NullKind::NaN),
             },
             self.series.name(),
         )

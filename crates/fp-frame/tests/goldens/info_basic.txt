@@ -1,0 +1,9 @@
+DataFrame: 2 rows x 2 columns
+Index: 2 entries
+
+Column               Non-Null   Dtype     
+------               --------   -----     
+a                    2          Int64
+b                    2          Utf8
+
+Memory usage: 48 bytes

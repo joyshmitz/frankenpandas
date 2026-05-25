@@ -107207,6 +107207,226 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("dataframe_nsmallest_golden.txt", &output);
     }
+
+    // ── Series aggregation methods ──
+
+    #[test]
+    fn var_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.var().unwrap();
+        assert_text_golden("var_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn std_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.std().unwrap();
+        assert_text_golden("std_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn median_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.median().unwrap();
+        assert_text_golden("median_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn quantile_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.quantile(0.5).unwrap();
+        assert_text_golden("quantile_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn skew_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+                (3_i64.into(), Scalar::Float64(3.0)),
+                (4_i64.into(), Scalar::Float64(10.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.skew().unwrap();
+        assert_text_golden("skew_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn kurtosis_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+                (3_i64.into(), Scalar::Float64(3.0)),
+                (4_i64.into(), Scalar::Float64(10.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.kurtosis().unwrap();
+        assert_text_golden("kurtosis_basic.txt", &format!("{result}"));
+    }
+
+    // ── Series covariance / correlation ──
+
+    #[test]
+    fn cov_golden_basic() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(4.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+                (3_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.cov(&s2).unwrap();
+        assert_text_golden("cov_basic.txt", &format!("{result}"));
+    }
+
+    #[test]
+    fn corr_golden_basic() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(4.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+                (3_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.corr(&s2).unwrap();
+        assert_text_golden("corr_basic.txt", &format!("{result}"));
+    }
+
+    // ── DataFrame describe ──
+
+    #[test]
+    fn describe_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ]),
+                ("b", vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                    Scalar::Float64(50.0),
+                ]),
+            ],
+        )
+        .unwrap();
+        let result = df.describe().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("describe_basic.txt", &output);
+    }
+
+    // ── DataFrame info ──
+
+    #[test]
+    fn info_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+            ],
+        )
+        .unwrap();
+        let result = df.info();
+        assert_text_golden("info_basic.txt", &result);
+    }
+
+    // ── DataFrame memory_usage ──
+
+    #[test]
+    fn memory_usage_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+            ],
+        )
+        .unwrap();
+        let result = df.memory_usage().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("memory_usage_basic.txt", &output);
+    }
 }
 
 #[cfg(test)]

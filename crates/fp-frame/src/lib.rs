@@ -4119,6 +4119,21 @@ impl Series {
             )));
         }
 
+        // Fast path: when indexes are identical, skip alignment entirely.
+        // This is the common case for s[s > x].
+        // Per br-frankenpandas-axw58 perf optimization.
+        if self.index.identical(&mask.index) {
+            let mut new_labels = Vec::with_capacity(self.len() / 2);
+            let mut new_values = Vec::with_capacity(self.len() / 2);
+            for (i, mask_val) in mask.column.values().iter().enumerate() {
+                if matches!(mask_val, Scalar::Bool(true)) {
+                    new_labels.push(self.index.labels()[i].clone());
+                    new_values.push(self.column.values()[i].clone());
+                }
+            }
+            return self.with_labels_and_values_preserving_name(new_labels, new_values);
+        }
+
         if self.index.has_duplicates() || mask.index.has_duplicates() {
             let data_first = self.index.position_map_first();
             let mask_first = mask.index.position_map_first();
@@ -26245,6 +26260,13 @@ impl DataFrame {
             }
         }
 
+        self.reorder_rows_by_positions_unchecked(positions)
+    }
+
+    /// Internal unchecked variant - caller guarantees positions are valid permutation.
+    /// Used by sort_values, sort_index where indices come from argsort.
+    /// Per br-frankenpandas-otwd1 perf optimization.
+    fn reorder_rows_by_positions_unchecked(&self, positions: &[usize]) -> Result<Self, FrameError> {
         let index = self.index.take(positions);
         let row_multiindex = self
             .row_multiindex
@@ -26282,26 +26304,40 @@ impl DataFrame {
                 )));
             }
         }
+        self.take_rows_by_positions_unchecked(positions)
+    }
 
-        let labels = positions
-            .iter()
-            .map(|&position| self.index.labels()[position].clone())
-            .collect::<Vec<_>>();
+    /// Internal unchecked variant - caller guarantees positions are in bounds.
+    /// Used by sort_values and other internal paths where indices come from
+    /// controlled sources (argsort, filter positions).
+    /// Per br-frankenpandas-otwd1 perf optimization.
+    fn take_rows_by_positions_unchecked(&self, positions: &[usize]) -> Result<Self, FrameError> {
+        let n = positions.len();
+        let index_labels = self.index.labels();
+
+        // Pre-allocate with exact capacity
+        let mut labels = Vec::with_capacity(n);
+        for &pos in positions {
+            labels.push(index_labels[pos].clone());
+        }
+
         let row_multiindex = self
             .row_multiindex
             .as_ref()
             .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
             .transpose()?;
+
         let mut columns = BTreeMap::new();
         for name in &self.column_order {
             let column = self
                 .columns
                 .get(name)
                 .expect("column name listed in order must exist");
-            let values = positions
-                .iter()
-                .map(|&position| column.values()[position].clone())
-                .collect::<Vec<_>>();
+            let col_values = column.values();
+            let mut values = Vec::with_capacity(n);
+            for &pos in positions {
+                values.push(col_values[pos].clone());
+            }
             columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
@@ -27402,6 +27438,32 @@ impl DataFrame {
     /// The mask must be a Bool-typed Series. Indexes are aligned; missing
     /// mask values are treated as `False`.
     pub fn filter_rows(&self, mask: &Series) -> Result<Self, FrameError> {
+        // Fast path: when indexes are identical, skip alignment entirely.
+        // This is the common case for df[df['col'] > x].
+        // Per br-frankenpandas-axw58 perf optimization.
+        if self.index.identical(mask.index()) {
+            if let Some(offending) = mask
+                .column()
+                .values()
+                .iter()
+                .find(|v| !matches!(v, Scalar::Bool(_) | Scalar::Null(_)))
+            {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "boolean mask required for filter_rows; found dtype {:?}",
+                    offending.dtype()
+                )));
+            }
+            // Collect positions where mask is True (pre-allocate for ~50% selectivity)
+            let mut keep_positions = Vec::with_capacity(self.len() / 2);
+            for (i, v) in mask.column().values().iter().enumerate() {
+                if matches!(v, Scalar::Bool(true)) {
+                    keep_positions.push(i);
+                }
+            }
+            // Use unchecked take - positions are valid indices into self
+            return self.take_rows_by_positions_unchecked(&keep_positions);
+        }
+
         // Align mask to DataFrame index (pandas behavior: extra mask labels are ignored).
         if self.index.has_duplicates() || mask.index().has_duplicates() {
             let data_first = self.index.position_map_first();
@@ -28268,7 +28330,8 @@ impl DataFrame {
                 self.index.labels()[right].cmp(&self.index.labels()[left])
             }
         });
-        self.reorder_rows_by_positions(&order)
+        // order is a permutation of 0..len(), always valid
+        self.reorder_rows_by_positions_unchecked(&order)
     }
 
     /// Sort the DataFrame by column names (axis=1).
@@ -28331,7 +28394,8 @@ impl DataFrame {
             )
         });
 
-        self.reorder_rows_by_positions(&order)
+        // order is a permutation of 0..len(), always valid
+        self.reorder_rows_by_positions_unchecked(&order)
     }
 
     /// Sort by multiple columns with per-column ascending flags.
@@ -28410,7 +28474,8 @@ impl DataFrame {
             Ordering::Equal
         });
 
-        self.reorder_rows_by_positions(&order)
+        // order is a permutation of 0..len(), always valid
+        self.reorder_rows_by_positions_unchecked(&order)
     }
 
     /// Label-based row selection for list-like indexers.

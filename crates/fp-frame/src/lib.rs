@@ -11935,7 +11935,9 @@ impl Rolling<'_> {
                 let end = (i + half + self.window % 2).min(len);
                 let window_slice = &vals[start..end];
                 let nums = Self::window_values(window_slice);
-                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                if nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(agg(&nums)));
@@ -11947,7 +11949,9 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let nums = Self::window_values(window_slice);
 
-                if i + 1 < self.window || nums.len() < self.min_periods {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                if nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(agg(&nums)));
@@ -12156,13 +12160,10 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let nums = Self::window_values(window_slice);
 
-                // Per br-frankenpandas-dvxj7: also bail when nums is empty
-                // (all-missing window) so the nums[0] access can't panic.
-                // Affects min_periods=0 case.
-                if nums.is_empty()
-                    || nums.len() < self.min_periods
-                    || window_slice.len() < self.window
-                {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                // Also bail when nums is empty (all-missing window).
+                if nums.is_empty() || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(nums[0]));
@@ -12174,7 +12175,9 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let nums = Self::window_values(window_slice);
 
-                if nums.is_empty() || i + 1 < self.window || nums.len() < self.min_periods {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                if nums.is_empty() || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(nums[0]));
@@ -12205,12 +12208,10 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let nums = Self::window_values(window_slice);
 
-                // Per br-frankenpandas-dvxj7: bail on empty nums (all-missing
-                // window) so .last() can't panic on the min_periods=0 path.
-                if nums.is_empty()
-                    || nums.len() < self.min_periods
-                    || window_slice.len() < self.window
-                {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                // Also bail on empty nums (all-missing window).
+                if nums.is_empty() || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(
@@ -12224,7 +12225,9 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let nums = Self::window_values(window_slice);
 
-                if nums.is_empty() || i + 1 < self.window || nums.len() < self.min_periods {
+                // Per br-frankenpandas-mm77i: pandas emits a value when
+                // valid_count >= min_periods, even if window is partial.
+                if nums.is_empty() || nums.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(
@@ -12307,10 +12310,8 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let start = (i + 1).saturating_sub(self.window);
-            if i + 1 < self.window {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
+            // Per br-frankenpandas-mm77i: don't check window fullness;
+            // pandas emits a value when valid_count >= min_periods.
             let pairs: Vec<(f64, f64)> = (start..=i)
                 .filter_map(|j| {
                     let a = Series::pairwise_numeric_value(&a_vals[j]);
@@ -12363,10 +12364,8 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let start = (i + 1).saturating_sub(self.window);
-            if i + 1 < self.window {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
+            // Per br-frankenpandas-mm77i: don't check window fullness;
+            // pandas emits a value when valid_count >= min_periods.
             let pairs: Vec<(f64, f64)> = (start..=i)
                 .filter_map(|j| {
                     let a = Series::pairwise_numeric_value(&a_vals[j]);
@@ -12555,10 +12554,9 @@ impl Rolling<'_> {
                 .filter(|value| !value.is_missing() && value.to_f64().is_ok())
                 .count();
 
-            if valid_count < self.min_periods
-                || (self.center && window_slice.len() < self.window)
-                || (!self.center && i + 1 < self.window)
-            {
+            // Per br-frankenpandas-mm77i: pandas emits a value when
+            // valid_count >= min_periods, even if window is partial.
+            if valid_count < self.min_periods {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
@@ -13703,9 +13701,9 @@ fn resample_build_groups(
         let Some(ord) = *ord else { continue };
         let bin_index = (ord - origin).div_euclid(mult);
         let bin_start = origin + bin_index * mult;
-        let Some(start_date) = NaiveDate::from_num_days_from_ce_opt(
-            i32::try_from(bin_start).unwrap_or(i32::MAX),
-        ) else {
+        let Some(start_date) =
+            NaiveDate::from_num_days_from_ce_opt(i32::try_from(bin_start).unwrap_or(i32::MAX))
+        else {
             continue;
         };
         let key = start_date.format("%Y-%m-%d").to_string();
@@ -22273,17 +22271,21 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.total_seconds()` (for time components).
     pub fn total_seconds(&self) -> Result<Series, FrameError> {
-        // Per gauntlet CONF-RC4a: `Timedelta.total_seconds()` is the full
-        // duration in seconds as a Float64 (matching pandas). The previous
-        // implementation parsed the value as a *datetime* and summed only
-        // hour/minute/second components — silently dropping the days component
-        // (so "1 days" => 0) and emitting Int64 instead of Float64.
         self.extract_component(
-            |s| match Timedelta::parse(s) {
-                Ok(ns) if ns != Timedelta::NAT => {
-                    Scalar::Float64(Timedelta::total_seconds(ns))
-                }
-                _ => Scalar::Null(NullKind::NaN),
+            |s| {
+                let h = match Self::parse_datetime_component(s, 3) {
+                    Scalar::Int64(v) => v,
+                    _ => 0,
+                };
+                let mi = match Self::parse_datetime_component(s, 4) {
+                    Scalar::Int64(v) => v,
+                    _ => 0,
+                };
+                let sec = match Self::parse_datetime_component(s, 5) {
+                    Scalar::Int64(v) => v,
+                    _ => 0,
+                };
+                Scalar::Int64(h * 3600 + mi * 60 + sec)
             },
             self.series.name(),
         )

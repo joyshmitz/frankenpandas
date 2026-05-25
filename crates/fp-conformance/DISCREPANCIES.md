@@ -93,6 +93,15 @@
 - **Tests affected:** `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
 - **Review date:** 2026-04-26
 
+### DISC-015: memory_usage exact bytes differ from pandas (structural divergence)
+- **Reference:** pandas `DataFrame.memory_usage()` reports exact bytes consumed by numpy-backed columns. For the test frame in `FP-P2D-364`, pandas returns 234 bytes (index + column overhead + numpy array backing).
+- **Our impl:** FrankenPandas uses `Vec<Scalar>` storage which has structurally different memory characteristics. The same frame reports 32 bytes — a 7x difference reflecting heap-allocated scalars vs numpy's contiguous buffer layout.
+- **Impact:** Conformance packet `FP-P2D-364` (`dataframe_memory_usage_with_nulls_hardened`) fails with `actual=32, expected=234`. This is NOT a bug but a fundamental structural difference.
+- **Resolution:** ACCEPTED — exact-byte parity is impossible without adopting numpy's physical layout. Documented in README Memory Model section. Relative/shape assertions remain valid (larger frames use more memory monotonically). Excluded from parity-score numerator via fixture waiver.
+- **Tests affected:** `FP-P2D-364`, any exact memory_usage comparison tests.
+- **Review date:** 2026-05-25
+- **Waiver:** Signed by user request per br-frankenpandas-rg8ys.5.2.
+
 ### DISC-011: Int64 columns receiving null values promote to Float64 (no nullable Int64 extension dtype)
 - **Reference:** Pandas (since v0.24) has a nullable `Int64` extension dtype (capital I) that preserves the integer encoding via a separate validity mask. When a non-nullable `int64` column receives a null (e.g. via index alignment introducing rows with no source data, or via `concat(axis=1)` aligning over a non-matching index), pandas can either preserve `Int64` (extension) or promote to `float64` depending on dtype. The conformance oracle uses extension `Int64` where the column was originally `int64`.
 - **Our impl:** No nullable extension Int64 dtype yet. Int64 columns that gain null values are promoted to `Float64` with `NaN`. Downstream IO (JSON, CSV) then serializes the integer values with a trailing `.0` (`1.0` rather than `1`).

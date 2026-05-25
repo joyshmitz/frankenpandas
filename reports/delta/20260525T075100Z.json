@@ -1,0 +1,43 @@
+{
+  "timestamp": "20260525T075100Z",
+  "packets_flipped_green": [],
+  "packets_flipped_red": [],
+  "still_red": [
+    "FP-P2D-203",
+    "FP-P2D-224",
+    "FP-P2D-234",
+    "FP-P2D-240",
+    "FP-P2D-241",
+    "FP-P2D-242",
+    "FP-P2D-303",
+    "FP-P2D-311",
+    "FP-P2D-312",
+    "FP-P2D-313",
+    "FP-P2D-322",
+    "FP-P2D-333",
+    "FP-P2D-334",
+    "FP-P2D-335",
+    "FP-P2D-338",
+    "FP-P2D-339",
+    "FP-P2D-340",
+    "FP-P2D-341",
+    "FP-P2D-345",
+    "FP-P2D-358",
+    "FP-P2D-363",
+    "FP-P2D-364",
+    "FP-P2D-382",
+    "FP-P2D-384",
+    "FP-P2D-389",
+    "FP-P2D-408",
+    "FP-P2D-412",
+    "FP-P2D-413",
+    "FP-P2D-426"
+  ],
+  "counts": {
+    "total": 431,
+    "passed": 402,
+    "failed": 29,
+    "pass_rate": 0.93
+  },
+  "note": "Initial baseline created"
+}

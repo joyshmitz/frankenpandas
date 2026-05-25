@@ -32,8 +32,8 @@
     ],
     "values": [
       { "kind": "bool", "value": true },
-      { "kind": "bool", "value": false },
-      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": true },
       { "kind": "bool", "value": false }
     ]
   }

@@ -4107,7 +4107,8 @@ mod tests {
             &mut ledger,
         )
         .expect("eval");
-        assert_eq!(out.values()[1], Scalar::Int64(12));
+        // Alignment introduces gaps → promotes to Float64 for NaN sentinel.
+        assert_eq!(out.values()[1], Scalar::Float64(12.0));
     }
 
     #[test]

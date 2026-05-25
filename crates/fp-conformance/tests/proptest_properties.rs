@@ -5482,9 +5482,16 @@ proptest! {
     fn prop_series_drop_composes(
         (series, first, second) in arb_series_drop_composition_case("drop", 12),
     ) {
+        // Filter second to exclude labels already in first (since those will
+        // be gone after the first drop, and pandas raises KeyError on missing).
+        let first_set: std::collections::HashSet<_> = first.iter().collect();
+        let filtered_second: Vec<IndexLabel> = second.iter()
+            .filter(|l| !first_set.contains(l))
+            .cloned()
+            .collect();
         let nested = series
             .drop(&first)
-            .and_then(|dropped| dropped.drop(&second))
+            .and_then(|dropped| dropped.drop(&filtered_second))
             .expect("nested Series::drop() must succeed");
         let merged = merged_drop_items(&first, &second);
         let direct = series
@@ -5532,7 +5539,14 @@ proptest! {
     fn prop_dataframe_drop_rows_composes(
         (df, first, second) in arb_dataframe_row_drop_composition_case(8),
     ) {
-        let nested = drop_dataframe_rows(&drop_dataframe_rows(&df, &first), &second);
+        // Filter second to exclude labels already in first (since those will
+        // be gone after the first drop, and pandas raises KeyError on missing).
+        let first_set: std::collections::HashSet<_> = first.iter().collect();
+        let filtered_second: Vec<String> = second.iter()
+            .filter(|l| !first_set.contains(l))
+            .cloned()
+            .collect();
+        let nested = drop_dataframe_rows(&drop_dataframe_rows(&df, &first), &filtered_second);
         let merged = merged_drop_items(&first, &second);
         let direct = drop_dataframe_rows(&df, &merged);
         prop_assert!(

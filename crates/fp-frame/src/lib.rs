@@ -19834,9 +19834,12 @@ impl StringAccessor<'_> {
     }
 
     /// Get the length of each string (character count, not byte count).
+    ///
+    /// Per br-frankenpandas-rg8ys.6.6: pandas returns float64 (not int64)
+    /// to represent nullable integers. Nulls become NaN.
     pub fn len(&self) -> Result<Series, FrameError> {
         self.apply_str(
-            |s| Scalar::Int64(s.chars().count() as i64),
+            |s| Scalar::Float64(s.chars().count() as f64),
             self.series.name(),
         )
     }
@@ -21344,16 +21347,17 @@ impl StringAccessor<'_> {
         DataFrame::new_with_column_order(index, columns, col_order)
     }
 
-    /// Encode strings to bytes (returns byte length as Int64).
+    /// Encode strings to bytes (returns byte length as Float64).
     ///
     /// Matches `pd.Series.str.encode(encoding)`. Since Rust strings are
     /// always UTF-8, this returns the byte length of each string for
-    /// the "utf-8" encoding, or the string itself for API compatibility.
+    /// the "utf-8" encoding. Per br-frankenpandas-rg8ys.6.6: pandas
+    /// returns float64 for nullable integers (nulls become NaN).
     pub fn encode(&self, _encoding: &str) -> Result<Series, FrameError> {
         // In Rust, strings are always valid UTF-8, so "encoding" is a no-op.
         // Return the byte lengths for compatibility.
         self.apply_str(
-            |s| Scalar::Int64(s.len() as i64),
+            |s| Scalar::Float64(s.len() as f64),
             &format!("{}_encoded", self.series.name()),
         )
     }
@@ -56247,8 +56251,9 @@ mod tests {
         )
         .unwrap();
         let result = s.str().len().unwrap();
-        assert_eq!(result.values()[0], Scalar::Int64(2));
-        assert_eq!(result.values()[1], Scalar::Int64(5));
+        // Per br-frankenpandas-rg8ys.6.6: str.len returns Float64 (pandas nullable int convention)
+        assert_eq!(result.values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.values()[1], Scalar::Float64(5.0));
     }
 
     #[test]

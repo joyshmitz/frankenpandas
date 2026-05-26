@@ -8,7 +8,7 @@
     "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
     "generated_at": "2026-04-22T21:02:48Z"
   },
-  "str_repeat_count": 3,
+  "str_repeat_n": 3,
   "left": {
     "name": "text",
     "index": [

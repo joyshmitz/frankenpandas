@@ -128,8 +128,8 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar, cast_scalar_owned, common_dtype, dropna,
-    fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar, cast_scalar_owned, common_dtype,
+    dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -2141,9 +2141,15 @@ pub struct PacketFixture {
     #[serde(default)]
     pub categorical_ordered: Option<bool>,
     // Window operation parameters
-    #[serde(default)]
+    // Per gauntlet mm77i root-cause: packets historically carry the window under
+    // the key `rolling_window` (not `window_size`) and the min_periods under
+    // `rolling_min_periods`. Without these aliases the harness silently ignored
+    // the packet's window (defaulting to 3) and min_periods (defaulting to the
+    // window), so faithful replay used the wrong params and diverged from the
+    // oracle-pinned expected. The rolling SUBJECT code was correct all along.
+    #[serde(default, alias = "rolling_window")]
     pub window_size: Option<usize>,
-    #[serde(default)]
+    #[serde(default, alias = "rolling_min_periods")]
     pub min_periods: Option<usize>,
     #[serde(default)]
     pub window_center: Option<bool>,
@@ -6302,9 +6308,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
         DType::Timedelta64 => {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
         }
-        DType::Datetime64 => {
-            Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000)
-        }
+        DType::Datetime64 => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
         DType::Period => Scalar::Period(i64::from(payload % 100)),
         DType::Interval => Scalar::Interval(fp_types::Interval {
             left: f64::from(payload % 10),
@@ -14793,11 +14797,37 @@ fn dataframes_semantically_equal(left: &DataFrame, right: &DataFrame) -> bool {
         let Some(right_col) = right.column(name) else {
             return false;
         };
-        if !left_col.semantic_eq(right_col) {
+        // For round-trip tests, allow numeric dtype coercion (Float64 <-> Int64)
+        // since formats like Excel convert whole-number floats to integers.
+        if !columns_semantically_equal_lenient(left_col, right_col) {
             return false;
         }
     }
     true
+}
+
+fn columns_semantically_equal_lenient(left: &Column, right: &Column) -> bool {
+    use fp_types::{DType, Scalar};
+    if left.len() != right.len() {
+        return false;
+    }
+    // Allow numeric coercion: Float64 <-> Int64 round-trips through formats
+    // that don't preserve exact numeric dtype (Excel, CSV).
+    let numeric_compat = matches!(
+        (left.dtype(), right.dtype()),
+        (DType::Float64 | DType::Int64, DType::Float64 | DType::Int64)
+    );
+    if !numeric_compat && left.dtype() != right.dtype() {
+        return false;
+    }
+    left.values()
+        .iter()
+        .zip(right.values())
+        .all(|(l, r)| match (l, r) {
+            (Scalar::Float64(a), Scalar::Int64(b)) => *a == *b as f64,
+            (Scalar::Int64(a), Scalar::Float64(b)) => *a as f64 == *b,
+            _ => l.semantic_eq(r),
+        })
 }
 
 fn run_bool_round_trip_match(

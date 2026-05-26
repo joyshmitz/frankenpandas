@@ -12146,8 +12146,10 @@ impl Rolling<'_> {
 
     /// Rolling count of non-null values.
     ///
-    /// Per br-frankenpandas-mm77i: pandas emits a value when valid_count >= min_periods,
-    /// even if the window is partial. The count itself is always the number of non-nulls.
+    /// pandas count() is special: min_periods checks WINDOW SIZE, not non-null count.
+    /// This differs from sum/mean/etc. where min_periods checks non-null count.
+    /// If the window has at least min_periods elements, count returns the
+    /// number of non-nulls (which can be 0).
     pub fn count(&self) -> Result<Series, FrameError> {
         self.validate()?;
         let vals = self.series.column().values();
@@ -12162,8 +12164,8 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                // min_periods applies to non-null count, not window size
-                if count < self.min_periods {
+                // For count(), min_periods checks WINDOW SIZE, not non-null count
+                if window_slice.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -12175,8 +12177,8 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                // min_periods applies to non-null count, not window size
-                if count < self.min_periods {
+                // For count(), min_periods checks WINDOW SIZE, not non-null count
+                if window_slice.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -13740,8 +13742,21 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
                 return Some(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
             }
-            if let Ok(d) = chrono::NaiveDate::parse_from_str(s.split('T').next().unwrap_or(s).split(' ').next().unwrap_or(s), "%Y-%m-%d") {
-                return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(
+                s.split('T')
+                    .next()
+                    .unwrap_or(s)
+                    .split(' ')
+                    .next()
+                    .unwrap_or(s),
+                "%Y-%m-%d",
+            ) {
+                return Some(
+                    d.and_hms_opt(0, 0, 0)?
+                        .and_utc()
+                        .timestamp_nanos_opt()
+                        .unwrap_or(0),
+                );
             }
             None
         }
@@ -13761,7 +13776,13 @@ fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
             })
         }
         IndexLabel::Utf8(s) => {
-            let date_part = s.split('T').next().unwrap_or(s).split(' ').next().unwrap_or(s);
+            let date_part = s
+                .split('T')
+                .next()
+                .unwrap_or(s)
+                .split(' ')
+                .next()
+                .unwrap_or(s);
             let parts: Vec<&str> = date_part.split('-').collect();
             if parts.len() >= 2 {
                 let year: i64 = parts[0].parse().ok()?;
@@ -13859,7 +13880,9 @@ fn resample_build_groups(
             let bin_start_ns = origin + bin_index * bucket_ns;
             let secs = bin_start_ns.div_euclid(1_000_000_000);
             let nano = (bin_start_ns % 1_000_000_000) as u32;
-            let Some(dt) = DateTime::from_timestamp(secs, nano) else { continue };
+            let Some(dt) = DateTime::from_timestamp(secs, nano) else {
+                continue;
+            };
             let key = dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
             if !groups.contains_key(&key) {
                 order.push(key.clone());
@@ -13880,7 +13903,8 @@ fn resample_build_groups(
     };
     if let Some(months_per) = months_per_unit {
         let bucket_months = mult * months_per;
-        let month_ords: Vec<Option<i64>> = labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords: Vec<Option<i64>> =
+            labels.iter().map(resample_label_to_month_ordinal).collect();
         let origin = match month_ords.iter().filter_map(|o| *o).min() {
             Some(o) => o,
             None => return (Vec::new(), std::collections::HashMap::new()),
@@ -13973,7 +13997,10 @@ impl Resample<'_> {
             Some((_, unit)) => {
                 let unit_lower = unit.to_lowercase();
                 let valid = matches!(unit.as_str(), "Y" | "A" | "M" | "Q" | "D")
-                    || matches!(unit_lower.as_str(), "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n");
+                    || matches!(
+                        unit_lower.as_str(),
+                        "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
+                    );
                 if valid {
                     Ok(())
                 } else {
@@ -19592,6 +19619,45 @@ impl StringAccessor<'_> {
         Series::new(name, index, column)
     }
 
+    /// Apply an integer-returning string op, promoting the whole result column
+    /// from Int64 to Float64 when the input contains ANY null.
+    ///
+    /// Per gauntlet rg8ys.6.6: pandas int-returning string accessors
+    /// (`len`/`find`/`rfind`/`count`/`encode`-length) yield `int64` when the
+    /// Series has no nulls and `float64` (with `NaN` for the nulls) when any
+    /// null is present. Emitting `Float64` unconditionally (the prior bug)
+    /// broke the no-null case; emitting `Int64` unconditionally broke the
+    /// with-null case. This helper produces `Int64` per element and promotes
+    /// the column to `Float64` only when a null forced the promotion.
+    fn apply_str_int<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> i64,
+    {
+        let vals = self.series.column().values();
+        let mut has_null = false;
+        let mut out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => Scalar::Int64(func(s)),
+                _ => {
+                    has_null = true;
+                    Scalar::Null(NullKind::NaN)
+                }
+            })
+            .collect();
+        if has_null {
+            for scalar in &mut out {
+                if let Scalar::Int64(i) = scalar {
+                    *scalar = Scalar::Float64(*i as f64);
+                }
+            }
+        }
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
+    }
+
     /// Convert strings to lowercase.
     pub fn lower(&self) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Utf8(s.to_lowercase()), self.series.name())
@@ -19853,10 +19919,8 @@ impl StringAccessor<'_> {
     /// Per br-frankenpandas-rg8ys.6.6: pandas returns float64 (not int64)
     /// to represent nullable integers. Nulls become NaN.
     pub fn len(&self) -> Result<Series, FrameError> {
-        self.apply_str(
-            |s| Scalar::Float64(s.chars().count() as f64),
-            self.series.name(),
-        )
+        // Int64 when no nulls, Float64 (NaN) when any null — matches pandas.
+        self.apply_str_int(|s| s.chars().count() as i64, self.series.name())
     }
 
     /// Slice each string from start to end.
@@ -20959,10 +21023,10 @@ impl StringAccessor<'_> {
     /// Per br-frankenpandas-02ae2b: pandas returns CHAR-based positions
     /// (Python 3 strings are char-indexed), not byte positions.
     pub fn find(&self, sub: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        self.apply_str_int(
             |s| match s.find(sub) {
-                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
-                None => Scalar::Int64(-1),
+                Some(byte_pos) => s[..byte_pos].chars().count() as i64,
+                None => -1,
             },
             self.series.name(),
         )
@@ -20973,10 +21037,10 @@ impl StringAccessor<'_> {
     /// Matches `pd.Series.str.rfind(sub)`. Returns -1 if not found.
     /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn rfind(&self, sub: &str) -> Result<Series, FrameError> {
-        self.apply_str(
+        self.apply_str_int(
             |s| match s.rfind(sub) {
-                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
-                None => Scalar::Int64(-1),
+                Some(byte_pos) => s[..byte_pos].chars().count() as i64,
+                None => -1,
             },
             self.series.name(),
         )
@@ -21370,11 +21434,10 @@ impl StringAccessor<'_> {
     /// returns float64 for nullable integers (nulls become NaN).
     pub fn encode(&self, _encoding: &str) -> Result<Series, FrameError> {
         // In Rust, strings are always valid UTF-8, so "encoding" is a no-op.
-        // Return the byte lengths for compatibility.
-        self.apply_str(
-            |s| Scalar::Float64(s.len() as f64),
-            &format!("{}_encoded", self.series.name()),
-        )
+        // Return the byte lengths for compatibility. Int64 with no nulls,
+        // Float64 (NaN) when any null is present — matches pandas.
+        let name = format!("{}_encoded", self.series.name());
+        self.apply_str_int(|s| s.len() as i64, &name)
     }
 
     /// Decode bytes to strings (identity operation in Rust).
@@ -22527,9 +22590,32 @@ impl DatetimeAccessor<'_> {
     ///
     /// Per br-frankenpandas-i9bah: pandas dt.total_seconds() is for timedelta
     /// dtype, not datetime. Returns Float64 (fractional seconds supported).
+    /// Errors if the series contains datetime strings (pandas has no
+    /// dt.total_seconds() for datetime).
     pub fn total_seconds(&self) -> Result<Series, FrameError> {
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
+
+        // First pass: check for datetime-formatted strings (YYYY-MM-DD pattern)
+        // which indicates this is a datetime series, not timedelta.
+        for v in vals {
+            if let Scalar::Utf8(s) = v {
+                // Detect datetime format: starts with year-month-day pattern
+                if s.len() >= 10 {
+                    let bytes = s.as_bytes();
+                    // Check for YYYY-MM-DD or YYYY/MM/DD pattern
+                    if bytes.len() >= 10
+                        && bytes[4] == b'-'
+                        && bytes[7] == b'-'
+                        && bytes[0..4].iter().all(|b| b.is_ascii_digit())
+                    {
+                        return Err(FrameError::CompatibilityRejected(
+                            "total_seconds is only valid for timedelta, not datetime".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
 
         for v in vals {
             match v {
@@ -22791,6 +22877,7 @@ impl DatetimeAccessor<'_> {
     }
 
     /// Internal: approximate total seconds for datetime comparison.
+    /// Uses proper day counting to handle year/month boundaries correctly.
     fn total_secs_approx(s: &str) -> f64 {
         let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
             return 0.0;
@@ -22807,7 +22894,13 @@ impl DatetimeAccessor<'_> {
             Scalar::Int64(v) => v,
             _ => 0,
         };
-        (y * 366 + m * 31 + d) as f64 * 86400.0 + (h * 3600 + mi * 60 + sec) as f64
+        // Compute days since epoch using proper calendar math
+        // Julian day number formula (simplified for Gregorian dates after 1582)
+        let a = (14 - m) / 12;
+        let yy = y + 4800 - a;
+        let mm = m + 12 * a - 3;
+        let jdn = d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045;
+        jdn as f64 * 86400.0 + (h * 3600 + mi * 60 + sec) as f64
     }
 
     /// Internal: round a datetime string to the given frequency, either floor or ceil.
@@ -26261,6 +26354,7 @@ impl DataFrame {
         Ok(selected_positions)
     }
 
+    #[allow(dead_code)]
     fn reorder_rows_by_positions(&self, positions: &[usize]) -> Result<Self, FrameError> {
         if positions.len() != self.len() {
             return Err(FrameError::CompatibilityRejected(format!(
@@ -27928,8 +28022,10 @@ impl DataFrame {
         subset: Option<&[String]>,
         keep: DuplicateKeep,
     ) -> Result<Series, FrameError> {
-        use std::collections::HashMap;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::HashMap,
+            hash::{Hash, Hasher},
+        };
 
         let selected_columns = self.resolve_column_selector(subset)?;
         let row_count = self.len();
@@ -28003,8 +28099,8 @@ impl DataFrame {
             DuplicateKeep::None => {
                 // Count occurrences, mark all that appear more than once
                 let mut counts: HashMap<&[u64], Vec<usize>> = HashMap::with_capacity(row_count);
-                for i in 0..row_count {
-                    counts.entry(row_keys[i].as_slice()).or_default().push(i);
+                for (i, key) in row_keys.iter().enumerate().take(row_count) {
+                    counts.entry(key.as_slice()).or_default().push(i);
                 }
                 for indices in counts.values() {
                     if indices.len() > 1 {
@@ -56268,9 +56364,9 @@ mod tests {
         )
         .unwrap();
         let result = s.str().len().unwrap();
-        // Per br-frankenpandas-rg8ys.6.6: str.len returns Float64 (pandas nullable int convention)
-        assert_eq!(result.values()[0], Scalar::Float64(2.0));
-        assert_eq!(result.values()[1], Scalar::Float64(5.0));
+        // pandas str.len returns int64 when no nulls, float64 with nulls
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Int64(5));
     }
 
     #[test]
@@ -75122,9 +75218,10 @@ mod tests {
         )
         .unwrap();
         let result = s.str().encode("utf-8").unwrap();
-        assert_eq!(result.values()[0], Scalar::Int64(5));
+        // pandas returns float64 when any null is present
+        assert_eq!(result.values()[0], Scalar::Float64(5.0));
         // "café" is 5 bytes in UTF-8 (é is 2 bytes)
-        assert_eq!(result.values()[1], Scalar::Int64(5));
+        assert_eq!(result.values()[1], Scalar::Float64(5.0));
         assert!(result.values()[2].is_missing());
     }
 
@@ -75915,6 +76012,24 @@ mod tests {
         let result = s.dt().total_seconds().unwrap();
         assert_eq!(result.values()[0], Scalar::Float64(86400.0)); // 1 day = 86400 seconds
         assert_eq!(result.values()[1], Scalar::Float64(7200.0)); // 2 hours = 7200 seconds
+    }
+
+    #[test]
+    fn dt_total_seconds_rejects_datetime() {
+        // Per br-frankenpandas-i9bah: pandas datetime has no total_seconds().
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T00:00:00".to_string()),
+                Scalar::Utf8("2024-01-15T01:30:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().total_seconds();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("total_seconds"));
     }
 
     // ── DataFrameExpanding count/quantile ──
@@ -107598,7 +107713,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = s.between(&Scalar::Int64(2), &Scalar::Int64(6), "both").unwrap();
+        let result = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(6), "both")
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("between_basic.txt", &output);
     }
@@ -107664,7 +107781,10 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
                 (
                     "b",
                     vec![
@@ -107910,20 +108030,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![
-                    Scalar::Float64(1.0),
-                    Scalar::Float64(2.0),
-                    Scalar::Float64(3.0),
-                    Scalar::Float64(4.0),
-                    Scalar::Float64(5.0),
-                ]),
-                ("b", vec![
-                    Scalar::Float64(10.0),
-                    Scalar::Float64(20.0),
-                    Scalar::Float64(30.0),
-                    Scalar::Float64(40.0),
-                    Scalar::Float64(50.0),
-                ]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -107940,7 +108066,10 @@ mod tests {
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
             ],
         )
         .unwrap();
@@ -110744,9 +110873,18 @@ mod test_select_columns_perf_76e1fd {
         .unwrap();
         let result = s.to_period("M").unwrap();
         assert_eq!(result.len(), 3);
-        assert_eq!(result.index().labels()[0], IndexLabel::Utf8("2024-01".into()));
-        assert_eq!(result.index().labels()[1], IndexLabel::Utf8("2024-02".into()));
-        assert_eq!(result.index().labels()[2], IndexLabel::Utf8("2024-03".into()));
+        assert_eq!(
+            result.index().labels()[0],
+            IndexLabel::Utf8("2024-01".into())
+        );
+        assert_eq!(
+            result.index().labels()[1],
+            IndexLabel::Utf8("2024-02".into())
+        );
+        assert_eq!(
+            result.index().labels()[2],
+            IndexLabel::Utf8("2024-03".into())
+        );
     }
 
     #[test]
@@ -110772,10 +110910,7 @@ mod test_select_columns_perf_76e1fd {
 
     #[test]
     fn series_to_xarray_produces_valid_dataarray() {
-        let idx = vec![
-            IndexLabel::Utf8("a".into()),
-            IndexLabel::Utf8("b".into()),
-        ];
+        let idx = vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())];
         let s = Series::new(
             "vals".to_owned(),
             Index::new(idx).rename_index(Some("idx")),

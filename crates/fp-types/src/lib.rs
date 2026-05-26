@@ -1016,10 +1016,13 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 if let Ok(v) = s.parse::<i64>() {
                     return Ok(Scalar::Int64(v));
                 }
-                if let Ok(f) = s.parse::<f64>() {
-                    if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < 9223372036854775808.0 {
-                        return Ok(Scalar::Int64(f as i64));
-                    }
+                if let Ok(f) = s.parse::<f64>()
+                    && f.is_finite()
+                    && f.fract() == 0.0
+                    && f >= i64::MIN as f64
+                    && f < 9223372036854775808.0
+                {
+                    return Ok(Scalar::Int64(f as i64));
                 }
                 Err(TypeError::InvalidCast { from, to: target })
             }
@@ -1028,9 +1031,10 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         DType::Float64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Float64(if *v { 1.0 } else { 0.0 })),
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
-            Scalar::Utf8(s) => s.parse::<f64>().map(Scalar::Float64).map_err(|_| {
-                TypeError::InvalidCast { from, to: target }
-            }),
+            Scalar::Utf8(s) => s
+                .parse::<f64>()
+                .map(Scalar::Float64)
+                .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Utf8 => Ok(Scalar::Utf8(scalar_to_string_for_astype(value))),
@@ -1210,11 +1214,13 @@ impl Timedelta {
 
             // Per br-frankenpandas-i9bah: check if remaining is a time format
             // (HH:MM:SS) which can appear after "N days " in pandas timedelta strings.
-            if remaining.contains(':') {
-                if let Some(time_nanos) = Self::try_parse_time_format(remaining) {
-                    total = total.checked_add(time_nanos).ok_or(TimedeltaError::Overflow)?;
-                    break;
-                }
+            if remaining.contains(':')
+                && let Some(time_nanos) = Self::try_parse_time_format(remaining)
+            {
+                total = total
+                    .checked_add(time_nanos)
+                    .ok_or(TimedeltaError::Overflow)?;
+                break;
             }
 
             let num_end = remaining

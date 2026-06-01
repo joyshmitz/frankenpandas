@@ -2958,7 +2958,7 @@ impl Column {
         if start >= self.values.len() {
             return Self::new(self.dtype, Vec::new());
         }
-        let end = (start + len).min(self.values.len());
+        let end = start.saturating_add(len).min(self.values.len());
         let values = self.values[start..end].to_vec();
         Self::new(self.dtype, values)
     }
@@ -9741,6 +9741,15 @@ mod tests {
         }
 
         #[test]
+        fn slice_huge_len_clamps_without_overflow() {
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
+            let tail = col.slice(1, usize::MAX).expect("slice");
+            assert_eq!(tail.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+        }
+
+        #[test]
         fn head_returns_first_n_values() {
             let col = Column::from_values(vec![
                 Scalar::Int64(10),
@@ -13544,9 +13553,9 @@ mod tests {
         use super::ColumnData;
         let values = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
         let data = ColumnData::from_scalars(&values, DType::Int64Nullable);
-        match data {
-            ColumnData::Int64(arr) => assert_eq!(arr, vec![1, 2, 3]),
-            _ => panic!("expected Int64 storage"),
+        assert!(matches!(&data, ColumnData::Int64(_)));
+        if let ColumnData::Int64(arr) = data {
+            assert_eq!(arr, vec![1, 2, 3]);
         }
     }
 }

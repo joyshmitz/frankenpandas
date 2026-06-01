@@ -82,11 +82,17 @@ fn build_join_frames(n: usize) -> (DataFrame, DataFrame) {
 
     let mut left_cols = BTreeMap::new();
     left_cols.insert("key".to_string(), Column::from_values(left_keys).unwrap());
-    left_cols.insert("left_val".to_string(), Column::from_values(left_vals).unwrap());
+    left_cols.insert(
+        "left_val".to_string(),
+        Column::from_values(left_vals).unwrap(),
+    );
 
     let mut right_cols = BTreeMap::new();
     right_cols.insert("key".to_string(), Column::from_values(right_keys).unwrap());
-    right_cols.insert("right_val".to_string(), Column::from_values(right_vals).unwrap());
+    right_cols.insert(
+        "right_val".to_string(),
+        Column::from_values(right_vals).unwrap(),
+    );
 
     let left = DataFrame::new_with_column_order(
         left_index,
@@ -115,7 +121,9 @@ fn build_csv_string(n: usize, cols: usize) -> String {
     csv.push_str(&header.join(","));
     csv.push('\n');
     for i in 0..n {
-        let row: Vec<String> = (0..cols).map(|c| format!("{}", (i * (c + 1)) as f64 * 0.1)).collect();
+        let row: Vec<String> = (0..cols)
+            .map(|c| format!("{}", (i * (c + 1)) as f64 * 0.1))
+            .collect();
         csv.push_str(&row.join(","));
         csv.push('\n');
     }
@@ -179,7 +187,10 @@ fn bench_df_sort_multi(c: &mut Criterion) {
     for &n in SIZES {
         let frame = build_numeric_frame(n, 10);
         group.bench_with_input(BenchmarkId::new("rows", n), &frame, |b, f| {
-            b.iter(|| f.sort_values_multi(&["c0", "c1"], &[true, false], "last").expect("sort_multi"))
+            b.iter(|| {
+                f.sort_values_multi(&["c0", "c1"], &[true, false], "last")
+                    .expect("sort_multi")
+            })
         });
     }
     group.finish();
@@ -202,7 +213,10 @@ fn bench_df_drop_duplicates(c: &mut Criterion) {
     for &n in SIZES {
         let frame = build_groupby_frame(n, 100);
         group.bench_with_input(BenchmarkId::new("rows", n), &frame, |b, f| {
-            b.iter(|| f.drop_duplicates(None, DuplicateKeep::First, false).expect("dedup"))
+            b.iter(|| {
+                f.drop_duplicates(None, DuplicateKeep::First, false)
+                    .expect("dedup")
+            })
         });
     }
     group.finish();
@@ -277,7 +291,12 @@ fn bench_groupby_ngroup(c: &mut Criterion) {
     for &n in SIZES {
         let frame = build_groupby_frame(n, 100);
         group.bench_with_input(BenchmarkId::new("rows", n), &frame, |b, f| {
-            b.iter(|| f.groupby(&["k"]).expect("groupby").ngroup().expect("ngroup"))
+            b.iter(|| {
+                f.groupby(&["k"])
+                    .expect("groupby")
+                    .ngroup()
+                    .expect("ngroup")
+            })
         });
     }
     group.finish();
@@ -293,8 +312,7 @@ fn bench_join_inner(c: &mut Criterion) {
         let (left, right) = build_join_frames(n);
         group.bench_with_input(BenchmarkId::new("rows", n), &(left, right), |b, (l, r)| {
             b.iter(|| {
-                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Inner)
-                    .expect("inner")
+                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Inner).expect("inner")
             })
         });
     }
@@ -307,8 +325,7 @@ fn bench_join_left(c: &mut Criterion) {
         let (left, right) = build_join_frames(n);
         group.bench_with_input(BenchmarkId::new("rows", n), &(left, right), |b, (l, r)| {
             b.iter(|| {
-                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Left)
-                    .expect("left")
+                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Left).expect("left")
             })
         });
     }
@@ -321,8 +338,7 @@ fn bench_join_outer(c: &mut Criterion) {
         let (left, right) = build_join_frames(n);
         group.bench_with_input(BenchmarkId::new("rows", n), &(left, right), |b, (l, r)| {
             b.iter(|| {
-                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Outer)
-                    .expect("outer")
+                merge_dataframes_on_with(l, r, &["key"], &["key"], JoinType::Outer).expect("outer")
             })
         });
     }
@@ -410,7 +426,10 @@ fn bench_iloc_slice(c: &mut Criterion) {
     for &n in SIZES {
         let frame = build_numeric_frame(n, 10);
         group.bench_with_input(BenchmarkId::new("rows", n), &frame, |b, f| {
-            b.iter(|| f.iloc_slice(Some(100), Some((n - 100) as i64)).expect("iloc_slice"))
+            b.iter(|| {
+                f.iloc_slice(Some(100), Some((n - 100) as i64))
+                    .expect("iloc_slice")
+            })
         });
     }
     group.finish();
@@ -420,10 +439,14 @@ fn bench_loc_labels(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexing/loc_labels");
     for &n in SIZES {
         let frame = build_numeric_frame(n, 10);
-        let labels: Vec<IndexLabel> = (0..1000).map(|i| IndexLabel::Int64((i * 10) as i64)).collect();
-        group.bench_with_input(BenchmarkId::new("rows", n), &(frame, labels), |b, (f, lbl)| {
-            b.iter(|| f.loc(lbl).expect("loc"))
-        });
+        let labels: Vec<IndexLabel> = (0..1000)
+            .map(|i| IndexLabel::Int64((i * 10) as i64))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("rows", n),
+            &(frame, labels),
+            |b, (f, lbl)| b.iter(|| f.loc(lbl).expect("loc")),
+        );
     }
     group.finish();
 }
@@ -433,9 +456,11 @@ fn bench_at_scalar(c: &mut Criterion) {
     for &n in SIZES {
         let series = build_series(n);
         let label = IndexLabel::Int64((n / 2) as i64);
-        group.bench_with_input(BenchmarkId::new("rows", n), &(series, label.clone()), |b, (s, lbl)| {
-            b.iter(|| s.at(lbl).expect("at"))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("rows", n),
+            &(series, label.clone()),
+            |b, (s, lbl)| b.iter(|| s.at(lbl).expect("at")),
+        );
     }
     group.finish();
 }
@@ -447,9 +472,11 @@ fn bench_reindex(c: &mut Criterion) {
         let new_labels: Vec<IndexLabel> = (0..n)
             .map(|i| IndexLabel::Int64(((i * 3) % (n * 2)) as i64))
             .collect();
-        group.bench_with_input(BenchmarkId::new("rows", n), &(series, new_labels), |b, (s, lbl)| {
-            b.iter(|| s.reindex(lbl.clone()).expect("reindex"))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("rows", n),
+            &(series, new_labels),
+            |b, (s, lbl)| b.iter(|| s.reindex(lbl.clone()).expect("reindex")),
+        );
     }
     group.finish();
 }

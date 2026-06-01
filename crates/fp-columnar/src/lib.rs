@@ -13524,9 +13524,8 @@ mod tests {
 
     #[test]
     fn column_promote_to_nullable_noop_without_nulls() {
-        let col =
-            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
-                .unwrap();
+        let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+            .unwrap();
         let promoted = col.promote_to_nullable();
         // No nulls, so dtype stays Int64
         assert_eq!(promoted.dtype(), DType::Int64);

@@ -123,7 +123,6 @@ pub use fp_io::{
     DEFAULT_HDF5_KEY,
     // Extension trait
     DataFrameIoExt,
-    SeriesIoExt,
     // Excel
     ExcelReadOptions,
     ExcelWriteOptions,
@@ -142,6 +141,7 @@ pub use fp_io::{
     PickleProtocol,
     PickleReadOptions,
     PickleWriteOptions,
+    SeriesIoExt,
     // SQL
     SqlBackendCaps,
     SqlChunkIterator,

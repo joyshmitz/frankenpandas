@@ -2,8 +2,7 @@
 //!
 //! Run: cargo run --release -p fp-conformance --example bench_runner
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
@@ -60,7 +59,9 @@ fn build_csv_string(n: usize, cols: usize) -> String {
     csv.push_str(&header.join(","));
     csv.push('\n');
     for i in 0..n {
-        let row: Vec<String> = (0..cols).map(|c| format!("{}", (i * (c + 1)) as f64 * 0.1)).collect();
+        let row: Vec<String> = (0..cols)
+            .map(|c| format!("{}", (i * (c + 1)) as f64 * 0.1))
+            .collect();
         csv.push_str(&row.join(","));
         csv.push('\n');
     }
@@ -89,7 +90,10 @@ impl BenchResult {
     fn p99_ns(&self) -> u128 {
         let mut sorted: Vec<_> = self.times_ns.clone();
         sorted.sort();
-        sorted.get((sorted.len() as f64 * 0.99) as usize).copied().unwrap_or(sorted[sorted.len() - 1])
+        sorted
+            .get((sorted.len() as f64 * 0.99) as usize)
+            .copied()
+            .unwrap_or(sorted[sorted.len() - 1])
     }
 
     fn to_json(&self) -> String {
@@ -144,7 +148,9 @@ fn main() {
         // IO benchmarks
         let csv_str = build_csv_string(n, 10);
         let csv_str_clone = csv_str.clone();
-        results.push(bench("io/csv_read", n, || read_csv_str(&csv_str_clone).unwrap()));
+        results.push(bench("io/csv_read", n, || {
+            read_csv_str(&csv_str_clone).unwrap()
+        }));
 
         let frame = build_numeric_frame(n, 10);
         let frame_clone = frame.clone();
@@ -153,15 +159,21 @@ fn main() {
         // DataFrame ops
         let frame = build_numeric_frame(n, 10);
         let frame_clone = frame.clone();
-        results.push(bench("dataframe_ops/sort_single", n, || frame_clone.sort_values("c0", true).unwrap()));
-
-        let frame_clone = frame.clone();
-        results.push(bench("dataframe_ops/drop_duplicates", n, || {
-            frame_clone.drop_duplicates(None, fp_index::DuplicateKeep::First, false).unwrap()
+        results.push(bench("dataframe_ops/sort_single", n, || {
+            frame_clone.sort_values("c0", true).unwrap()
         }));
 
         let frame_clone = frame.clone();
-        results.push(bench("dataframe_ops/cumsum", n, || frame_clone.cumsum().unwrap()));
+        results.push(bench("dataframe_ops/drop_duplicates", n, || {
+            frame_clone
+                .drop_duplicates(None, fp_index::DuplicateKeep::First, false)
+                .unwrap()
+        }));
+
+        let frame_clone = frame.clone();
+        results.push(bench("dataframe_ops/cumsum", n, || {
+            frame_clone.cumsum().unwrap()
+        }));
 
         // GroupBy
         let frame = build_groupby_frame(n, 100);
@@ -191,7 +203,9 @@ fn main() {
         let frame = build_numeric_frame(n, 10);
         let frame_clone = frame.clone();
         results.push(bench("indexing/iloc_slice", n, || {
-            frame_clone.iloc_slice(Some(100), Some((n - 100) as i64)).unwrap()
+            frame_clone
+                .iloc_slice(Some(100), Some((n - 100) as i64))
+                .unwrap()
         }));
 
         let series = build_series(n);
@@ -210,10 +224,13 @@ fn main() {
     println!("    \"library\": \"frankenpandas\",");
     println!("    \"version\": \"0.1.0\",");
     println!("    \"rust_version\": \"nightly\",");
-    println!("    \"timestamp\": \"{}\"", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs());
+    println!(
+        "    \"timestamp\": \"{}\"",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
     println!("  }},");
     println!("  \"results\": [");
     for (i, r) in results.iter().enumerate() {

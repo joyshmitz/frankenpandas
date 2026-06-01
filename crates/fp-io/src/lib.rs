@@ -2669,7 +2669,11 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
                 Scalar::Null(_) | Scalar::Int64(_) | Scalar::Float64(_) => {
                     parsed_values.push(None);
                 }
-                Scalar::Bool(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
+                Scalar::Bool(_)
+                | Scalar::Timedelta64(_)
+                | Scalar::Datetime64(_)
+                | Scalar::Period(_)
+                | Scalar::Interval(_) => {
                     saw_text_float = false;
                     parsed_values.clear();
                     break;
@@ -2798,7 +2802,12 @@ fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
             Scalar::Int64(_) => saw_int = true,
             Scalar::Float64(_) => saw_float = true,
             Scalar::Null(_) => {}
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
+            Scalar::Bool(_)
+            | Scalar::Utf8(_)
+            | Scalar::Timedelta64(_)
+            | Scalar::Datetime64(_)
+            | Scalar::Period(_)
+            | Scalar::Interval(_) => {
                 return false;
             }
         }
@@ -8325,9 +8334,7 @@ fn scalar_to_mysql_value(s: &Scalar) -> mysql::Value {
 fn mysql_value_to_scalar(v: Option<mysql::Value>) -> Scalar {
     match v {
         None | Some(mysql::Value::NULL) => Scalar::Null(crate::NullKind::Null),
-        Some(mysql::Value::Bytes(b)) => {
-            Scalar::Utf8(String::from_utf8_lossy(&b).into_owned())
-        }
+        Some(mysql::Value::Bytes(b)) => Scalar::Utf8(String::from_utf8_lossy(&b).into_owned()),
         Some(mysql::Value::Int(i)) => Scalar::Int64(i),
         Some(mysql::Value::UInt(u)) => Scalar::Int64(u as i64),
         Some(mysql::Value::Float(f)) => Scalar::Float64(f as f64),
@@ -10819,10 +10826,7 @@ pub trait SeriesIoExt {
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
 
     /// Serialize this Series to xlsx bytes with explicit options.
-    fn to_excel_bytes_with_options(
-        &self,
-        options: &ExcelWriteOptions,
-    ) -> Result<Vec<u8>, IoError>;
+    fn to_excel_bytes_with_options(&self, options: &ExcelWriteOptions) -> Result<Vec<u8>, IoError>;
 
     /// Write this Series to a SQL table.
     ///
@@ -10993,10 +10997,7 @@ impl SeriesIoExt for Series {
         write_excel_bytes(&self.to_frame(None)?)
     }
 
-    fn to_excel_bytes_with_options(
-        &self,
-        options: &ExcelWriteOptions,
-    ) -> Result<Vec<u8>, IoError> {
+    fn to_excel_bytes_with_options(&self, options: &ExcelWriteOptions) -> Result<Vec<u8>, IoError> {
         write_excel_bytes_with_options(&self.to_frame(None)?, options)
     }
 
@@ -11720,10 +11721,12 @@ mod tests {
         let options = PickleWriteOptions {
             protocol: PickleProtocol::V2,
         };
-        assert!(!source
-            .to_pickle_bytes_with_options(&options)
-            .expect("series pickle protocol v2")
-            .is_empty());
+        assert!(
+            !source
+                .to_pickle_bytes_with_options(&options)
+                .expect("series pickle protocol v2")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -11816,9 +11819,7 @@ mod tests {
         };
 
         assert_eq!(
-            source
-                .to_markdown_string()
-                .expect("series markdown string"),
+            source.to_markdown_string().expect("series markdown string"),
             write_markdown_string(&source.to_frame(None).expect("series frame"))
                 .expect("frame markdown string")
         );
@@ -13927,10 +13928,7 @@ mod tests {
 
         let columns_json: serde_json::Value =
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Columns).unwrap()).unwrap();
-        assert_eq!(
-            columns_json,
-            serde_json::json!({"a": {"0": 1, "1": null}})
-        );
+        assert_eq!(columns_json, serde_json::json!({"a": {"0": 1, "1": null}}));
 
         let index_json: serde_json::Value =
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Index).unwrap()).unwrap();
@@ -14013,10 +14011,7 @@ mod tests {
         );
         assert!(frame.column("id").is_none());
         assert!(frame.column("val").unwrap().values()[0].is_missing());
-        assert_eq!(
-            frame.column("val").unwrap().values()[1],
-            Scalar::Int64(2)
-        );
+        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Int64(2));
 
         std::fs::remove_file(&path).ok();
     }
@@ -16122,9 +16117,19 @@ mod tests {
 
         fn dtype_sql(&self, dtype: DType) -> &'static str {
             match dtype {
-                DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable | DType::Timedelta64 | DType::Datetime64 => "BIGINT",
+                DType::Int64
+                | DType::Int64Nullable
+                | DType::Bool
+                | DType::BoolNullable
+                | DType::Timedelta64
+                | DType::Datetime64 => "BIGINT",
                 DType::Float64 => "DOUBLE PRECISION",
-                DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse | DType::Period | DType::Interval => "TEXT",
+                DType::Utf8
+                | DType::Categorical
+                | DType::Null
+                | DType::Sparse
+                | DType::Period
+                | DType::Interval => "TEXT",
             }
         }
 
@@ -19339,10 +19344,7 @@ mod tests {
 
         assert_eq!(
             rows,
-            vec![
-                serde_json::json!({"a": 1}),
-                serde_json::json!({"a": null})
-            ]
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": null})]
         );
     }
 

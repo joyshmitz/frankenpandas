@@ -20,9 +20,11 @@ use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
-use pyo3::IntoPyObjectExt;
+use pyo3::{
+    IntoPyObjectExt,
+    prelude::*,
+    types::{PyDict, PyList},
+};
 
 /// Convert a Python value to a FrankenPandas Scalar.
 fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
@@ -41,9 +43,10 @@ fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Scalar::Utf8(s));
     }
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-        format!("Cannot convert {} to Scalar", obj.get_type().name()?),
-    ))
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot convert {} to Scalar",
+        obj.get_type().name()?
+    )))
 }
 
 /// Convert a FrankenPandas Scalar to a Python object.
@@ -234,9 +237,7 @@ impl PyDataFrame {
             columns.insert(col_name, column);
         }
 
-        let labels: Vec<IndexLabel> = (0..n_rows)
-            .map(|i| IndexLabel::Int64(i as i64))
-            .collect();
+        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
         let index = Index::new(labels);
 
         let df = DataFrame::new_with_column_order(index, columns, column_order)

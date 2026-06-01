@@ -1013,11 +1013,19 @@ pub fn merge_dataframes_on_with_options(
         validate_merge_cardinality(validate_mode, &left_keys, &right_keys)?;
     }
 
-    // Build hash map from right key → row positions.
-    let mut right_map = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
-    for (pos, key) in right_keys.iter().enumerate() {
-        right_map.entry(key).or_default().push(pos);
-    }
+    // Build only the probe maps required by the selected join direction.
+    let right_map = if matches!(
+        join_type,
+        JoinType::Inner | JoinType::Left | JoinType::Outer
+    ) {
+        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
+        for (pos, key) in right_keys.iter().enumerate() {
+            m.entry(key).or_default().push(pos);
+        }
+        Some(m)
+    } else {
+        None
+    };
 
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
         let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
@@ -1036,6 +1044,9 @@ pub fn merge_dataframes_on_with_options(
 
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Outer => {
+            let right_map = right_map
+                .as_ref()
+                .expect("right_map required for Inner, Left, and Outer joins");
             for (left_pos, key) in left_keys.iter().enumerate() {
                 if let Some(matches) = right_map.get(key) {
                     for &right_pos in matches {

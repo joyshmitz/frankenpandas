@@ -1151,7 +1151,60 @@ impl MaterializedView {
     fn is_linear(expr: &Expr) -> bool {
         let mut series_set = std::collections::BTreeSet::new();
         Self::extract_series(expr, &mut series_set);
-        series_set.len() == 1
+        series_set.len() == 1 && Self::is_append_local(expr)
+    }
+
+    fn is_append_local(expr: &Expr) -> bool {
+        match expr {
+            Expr::Series { .. } | Expr::Local { .. } | Expr::Literal { .. } => true,
+            Expr::Add { left, right }
+            | Expr::Sub { left, right }
+            | Expr::Mul { left, right }
+            | Expr::Div { left, right }
+            | Expr::Modulo { left, right }
+            | Expr::FloorDiv { left, right }
+            | Expr::Pow { left, right }
+            | Expr::And { left, right }
+            | Expr::Or { left, right }
+            | Expr::Compare { left, right, .. } => {
+                Self::is_append_local(left) && Self::is_append_local(right)
+            }
+            Expr::Not { expr }
+            | Expr::Abs { expr }
+            | Expr::Round { expr, .. }
+            | Expr::IsNull { expr, .. }
+            | Expr::FillNa { expr, .. }
+            | Expr::Replace { expr, .. }
+            | Expr::Astype { expr, .. }
+            | Expr::Between { expr, .. }
+            | Expr::Clip { expr, .. }
+            | Expr::IsIn { left: expr, .. } => Self::is_append_local(expr),
+            Expr::Where {
+                expr, cond, other, ..
+            } => {
+                Self::is_append_local(expr)
+                    && Self::is_append_local(cond)
+                    && other.as_deref().is_none_or(Self::is_append_local)
+            }
+            Expr::DropNa { .. }
+            | Expr::SortValues { .. }
+            | Expr::SortIndex { .. }
+            | Expr::ArgSort { .. }
+            | Expr::Mode { .. }
+            | Expr::Duplicated { .. }
+            | Expr::DropDuplicates { .. }
+            | Expr::HeadTail { .. }
+            | Expr::TopN { .. }
+            | Expr::CombineFirst { .. }
+            | Expr::Rank { .. }
+            | Expr::Shift { .. }
+            | Expr::Diff { .. }
+            | Expr::CumSum { .. }
+            | Expr::CumProd { .. }
+            | Expr::CumMin { .. }
+            | Expr::CumMax { .. }
+            | Expr::PctChange { .. } => false,
+        }
     }
 }
 
@@ -4998,6 +5051,88 @@ mod tests {
     }
 
     #[test]
+    fn ivm_falls_back_for_cumulative_expressions() {
+        let a = make_series("a", vec![0, 1], vec![Scalar::Int64(1), Scalar::Int64(2)]);
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+
+        let expr = Expr::CumSum {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &ctx, &policy, &mut ledger).expect("base");
+        assert_eq!(view.result.values(), &[Scalar::Int64(1), Scalar::Int64(3)]);
+
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Int64(3)],
+        };
+        ctx.insert_series(make_series(
+            "a",
+            vec![0, 1, 2],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ));
+
+        view.apply_delta(&delta, &ctx, &policy, &mut ledger)
+            .expect("delta");
+
+        let full_result = evaluate(&expr, &ctx, &policy, &mut ledger).expect("full");
+        assert_eq!(view.result.values(), full_result.values());
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(6)]
+        );
+    }
+
+    #[test]
+    fn ivm_falls_back_for_order_dependent_expressions() {
+        let a = make_series("a", vec![0, 1], vec![Scalar::Int64(2), Scalar::Int64(1)]);
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+
+        let expr = Expr::SortValues {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            ascending: true,
+            na_position: "last".into(),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &ctx, &policy, &mut ledger).expect("base");
+        assert_eq!(view.result.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Int64(0)],
+        };
+        ctx.insert_series(make_series(
+            "a",
+            vec![0, 1, 2],
+            vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(0)],
+        ));
+
+        view.apply_delta(&delta, &ctx, &policy, &mut ledger)
+            .expect("delta");
+
+        let full_result = evaluate(&expr, &ctx, &policy, &mut ledger).expect("full");
+        assert_eq!(view.result.values(), full_result.values());
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
     fn ivm_is_linear_detects_expressions() {
         assert!(MaterializedView::is_linear(&Expr::Series {
             name: SeriesRef("a".into()),
@@ -5108,6 +5243,18 @@ mod tests {
         }));
         assert!(!MaterializedView::is_linear(&Expr::Literal {
             value: Scalar::Int64(42),
+        }));
+        assert!(!MaterializedView::is_linear(&Expr::CumSum {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+        }));
+        assert!(!MaterializedView::is_linear(&Expr::SortValues {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            ascending: true,
+            na_position: "last".into(),
         }));
     }
 

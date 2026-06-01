@@ -789,6 +789,12 @@ fn sort_merge_rows_by_join_keys(
     reorder_vec_by_index(right_positions, &order);
 }
 
+fn push_merge_row_key(out_row_keys: &mut Option<Vec<CompositeJoinKey>>, key: &CompositeJoinKey) {
+    if let Some(out_row_keys) = out_row_keys {
+        out_row_keys.push(key.clone());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedMergeSuffixes {
     left: Option<String>,
@@ -1040,7 +1046,8 @@ pub fn merge_dataframes_on_with_options(
     // Compute row position mappings.
     let mut left_positions = Vec::<Option<usize>>::new();
     let mut right_positions = Vec::<Option<usize>>::new();
-    let mut out_row_keys = Vec::<CompositeJoinKey>::new();
+    let needs_key_order = sort || matches!(join_type, JoinType::Outer);
+    let mut out_row_keys = needs_key_order.then(Vec::<CompositeJoinKey>::new);
 
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Outer => {
@@ -1050,7 +1057,7 @@ pub fn merge_dataframes_on_with_options(
             for (left_pos, key) in left_keys.iter().enumerate() {
                 if let Some(matches) = right_map.get(key) {
                     for &right_pos in matches {
-                        out_row_keys.push(key.clone());
+                        push_merge_row_key(&mut out_row_keys, key);
                         left_positions.push(Some(left_pos));
                         right_positions.push(Some(right_pos));
                     }
@@ -1058,7 +1065,7 @@ pub fn merge_dataframes_on_with_options(
                 }
 
                 if matches!(join_type, JoinType::Left | JoinType::Outer) {
-                    out_row_keys.push(key.clone());
+                    push_merge_row_key(&mut out_row_keys, key);
                     left_positions.push(Some(left_pos));
                     right_positions.push(None);
                 }
@@ -1068,7 +1075,7 @@ pub fn merge_dataframes_on_with_options(
                 let left_map = left_map.as_ref().expect("left_map required for Outer join");
                 for (right_pos, key) in right_keys.iter().enumerate() {
                     if !left_map.contains_key(key) {
-                        out_row_keys.push(key.clone());
+                        push_merge_row_key(&mut out_row_keys, key);
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
                     }
@@ -1080,14 +1087,14 @@ pub fn merge_dataframes_on_with_options(
             for (right_pos, key) in right_keys.iter().enumerate() {
                 if let Some(matches) = left_map.get(key) {
                     for &left_pos in matches {
-                        out_row_keys.push(key.clone());
+                        push_merge_row_key(&mut out_row_keys, key);
                         left_positions.push(Some(left_pos));
                         right_positions.push(Some(right_pos));
                     }
                     continue;
                 }
 
-                out_row_keys.push(key.clone());
+                push_merge_row_key(&mut out_row_keys, key);
                 left_positions.push(None);
                 right_positions.push(Some(right_pos));
             }
@@ -1099,8 +1106,11 @@ pub fn merge_dataframes_on_with_options(
         }
     }
 
-    if sort || matches!(join_type, JoinType::Outer) {
-        sort_merge_rows_by_join_keys(&out_row_keys, &mut left_positions, &mut right_positions);
+    if needs_key_order {
+        let out_row_keys = out_row_keys
+            .as_ref()
+            .expect("merge row keys required when sorting output rows");
+        sort_merge_rows_by_join_keys(out_row_keys, &mut left_positions, &mut right_positions);
     }
 
     // Build output columns by reindexing.

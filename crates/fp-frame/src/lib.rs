@@ -548,6 +548,28 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
                 (sum_sq / (vals.len() as f64 - 1.0)).sqrt()
             }
         }
+        // Distinct count. `vals` is already null-free (the caller drops values
+        // that fail `to_f64()`), so this matches pandas `nunique` (NaN-excluding).
+        "nunique" => {
+            let mut seen = std::collections::HashSet::with_capacity(vals.len());
+            for v in vals {
+                seen.insert(v.to_bits());
+            }
+            seen.len() as f64
+        }
+        // Delegate sem/skew to the audited fp_types kernels rather than inlining
+        // the formula (an inline groupby copy of skew/kurtosis was the f4dc5540
+        // bug). nansem(ddof=1) = std/sqrt(n); nanskew = adjusted Fisher-Pearson
+        // G1. Both return NaN below their min sample size, matching pandas.
+        "sem" | "skew" => {
+            let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
+            let agg = if aggfunc == "sem" {
+                fp_types::nansem(&scalars, 1)
+            } else {
+                fp_types::nanskew(&scalars)
+            };
+            agg.to_f64().unwrap_or(f64::NAN)
+        }
         _ => {
             return Err(FrameError::CompatibilityRejected(format!(
                 "pivot_table aggfunc '{aggfunc}' not supported"
@@ -55332,6 +55354,79 @@ mod tests {
         assert!((r2_c1 - 8.0_f64.sqrt()).abs() < 1e-10);
         assert!((r2_c2 - 2.0_f64.sqrt()).abs() < 1e-10);
         assert!(pivoted.columns["c2"].values()[0].is_missing());
+    }
+
+    fn dataframe_pivot_agg_fixture(vals: Vec<Scalar>) -> DataFrame {
+        let rows: Vec<Scalar> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Scalar::Utf8(if i < 3 { "g1" } else { "g2" }.into()))
+            .collect();
+        let positions: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::from).collect();
+        DataFrame::from_series(vec![
+            Series::from_values("row", positions.clone(), rows).unwrap(),
+            Series::from_values(
+                "col",
+                positions.clone(),
+                vec![Scalar::Utf8("c".into()); vals.len()],
+            )
+            .unwrap(),
+            Series::from_values("val", positions, vals).unwrap(),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn dataframe_pivot_table_nunique_counts_distinct_values() {
+        // g1=[1,2,4] -> 3 distinct; g2=[5,5] -> 1 distinct (live pandas 2.2.3).
+        let df = dataframe_pivot_agg_fixture(vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(5.0),
+        ]);
+        let pivoted = df.pivot_table("val", "row", "col", "nunique").unwrap();
+        assert_eq!(pivoted.columns["c"].values()[0].to_f64().unwrap(), 3.0);
+        assert_eq!(pivoted.columns["c"].values()[1].to_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn dataframe_pivot_table_sem_matches_pandas() {
+        // sem = std(ddof=1)/sqrt(n). g1=[1,2,4] -> 0.8819171036881968;
+        // g2=[5,5] -> 0.0 (live pandas 2.2.3).
+        let df = dataframe_pivot_agg_fixture(vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(5.0),
+        ]);
+        let pivoted = df.pivot_table("val", "row", "col", "sem").unwrap();
+        let g1 = pivoted.columns["c"].values()[0].to_f64().unwrap();
+        let g2 = pivoted.columns["c"].values()[1].to_f64().unwrap();
+        assert!((g1 - 0.881_917_103_688_196_8).abs() < 1e-12);
+        assert_eq!(g2, 0.0);
+    }
+
+    #[test]
+    fn dataframe_pivot_table_skew_matches_pandas() {
+        // Adjusted Fisher-Pearson G1; scale/location invariant, so [1,2,4] and
+        // [10,20,40] both give 0.9352195295828247 (live pandas 2.2.3). Both
+        // groups kept at n>=3 so neither row is dropped by pivot dropna.
+        let df = dataframe_pivot_agg_fixture(vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(40.0),
+        ]);
+        let pivoted = df.pivot_table("val", "row", "col", "skew").unwrap();
+        let g1 = pivoted.columns["c"].values()[0].to_f64().unwrap();
+        let g2 = pivoted.columns["c"].values()[1].to_f64().unwrap();
+        assert!((g1 - 0.935_219_529_582_824_7).abs() < 1e-12);
+        assert!((g2 - 0.935_219_529_582_824_7).abs() < 1e-12);
     }
 
     #[test]

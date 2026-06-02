@@ -15727,31 +15727,66 @@ fn rank_numeric_positions(
         i = j;
     }
 
-    match na_option {
-        "keep" => {}
-        "top" => {
-            let null_count = null_positions.len();
+    // When na_option != "keep", the null values are themselves ranked as a
+    // single tied group placed below ("top") or above ("bottom") the non-null
+    // values, and the chosen method applies to that tied group too (pandas
+    // 2.2.3). The group occupies `null_count` consecutive positions for the
+    // continuous methods (average/min/max/first) and a single dense rank for
+    // "dense"; the non-null ranks shift to make room (by `null_count` for the
+    // continuous methods, by one group for "dense").
+    if na_option != "keep" && !null_positions.is_empty() {
+        let null_count = null_positions.len();
+        let non_null_count = sortable.len();
+        let is_dense = method == "dense";
+
+        if na_option == "top" {
+            let shift = if is_dense { 1.0 } else { null_count as f64 };
             for rank in &mut ranks {
                 if !rank.is_nan() {
-                    *rank += null_count as f64;
+                    *rank += shift;
                 }
             }
-            for (i, &pos) in null_positions.iter().enumerate() {
-                ranks[pos] = (i + 1) as f64;
-            }
         }
-        "bottom" => {
-            let non_null_count = sortable.len();
-            for (i, &pos) in null_positions.iter().enumerate() {
-                ranks[pos] = (non_null_count + i + 1) as f64;
-            }
+
+        // Base rank just below the null group: 0 for "top" (group starts at 1),
+        // `non_null_count` for "bottom" (group starts after the non-null ranks).
+        let base = if na_option == "bottom" {
+            non_null_count as f64
+        } else {
+            0.0
+        };
+        let nc = null_count as f64;
+        for (i, &pos) in null_positions.iter().enumerate() {
+            ranks[pos] = match method {
+                "average" => base + (1.0 + nc) / 2.0,
+                "min" => base + 1.0,
+                "max" => base + nc,
+                "first" => base + (i + 1) as f64,
+                "dense" => {
+                    if na_option == "top" {
+                        1.0
+                    } else {
+                        (distinct_non_null + 1) as f64
+                    }
+                }
+                _ => unreachable!("rank method should be validated before ranking"),
+            };
         }
-        _ => unreachable!("rank na_option should be validated before ranking"),
     }
 
     if pct {
+        // When na_option != "keep" the nulls are assigned ranks too, so they
+        // occupy slots in the percentile denominator: the continuous methods
+        // divide by the full length, and "dense" gains one extra group for the
+        // null bucket. With na_option == "keep" (or no nulls) the denominator
+        // is the non-null count / distinct non-null count. Verified against
+        // pandas 2.2.3 (e.g. rank(method='average', na_option='top', pct=True)
+        // on [2.0, NaN, 1.0] -> [1.0, 1/3, 2/3], not [1.5, 0.5, 1.0]).
+        let nulls_ranked = na_option != "keep" && !null_positions.is_empty();
         let divisor = if method == "dense" {
-            distinct_non_null
+            distinct_non_null + usize::from(nulls_ranked)
+        } else if nulls_ranked {
+            len
         } else {
             sortable.len()
         };
@@ -53915,7 +53950,11 @@ mod tests {
     }
 
     #[test]
-    fn series_rank_pct_top_uses_non_null_denominator() {
+    fn series_rank_pct_top_includes_ranked_nulls_in_denominator() {
+        // With na_option != "keep" the null is ranked, so the percentile
+        // denominator is the full length (3), not the non-null count (2).
+        // Verified against pandas 2.2.3: pd.Series([2.0, NaN, 1.0]).rank(
+        //   method='average', na_option='top', pct=True) -> [1.0, 1/3, 2/3].
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -53928,9 +53967,116 @@ mod tests {
         .unwrap();
 
         let ranked = s.rank_with_pct("average", true, "top", true).unwrap();
-        assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.5).abs() < 1e-12));
-        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
-        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - 1.0 / 3.0).abs() < 1e-12));
+        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - 2.0 / 3.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn series_rank_pct_na_option_denominator_matches_pandas() {
+        // pandas 2.2.3 ground truth for [3, 1, 1, NaN, 2]:
+        //   average/top    -> [1.0, 0.5, 0.5, 0.2, 0.8]      (÷ 5 = full len)
+        //   dense/top      -> [1.0, 0.5, 0.5, 0.25, 0.75]    (÷ 4 = distinct+1)
+        //   average/bottom -> [0.8, 0.3, 0.3, 1.0, 0.6]      (÷ 5)
+        //   dense/bottom   -> [0.75, 0.25, 0.25, 1.0, 0.5]   (÷ 4)
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let f = |v: &Scalar| match v {
+            Scalar::Float64(x) => *x,
+            other => panic!("expected float, got {other:?}"),
+        };
+        let close = |got: Vec<f64>, want: [f64; 5]| {
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert!((g - w).abs() < 1e-12, "got {got:?} want {want:?}");
+            }
+        };
+        let collect = |s: Series| s.values().iter().map(f).collect::<Vec<_>>();
+        close(
+            collect(s.rank_with_pct("average", true, "top", true).unwrap()),
+            [1.0, 0.5, 0.5, 0.2, 0.8],
+        );
+        close(
+            collect(s.rank_with_pct("dense", true, "top", true).unwrap()),
+            [1.0, 0.5, 0.5, 0.25, 0.75],
+        );
+        close(
+            collect(s.rank_with_pct("average", true, "bottom", true).unwrap()),
+            [0.8, 0.3, 0.3, 1.0, 0.6],
+        );
+        close(
+            collect(s.rank_with_pct("dense", true, "bottom", true).unwrap()),
+            [0.75, 0.25, 0.25, 1.0, 0.5],
+        );
+    }
+
+    #[test]
+    fn series_rank_na_option_multi_null_matches_pandas() {
+        // Two nulls form ONE tied group; the method applies to that group.
+        // pandas 2.2.3 ground truth for [3, NaN, 1, NaN, 2] (ascending):
+        //   dense/top      -> [4, 1, 2, 1, 3]       (nulls share dense rank 1)
+        //   dense/bottom   -> [3, 4, 1, 4, 2]       (nulls share dense rank distinct+1)
+        //   average/top    -> [5, 1.5, 3, 1.5, 4]   (null group averaged over ranks 1..2)
+        //   average/bottom -> [3, 4.5, 1, 4.5, 2]   (null group averaged over ranks 4..5)
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let f = |v: &Scalar| match v {
+            Scalar::Float64(x) => *x,
+            other => panic!("expected float, got {other:?}"),
+        };
+        let collect = |s: Series| s.values().iter().map(f).collect::<Vec<_>>();
+        let close = |got: Vec<f64>, want: [f64; 5]| {
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert!((g - w).abs() < 1e-12, "got {got:?} want {want:?}");
+            }
+        };
+        close(
+            collect(s.rank("dense", true, "top").unwrap()),
+            [4.0, 1.0, 2.0, 1.0, 3.0],
+        );
+        close(
+            collect(s.rank("dense", true, "bottom").unwrap()),
+            [3.0, 4.0, 1.0, 4.0, 2.0],
+        );
+        close(
+            collect(s.rank("average", true, "top").unwrap()),
+            [5.0, 1.5, 3.0, 1.5, 4.0],
+        );
+        close(
+            collect(s.rank("average", true, "bottom").unwrap()),
+            [3.0, 4.5, 1.0, 4.5, 2.0],
+        );
     }
 
     #[test]

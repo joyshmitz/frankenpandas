@@ -4666,6 +4666,13 @@ impl Series {
                                 *slot = Scalar::Timedelta64(Timedelta::NAT);
                             }
                         }
+                    } else if let (Some(lv), None) = (left, right) {
+                        // Trailing NaT gap: forward-fill the last valid value
+                        // (pandas default limit_direction='forward').
+                        let clamped = lv.clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+                        for slot in out[gap_start..j].iter_mut() {
+                            *slot = Scalar::Timedelta64(clamped);
+                        }
                     }
                     i = j + 1;
                 } else {
@@ -4694,12 +4701,20 @@ impl Series {
 
                 let right = if j < n { out[j].to_f64().ok() } else { None };
 
-                // Only interpolate if we have both endpoints
+                // Interior gap (both endpoints): linear interpolation.
                 if let (Some(lv), Some(rv)) = (left, right) {
                     let gap_len = j - gap_start + 1; // includes both endpoints
                     for (offset, slot) in out[gap_start..j].iter_mut().enumerate() {
                         let t = (offset + 1) as f64 / gap_len as f64;
                         *slot = Scalar::Float64(lv + t * (rv - lv));
+                    }
+                } else if let (Some(lv), None) = (left, right) {
+                    // Trailing gap (no right anchor): pandas' default
+                    // limit_direction='forward' carries the last valid value
+                    // forward — it does NOT extrapolate. Leading gaps (left
+                    // is None) are left as NaN, also matching pandas.
+                    for slot in out[gap_start..j].iter_mut() {
+                        *slot = Scalar::Float64(lv);
                     }
                 }
 
@@ -64795,11 +64810,47 @@ mod tests {
         .unwrap();
 
         let result = s.interpolate().unwrap();
-        // Leading and trailing NaNs remain
+        // pandas default limit_direction='forward': LEADING NaN stays NaN, but
+        // a TRAILING NaN is forward-filled with the last valid value.
+        // Verified vs pandas 2.2.3: [NaN,10,20,NaN] -> [NaN,10,20,20].
         assert!(result.values()[0].is_missing());
         assert_eq!(result.values()[1], Scalar::Float64(10.0));
         assert_eq!(result.values()[2], Scalar::Float64(20.0));
-        assert!(result.values()[3].is_missing());
+        assert_eq!(result.values()[3], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn series_interpolate_interior_then_trailing_forward_fills() {
+        // [1,NaN,3,NaN,NaN] -> [1,2,3,3,3]: interior gap interpolated, trailing
+        // gap forward-filled (no extrapolation). Verified vs pandas 2.2.3.
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let r = s.interpolate().unwrap();
+        let got: Vec<f64> = r
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(x) => *x,
+                other => panic!("expected float, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, [1.0, 2.0, 3.0, 3.0, 3.0]);
     }
 
     #[test]

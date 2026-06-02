@@ -27501,7 +27501,7 @@ impl DataFrame {
                     Scalar::Int64(v) => IndexLabel::Int64(v),
                     Scalar::Utf8(v) => IndexLabel::Utf8(v),
                     Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-                    Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+                    Scalar::Bool(v) => IndexLabel::Utf8(if matches!(v, true) { "True" } else { "False" }.to_string()),
                     Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
@@ -28629,7 +28629,7 @@ impl DataFrame {
                             Scalar::Int64(v) => IndexLabel::Int64(*v),
                             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
                             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-                            Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+                            Scalar::Bool(b) => IndexLabel::Utf8(if matches!(b, true) { "True" } else { "False" }.to_string()),
                             Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                             Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
@@ -38851,7 +38851,7 @@ impl DataFrame {
                     Scalar::Utf8(s) => s.clone(),
                     Scalar::Int64(i) => i.to_string(),
                     Scalar::Float64(f) => f.to_string(),
-                    Scalar::Bool(b) => b.to_string(),
+                    Scalar::Bool(b) => if matches!(b, true) { "True" } else { "False" }.to_string(),
                     _ => continue,
                 };
                 if seen_set.insert(s.clone()) {
@@ -38886,7 +38886,7 @@ impl DataFrame {
                                 Scalar::Utf8(s) => s.clone(),
                                 Scalar::Int64(i) => i.to_string(),
                                 Scalar::Float64(f) => f.to_string(),
-                                Scalar::Bool(b) => b.to_string(),
+                                Scalar::Bool(b) => if matches!(b, true) { "True" } else { "False" }.to_string(),
                                 _ => String::new(),
                             };
                             // pandas 2.x pd.get_dummies emits bool indicator
@@ -85659,10 +85659,10 @@ mod tests {
         assert_eq!(level0.labels()[0], IndexLabel::Utf8("1.5".into()));
         assert_eq!(level0.labels()[1], IndexLabel::Utf8("2.5".into()));
 
-        // Bool values should become Utf8 "true"/"false" labels.
+        // Bool values should become Utf8 "True"/"False" labels (pandas parity).
         let level1 = mi.get_level_values(1).unwrap();
-        assert_eq!(level1.labels()[0], IndexLabel::Utf8("true".into()));
-        assert_eq!(level1.labels()[1], IndexLabel::Utf8("false".into()));
+        assert_eq!(level1.labels()[0], IndexLabel::Utf8("True".into()));
+        assert_eq!(level1.labels()[1], IndexLabel::Utf8("False".into()));
     }
 
     // ── to_timedelta tests ──

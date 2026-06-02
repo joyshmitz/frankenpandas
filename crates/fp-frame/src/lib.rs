@@ -4001,12 +4001,13 @@ impl Series {
     /// both Series have identical names, index labels, and values (including
     /// NaN == NaN semantics for null positions).
     pub fn equals(&self, other: &Self) -> bool {
-        if self.name != other.name {
-            return false;
-        }
         if self.index.labels() != other.index.labels() {
             return false;
         }
+        // NB: pandas Series.equals() ignores the Series name (only shape,
+        // index, and NaN-aware values matter) — br-frankenpandas. DataFrame
+        // column labels, by contrast, are data and ARE compared by
+        // DataFrame::equals.
         let lv = self.values();
         let rv = other.values();
         if lv.len() != rv.len() {
@@ -59893,10 +59894,13 @@ mod tests {
     }
 
     #[test]
-    fn series_equals_different_names() {
+    fn series_equals_ignores_name() {
+        // pandas Series.equals() ignores the name: it compares only shape,
+        // index, and (NaN-aware) values. Verified vs pandas 2.2.3:
+        // Series([1],name='a').equals(Series([1],name='b')) is True.
         let a = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
         let b = Series::from_values("y", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
-        assert!(!a.equals(&b));
+        assert!(a.equals(&b));
     }
 
     #[test]

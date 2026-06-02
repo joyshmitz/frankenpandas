@@ -11,12 +11,13 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool }
+//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join }
 
 use std::{collections::BTreeMap, time::Instant};
 
 use fp_frame::DataFrame;
 use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_join::{merge_dataframes, JoinType};
 use fp_types::Scalar;
 
 fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
@@ -52,6 +53,29 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Join workload frame: `id` key column at fixed cardinality + one value
+/// column. Matches `high_ram_perf_baseline::build_join_frame` so the flamegraph
+/// corresponds to the recorded `dataframe_inner_join` baseline (~36x vs pandas).
+fn build_join_frame(
+    value_name: &str,
+    n: usize,
+    key_cardinality: usize,
+    multiplier: i64,
+) -> DataFrame {
+    let cardinality = key_cardinality.max(1);
+    let keys: Vec<Scalar> = (0..n)
+        .map(|row| Scalar::Int64((row % cardinality) as i64))
+        .collect();
+    let values: Vec<Scalar> = (0..n)
+        .map(|row| Scalar::Int64(((row as i64 * multiplier + 11) % 10_007).abs()))
+        .collect();
+    DataFrame::from_dict(
+        &["id", value_name],
+        vec![("id", keys), (value_name, values)],
+    )
+    .expect("join frame")
+}
+
 /// Deterministic serialization of a frame's observable state (index labels +
 /// per-column dtype and values in column order). Used for the isomorphism
 /// golden-output sha256 proof; it must be stable across the optimization.
@@ -85,6 +109,12 @@ fn run_golden(scenario: &str, n: usize) {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
             frame.iloc_bool(&mask).expect("filter")
+        }
+        "inner_join" => {
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame("right_value", n, 512, 13);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+            DataFrame::new(out.index, out.columns).expect("join golden frame")
         }
         other => {
             eprintln!("unknown golden scenario: {other}");
@@ -136,6 +166,16 @@ fn main() {
             for _ in 0..iters {
                 let out = frame.iloc_bool(&mask).expect("filter");
                 sink = sink.wrapping_add(out.len());
+            }
+        }
+        "inner_join" => {
+            // cardinality 512 matches the high_ram baseline; output fans out to
+            // ~n^2/cardinality rows, which is where the ~36x cost lives.
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame("right_value", n, 512, 13);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
             }
         }
         other => {

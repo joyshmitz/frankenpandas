@@ -6914,6 +6914,36 @@ def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -
     return {"expected_frame": expected_frame}
 
 
+def op_json_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Read the JSON, write it back with the same orient, read again, and report
+    # whether the frame survives the round trip losslessly (expected_bool).
+    text = payload.get("json_input")
+    if not isinstance(text, str):
+        raise OracleError("json_round_trip requires json_input string")
+    orient = payload.get("json_orient")
+    try:
+        df1 = pd.read_json(io.StringIO(text), orient=orient)
+        df2 = pd.read_json(io.StringIO(df1.to_json(orient=orient)), orient=orient)
+    except Exception as exc:
+        raise OracleError(f"json_round_trip failed: {exc}") from exc
+    return {"expected_bool": bool(df1.equals(df2))}
+
+
+def op_jsonl_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # JSON-lines round trip (orient=records, lines=True).
+    text = payload.get("jsonl_input")
+    if not isinstance(text, str):
+        raise OracleError("jsonl_round_trip requires jsonl_input string")
+    try:
+        df1 = pd.read_json(io.StringIO(text), lines=True)
+        df2 = pd.read_json(
+            io.StringIO(df1.to_json(orient="records", lines=True)), lines=True
+        )
+    except Exception as exc:
+        raise OracleError(f"jsonl_round_trip failed: {exc}") from exc
+    return {"expected_bool": bool(df1.equals(df2))}
+
+
 def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op = payload.get("operation")
     if op == "series_add":
@@ -7274,6 +7304,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_resample(pd, payload, "sum", op)
     if op == "dataframe_resample_mean":
         return op_dataframe_resample(pd, payload, "mean", op)
+    if op == "json_round_trip":
+        return op_json_round_trip(pd, payload)
+    if op == "jsonl_round_trip":
+        return op_jsonl_round_trip(pd, payload)
     if op == "series_count":
         return op_series_count(pd, payload)
     if op in {"series_first_valid_index", "series_first_valid_index_default"}:

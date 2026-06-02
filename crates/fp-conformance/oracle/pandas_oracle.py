@@ -2227,7 +2227,10 @@ def op_series_to_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:
     series = fixture_series_from_payload(pd, left, "series_to_frame")
     name = payload.get("frame_name")
     try:
-        out = series.to_frame(name=name)
+        # Passing name=None EXPLICITLY makes pandas name the column literally
+        # None (the default is a no_default sentinel). Only override when a
+        # frame_name is supplied; otherwise let to_frame() use the series name.
+        out = series.to_frame(name=name) if name is not None else series.to_frame()
     except Exception as exc:
         raise OracleError(f"series_to_frame failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}

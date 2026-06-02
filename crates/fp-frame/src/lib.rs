@@ -43750,35 +43750,14 @@ impl DataFrameGroupBy<'_> {
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
-                let gv: Vec<f64> = row_indices
-                    .iter()
-                    .filter_map(|&i| {
-                        let v = &col.values()[i];
-                        if v.is_missing() {
-                            None
-                        } else {
-                            v.to_f64().ok()
-                        }
-                    })
-                    .collect();
-
-                let n = gv.len();
-                if n < 4 {
-                    vals.push(Scalar::Float64(f64::NAN));
-                } else {
-                    let mean = gv.iter().sum::<f64>() / n as f64;
-                    let m2 = gv.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
-                    let m4 = gv.iter().map(|x| (x - mean).powi(4)).sum::<f64>();
-                    let nf = n as f64;
-                    let s2 = m2 / (nf - 1.0);
-                    if s2 == 0.0 {
-                        vals.push(Scalar::Float64(f64::NAN));
-                    } else {
-                        let excess = (nf * (nf + 1.0) * m4 / (m2 * m2) - 3.0 * (nf - 1.0).powi(2))
-                            / ((nf - 1.0) * (nf - 2.0) * (nf - 3.0));
-                        vals.push(Scalar::Float64(excess));
-                    }
-                }
+                // Delegate to the shared, tested fp_types::nankurt (the same path
+                // SeriesGroupBy.kurtosis uses). The prior inline formula divided
+                // m4 by (sum-of-squared-deviations)^2 instead of variance^2,
+                // inflating |kurtosis| by a factor of (n-1)^2 (e.g. group
+                // [1,2,3,4] yielded -3.133 instead of pandas' -1.2).
+                let gv: Vec<Scalar> =
+                    row_indices.iter().map(|&i| col.values()[i].clone()).collect();
+                vals.push(fp_types::nankurt(&gv));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);

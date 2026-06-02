@@ -161,7 +161,9 @@ def label_from_json(value: dict[str, Any]) -> Any:
         return int(raw)
     if kind == "float64":
         return float(raw)
-    if kind == "utf8":
+    # "str"/"string" are serde aliases for the canonical "utf8" string kind
+    # (see fp-types Scalar: #[serde(alias = "string", alias = "str")]).
+    if kind in ("utf8", "str", "string"):
         return str(raw)
     raise OracleError(f"unsupported index label kind: {kind!r}")
 
@@ -180,7 +182,9 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
         return int(raw)
     if kind == "float64":
         return float(raw)
-    if kind == "utf8":
+    # "str"/"string" are serde aliases for the canonical "utf8" string kind
+    # (see fp-types Scalar: #[serde(alias = "string", alias = "str")]).
+    if kind in ("utf8", "str", "string"):
         return str(raw)
     # timedelta64 carries integer nanoseconds (matching Rust
     # `Scalar::Timedelta64`). Returning a native pandas Timedelta lets the many

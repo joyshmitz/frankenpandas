@@ -1213,6 +1213,14 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
             raise OracleError("series_to_datetime datetime_utc must be a boolean")
         kwargs["utc"] = utc
 
+    # For string inputs with no unit/origin, parse each element with its own
+    # format (format="mixed") to match FP's flexible per-element parsing. The
+    # default single-inferred-format path coerces heterogeneous ISO strings
+    # (date-only mixed with date+time) to NaT after the first row. Numeric
+    # (epoch) inputs keep the default path; format="mixed" only applies to text.
+    if "unit" not in kwargs and "origin" not in kwargs and series.dtype == object:
+        kwargs["format"] = "mixed"
+
     try:
         out = pd.to_datetime(series, **kwargs)
     except Exception as exc:

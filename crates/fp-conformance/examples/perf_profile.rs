@@ -142,7 +142,7 @@ fn run_golden(scenario: &str, n: usize) {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
-            DataFrame::new(out.index, out.columns).expect("join golden frame")
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order).expect("join golden frame")
         }
         "series_add" => {
             let (left, right) = build_series_pair(n);

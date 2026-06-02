@@ -568,6 +568,10 @@ fn join_series_with_arena(
 pub struct MergedDataFrame {
     pub index: Index,
     pub columns: std::collections::BTreeMap<String, Column>,
+    /// Output column order in pandas' convention (key/left columns in their
+    /// source order, then right non-key columns). The `columns` map is sorted,
+    /// so this Vec carries the real order for materialization — br-691lh.
+    pub column_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -869,6 +873,7 @@ fn ensure_merge_suffixes_for_overlaps(
 
 fn insert_merged_output_column(
     output_columns: &mut std::collections::BTreeMap<String, Column>,
+    order: &mut Vec<String>,
     name: String,
     column: Column,
 ) -> Result<(), JoinError> {
@@ -877,6 +882,7 @@ fn insert_merged_output_column(
             format!("merge suffixes cause duplicate output column '{name}'"),
         )));
     }
+    order.push(name.clone());
     output_columns.insert(name, column);
     Ok(())
 }
@@ -1149,6 +1155,7 @@ pub fn merge_dataframes_on_with_options(
     let n = left_positions.len();
     let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
     let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::new();
 
     // Collect column names to handle conflicts.
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
@@ -1171,8 +1178,13 @@ pub fn merge_dataframes_on_with_options(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, &suffixes)?;
 
-    // Add left columns (including left key columns).
-    for (name, col) in left.columns() {
+    // Add left columns (including left key columns) in the left frame's own
+    // column order (pandas preserves it; the BTreeMap would re-sort) — br-691lh.
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
         if left_key_name_set.contains(name.as_str()) {
             if let Some((left_key_idx, right_key_idx)) = shared_name_positions.get(name.as_str()) {
                 // Shared key name: for rows emitted from right-only keys, source key values from
@@ -1193,7 +1205,12 @@ pub fn merge_dataframes_on_with_options(
                         .collect::<Vec<_>>();
                     Column::from_values(values)?
                 };
-                insert_merged_output_column(&mut columns, name.clone(), key_column)?;
+                insert_merged_output_column(
+                    &mut columns,
+                    &mut column_order,
+                    name.clone(),
+                    key_column,
+                )?;
             } else {
                 let key_column = if let Some(positions) = inner_left_positions {
                     col.take_positions(positions)
@@ -1202,7 +1219,12 @@ pub fn merge_dataframes_on_with_options(
                 } else {
                     col.reindex_by_positions(&left_positions)?
                 };
-                insert_merged_output_column(&mut columns, name.clone(), key_column)?;
+                insert_merged_output_column(
+                    &mut columns,
+                    &mut column_order,
+                    name.clone(),
+                    key_column,
+                )?;
             }
             continue;
         }
@@ -1218,11 +1240,15 @@ pub fn merge_dataframes_on_with_options(
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, out_name, reindexed)?;
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
 
-    // Add right columns (including right key alias columns).
-    for (name, col) in right.columns() {
+    // Add right non-key columns in the right frame's own column order — br-691lh.
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
         if right_key_name_set.contains(name.as_str())
             && shared_name_positions.contains_key(name.as_str())
         {
@@ -1241,7 +1267,7 @@ pub fn merge_dataframes_on_with_options(
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, out_name, reindexed)?;
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
 
     if let Some(indicator_name) = indicator_name.as_deref() {
@@ -1252,10 +1278,19 @@ pub fn merge_dataframes_on_with_options(
             &columns,
         )?;
         let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
-        insert_merged_output_column(&mut columns, indicator_name.to_owned(), indicator_col)?;
+        insert_merged_output_column(
+            &mut columns,
+            &mut column_order,
+            indicator_name.to_owned(),
+            indicator_col,
+        )?;
     }
 
-    Ok(MergedDataFrame { index, columns })
+    Ok(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    })
 }
 
 /// Merge two DataFrames on one or more key columns with identical key names.
@@ -1301,6 +1336,7 @@ fn merge_dataframes_cross(
 
     let index = Index::new((0..out_rows as i64).map(IndexLabel::from).collect());
     let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
@@ -1315,7 +1351,7 @@ fn merge_dataframes_cross(
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, out_name, reindexed)?;
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
 
     for (name, col) in right.columns() {
@@ -1325,7 +1361,7 @@ fn merge_dataframes_cross(
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, out_name, reindexed)?;
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
 
     if let Some(indicator_name) = indicator_name {
@@ -1336,10 +1372,19 @@ fn merge_dataframes_cross(
             &columns,
         )?;
         let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
-        insert_merged_output_column(&mut columns, indicator_name.to_owned(), indicator_col)?;
+        insert_merged_output_column(
+            &mut columns,
+            &mut column_order,
+            indicator_name.to_owned(),
+            indicator_col,
+        )?;
     }
 
-    Ok(MergedDataFrame { index, columns })
+    Ok(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    })
 }
 
 /// Extension trait adding `.merge()` and `.join()` instance methods to `DataFrame`.
@@ -1453,8 +1498,12 @@ pub fn merge_ordered(
 
     if let Some(method) = fill_method {
         // Convert to DataFrame to apply fill
-        let mut df = fp_frame::DataFrame::new(merged.index.clone(), merged.columns.clone())
-            .map_err(JoinError::Frame)?;
+        let mut df = fp_frame::DataFrame::new_with_column_order(
+            merged.index.clone(),
+            merged.columns.clone(),
+            merged.column_order.clone(),
+        )
+        .map_err(JoinError::Frame)?;
 
         df = match method {
             "ffill" => df.ffill(None).map_err(JoinError::Frame)?,
@@ -1465,9 +1514,11 @@ pub fn merge_ordered(
             }
         };
 
+        let column_order = df.column_names().into_iter().cloned().collect();
         Ok(MergedDataFrame {
             index: df.index().clone(),
             columns: df.columns().clone(),
+            column_order,
         })
     } else {
         Ok(merged)
@@ -2013,6 +2064,7 @@ fn build_asof_output(
 
     let n_out = left.len();
     let mut out_columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::new();
 
     // Left columns (all rows present)
     for col_name in &left_col_names {
@@ -2026,7 +2078,12 @@ fn build_asof_output(
         } else {
             col_name.clone()
         };
-        insert_merged_output_column(&mut out_columns, output_name, col.clone())?;
+        insert_merged_output_column(
+            &mut out_columns,
+            &mut column_order,
+            output_name,
+            col.clone(),
+        )?;
     }
 
     // Right columns (matched or null)
@@ -2053,6 +2110,7 @@ fn build_asof_output(
         }
         insert_merged_output_column(
             &mut out_columns,
+            &mut column_order,
             output_name,
             Column::new(right_col.dtype(), vals)?,
         )?;
@@ -2061,6 +2119,7 @@ fn build_asof_output(
     Ok(MergedDataFrame {
         index: left.index().clone(),
         columns: out_columns,
+        column_order,
     })
 }
 
@@ -2633,6 +2692,35 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn merge_preserves_pandas_column_order_for_nonalphabetical_names() {
+        // br-frankenpandas-691lh: output columns follow pandas order — key/left
+        // columns in the LEFT frame's source order, then right non-key columns —
+        // not alphabetical (the columns map is a BTreeMap). Verified vs pandas
+        // 2.2.3: merge(left[k,zebra,apple], right[k,mango], on=k)
+        //   -> [k, zebra, apple, mango].
+        let left = DataFrame::from_dict(
+            &["k", "zebra", "apple"],
+            vec![
+                ("k", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("zebra", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("apple", vec![Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k", "mango"],
+            vec![
+                ("k", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("mango", vec![Scalar::Int64(50), Scalar::Int64(60)]),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
+        let order: Vec<&str> = merged.column_order.iter().map(String::as_str).collect();
+        assert_eq!(order, ["k", "zebra", "apple", "mango"]);
     }
 
     fn merged_values<'a>(

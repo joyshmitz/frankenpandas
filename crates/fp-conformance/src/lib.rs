@@ -13907,7 +13907,7 @@ fn execute_dataframe_merge_asof_fixture_operation(
 
     let merged = fp_join::merge_asof_with_options(&left, &right, on, direction, options)
         .map_err(|err| err.to_string())?;
-    DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_merge_ordered_fixture_operation(
@@ -13933,7 +13933,7 @@ fn execute_dataframe_merge_ordered_fixture_operation(
         fixture.merge_fill_method.as_deref(),
     )
     .map_err(|err| err.to_string())?;
-    DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
 }
 
 fn validate_cross_merge_configuration(
@@ -16963,7 +16963,7 @@ fn execute_dataframe_merge_fixture_operation(
         },
     )
     .map_err(|err| err.to_string())?;
-    DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
 }
 
 fn dataframe_with_index_as_columns(

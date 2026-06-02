@@ -26735,6 +26735,18 @@ impl DataFrame {
     }
 
     fn reset_index_column_name(&self) -> Result<String, FrameError> {
+        // Named index: pandas restores the former index under the index's NAME
+        // (df.set_index('t').reset_index() -> column 't'). A collision with an
+        // existing column is a ValueError ("cannot insert X, already exists").
+        if let Some(name) = self.index.name() {
+            if self.columns.contains_key(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "cannot insert {name}, already exists"
+                )));
+            }
+            return Ok(name.to_owned());
+        }
+        // Unnamed index: fall back to 'index', then 'level_0' on collision.
         if !self.columns.contains_key("index") {
             return Ok("index".to_owned());
         }
@@ -51424,15 +51436,53 @@ mod tests {
         .unwrap();
 
         let indexed = df.set_index("t", true).unwrap();
-        // reset_index restores the former index as a column (named "index" by
-        // FP's current naming rule) — the point here is the dtype round-trips.
+        // reset_index restores the former index under its NAME ("t", pandas
+        // parity) with the datetime dtype preserved.
         let restored = indexed.reset_index(false).unwrap();
-        let restored_col = restored.column("index").unwrap();
+        let restored_col = restored.column("t").unwrap();
         assert_eq!(
             restored_col.values(),
             &[Scalar::Datetime64(t0), Scalar::Datetime64(t1)]
         );
         assert_eq!(restored_col.dtype(), DType::Datetime64);
+        assert!(
+            restored.column("index").is_none(),
+            "named index must reset to its name, not 'index'"
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_uses_index_name_with_pandas_collision_rules() {
+        let df = DataFrame::from_dict(
+            &["a", "v"],
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        // Named index -> restored column carries the index NAME ('a'), not 'index'.
+        let named = df.set_index("a", true).unwrap().reset_index(false).unwrap();
+        assert!(named.column("a").is_some());
+        assert!(named.column("index").is_none());
+        let order = named.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(order, vec!["a".to_owned(), "v".to_owned()]);
+
+        // Unnamed (default RangeIndex) -> 'index'.
+        let unnamed = df.reset_index(false).unwrap();
+        assert!(unnamed.column("index").is_some());
+
+        // Collision: index named 'a' while the source 'a' column is kept
+        // (drop=false) -> pandas ValueError "cannot insert a, already exists".
+        let collide = df
+            .set_index("a", false)
+            .unwrap()
+            .reset_index(false)
+            .unwrap_err();
+        assert!(
+            matches!(collide, FrameError::CompatibilityRejected(msg) if msg.contains("cannot insert a, already exists"))
+        );
     }
 
     #[test]

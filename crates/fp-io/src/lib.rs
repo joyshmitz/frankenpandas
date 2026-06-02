@@ -2390,15 +2390,30 @@ fn escape_latex_table_cell(value: &str) -> String {
     escaped
 }
 
-/// Default NA values recognized by pandas read_csv.
-/// See: <https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html>
-const PANDAS_DEFAULT_NA_VALUES: &[&str] = &[
-    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
-    "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
-];
-
 fn is_pandas_default_na(s: &str) -> bool {
-    PANDAS_DEFAULT_NA_VALUES.contains(&s)
+    // Default NA values recognized by pandas read_csv.
+    // See: <https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html>
+    matches!(
+        s,
+        "" | "#N/A"
+            | "#N/A N/A"
+            | "#NA"
+            | "-1.#IND"
+            | "-1.#QNAN"
+            | "-NaN"
+            | "-nan"
+            | "1.#IND"
+            | "1.#QNAN"
+            | "<NA>"
+            | "N/A"
+            | "NA"
+            | "NULL"
+            | "NaN"
+            | "None"
+            | "n/a"
+            | "nan"
+            | "null"
+    )
 }
 
 fn parse_scalar(field: &str) -> Scalar {
@@ -13471,6 +13486,21 @@ mod tests {
         let b = frame.column("b").unwrap();
         assert!(b.values()[0].is_missing(), "None should be parsed as NA");
         assert_eq!(b.values()[1], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_default_na_token_set_matches_pandas_table() {
+        let default_tokens = [
+            "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND",
+            "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
+        ];
+        for token in default_tokens {
+            assert!(super::is_pandas_default_na(token), "{token:?}");
+        }
+
+        for token in ["none", "NAN", "n/a ", " NULL", "0", "false"] {
+            assert!(!super::is_pandas_default_na(token), "{token:?}");
+        }
     }
 
     #[test]

@@ -289,6 +289,8 @@ fn main() {
             }
         }
         "csv_read" => {
+            // Matches bench_runner::build_csv_string + io/csv_read shape:
+            // 10 dense numeric columns, default pandas-style CSV parsing.
             let csv = build_csv_string(n, 10);
             for _ in 0..iters {
                 let out = read_csv_str(&csv).expect("csv read");

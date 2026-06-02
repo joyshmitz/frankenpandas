@@ -43527,31 +43527,19 @@ impl DataFrameGroupBy<'_> {
             let mut vals = Vec::with_capacity(group_order.len());
 
             for gkey in &group_order {
-                let row_indices = &groups[gkey];
-                let gv: Vec<f64> = row_indices
+                // Per br-frankenpandas-c7feq: delegate to the shared, verified
+                // fp_types::nanskew (bias-corrected sample skewness) rather than
+                // an inline formula. The previous inline version mixed a
+                // population third moment (m3/n) with a sample variance
+                // (m2/(n-1)), yielding results off by a factor of (n/(n-1))^1.5
+                // — e.g. 0.9428 instead of pandas' 1.7320 for [10,10,40].
+                // nanskew also handles n<3 → NaN and zero-variance groups → 0.0,
+                // keeping groupby.skew consistent with Series/resample/rolling.
+                let group_values: Vec<Scalar> = groups[gkey]
                     .iter()
-                    .filter_map(|&i| {
-                        let v = &col.values()[i];
-                        if v.is_missing() {
-                            None
-                        } else {
-                            v.to_f64().ok()
-                        }
-                    })
+                    .map(|&i| col.values()[i].clone())
                     .collect();
-
-                let n = gv.len();
-                if n < 3 {
-                    vals.push(Scalar::Float64(f64::NAN));
-                } else {
-                    let mean = gv.iter().sum::<f64>() / n as f64;
-                    let m2 = gv.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
-                    let m3 = gv.iter().map(|x| (x - mean).powi(3)).sum::<f64>();
-                    let nf = n as f64;
-                    let s2 = m2 / (nf - 1.0);
-                    let skew = (m3 / nf) / (s2.powf(1.5)) * (nf * (nf - 1.0)).sqrt() / (nf - 2.0);
-                    vals.push(Scalar::Float64(skew));
-                }
+                vals.push(fp_types::nanskew(&group_values));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
@@ -71295,6 +71283,55 @@ mod tests {
         // Symmetric data → skew ≈ 0
         let val = result.columns()["v"].values()[0].to_f64().unwrap();
         assert!(val.abs() < 0.01);
+    }
+
+    #[test]
+    fn groupby_skew_asymmetric_multigroup_matches_pandas() {
+        // Regression for br-frankenpandas-c7feq: asymmetric groups expose the
+        // bias-correction factor that symmetric data (m3=0) hides. Verified
+        // against pandas 2.2.3:
+        //   df.groupby('g')['v'].skew() for g=a:[1,2,4], b:[10,10,40]
+        //   -> a: 0.9352195295828237, b: 1.7320508075688772
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.groupby(&["g"]).unwrap().skew().unwrap();
+        let v = &result.columns()["v"];
+        let a = v.values()[0].to_f64().unwrap();
+        let b = v.values()[1].to_f64().unwrap();
+        assert!(
+            (a - 0.935_219_529_582_823_7).abs() < 1e-9,
+            "group a skew={a}"
+        );
+        assert!(
+            (b - 1.732_050_807_568_877_2).abs() < 1e-9,
+            "group b skew={b}"
+        );
     }
 
     #[test]

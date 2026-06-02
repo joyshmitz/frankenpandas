@@ -11089,3 +11089,82 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — sort_values output ordering + value_counts
+// conservation.
+//
+// The suite already proves sort idempotence and sign-duality, but NONE of
+// those catch a sort that secretly returns its input unchanged (a no-op is
+// idempotent AND sign-dual). MR-S1 closes that by asserting the output is
+// actually monotonic with nulls trailing (pandas na_position='last'). MR-V1
+// asserts value_counts conserves the non-null count. Added by RubyGoose
+// (metamorphic gauntlet).
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-S1: sort_values(ascending) yields a non-decreasing run of non-null
+    /// values, with all nulls trailing (pandas default na_position='last').
+    #[test]
+    fn prop_sort_values_output_is_monotonic(series in arb_numeric_series("sort_mono", 12)) {
+        let sorted = match series.sort_values(true) { Ok(s) => s, Err(_) => return Ok(()) };
+        let vals = sorted.column().values();
+        let mut seen_null = false;
+        let mut prev: Option<f64> = None;
+        for v in vals {
+            if v.is_missing() {
+                seen_null = true;
+                continue;
+            }
+            // a non-null after a null violates na_position='last'
+            prop_assert!(!seen_null, "non-null value {:?} appeared after a null in ascending sort", v);
+            if let Some(f) = mm_scalar_f64(v) {
+                if let Some(p) = prev {
+                    prop_assert!(f >= p, "ascending sort not monotonic: {} then {}", p, f);
+                }
+                prev = Some(f);
+            }
+        }
+    }
+
+    /// MR-S1b: descending sort yields a non-increasing run of non-null values,
+    /// nulls trailing.
+    #[test]
+    fn prop_sort_values_descending_is_monotonic(series in arb_numeric_series("sort_mono_desc", 12)) {
+        let sorted = match series.sort_values(false) { Ok(s) => s, Err(_) => return Ok(()) };
+        let vals = sorted.column().values();
+        let mut seen_null = false;
+        let mut prev: Option<f64> = None;
+        for v in vals {
+            if v.is_missing() { seen_null = true; continue; }
+            prop_assert!(!seen_null, "non-null {:?} after null in descending sort", v);
+            if let Some(f) = mm_scalar_f64(v) {
+                if let Some(p) = prev {
+                    prop_assert!(f <= p, "descending sort not monotonic: {} then {}", p, f);
+                }
+                prev = Some(f);
+            }
+        }
+    }
+
+    /// MR-V1: value_counts conserves the non-null element count — the counts
+    /// sum to the number of non-null entries, and every count is positive.
+    #[test]
+    fn prop_value_counts_conserves_nonnull(series in arb_numeric_series("vcounts", 14)) {
+        let vc = match series.value_counts() { Ok(v) => v, Err(_) => return Ok(()) };
+        let nonnull = series.column().values().iter().filter(|v| !v.is_missing()).count();
+        let mut total: i64 = 0;
+        for c in vc.column().values() {
+            match c {
+                Scalar::Int64(n) => {
+                    prop_assert!(*n > 0, "value_counts produced a non-positive count {}", n);
+                    total += *n;
+                }
+                other => prop_assert!(false, "value_counts produced non-int count {:?}", other),
+            }
+        }
+        prop_assert_eq!(total as usize, nonnull, "value_counts sum {} != non-null {}", total, nonnull);
+    }
+}

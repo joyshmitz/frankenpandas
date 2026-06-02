@@ -10999,3 +10999,93 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — DataFrame.describe
+//
+// Zero pre-existing metamorphic coverage for describe. Relations encode the
+// pandas describe contract that is independent of the exact input:
+//   MR-D1 quartile monotonicity: min <= 25% <= 50% <= 75% <= max
+//   MR-D2 count equals the number of non-null entries in the column
+// Percentile interpolation is a classic divergence point, so the ordering
+// invariant is a high-yield self-check. Added by RubyGoose (metamorphic
+// gauntlet).
+// =====================================================================
+
+/// Numeric coercion for describe stat extraction: Int64/Float64 -> f64,
+/// missing/NaN/other -> None.
+fn mm_scalar_f64(s: &Scalar) -> Option<f64> {
+    if s.is_missing() {
+        return None;
+    }
+    match s {
+        Scalar::Int64(v) => Some(*v as f64),
+        Scalar::Float64(v) if !v.is_nan() => Some(*v),
+        _ => None,
+    }
+}
+
+/// Row index of a stat label (e.g. "min") in a describe frame's index.
+fn mm_describe_row(desc: &DataFrame, stat: &str) -> Option<usize> {
+    desc.index().labels().iter().position(|l| match l {
+        IndexLabel::Utf8(s) => s == stat,
+        _ => false,
+    })
+}
+
+/// Value of a describe stat for a column, as f64 (None if missing/non-numeric).
+fn mm_describe_stat(desc: &DataFrame, col: &str, stat: &str) -> Option<f64> {
+    let row = mm_describe_row(desc, stat)?;
+    let column = desc.columns().get(col)?;
+    mm_scalar_f64(column.values().get(row)?)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-D1: describe quartiles are monotonic — min <= 25% <= 50% <= 75% <= max.
+    #[test]
+    fn prop_describe_quartiles_monotonic(df in arb_numeric_dataframe(10)) {
+        let desc = match df.describe() { Ok(d) => d, Err(_) => return Ok(()) };
+        let cols: Vec<String> = df.column_names().into_iter().cloned().collect();
+        for col in &cols {
+            // Only assert when all five order stats are present & numeric
+            // (all-null columns yield missing stats — nothing to order).
+            let stats = ["min", "25%", "50%", "75%", "max"];
+            let vals: Option<Vec<f64>> =
+                stats.iter().map(|s| mm_describe_stat(&desc, col, s)).collect();
+            if let Some(v) = vals {
+                for w in v.windows(2) {
+                    prop_assert!(
+                        w[0] <= w[1],
+                        "describe quartile order violated for col {}: {:?} (min,25,50,75,max)",
+                        col, v
+                    );
+                }
+            }
+        }
+    }
+
+    /// MR-D2: describe count equals the number of non-null entries.
+    #[test]
+    fn prop_describe_count_matches_nonnull(df in arb_numeric_dataframe(10)) {
+        let desc = match df.describe() { Ok(d) => d, Err(_) => return Ok(()) };
+        let cols: Vec<String> = df.column_names().into_iter().cloned().collect();
+        for col in &cols {
+            let nonnull = df
+                .columns()
+                .get(col)
+                .expect("orig column")
+                .values()
+                .iter()
+                .filter(|v| !v.is_missing())
+                .count();
+            if let Some(count) = mm_describe_stat(&desc, col, "count") {
+                prop_assert_eq!(
+                    count as usize, nonnull,
+                    "describe count {} != non-null {} for col {}", count, nonnull, col
+                );
+            }
+        }
+    }
+}

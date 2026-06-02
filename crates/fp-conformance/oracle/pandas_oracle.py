@@ -1318,7 +1318,18 @@ def op_series_dt_dayofyear(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_series_dt_weekofyear(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    return op_series_dt_accessor(pd, payload, "isocalendar", "series_dt_weekofyear")
+    # dt.isocalendar() returns a DataFrame (year/week/day); weekofyear is its
+    # `week` column. Routing through the generic accessor produced an empty
+    # result because a DataFrame has no .tolist().
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_weekofyear requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_weekofyear")
+    try:
+        out = pd.to_datetime(series, errors="coerce").dt.isocalendar().week
+    except Exception as exc:
+        raise OracleError(f"series_dt_weekofyear failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_dt_quarter(pd, payload: dict[str, Any]) -> dict[str, Any]:

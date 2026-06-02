@@ -32363,24 +32363,38 @@ impl DataFrame {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Spearman and Kendall correlation matrices are exactly symmetric to the
+        // last bit: spearman routes through `pearson_on_slices`, whose covariance
+        // is the deviation sum `Σ(x-x̄)(y-ȳ)` (a single commutative product per
+        // term, no non-associative `n·mean_x·mean_y` triple), and kendall's
+        // concordant/discordant counts plus the `tied_x`/`tied_y` swap are
+        // symmetric under `x <-> y`. So compute only the upper triangle and copy
+        // each value to its transpose — halving the expensive O(M log M) /
+        // O(M^2) per-pair work with zero change to output bits. The diagonal is
+        // the self-correlation 1.0, exactly as before.
+        let mut mat = vec![0.0_f64; n * n];
+        for i in 0..n {
+            mat[i * n + i] = 1.0; // self-correlation
+            for j in (i + 1)..n {
+                let val = match method {
+                    "spearman" => series_list[i]
+                        .corr_spearman(&series_list[j])
+                        .unwrap_or(f64::NAN),
+                    "kendall" => series_list[i]
+                        .corr_kendall(&series_list[j])
+                        .unwrap_or(f64::NAN),
+                    _ => f64::NAN,
+                };
+                mat[i * n + j] = val;
+                mat[j * n + i] = val;
+            }
+        }
+
         let mut result_cols = BTreeMap::new();
         for (j, col_j_name) in numeric_cols.iter().enumerate() {
             let mut vals = Vec::with_capacity(n);
-            for (i, _) in numeric_cols.iter().enumerate() {
-                let val = if i == j {
-                    1.0 // Self-correlation is always 1
-                } else {
-                    match method {
-                        "spearman" => series_list[i]
-                            .corr_spearman(&series_list[j])
-                            .unwrap_or(f64::NAN),
-                        "kendall" => series_list[i]
-                            .corr_kendall(&series_list[j])
-                            .unwrap_or(f64::NAN),
-                        _ => f64::NAN,
-                    }
-                };
-                vals.push(Scalar::Float64(val));
+            for i in 0..n {
+                vals.push(Scalar::Float64(mat[i * n + j]));
             }
             result_cols.insert(col_j_name.clone(), Column::new(DType::Float64, vals)?);
         }

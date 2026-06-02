@@ -200,6 +200,12 @@ fn run_golden(scenario: &str, n: usize) {
         }
         "df_corr" => build_corr_frame(n, 64).corr().expect("corr"),
         "df_cov" => build_corr_frame(n, 64).cov().expect("cov"),
+        "df_spearman" => build_corr_frame(n, 64)
+            .corr_method("spearman")
+            .expect("spearman"),
+        "df_kendall" => build_corr_frame(n, 32)
+            .corr_method("kendall")
+            .expect("kendall"),
         "inner_join" => {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
@@ -300,6 +306,21 @@ fn main() {
             let frame = build_corr_frame(n, 64);
             for _ in 0..iters {
                 let out = frame.cov().expect("cov");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_spearman" => {
+            let frame = build_corr_frame(n, 64);
+            for _ in 0..iters {
+                let out = frame.corr_method("spearman").expect("spearman");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_kendall" => {
+            // kendall is O(M^2) per pair; keep n small in the bench invocation.
+            let frame = build_corr_frame(n, 32);
+            for _ in 0..iters {
+                let out = frame.corr_method("kendall").expect("kendall");
                 sink = sink.wrapping_add(out.len());
             }
         }

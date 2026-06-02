@@ -4574,12 +4574,14 @@ def op_series_str_wrap(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_str_expandtabs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    tabsize = payload.get("str_tabsize", 8)
+    tabsize = payload.get("str_expandtabs_size", payload.get("str_tabsize", 8))
     if left is None:
         raise OracleError("series_str_expandtabs requires left payload")
     series = fixture_series_from_payload(pd, left, "series_str_expandtabs")
     try:
-        out = series.str.expandtabs(tabsize)
+        # pandas StringMethods has no .expandtabs; apply Python str.expandtabs
+        # per element (nulls pass through unchanged).
+        out = series.apply(lambda s: s.expandtabs(tabsize) if isinstance(s, str) else s)
     except Exception as exc:
         raise OracleError(f"series_str_expandtabs failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}

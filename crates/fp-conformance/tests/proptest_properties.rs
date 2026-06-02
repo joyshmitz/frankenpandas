@@ -10891,3 +10891,111 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — concat_dataframes (vertical / axis=0)
+//
+// Zero pre-existing metamorphic coverage for concat (`rg -c concat` = 0).
+// Relations derived from pandas `pd.concat([...], axis=0)` semantics: the
+// result stacks rows in order, unions columns (here all inputs share columns
+// a,b), and length is additive. Values compared numerically since concat
+// unifies mixed int/float columns. Added by RubyGoose (metamorphic gauntlet).
+// =====================================================================
+
+/// Flatten a frame's column into an owned Vec for positional comparison.
+fn mm_col_values(df: &DataFrame, name: &str) -> Vec<Scalar> {
+    df.columns()
+        .get(name)
+        .map(|c| c.values().to_vec())
+        .unwrap_or_default()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// MR-C1: vertical concat length is additive.
+    #[test]
+    fn prop_concat_length_additive(
+        a in arb_numeric_dataframe(6),
+        b in arb_numeric_dataframe(6),
+    ) {
+        let out = match fp_frame::concat_dataframes(&[&a, &b]) {
+            Ok(o) => o,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(out.len(), a.len() + b.len());
+    }
+
+    /// MR-C2: concat of a single frame preserves its column set and cell
+    /// values (a degenerate identity).
+    #[test]
+    fn prop_concat_singleton_identity(a in arb_numeric_dataframe(6)) {
+        let out = match fp_frame::concat_dataframes(&[&a]) {
+            Ok(o) => o,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(out.len(), a.len());
+        let oc: Vec<String> = out.column_names().into_iter().cloned().collect();
+        let ac: Vec<String> = a.column_names().into_iter().cloned().collect();
+        prop_assert_eq!(&oc, &ac);
+        for name in &ac {
+            let ov = mm_col_values(&out, name);
+            let av = mm_col_values(&a, name);
+            prop_assert_eq!(ov.len(), av.len());
+            for (x, y) in ov.iter().zip(av.iter()) {
+                prop_assert!(mm_scalar_value_eq(x, y), "singleton concat changed {}: {:?} vs {:?}", name, x, y);
+            }
+        }
+    }
+
+    /// MR-C3: vertical concat stacks values in order — column c of
+    /// concat([a,b]) equals a[c] followed by b[c], positionally & numerically.
+    #[test]
+    fn prop_concat_stacks_values_in_order(
+        a in arb_numeric_dataframe(6),
+        b in arb_numeric_dataframe(6),
+    ) {
+        let out = match fp_frame::concat_dataframes(&[&a, &b]) {
+            Ok(o) => o,
+            Err(_) => return Ok(()),
+        };
+        for name in ["a", "b"] {
+            let ov = mm_col_values(&out, name);
+            let mut expected = mm_col_values(&a, name);
+            expected.extend(mm_col_values(&b, name));
+            prop_assert_eq!(ov.len(), expected.len());
+            for (i, (x, y)) in ov.iter().zip(expected.iter()).enumerate() {
+                prop_assert!(
+                    mm_scalar_value_eq(x, y),
+                    "concat stack mismatch col {} row {}: {:?} vs {:?}", name, i, x, y
+                );
+            }
+        }
+    }
+
+    /// MR-C4: vertical concat is associative at the value level —
+    /// concat([concat([a,b]),c]) equals concat([a,concat([b,c])]).
+    #[test]
+    fn prop_concat_associative(
+        a in arb_numeric_dataframe(5),
+        b in arb_numeric_dataframe(5),
+        c in arb_numeric_dataframe(5),
+    ) {
+        let ab = match fp_frame::concat_dataframes(&[&a, &b]) { Ok(o) => o, Err(_) => return Ok(()) };
+        let bc = match fp_frame::concat_dataframes(&[&b, &c]) { Ok(o) => o, Err(_) => return Ok(()) };
+        let left = match fp_frame::concat_dataframes(&[&ab, &c]) { Ok(o) => o, Err(_) => return Ok(()) };
+        let right = match fp_frame::concat_dataframes(&[&a, &bc]) { Ok(o) => o, Err(_) => return Ok(()) };
+        prop_assert_eq!(left.len(), right.len());
+        for name in ["a", "b"] {
+            let lv = mm_col_values(&left, name);
+            let rv = mm_col_values(&right, name);
+            prop_assert_eq!(lv.len(), rv.len());
+            for (i, (x, y)) in lv.iter().zip(rv.iter()).enumerate() {
+                prop_assert!(
+                    mm_scalar_value_eq(x, y),
+                    "concat associativity mismatch col {} row {}: {:?} vs {:?}", name, i, x, y
+                );
+            }
+        }
+    }
+}

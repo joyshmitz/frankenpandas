@@ -11333,3 +11333,73 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — groupby-sum conservation (br-frankenpandas-t8wrc)
+// Co-indexed keys+values so alignment is the identity; then the sum of all
+// group sums must equal the sum of the values whose key is non-null (default
+// groupby drops null keys). A strong conservation invariant for the groupby
+// aggregation path. Added by RubyGoose.
+// =====================================================================
+
+/// Co-indexed (keys, values) pair: both series share one index, keys are a
+/// small label space (with occasional nulls), values are finite no-null f64 so
+/// the conserved sum is well defined.
+fn arb_coindexed_groupby(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
+    (1..=max_len).prop_flat_map(|len| {
+        let idx = arb_unique_index_labels(len);
+        let keys = proptest::collection::vec(
+            prop_oneof![
+                4 => (0i64..5).prop_map(Scalar::Int64),
+                1 => Just(Scalar::Null(NullKind::Null)),
+            ],
+            len,
+        );
+        let vals = proptest::collection::vec(
+            (-1_000i64..1_000).prop_map(Scalar::Int64),
+            len,
+        );
+        (idx, keys, vals).prop_filter_map("coindexed construct", |(i, k, v)| {
+            let keys = Series::from_values("k".to_owned(), i.clone(), k).ok()?;
+            let values = Series::from_values("v".to_owned(), i, v).ok()?;
+            Some((keys, values))
+        })
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-GB1: sum of all group sums == sum of values whose key is non-null
+    /// (pandas/FP groupby drops null keys by default). Co-indexed inputs so no
+    /// alignment loss; integer values so the total is exact.
+    #[test]
+    fn prop_groupby_sum_conserves_total((keys, values) in arb_coindexed_groupby(14)) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        let result = match groupby_sum(&keys, &values, GroupByOptions::default(), &policy, &mut ledger) {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        // expected: sum of value[i] where key[i] is non-null
+        let kv = keys.column().values();
+        let vv = values.column().values();
+        let mut expected: i128 = 0;
+        for (k, v) in kv.iter().zip(vv.iter()) {
+            if !k.is_missing() {
+                if let Scalar::Int64(n) = v {
+                    expected += *n as i128;
+                }
+            }
+        }
+        let mut total: i128 = 0;
+        for s in result.values() {
+            match s {
+                Scalar::Int64(n) => total += *n as i128,
+                Scalar::Float64(f) => total += *f as i128,
+                _ => {}
+            }
+        }
+        prop_assert_eq!(total, expected, "groupby sum total {} != non-null-key value sum {}", total, expected);
+    }
+}

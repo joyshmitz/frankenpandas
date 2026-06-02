@@ -37829,6 +37829,121 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), result_cols, self.column_order.clone())
     }
 
+    /// Clip each row to its own bound, matching `df.clip(lower=s, upper=s,
+    /// axis=0)` where `lower`/`upper` are Series indexed by row label.
+    ///
+    /// Every numeric value in row `i` is clipped to the bound looked up by that
+    /// row's label. Semantics verified against live pandas 2.2.3
+    /// (br-frankenpandas-l4wfl):
+    /// - A row label *present* in the bound Series with a finite value clips
+    ///   that whole row to the value; dtype is preserved when the input is
+    ///   `Int64` and every resulting value is integral (an integral float bound
+    ///   such as `3.0` keeps `Int64`; a fractional bound that actually clips
+    ///   demotes the column to `Float64`).
+    /// - A row label present but *NaN* applies no clipping on that side (NaN
+    ///   comparisons are false), leaving the value and dtype untouched.
+    /// - A row label *absent* from any provided bound Series forces that entire
+    ///   row to NaN and demotes every column to `Float64` — pandas reindexes the
+    ///   bound to the frame's axis, and the introduced NaN propagates through
+    ///   the where-broadcast. This is distinct from a present-but-NaN bound.
+    /// - Pre-existing data nulls are preserved (and, like pandas, keep the
+    ///   column in `Float64`).
+    ///
+    /// A bound Series passed as `None` applies no clipping on that side.
+    /// (Per-column bounds, `axis=1`, are [`Self::clip_with_column_bounds`].)
+    pub fn clip_with_row_bounds(
+        &self,
+        lower: Option<&Series>,
+        upper: Option<&Series>,
+    ) -> Result<Self, FrameError> {
+        let row_labels = self.index.labels();
+        let nrows = row_labels.len();
+
+        // Resolve each provided bound Series to a per-row `Option<f64>` and
+        // record rows whose label is absent from a provided bound (those rows
+        // are forced to NaN, matching pandas' reindex-then-where broadcast).
+        // present + finite -> Some(v); present + NaN -> None (no clip);
+        // absent           -> None and `force_nan[i] = true`.
+        let mut force_nan = vec![false; nrows];
+        let resolve_side = |bounds: Option<&Series>, force: &mut [bool]| -> Vec<Option<f64>> {
+            let mut per_row = Vec::with_capacity(nrows);
+            for (i, label) in row_labels.iter().enumerate() {
+                match bounds {
+                    None => per_row.push(None),
+                    Some(series) => match series.get(label) {
+                        None => {
+                            force[i] = true;
+                            per_row.push(None);
+                        }
+                        Some(scalar) => match scalar.to_f64() {
+                            Ok(v) if !v.is_nan() => per_row.push(Some(v)),
+                            _ => per_row.push(None),
+                        },
+                    },
+                }
+            }
+            per_row
+        };
+        let lo_per_row = resolve_side(lower, &mut force_nan);
+        let hi_per_row = resolve_side(upper, &mut force_nan);
+
+        let mut result_cols = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if !matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+                result_cols.insert(name.clone(), col.clone());
+                continue;
+            }
+            let input_is_int = matches!(col.dtype(), DType::Int64);
+            let values = col.values();
+            let mut clipped = Vec::with_capacity(nrows);
+            let mut all_integral = true;
+            let mut any_null = false;
+            for (i, val) in values.iter().enumerate() {
+                if force_nan[i] {
+                    clipped.push(Scalar::Null(NullKind::NaN));
+                    any_null = true;
+                    continue;
+                }
+                if val.is_missing() {
+                    clipped.push(val.clone());
+                    any_null = true;
+                    continue;
+                }
+                let mut x = val.to_f64().map_err(ColumnError::from)?;
+                if let Some(lo) = lo_per_row[i]
+                    && x < lo
+                {
+                    x = lo;
+                }
+                if let Some(hi) = hi_per_row[i]
+                    && x > hi
+                {
+                    x = hi;
+                }
+                if x.fract() != 0.0 {
+                    all_integral = false;
+                }
+                clipped.push(Scalar::Float64(x));
+            }
+
+            let column = if input_is_int && !any_null && all_integral {
+                let ints = clipped
+                    .into_iter()
+                    .map(|s| match s {
+                        Scalar::Float64(x) => Scalar::Int64(x as i64),
+                        other => other,
+                    })
+                    .collect();
+                Column::new(DType::Int64, ints)?
+            } else {
+                Column::new(DType::Float64, clipped)?
+            };
+            result_cols.insert(name.clone(), column);
+        }
+        Self::new_with_column_order(self.index.clone(), result_cols, self.column_order.clone())
+    }
+
     /// Round numeric columns to specified decimal places.
     ///
     /// Matches `pd.DataFrame.round(decimals)`.
@@ -62117,6 +62232,156 @@ mod tests {
         assert!(a[1].is_missing());
         assert_eq!(a[2], Scalar::Float64(9.0));
         assert_eq!(out.column("b").unwrap().values()[0], Scalar::Float64(3.0));
+    }
+
+    fn dataframe_row_bound_series(pairs: &[(i64, Scalar)]) -> Series {
+        let labels: Vec<IndexLabel> = pairs.iter().map(|(l, _)| (*l).into()).collect();
+        let vals: Vec<Scalar> = pairs.iter().map(|(_, v)| v.clone()).collect();
+        Series::from_values("bound", labels, vals).unwrap()
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_clips_each_row_and_keeps_int() {
+        // df.clip(lower=Series({0:3,1:4,2:4}), axis=0): each row clipped to its
+        // own bound; int64 preserved (verified vs live pandas 2.2.3).
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+            vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
+        );
+        let lower = dataframe_row_bound_series(&[
+            (0, Scalar::Int64(3)),
+            (1, Scalar::Int64(4)),
+            (2, Scalar::Int64(4)),
+        ]);
+        let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(6), Scalar::Int64(11)]
+        );
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_lower_upper_clamps_both() {
+        // Both bounds per row: lower {0:3,1:4,2:4}, upper {0:8,1:8,2:8}.
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+            vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
+        );
+        let lower = dataframe_row_bound_series(&[
+            (0, Scalar::Int64(3)),
+            (1, Scalar::Int64(4)),
+            (2, Scalar::Int64(4)),
+        ]);
+        let upper = dataframe_row_bound_series(&[
+            (0, Scalar::Int64(8)),
+            (1, Scalar::Int64(8)),
+            (2, Scalar::Int64(8)),
+        ]);
+        let out = df.clip_with_row_bounds(Some(&lower), Some(&upper)).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(8)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(6), Scalar::Int64(8)]
+        );
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_present_nan_is_no_clip_keeps_int() {
+        // A row label present but NaN applies no clip on that side; int64 kept
+        // (NaN comparisons are false). Verified vs live pandas 2.2.3.
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+            vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
+        );
+        let lower = dataframe_row_bound_series(&[
+            (0, Scalar::Int64(3)),
+            (1, Scalar::Null(NullKind::NaN)),
+            (2, Scalar::Int64(4)),
+        ]);
+        let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
+        // Row 1 untouched (5, 6); int64 preserved across the whole column.
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(6), Scalar::Int64(11)]
+        );
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_missing_label_forces_nan_row_and_float() {
+        // Row 2 absent from the bound Series -> that row becomes NaN and every
+        // column demotes to float64 (pandas reindex-then-where broadcast). This
+        // is distinct from a present-but-NaN bound. Verified vs live pandas.
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+            vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
+        );
+        let lower =
+            dataframe_row_bound_series(&[(0, Scalar::Int64(3)), (1, Scalar::Int64(4))]);
+        let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
+        let a = out.column("a").unwrap().values();
+        assert_eq!(a[0], Scalar::Float64(3.0));
+        assert_eq!(a[1], Scalar::Float64(5.0));
+        assert!(a[2].is_missing());
+        let b = out.column("b").unwrap().values();
+        assert_eq!(b[0], Scalar::Float64(3.0));
+        assert_eq!(b[1], Scalar::Float64(6.0));
+        assert!(b[2].is_missing());
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_fractional_bound_demotes_to_float() {
+        // An integral input clipped by a fractional bound that actually clips
+        // demotes the column to float64 (matches pandas value-based dtype rule).
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
+            vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
+        );
+        let lower = dataframe_row_bound_series(&[
+            (0, Scalar::Float64(3.5)),
+            (1, Scalar::Float64(4.0)),
+            (2, Scalar::Float64(4.0)),
+        ]);
+        let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Float64(3.5), Scalar::Float64(5.0), Scalar::Float64(10.0)]
+        );
+        // The row-0 bound 3.5 also clips b[0] (2 -> 3.5), so column b demotes to
+        // float64 too: every column shares the per-row bound. Verified vs pandas.
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Float64(3.5), Scalar::Float64(6.0), Scalar::Float64(11.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_clip_with_row_bounds_preserves_data_nulls() {
+        // Existing data nulls survive clipping; the column stays float64.
+        let df = dataframe_clip_axis_fixture(
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(9.0)],
+            vec![Scalar::Float64(2.0), Scalar::Float64(6.0), Scalar::Float64(10.0)],
+        );
+        let lower = dataframe_row_bound_series(&[
+            (0, Scalar::Int64(3)),
+            (1, Scalar::Int64(3)),
+            (2, Scalar::Int64(3)),
+        ]);
+        let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
+        let a = out.column("a").unwrap().values();
+        assert_eq!(a[0], Scalar::Float64(3.0));
+        assert!(a[1].is_missing());
+        assert_eq!(a[2], Scalar::Float64(9.0));
     }
 
     #[test]

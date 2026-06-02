@@ -2932,9 +2932,6 @@ impl Series {
             "series_binary_arithmetic_materialization",
         );
 
-        let left = self.column.reindex_by_positions(&left_positions)?;
-        let right = other.column.reindex_by_positions(&right_positions)?;
-
         let action = policy.decide_join_admission(union_index.len(), ledger);
         if matches!(action, DecisionAction::Reject) {
             return Err(FrameError::CompatibilityRejected(
@@ -2942,20 +2939,37 @@ impl Series {
             ));
         }
 
-        // Pandas promotes to Float64 when alignment introduces missing values,
-        // so NaN can be used as the missing sentinel (Int64 has no NaN).
-        let has_alignment_gaps = left_positions.iter().any(Option::is_none)
-            || right_positions.iter().any(Option::is_none);
-        let (left, right) = if has_alignment_gaps
-            && matches!(left.dtype(), DType::Int64 | DType::Bool)
-            && matches!(right.dtype(), DType::Int64 | DType::Bool)
+        // AG-10 fused fast path: when both columns are already Float64, gather
+        // f64 directly from the originals into the union layout and apply the op
+        // in one vectorized pass — skipping the two intermediate reindexed
+        // `Vec<Scalar>` materializations. Output is byte-identical to the general
+        // reindex + binary_numeric path in the `else` arm (proof in
+        // `Column::aligned_binary_f64`). All other dtype combinations (incl. the
+        // Int64/Bool→Float64 gap promotion) take the general path unchanged.
+        let column = if matches!(self.column.dtype(), DType::Float64)
+            && matches!(other.column.dtype(), DType::Float64)
         {
-            (left.astype(DType::Float64)?, right.astype(DType::Float64)?)
+            self.column
+                .aligned_binary_f64(&other.column, &left_positions, &right_positions, op)?
         } else {
-            (left, right)
-        };
+            let left = self.column.reindex_by_positions(&left_positions)?;
+            let right = other.column.reindex_by_positions(&right_positions)?;
 
-        let column = left.binary_numeric(&right, op)?;
+            // Pandas promotes to Float64 when alignment introduces missing values,
+            // so NaN can be used as the missing sentinel (Int64 has no NaN).
+            let has_alignment_gaps = left_positions.iter().any(Option::is_none)
+                || right_positions.iter().any(Option::is_none);
+            let (left, right) = if has_alignment_gaps
+                && matches!(left.dtype(), DType::Int64 | DType::Bool)
+                && matches!(right.dtype(), DType::Int64 | DType::Bool)
+            {
+                (left.astype(DType::Float64)?, right.astype(DType::Float64)?)
+            } else {
+                (left, right)
+            };
+
+            left.binary_numeric(&right, op)?
+        };
 
         let op_symbol = match op {
             ArithmeticOp::Add => "+",
@@ -27577,7 +27591,9 @@ impl DataFrame {
                     Scalar::Int64(v) => IndexLabel::Int64(v),
                     Scalar::Utf8(v) => IndexLabel::Utf8(v),
                     Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-                    Scalar::Bool(v) => IndexLabel::Utf8(if v { "True" } else { "False" }.to_string()),
+                    Scalar::Bool(v) => {
+                        IndexLabel::Utf8(if v { "True" } else { "False" }.to_string())
+                    }
                     Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
@@ -28705,7 +28721,9 @@ impl DataFrame {
                             Scalar::Int64(v) => IndexLabel::Int64(*v),
                             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
                             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-                            Scalar::Bool(b) => IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string()),
+                            Scalar::Bool(b) => {
+                                IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string())
+                            }
                             Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                             Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
@@ -44099,8 +44117,10 @@ impl DataFrameGroupBy<'_> {
                 // m4 by (sum-of-squared-deviations)^2 instead of variance^2,
                 // inflating |kurtosis| by a factor of (n-1)^2 (e.g. group
                 // [1,2,3,4] yielded -3.133 instead of pandas' -1.2).
-                let gv: Vec<Scalar> =
-                    row_indices.iter().map(|&i| col.values()[i].clone()).collect();
+                let gv: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
                 vals.push(fp_types::nankurt(&gv));
             }
 
@@ -51756,7 +51776,11 @@ mod tests {
         let named = df.set_index("a", true).unwrap().reset_index(false).unwrap();
         assert!(named.column("a").is_some());
         assert!(named.column("index").is_none());
-        let order = named.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let order = named
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         assert_eq!(order, vec!["a".to_owned(), "v".to_owned()]);
 
         // Unnamed (default RangeIndex) -> 'index'.
@@ -62215,15 +62239,29 @@ mod tests {
             out.column("a").unwrap().values(),
             &[Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(9)]
         );
-        assert!(out.column("b").unwrap().values().iter().all(Scalar::is_missing));
+        assert!(
+            out.column("b")
+                .unwrap()
+                .values()
+                .iter()
+                .all(Scalar::is_missing)
+        );
     }
 
     #[test]
     fn dataframe_clip_with_column_bounds_preserves_data_nulls() {
         // Existing data nulls survive clipping (pandas keeps NaN in the data).
         let df = dataframe_clip_axis_fixture(
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(9.0)],
-            vec![Scalar::Float64(2.0), Scalar::Float64(6.0), Scalar::Float64(10.0)],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(9.0),
+            ],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(10.0),
+            ],
         );
         let lower = dataframe_col_bound_series(&[("a", 3), ("b", 3)]);
         let out = df.clip_with_column_bounds(Some(&lower), None).unwrap();
@@ -62326,8 +62364,7 @@ mod tests {
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)],
             vec![Scalar::Int64(2), Scalar::Int64(6), Scalar::Int64(11)],
         );
-        let lower =
-            dataframe_row_bound_series(&[(0, Scalar::Int64(3)), (1, Scalar::Int64(4))]);
+        let lower = dataframe_row_bound_series(&[(0, Scalar::Int64(3)), (1, Scalar::Int64(4))]);
         let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
         let a = out.column("a").unwrap().values();
         assert_eq!(a[0], Scalar::Float64(3.0));
@@ -62355,13 +62392,21 @@ mod tests {
         let out = df.clip_with_row_bounds(Some(&lower), None).unwrap();
         assert_eq!(
             out.column("a").unwrap().values(),
-            &[Scalar::Float64(3.5), Scalar::Float64(5.0), Scalar::Float64(10.0)]
+            &[
+                Scalar::Float64(3.5),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0)
+            ]
         );
         // The row-0 bound 3.5 also clips b[0] (2 -> 3.5), so column b demotes to
         // float64 too: every column shares the per-row bound. Verified vs pandas.
         assert_eq!(
             out.column("b").unwrap().values(),
-            &[Scalar::Float64(3.5), Scalar::Float64(6.0), Scalar::Float64(11.0)]
+            &[
+                Scalar::Float64(3.5),
+                Scalar::Float64(6.0),
+                Scalar::Float64(11.0)
+            ]
         );
     }
 
@@ -62369,8 +62414,16 @@ mod tests {
     fn dataframe_clip_with_row_bounds_preserves_data_nulls() {
         // Existing data nulls survive clipping; the column stays float64.
         let df = dataframe_clip_axis_fixture(
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(9.0)],
-            vec![Scalar::Float64(2.0), Scalar::Float64(6.0), Scalar::Float64(10.0)],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(9.0),
+            ],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(10.0),
+            ],
         );
         let lower = dataframe_row_bound_series(&[
             (0, Scalar::Int64(3)),
@@ -64048,16 +64101,28 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["x", "y"],
             vec![
-                ("x", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("y", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "x",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "y",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
             ],
         )
         .unwrap();
         let df2 = DataFrame::from_dict(
             &["x", "y"],
             vec![
-                ("x", vec![Scalar::Int64(1), Scalar::Int64(9), Scalar::Int64(3)]),
-                ("y", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(8)]),
+                (
+                    "x",
+                    vec![Scalar::Int64(1), Scalar::Int64(9), Scalar::Int64(3)],
+                ),
+                (
+                    "y",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(8)],
+                ),
             ],
         )
         .unwrap();
@@ -64120,7 +64185,13 @@ mod tests {
         assert_eq!(kept.len(), 3);
         assert_eq!(kept.column_names().len(), 4);
         for col in ["x_self", "x_other", "y_self", "y_other"] {
-            assert!(kept.column(col).unwrap().values().iter().all(Scalar::is_missing));
+            assert!(
+                kept.column(col)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .all(Scalar::is_missing)
+            );
         }
     }
 
@@ -64138,7 +64209,9 @@ mod tests {
 
         // 2 diff rows x {self, other} -> 4 stacked rows, with a row MultiIndex.
         assert_eq!(out.len(), 4);
-        let mi = out.row_multiindex().expect("align_axis=0 has a row MultiIndex");
+        let mi = out
+            .row_multiindex()
+            .expect("align_axis=0 has a row MultiIndex");
         assert_eq!(mi.len(), 4);
         assert_eq!(
             out.index().labels(),
@@ -64183,7 +64256,9 @@ mod tests {
         let err = df1
             .compare_with_align_axis(&df2, ("self", "other"), false, false, 2)
             .unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("No axis named 2")));
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("No axis named 2"))
+        );
     }
 
     // --- Series.str formatting & predicates tests ---

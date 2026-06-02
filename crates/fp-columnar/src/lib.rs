@@ -1894,6 +1894,87 @@ impl Column {
         }
     }
 
+    /// AG-10 fused outer-alignment arithmetic for two Float64 columns.
+    ///
+    /// Equivalent to `self.reindex_by_positions(lp)?.binary_numeric(
+    /// &right.reindex_by_positions(rp)?, op)` for the Float64-output case, but it
+    /// gathers `f64` directly from the *original* columns into the union layout
+    /// in one pass instead of materializing two intermediate `Vec<Scalar>` and
+    /// re-deriving their `f64` views. Provably isomorphic: `from_scalars` is
+    /// element-wise and `reindex` is a gather, so `gather(from_scalars(src)) ==
+    /// from_scalars(reindex(src))`; the nan-aware validity gathers identically
+    /// (a `None` slot reindexes to `missing_for_dtype(Float64) = Null(NaN)`,
+    /// i.e. invalid, exactly as the gathered mask marks it). For Float64 output
+    /// every invalid position is `Null(NaN)` — matching both arms of
+    /// `try_vectorized_binary`'s invalid branch. Caller guarantees both columns
+    /// are `Float64`.
+    pub fn aligned_binary_f64(
+        &self,
+        right: &Self,
+        left_positions: &[Option<usize>],
+        right_positions: &[Option<usize>],
+        op: ArithmeticOp,
+    ) -> Result<Self, ColumnError> {
+        debug_assert_eq!(left_positions.len(), right_positions.len());
+        let out_len = left_positions.len();
+
+        let ColumnData::Float64(lsrc) = ColumnData::from_scalars(&self.values, DType::Float64)
+        else {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: DType::Float64,
+            });
+        };
+        let ColumnData::Float64(rsrc) = ColumnData::from_scalars(&right.values, DType::Float64)
+        else {
+            return Err(ColumnError::DTypeMismatch {
+                left: right.dtype,
+                right: DType::Float64,
+            });
+        };
+        let lvalid = self.nan_aware_validity();
+        let rvalid = right.nan_aware_validity();
+
+        let mut l = vec![0.0_f64; out_len];
+        let mut r = vec![0.0_f64; out_len];
+        let mut lmask = ValidityMask::all_invalid(out_len);
+        let mut rmask = ValidityMask::all_invalid(out_len);
+        for (k, slot) in left_positions.iter().enumerate() {
+            if let Some(i) = slot {
+                l[k] = lsrc[*i];
+                if lvalid.get(*i) {
+                    lmask.set(k, true);
+                }
+            } else {
+                l[k] = f64::NAN;
+            }
+        }
+        for (k, slot) in right_positions.iter().enumerate() {
+            if let Some(j) = slot {
+                r[k] = rsrc[*j];
+                if rvalid.get(*j) {
+                    rmask.set(k, true);
+                }
+            } else {
+                r[k] = f64::NAN;
+            }
+        }
+
+        let (result_data, result_validity) = vectorized_binary_f64(&l, &r, &lmask, &rmask, op);
+        let values: Vec<Scalar> = result_data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if result_validity.get(i) {
+                    Scalar::Float64(*v)
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
     /// Validity mask that also marks NaN float values as invalid.
     #[must_use]
     fn nan_aware_validity(&self) -> ValidityMask {
@@ -8626,6 +8707,50 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(11.0));
         assert!(result.values()[1].is_nan(), "null+valid should be NaN");
         assert!(result.values()[2].is_nan(), "valid+null should be NaN");
+    }
+
+    #[test]
+    fn aligned_binary_f64_matches_reindex_then_binary_numeric() {
+        let left = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .expect("left");
+        let right = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .expect("right");
+        let left_positions = [Some(2), None, Some(1), Some(0)];
+        let right_positions = [None, Some(0), Some(2), Some(1)];
+
+        let expected_left = left
+            .reindex_by_positions(&left_positions)
+            .expect("left reindex");
+        let expected_right = right
+            .reindex_by_positions(&right_positions)
+            .expect("right reindex");
+        let expected = expected_left
+            .binary_numeric(&expected_right, ArithmeticOp::Add)
+            .expect("generic add");
+        let actual = left
+            .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
+            .expect("aligned add");
+
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert_eq!(actual.values(), expected.values());
+        assert_eq!(actual.validity().len(), expected.validity().len());
+        for idx in 0..actual.len() {
+            assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
+        }
     }
 
     #[test]

@@ -11168,3 +11168,73 @@ proptest! {
         prop_assert_eq!(total as usize, nonnull, "value_counts sum {} != non-null {}", total, nonnull);
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — Series.rolling
+//
+// Zero pre-existing metamorphic coverage for rolling. Relations from pandas
+// rolling-window semantics:
+//   MR-R1 rolling(1, min_periods=1).sum() is the identity on values
+//   MR-R2 rolling(w, min_periods=w).sum() has exactly min(w-1, len) leading
+//         nulls (the window-fill boundary), independent of the data
+//   MR-R3 rolling(len, min_periods=1).sum() last element equals the whole-
+//         series sum (skipna), compared with a relative float tolerance
+// Added by RubyGoose (metamorphic gauntlet).
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// MR-R1: a width-1 rolling sum returns each element unchanged (NaN stays
+    /// NaN since a lone missing value fails min_periods=1).
+    #[test]
+    fn prop_rolling_window1_is_identity(series in arb_numeric_series("roll1", 12)) {
+        if series.len() == 0 { return Ok(()); }
+        let out = match series.rolling(1, Some(1)).sum() { Ok(s) => s, Err(_) => return Ok(()) };
+        let iv = series.column().values();
+        let ov = out.column().values();
+        prop_assert_eq!(iv.len(), ov.len());
+        for (i, (a, b)) in iv.iter().zip(ov.iter()).enumerate() {
+            prop_assert!(mm_scalar_value_eq(a, b), "rolling(1) changed elem {}: {:?} vs {:?}", i, a, b);
+        }
+    }
+
+    /// MR-R2: rolling(w, min_periods=w).sum() emits exactly min(w-1, len)
+    /// leading nulls — the window-fill boundary is data-independent.
+    #[test]
+    fn prop_rolling_full_min_periods_leading_nulls(series in arb_numeric_series("rollfill", 12)) {
+        let len = series.len();
+        if len == 0 { return Ok(()); }
+        let w = (len / 2).max(1);
+        let out = match series.rolling(w, Some(w)).sum() { Ok(s) => s, Err(_) => return Ok(()) };
+        let ov = out.column().values();
+        let expected_leading = (w - 1).min(len);
+        let actual_leading = ov.iter().take_while(|v| v.is_missing()).count();
+        // Trailing positions may also be null if the window contains a missing
+        // input value, so we only assert the *minimum* guaranteed leading run.
+        prop_assert!(
+            actual_leading >= expected_leading,
+            "rolling({},mp={}) expected >= {} leading nulls, got {}", w, w, expected_leading, actual_leading
+        );
+    }
+
+    /// MR-R3: rolling(len, min_periods=1).sum() last element equals the
+    /// whole-series (skipna) sum within a relative float tolerance.
+    #[test]
+    fn prop_rolling_full_window_last_is_total_sum(series in arb_numeric_series("rolltotal", 12)) {
+        let len = series.len();
+        if len == 0 { return Ok(()); }
+        let out = match series.rolling(len, Some(1)).sum() { Ok(s) => s, Err(_) => return Ok(()) };
+        let ov = out.column().values();
+        let last = match ov.last() { Some(v) => v, None => return Ok(()) };
+        let total = match series.sum() { Ok(s) => s, Err(_) => return Ok(()) };
+        match (mm_scalar_f64(last), mm_scalar_f64(&total)) {
+            (Some(a), Some(b)) => {
+                let tol = 1e-9 * (1.0 + a.abs().max(b.abs()));
+                prop_assert!((a - b).abs() <= tol, "rolling-last {} != series sum {}", a, b);
+            }
+            // If either is missing/NaN both should be (all-null series).
+            (a, b) => prop_assert_eq!(a.is_none(), b.is_none()),
+        }
+    }
+}

@@ -404,8 +404,14 @@ def op_series_binary_numeric(
     left_values = [scalar_from_json(item) for item in left["values"]]
     right_values = [scalar_from_json(item) for item in right["values"]]
 
-    lhs = pd.Series(left_values, index=left_index, dtype="float64")
-    rhs = pd.Series(right_values, index=right_index, dtype="float64")
+    # Let pandas infer the operand dtype (do NOT force float64). This mirrors
+    # real `pd.Series([...])` list construction exactly: an all-int operand
+    # stays int64 (so int+int full-overlap yields int64, not float64), a
+    # None-containing numeric operand coerces to float64 with NaN, and division
+    # is always float. The old forced-float64 made the live oracle report
+    # Float64 even for genuine int results, diverging from real pandas and FP.
+    lhs = pd.Series(left_values, index=left_index)
+    rhs = pd.Series(right_values, index=right_index)
     if operation == "series_add":
         out = lhs + rhs
     elif operation == "series_sub":

@@ -1190,6 +1190,46 @@ impl Column {
         Self::new(dtype, values)
     }
 
+    /// Gather a new column from the given row positions of `self`.
+    ///
+    /// This is the fast path for materialization (`take`, `iloc`, boolean
+    /// filter, `sort_values`, `drop_duplicates`, `reindex`, `head`/`tail`,
+    /// groupby row selection). Because every gathered value originates from
+    /// `self` it already matches `self.dtype` (no coercion needed), so this
+    /// skips the dtype-coercion and object-bucket detection scans that
+    /// `Column::new` performs, folding the missing-normalization and validity
+    /// rebuild into a single pass.
+    ///
+    /// The output is bit-for-bit identical to
+    /// `Column::new(self.dtype(), positions.iter().map(|&p| self.values[p].clone()).collect())`
+    /// (the no-coercion branch `Column::new` takes for same-dtype input): each
+    /// gathered value is missing-normalized via `normalize_missing_for_dtype`
+    /// (generic `Null` → dtype-specific missing, e.g. `NaT` for datetime), and
+    /// the validity mask is recomputed from the normalized values'
+    /// `is_missing()` exactly as `ValidityMask::from_values` would.
+    ///
+    /// # Panics
+    /// Panics if any position is out of bounds (callers materialize from
+    /// validated index positions; this mirrors the prior `values()[pos]` index).
+    #[must_use]
+    pub fn take_positions(&self, positions: &[usize]) -> Self {
+        let n = positions.len();
+        let mut values = Vec::with_capacity(n);
+        let mut words = vec![0_u64; n.div_ceil(64)];
+        for (out_idx, &pos) in positions.iter().enumerate() {
+            let value = Self::normalize_missing_for_dtype(self.values[pos].clone(), self.dtype);
+            if !value.is_missing() {
+                words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+            }
+            values.push(value);
+        }
+        Self {
+            dtype: self.dtype,
+            values,
+            validity: ValidityMask { words, len: n },
+        }
+    }
+
     /// Create a column filled with zeros.
     ///
     /// Matches np.zeros().
@@ -8017,6 +8057,37 @@ mod tests {
                 Scalar::Int64(10)
             ]
         );
+    }
+
+    #[test]
+    fn take_positions_matches_validated_materialization() {
+        let column = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .expect("column should build");
+
+        let positions = [2, 1, 0, 2];
+        let gathered = column.take_positions(&positions);
+        let expected_values = positions
+            .iter()
+            .map(|&position| column.values()[position].clone())
+            .collect::<Vec<_>>();
+        let expected =
+            Column::new(column.dtype(), expected_values).expect("validated materialization");
+
+        assert_eq!(gathered.dtype(), expected.dtype());
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+
+        let empty = column.take_positions(&[]);
+        assert_eq!(empty.dtype(), column.dtype());
+        assert!(empty.values().is_empty());
+        assert_eq!(empty.validity(), &ValidityMask::all_invalid(0));
     }
 
     #[test]

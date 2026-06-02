@@ -13,8 +13,7 @@
 //! Args: <scenario> <n_rows> <iterations>
 //!   scenario ∈ { drop_duplicates, sort_single, filter_bool }
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_frame::DataFrame;
 use fp_index::{DuplicateKeep, Index, IndexLabel};
@@ -53,11 +52,62 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Deterministic serialization of a frame's observable state (index labels +
+/// per-column dtype and values in column order). Used for the isomorphism
+/// golden-output sha256 proof; it must be stable across the optimization.
+fn golden_dump(df: &DataFrame) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("nrows={}\n", df.len()));
+    for label in df.index().labels() {
+        s.push_str(&format!("{label:?}|"));
+    }
+    s.push('\n');
+    for name in df.column_names() {
+        let col = df.columns().get(name).expect("column");
+        s.push_str(&format!("col {name} dtype={:?}\n", col.dtype()));
+        for v in col.values() {
+            s.push_str(&format!("{v:?};"));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+fn run_golden(scenario: &str, n: usize) {
+    let out = match scenario {
+        "drop_duplicates" => build_groupby_frame(n, 100)
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .expect("dedup"),
+        "sort_single" => build_numeric_frame(n, 4)
+            .sort_values("c0", true)
+            .expect("sort"),
+        "filter_bool" => {
+            let frame = build_numeric_frame(n, 10);
+            let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            frame.iloc_bool(&mask).expect("filter")
+        }
+        other => {
+            eprintln!("unknown golden scenario: {other}");
+            std::process::exit(2);
+        }
+    };
+    print!("{}", golden_dump(&out));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let scenario = args.get(1).map(String::as_str).unwrap_or("drop_duplicates");
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+
+    // Golden mode: `perf_profile golden <scenario> <n>` prints a deterministic
+    // dump of the operation's output for sha256 isomorphism proofs.
+    if scenario == "golden" {
+        let gscenario = args.get(2).map(String::as_str).unwrap_or("drop_duplicates");
+        let gn: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        run_golden(gscenario, gn);
+        return;
+    }
 
     eprintln!("perf_profile: scenario={scenario} n={n} iters={iters}");
     let start = Instant::now();

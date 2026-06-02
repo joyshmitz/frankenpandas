@@ -26392,11 +26392,9 @@ impl DataFrame {
                 .columns
                 .get(name)
                 .expect("column name listed in order must exist");
-            let values = positions
-                .iter()
-                .map(|&position| column.values()[position].clone())
-                .collect::<Vec<_>>();
-            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
+            // Gather fast path (br-frankenpandas-2a6ln): same-dtype, already
+            // normalized values, so skip Column::new's re-validation passes.
+            columns.insert(name.clone(), column.take_positions(positions));
         }
 
         Self::new_with_axes(
@@ -26446,12 +26444,12 @@ impl DataFrame {
                 .columns
                 .get(name)
                 .expect("column name listed in order must exist");
-            let col_values = column.values();
-            let mut values = Vec::with_capacity(n);
-            for &pos in positions {
-                values.push(col_values[pos].clone());
-            }
-            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
+            // Gather fast path (br-frankenpandas-2a6ln): every value originates
+            // from `column`, so it already matches the dtype and is already
+            // missing-normalized. `Column::take_positions` clones the selected
+            // values and rebuilds validity in one pass, skipping the ~5
+            // re-validation passes `Column::new` would run.
+            columns.insert(name.clone(), column.take_positions(positions));
         }
 
         // Per br-frankenpandas-lhzot: preserve the index name through
@@ -98089,7 +98087,7 @@ mod tests {
         )
         .unwrap();
         let result = df.fillna_method("ffill").unwrap();
-        let output = format!("{result}");
+        let output = result.to_string();
         assert_text_golden("dataframe_fillna_method_basic.txt", &output);
     }
 
@@ -98104,7 +98102,7 @@ mod tests {
         )
         .unwrap();
         let result = df.info();
-        let output = format!("{result}");
+        let output = result.to_string();
         assert_text_golden("dataframe_info_basic.txt", &output);
     }
 
@@ -98134,7 +98132,7 @@ mod tests {
         )
         .unwrap();
         let result = df.to_string();
-        let output = format!("{result}");
+        let output = result.to_string();
         assert_text_golden("dataframe_to_string_basic.txt", &output);
     }
 
@@ -98156,14 +98154,14 @@ mod tests {
     #[test]
     fn series_logspace_golden_basic() {
         let result = Series::logspace("x", 0.0, 2.0, 5).unwrap();
-        let output = format!("{result}");
+        let output = result.to_string();
         assert_text_golden("series_logspace_basic.txt", &output);
     }
 
     #[test]
     fn series_geomspace_golden_basic() {
         let result = Series::geomspace("x", 1.0, 1000.0, 4).unwrap();
-        let output = format!("{result}");
+        let output = result.to_string();
         assert_text_golden("series_geomspace_basic.txt", &output);
     }
 

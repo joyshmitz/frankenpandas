@@ -245,8 +245,11 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
 
 
 def label_to_json(value: Any) -> dict[str, Any]:
+    # FrankenPandas IndexLabel has no Bool variant, so a bool index/column
+    # label is stringified to "True"/"False" (Utf8). The bool check must stay
+    # ahead of the int check since bool is an int subclass.
     if isinstance(value, bool):
-        return {"kind": "bool", "value": value}
+        return {"kind": "utf8", "value": str(value)}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     return {"kind": "utf8", "value": str(value)}

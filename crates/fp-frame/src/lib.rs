@@ -1147,7 +1147,10 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-        IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+        // Preserve the datetime dtype on the way back to a column (symmetric
+        // with Timedelta64). pandas `reset_index()` on a DatetimeIndex yields a
+        // datetime64[ns] column, not a string.
+        IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
     }
 }
 
@@ -26385,7 +26388,9 @@ impl DataFrame {
             IndexLabel::Int64(v) => Scalar::Int64(*v),
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-            IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+            // Preserve datetime dtype on reset/extraction (symmetric with
+            // Timedelta64); pandas reset_index on a DatetimeIndex -> datetime64.
+            IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
         }
     }
 
@@ -51400,6 +51405,34 @@ mod tests {
             out.column("d").unwrap().values(),
             &[Scalar::Timedelta64(d0), Scalar::Timedelta64(d1)]
         );
+    }
+
+    #[test]
+    fn dataframe_set_index_reset_index_datetime_roundtrips_typed() {
+        // set_index('t').reset_index() must return a datetime64 column, not a
+        // stringified one — pandas reset_index on a DatetimeIndex yields a
+        // datetime64[ns] column. Guards the index_label_to_scalar symmetry fix.
+        let t0 = 1_704_067_200_000_000_000_i64;
+        let t1 = 1_704_153_600_000_000_000_i64;
+        let df = DataFrame::from_dict(
+            &["t", "v"],
+            vec![
+                ("t", vec![Scalar::Datetime64(t0), Scalar::Datetime64(t1)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let indexed = df.set_index("t", true).unwrap();
+        // reset_index restores the former index as a column (named "index" by
+        // FP's current naming rule) — the point here is the dtype round-trips.
+        let restored = indexed.reset_index(false).unwrap();
+        let restored_col = restored.column("index").unwrap();
+        assert_eq!(
+            restored_col.values(),
+            &[Scalar::Datetime64(t0), Scalar::Datetime64(t1)]
+        );
+        assert_eq!(restored_col.dtype(), DType::Datetime64);
     }
 
     #[test]

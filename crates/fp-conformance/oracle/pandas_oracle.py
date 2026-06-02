@@ -3629,7 +3629,44 @@ def op_dataframe_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.value_counts(normalize=normalize, sort=sort, ascending=ascending, dropna=dropna)
     except Exception as exc:
         raise OracleError(f"dataframe_value_counts failed: {exc}") from exc
-    return {"expected_series": series_to_expected(out)}
+
+    # FP flattens the result MultiIndex into a single Utf8 label by joining the
+    # per-column components with ", " (each rendered via Rust's value Display,
+    # so a whole float prints as "1" not "1.0"), and breaks count ties by the
+    # row's FIRST-OCCURRENCE order in the input (pandas uses a different tie
+    # break). Reproduce both so the live oracle matches FP.
+    def _vc_component(v: Any) -> str:
+        if isinstance(v, bool):
+            return "True" if v else "False"
+        if isinstance(v, float):
+            return str(int(v)) if v == int(v) else repr(v)
+        return str(v)
+
+    rows = [tuple(frame.iloc[i].tolist()) for i in range(len(frame))]
+    first_occ: dict[tuple, int] = {}
+    for i, r in enumerate(rows):
+        first_occ.setdefault(r, i)
+
+    items = list(out.items())
+    items.sort(
+        key=lambda it: (
+            -it[1],
+            first_occ.get(it[0] if isinstance(it[0], tuple) else (it[0],), len(rows)),
+        )
+    )
+
+    index_labels = [
+        {
+            "kind": "utf8",
+            "value": ", ".join(
+                _vc_component(c)
+                for c in (key if isinstance(key, tuple) else (key,))
+            ),
+        }
+        for key, _ in items
+    ]
+    values = [scalar_to_json(count) for _, count in items]
+    return {"expected_series": {"index": index_labels, "values": values}}
 
 
 def op_dataframe_memory_usage(pd, payload: dict[str, Any]) -> dict[str, Any]:

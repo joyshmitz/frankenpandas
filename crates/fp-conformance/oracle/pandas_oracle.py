@@ -547,8 +547,12 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
     aligned_keys = key_series.reindex(union_index)
     aligned_values = value_series.reindex(union_index)
 
+    # pandas groupby defaults to sort=True (group keys sorted); FrankenPandas
+    # and the fixtures follow that default, so the oracle must too. The prior
+    # sort=False emitted group keys in first-seen order, a false live-gate red
+    # for every groupby case whose key order differed from sorted order.
     grouped = pd.DataFrame({"key": aligned_keys, "value": aligned_values}).groupby(
-        "key", sort=False, dropna=True
+        "key", sort=True, dropna=True
     )["value"]
     if agg == "sum":
         out = grouped.sum()

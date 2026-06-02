@@ -2302,6 +2302,39 @@ def op_series_dropna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_drop_na(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # `drop_na` is the Series dropna op under an alias the dispatch lacked.
+    # Build the input via fixture_series_from_payload so an int column with a
+    # null infers nullable Int64 (matching FP) rather than numpy float64 —
+    # dropna then preserves the int64 dtype as the fixtures expect.
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("drop_na requires left payload")
+    series = fixture_series_from_payload(pd, left, "drop_na")
+    try:
+        out = series.dropna()
+    except Exception as exc:
+        raise OracleError(f"drop_na failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_fill_na(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # `fill_na` is the Series fillna op under an alias the dispatch lacked.
+    left = payload.get("left")
+    fill_value_payload = payload.get("fill_value")
+    if left is None:
+        raise OracleError("fill_na requires left payload")
+    if fill_value_payload is None:
+        raise OracleError("fill_na requires fill_value payload")
+    series = fixture_series_from_payload(pd, left, "fill_na")
+    fill_value = scalar_from_json(fill_value_payload)
+    try:
+        out = series.fillna(fill_value)
+    except Exception as exc:
+        raise OracleError(f"fill_na failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -7155,6 +7188,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_fillna(pd, payload)
     if op == "series_dropna":
         return op_series_dropna(pd, payload)
+    if op == "drop_na":
+        return op_drop_na(pd, payload)
+    if op == "fill_na":
+        return op_fill_na(pd, payload)
     if op == "series_count":
         return op_series_count(pd, payload)
     if op in {"series_first_valid_index", "series_first_valid_index_default"}:

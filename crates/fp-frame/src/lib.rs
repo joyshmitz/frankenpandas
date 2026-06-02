@@ -40073,18 +40073,41 @@ impl DataFrame {
         keep_shape: bool,
         keep_equal: bool,
     ) -> Result<Self, FrameError> {
+        self.compare_with_align_axis(other, result_names, keep_shape, keep_equal, 1)
+    }
+
+    /// Matches `df.compare(other, align_axis=..., keep_shape=...,
+    /// keep_equal=..., result_names=(left, right))`.
+    ///
+    /// `align_axis=1` (default) lays self/other side by side as
+    /// `col_self`/`col_other` columns; `align_axis=0` stacks them as a 2-level
+    /// row MultiIndex `(label, result_name)` over the original columns.
+    /// `keep_shape`/`keep_equal` behave as in pandas.
+    pub fn compare_with_align_axis(
+        &self,
+        other: &Self,
+        result_names: (&str, &str),
+        keep_shape: bool,
+        keep_equal: bool,
+        align_axis: i64,
+    ) -> Result<Self, FrameError> {
         if self.index != other.index || self.column_order != other.column_order {
             return Err(FrameError::CompatibilityRejected(
                 "compare requires DataFrames with identical index and columns".to_owned(),
             ));
         }
+        if align_axis != 0 && align_axis != 1 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "No axis named {align_axis} for object type DataFrame"
+            )));
+        }
 
         let n = self.len();
-        // Track which rows have any difference
         let mut has_diff = vec![false; n];
-
-        // Build diff columns: for each shared column, create "col_self" and "col_other"
-        let mut diff_cols: Vec<(String, Vec<Scalar>)> = Vec::new();
+        // (column name, self values, other values, column-has-any-diff). Built
+        // once; both align_axis layouts are assembled from it.
+        let mut per_col: Vec<(String, Vec<Scalar>, Vec<Scalar>, bool)> =
+            Vec::with_capacity(self.column_order.len());
 
         for col_name in &self.column_order {
             let self_col = &self.columns[col_name];
@@ -40112,14 +40135,11 @@ impl DataFrame {
                 }
             }
 
-            // keep_shape keeps every column pair even when fully equal.
-            if keep_shape || col_has_diff {
-                diff_cols.push((format!("{col_name}_{}", result_names.0), self_vals));
-                diff_cols.push((format!("{col_name}_{}", result_names.1), other_vals));
-            }
+            per_col.push((col_name.clone(), self_vals, other_vals, col_has_diff));
         }
 
-        if diff_cols.is_empty() && !keep_shape {
+        let any_diff_col = per_col.iter().any(|(_, _, _, d)| *d);
+        if !any_diff_col && !keep_shape {
             // No differences found - return empty DataFrame.
             // Per br-frankenpandas-mu31x: preserve self.index.name on the
             // empty result, matching pandas df.compare.
@@ -40138,23 +40158,80 @@ impl DataFrame {
                 .collect()
         };
 
+        if align_axis == 0 {
+            return self.compare_assemble_axis0(result_names, keep_shape, &per_col, &row_indices);
+        }
+
+        // align_axis == 1: self/other laid out side by side per column.
+        let mut columns = BTreeMap::new();
+        let mut column_order = Vec::new();
+        for (col_name, self_vals, other_vals, col_has_diff) in &per_col {
+            // keep_shape keeps every column pair even when fully equal.
+            if !(keep_shape || *col_has_diff) {
+                continue;
+            }
+            let self_filtered: Vec<Scalar> =
+                row_indices.iter().map(|&i| self_vals[i].clone()).collect();
+            let other_filtered: Vec<Scalar> =
+                row_indices.iter().map(|&i| other_vals[i].clone()).collect();
+            let self_name = format!("{col_name}_{}", result_names.0);
+            let other_name = format!("{col_name}_{}", result_names.1);
+            columns.insert(self_name.clone(), Column::from_values(self_filtered)?);
+            columns.insert(other_name.clone(), Column::from_values(other_filtered)?);
+            column_order.push(self_name);
+            column_order.push(other_name);
+        }
+
         let new_labels: Vec<IndexLabel> = row_indices
             .iter()
             .map(|&i| self.index.labels()[i].clone())
             .collect();
-
-        let mut columns = BTreeMap::new();
-        let mut column_order = Vec::new();
-        for (name, vals) in &diff_cols {
-            let filtered: Vec<Scalar> = row_indices.iter().map(|&i| vals[i].clone()).collect();
-            columns.insert(name.clone(), Column::from_values(filtered)?);
-            column_order.push(name.clone());
-        }
-
         // Per br-frankenpandas-mu31x: pandas df.compare preserves
         // self.index.name on the result.
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         Self::new_with_column_order(new_index, columns, column_order)
+    }
+
+    /// Assemble the `align_axis=0` (stacked) compare result: the original
+    /// columns are kept, and each retained row label produces two MultiIndex
+    /// rows `(label, result_names.0)` and `(label, result_names.1)`.
+    fn compare_assemble_axis0(
+        &self,
+        result_names: (&str, &str),
+        keep_shape: bool,
+        per_col: &[(String, Vec<Scalar>, Vec<Scalar>, bool)],
+        row_indices: &[usize],
+    ) -> Result<Self, FrameError> {
+        let mut columns = BTreeMap::new();
+        let mut column_order = Vec::new();
+        for (col_name, self_vals, other_vals, col_has_diff) in per_col {
+            if !(keep_shape || *col_has_diff) {
+                continue;
+            }
+            let mut interleaved = Vec::with_capacity(row_indices.len() * 2);
+            for &i in row_indices {
+                interleaved.push(self_vals[i].clone());
+                interleaved.push(other_vals[i].clone());
+            }
+            columns.insert(col_name.clone(), Column::from_values(interleaved)?);
+            column_order.push(col_name.clone());
+        }
+
+        let mut level0 = Vec::with_capacity(row_indices.len() * 2);
+        let mut level1 = Vec::with_capacity(row_indices.len() * 2);
+        for &i in row_indices {
+            let label = self.index.labels()[i].clone();
+            level0.push(label.clone());
+            level0.push(label);
+            level1.push(IndexLabel::Utf8(result_names.0.to_owned()));
+            level1.push(IndexLabel::Utf8(result_names.1.to_owned()));
+        }
+        // Level 1 ('self'/'other') is unnamed in pandas; level 0 keeps the
+        // original index name.
+        let multiindex = fp_index::MultiIndex::from_arrays(vec![level0, level1])?
+            .set_names(vec![self.index.name().map(str::to_owned), None]);
+        let flat_index = multiindex.to_flat_index("/");
+        Self::new_with_axes(flat_index, Some(multiindex), columns, column_order, None)
     }
 
     /// Select columns by data type.
@@ -63658,6 +63735,68 @@ mod tests {
         for col in ["x_self", "x_other", "y_self", "y_other"] {
             assert!(kept.column(col).unwrap().values().iter().all(Scalar::is_missing));
         }
+    }
+
+    #[test]
+    fn dataframe_compare_align_axis_0_stacks_self_other_as_row_multiindex() {
+        // Verified vs live pandas 2.2.3: align_axis=0 keeps the original columns
+        // and stacks (label, self)/(label, other) as a 2-level row MultiIndex.
+        let (df1, df2) = dataframe_compare_xy_fixture();
+        let out = df1
+            .compare_with_align_axis(&df2, ("self", "other"), false, false, 0)
+            .unwrap();
+
+        // Columns are the originals, not col_self/col_other.
+        assert_eq!(out.column_names(), vec!["x", "y"]);
+
+        // 2 diff rows x {self, other} -> 4 stacked rows, with a row MultiIndex.
+        assert_eq!(out.len(), 4);
+        let mi = out.row_multiindex().expect("align_axis=0 has a row MultiIndex");
+        assert_eq!(mi.len(), 4);
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("1/self".into()),
+                IndexLabel::Utf8("1/other".into()),
+                IndexLabel::Utf8("2/self".into()),
+                IndexLabel::Utf8("2/other".into()),
+            ]
+        );
+
+        // x: [2, 9, NaN, NaN]; y: [NaN, NaN, 3, 8].
+        let x = out.column("x").unwrap().values();
+        assert_eq!(x[0], Scalar::Int64(2));
+        assert_eq!(x[1], Scalar::Int64(9));
+        assert!(x[2].is_missing() && x[3].is_missing());
+        let y = out.column("y").unwrap().values();
+        assert!(y[0].is_missing() && y[1].is_missing());
+        assert_eq!(y[2], Scalar::Int64(3));
+        assert_eq!(y[3], Scalar::Int64(8));
+    }
+
+    #[test]
+    fn dataframe_compare_align_axis_0_keep_shape_keeps_all_rows() {
+        // keep_shape with align_axis=0 -> every source row contributes a
+        // self/other pair (row 0 is all-equal -> all NaN). pandas 2.2.3.
+        let (df1, df2) = dataframe_compare_xy_fixture();
+        let out = df1
+            .compare_with_align_axis(&df2, ("self", "other"), true, false, 0)
+            .unwrap();
+        assert_eq!(out.len(), 6);
+        assert_eq!(out.index().labels()[0], IndexLabel::Utf8("0/self".into()));
+        assert_eq!(out.index().labels()[1], IndexLabel::Utf8("0/other".into()));
+        // Row 0 (all equal) is NaN in both columns.
+        assert!(out.column("x").unwrap().values()[0].is_missing());
+        assert!(out.column("y").unwrap().values()[1].is_missing());
+    }
+
+    #[test]
+    fn dataframe_compare_rejects_invalid_align_axis() {
+        let (df1, df2) = dataframe_compare_xy_fixture();
+        let err = df1
+            .compare_with_align_axis(&df2, ("self", "other"), false, false, 2)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("No axis named 2")));
     }
 
     // --- Series.str formatting & predicates tests ---

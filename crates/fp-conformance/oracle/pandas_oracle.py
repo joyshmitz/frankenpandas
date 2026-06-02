@@ -2159,7 +2159,7 @@ def op_series_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
-    other = payload.get("where_other")
+    other = payload.get("fill_value", payload.get("where_other"))
     if left is None or right is None:
         raise OracleError("series_where requires left(data) and right(cond) payloads")
     series = fixture_series_from_payload(pd, left, "series_where")
@@ -2175,7 +2175,7 @@ def op_series_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_mask(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
-    other = payload.get("mask_other")
+    other = payload.get("fill_value", payload.get("mask_other"))
     if left is None or right is None:
         raise OracleError("series_mask requires left(data) and right(cond) payloads")
     series = fixture_series_from_payload(pd, left, "series_mask")

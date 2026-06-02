@@ -1,4 +1,4 @@
-0    true
-1    false
-2    false
+0    True
+1    False
+2    False
 Name: text, Length: 3, dtype: Bool

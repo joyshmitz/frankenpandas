@@ -419,7 +419,7 @@ impl std::fmt::Display for Scalar {
             Self::Null(NullKind::NaN) => write!(f, "NaN"),
             Self::Null(NullKind::NaT) => write!(f, "NaT"),
             Self::Null(NullKind::Null) => write!(f, "None"),
-            Self::Bool(b) => write!(f, "{b}"),
+            Self::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
             Self::Int64(v) => write!(f, "{v}"),
             Self::Float64(v) => write!(f, "{v}"),
             Self::Utf8(s) => write!(f, "{s}"),

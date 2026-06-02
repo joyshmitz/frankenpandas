@@ -2635,7 +2635,7 @@ impl Series {
             };
             let val_str = match val {
                 Scalar::Null(_) => "NaN".to_string(),
-                Scalar::Bool(b) => b.to_string(),
+                Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 Scalar::Float64(v) => {
                     if v.is_nan() {

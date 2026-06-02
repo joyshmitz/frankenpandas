@@ -1,6 +1,6 @@
              a      b
-0        false  false
-1         true  false
-2        false   true
+0        False  False
+1         True  False
+2        False   True
 
 [3 rows x 2 columns]

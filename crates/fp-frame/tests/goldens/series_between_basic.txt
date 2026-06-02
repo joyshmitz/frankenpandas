@@ -1,6 +1,6 @@
-0    false
-1    true
-2    true
-3    true
-4    false
+0    False
+1    True
+2    True
+3    True
+4    False
 Name: vals, Length: 5, dtype: Bool

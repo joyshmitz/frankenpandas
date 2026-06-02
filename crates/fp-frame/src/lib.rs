@@ -2199,6 +2199,40 @@ fn compare_scalars_with_na_position(
     }
 }
 
+fn typed_dense_sort_order(values: &[Scalar], dtype: DType, ascending: bool) -> Option<Vec<usize>> {
+    match dtype {
+        DType::Int64 | DType::Int64Nullable => {
+            let mut keyed = Vec::with_capacity(values.len());
+            for (position, value) in values.iter().enumerate() {
+                match value {
+                    Scalar::Int64(v) => keyed.push((position, *v)),
+                    _ => return None,
+                }
+            }
+            keyed.sort_by(|left, right| {
+                let order = left.1.cmp(&right.1);
+                if ascending { order } else { order.reverse() }
+            });
+            Some(keyed.into_iter().map(|(position, _)| position).collect())
+        }
+        DType::Float64 => {
+            let mut keyed = Vec::with_capacity(values.len());
+            for (position, value) in values.iter().enumerate() {
+                match value {
+                    Scalar::Float64(v) if !v.is_nan() => keyed.push((position, *v)),
+                    _ => return None,
+                }
+            }
+            keyed.sort_by(|left, right| {
+                let order = left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal);
+                if ascending { order } else { order.reverse() }
+            });
+            Some(keyed.into_iter().map(|(position, _)| position).collect())
+        }
+        _ => None,
+    }
+}
+
 fn is_ordering_comparison(op: ComparisonOp) -> bool {
     matches!(
         op,
@@ -28534,15 +28568,23 @@ impl DataFrame {
         }
 
         let na_first = na_position == "first";
-        let mut order = (0..self.len()).collect::<Vec<_>>();
-        order.sort_by(|&left_pos, &right_pos| {
-            compare_scalars_with_na_position(
-                &sort_column.values()[left_pos],
-                &sort_column.values()[right_pos],
-                ascending,
-                na_first,
-            )
-        });
+        let order = if !na_first
+            && let Some(order) =
+                typed_dense_sort_order(sort_column.values(), sort_column.dtype(), ascending)
+        {
+            order
+        } else {
+            let mut order = (0..self.len()).collect::<Vec<_>>();
+            order.sort_by(|&left_pos, &right_pos| {
+                compare_scalars_with_na_position(
+                    &sort_column.values()[left_pos],
+                    &sort_column.values()[right_pos],
+                    ascending,
+                    na_first,
+                )
+            });
+            order
+        };
 
         // order is a permutation of 0..len(), always valid
         self.reorder_rows_by_positions_unchecked(&order)
@@ -51341,6 +51383,56 @@ mod tests {
                 IndexLabel::from("r4"),
                 IndexLabel::from("r3"),
                 IndexLabel::from("r2")
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_values_dense_float_fast_path_keeps_stable_ties() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "score",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "tag",
+                    vec![
+                        Scalar::Utf8("first-two".to_owned()),
+                        Scalar::Utf8("first-one".to_owned()),
+                        Scalar::Utf8("second-two".to_owned()),
+                        Scalar::Utf8("second-one".to_owned()),
+                    ],
+                ),
+            ],
+            vec!["r1".into(), "r2".into(), "r3".into(), "r4".into()],
+        )
+        .unwrap();
+
+        let asc = df.sort_values("score", true).unwrap();
+        assert_eq!(
+            asc.index().labels(),
+            &[
+                IndexLabel::from("r2"),
+                IndexLabel::from("r4"),
+                IndexLabel::from("r1"),
+                IndexLabel::from("r3"),
+            ]
+        );
+
+        let desc = df.sort_values("score", false).unwrap();
+        assert_eq!(
+            desc.index().labels(),
+            &[
+                IndexLabel::from("r1"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r2"),
+                IndexLabel::from("r4"),
             ]
         );
     }

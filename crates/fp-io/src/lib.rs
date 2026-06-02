@@ -2441,7 +2441,8 @@ fn parse_scalar(field: &str) -> Scalar {
 fn scalar_to_csv(scalar: &Scalar) -> String {
     match scalar {
         Scalar::Null(_) => String::new(),
-        Scalar::Bool(v) => v.to_string(),
+        // pandas to_csv writes capitalized True/False (matches fp-frame::to_csv).
+        Scalar::Bool(v) => if *v { "True" } else { "False" }.to_string(),
         Scalar::Int64(v) => v.to_string(),
         Scalar::Float64(v) => {
             if v.is_nan() {

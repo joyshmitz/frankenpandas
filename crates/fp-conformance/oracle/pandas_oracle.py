@@ -4295,6 +4295,34 @@ def op_series_str_encode(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_series_str_rsplit_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_rsplit_get"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "str_split_pat", op_name)
+    n = _int_payload(payload, "str_split_n", op_name)
+
+    def pick(s: Any) -> Any:
+        if not isinstance(s, str):
+            return float("nan")
+        # FP indexes Rust str::rsplit, which yields parts in reverse order, so
+        # n counts from the END of the forward split. Out of range -> missing.
+        parts = s.split(pat)[::-1]
+        return parts[n] if 0 <= n < len(parts) else float("nan")
+
+    try:
+        out = series.apply(pick)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_decode(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # FP's str.decode is the identity on an already-decoded str Series.
+    op_name = "series_str_decode"
+    series = _series_for_str_op(pd, payload, op_name)
+    return {"expected_series": series_to_expected(series)}
+
+
 def op_series_str_find(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # Per br-frankenpandas-04aaef: live-oracle coverage for the char-position
     # fix in br-frankenpandas-02ae2b. pandas Series.str.find returns CHAR-based
@@ -6939,6 +6967,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_translate(pd, payload)
     if op == "series_str_encode":
         return op_series_str_encode(pd, payload)
+    if op == "series_str_rsplit_get":
+        return op_series_str_rsplit_get(pd, payload)
+    if op == "series_str_decode":
+        return op_series_str_decode(pd, payload)
     if op in {"series_str_rfind", "series_str_rfind_default"}:
         return op_series_str_rfind(pd, payload)
     if op in {"series_str_zfill", "series_str_zfill_default"}:

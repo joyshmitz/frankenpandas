@@ -38824,7 +38824,9 @@ impl DataFrame {
                                 Scalar::Bool(b) => b.to_string(),
                                 _ => String::new(),
                             };
-                            Scalar::Int64(i64::from(vs == *uval))
+                            // pandas 2.x pd.get_dummies emits bool indicator
+                            // columns (uint8/int in 1.x). br-frankenpandas.
+                            Scalar::Bool(vs == *uval)
                         })
                         .collect();
                     result_cols.insert(indicator_name.clone(), Column::from_values(vals)?);
@@ -38835,7 +38837,7 @@ impl DataFrame {
                     let vals: Vec<Scalar> = src
                         .values()
                         .iter()
-                        .map(|v| Scalar::Int64(i64::from(v.is_missing())))
+                        .map(|v| Scalar::Bool(v.is_missing()))
                         .collect();
                     result_cols.insert(nan_name.clone(), Column::from_values(vals)?);
                     col_order.push(nan_name);
@@ -74663,13 +74665,19 @@ mod tests {
         assert!(result.columns.contains_key("value"));
         assert!(!result.columns.contains_key("color"));
 
-        // Check indicator values
-        assert_eq!(result.columns["color_red"].values()[0], Scalar::Int64(1));
-        assert_eq!(result.columns["color_red"].values()[1], Scalar::Int64(0));
-        assert_eq!(result.columns["color_red"].values()[2], Scalar::Int64(1));
-        assert_eq!(result.columns["color_blue"].values()[0], Scalar::Int64(0));
-        assert_eq!(result.columns["color_blue"].values()[1], Scalar::Int64(1));
-        assert_eq!(result.columns["color_blue"].values()[2], Scalar::Int64(0));
+        // Check indicator values (pandas 2.x get_dummies emits bool columns).
+        assert_eq!(result.columns["color_red"].values()[0], Scalar::Bool(true));
+        assert_eq!(result.columns["color_red"].values()[1], Scalar::Bool(false));
+        assert_eq!(result.columns["color_red"].values()[2], Scalar::Bool(true));
+        assert_eq!(
+            result.columns["color_blue"].values()[0],
+            Scalar::Bool(false)
+        );
+        assert_eq!(result.columns["color_blue"].values()[1], Scalar::Bool(true));
+        assert_eq!(
+            result.columns["color_blue"].values()[2],
+            Scalar::Bool(false)
+        );
     }
 
     #[test]
@@ -74768,9 +74776,9 @@ mod tests {
         assert!(result.columns.contains_key("a_y"));
         assert!(result.columns.contains_key("a_nan"));
         let nan_col = result.column("a_nan").unwrap();
-        assert_eq!(nan_col.values()[0], Scalar::Int64(0));
-        assert_eq!(nan_col.values()[1], Scalar::Int64(1));
-        assert_eq!(nan_col.values()[2], Scalar::Int64(0));
+        assert_eq!(nan_col.values()[0], Scalar::Bool(false));
+        assert_eq!(nan_col.values()[1], Scalar::Bool(true));
+        assert_eq!(nan_col.values()[2], Scalar::Bool(false));
     }
 
     #[test]
@@ -103381,15 +103389,15 @@ mod tests {
         assert!(dummies.columns.contains_key("color_blue"));
         let red = dummies.columns["color_red"].values();
         let blue = dummies.columns["color_blue"].values();
-        // Row 0 = "red" → red=1, blue=0.
-        assert_eq!(red[0], Scalar::Int64(1));
-        assert_eq!(blue[0], Scalar::Int64(0));
-        // Row 1 = "blue" → red=0, blue=1.
-        assert_eq!(red[1], Scalar::Int64(0));
-        assert_eq!(blue[1], Scalar::Int64(1));
-        // Row 2 = "red" → red=1, blue=0.
-        assert_eq!(red[2], Scalar::Int64(1));
-        assert_eq!(blue[2], Scalar::Int64(0));
+        // Row 0 = "red" → red=true, blue=false (pandas 2.x bool dummies).
+        assert_eq!(red[0], Scalar::Bool(true));
+        assert_eq!(blue[0], Scalar::Bool(false));
+        // Row 1 = "blue" → red=false, blue=true.
+        assert_eq!(red[1], Scalar::Bool(false));
+        assert_eq!(blue[1], Scalar::Bool(true));
+        // Row 2 = "red" → red=true, blue=false.
+        assert_eq!(red[2], Scalar::Bool(true));
+        assert_eq!(blue[2], Scalar::Bool(false));
     }
 
     #[test]

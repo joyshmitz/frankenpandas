@@ -10,57 +10,147 @@
   },
   "frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "count": [
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        {
+          "kind": "int64",
+          "value": 5
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        }
       ],
       "animal": [
-        { "kind": "utf8", "value": "cat" },
-        { "kind": "utf8", "value": "dog" },
-        { "kind": "utf8", "value": "cat" }
+        {
+          "kind": "utf8",
+          "value": "cat"
+        },
+        {
+          "kind": "utf8",
+          "value": "dog"
+        },
+        {
+          "kind": "utf8",
+          "value": "cat"
+        }
       ],
       "mood": [
-        { "kind": "utf8", "value": "happy" },
-        { "kind": "null", "value": "null" },
-        { "kind": "utf8", "value": "happy" }
+        {
+          "kind": "utf8",
+          "value": "happy"
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "utf8",
+          "value": "happy"
+        }
       ]
     },
-    "column_order": ["count", "animal", "mood"]
+    "column_order": [
+      "count",
+      "animal",
+      "mood"
+    ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "columns": {
       "count": [
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        {
+          "kind": "int64",
+          "value": 5
+        },
+        {
+          "kind": "int64",
+          "value": 3
+        },
+        {
+          "kind": "int64",
+          "value": 4
+        }
       ],
       "animal_cat": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 1 }
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        },
+        {
+          "kind": "bool",
+          "value": true
+        }
       ],
       "animal_dog": [
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 }
+        {
+          "kind": "bool",
+          "value": false
+        },
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        }
       ],
       "mood_happy": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 },
-        { "kind": "int64", "value": 1 }
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        },
+        {
+          "kind": "bool",
+          "value": true
+        }
       ]
     },
-    "column_order": ["count", "animal_cat", "animal_dog", "mood_happy"]
+    "column_order": [
+      "count",
+      "animal_cat",
+      "animal_dog",
+      "mood_happy"
+    ]
   }
 }

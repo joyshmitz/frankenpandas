@@ -1,6 +1,6 @@
          cat_a  cat_b
-0            1      0
-1            0      1
-2            1      0
+0         true  false
+1        false   true
+2         true  false
 
 [3 rows x 2 columns]

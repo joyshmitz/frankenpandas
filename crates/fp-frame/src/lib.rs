@@ -40057,6 +40057,22 @@ impl DataFrame {
         other: &Self,
         result_names: (&str, &str),
     ) -> Result<Self, FrameError> {
+        self.compare_with_options(other, result_names, false, false)
+    }
+
+    /// Matches `df.compare(other, keep_shape=..., keep_equal=...,
+    /// result_names=(left, right))` for `align_axis=1` (the default, columns
+    /// axis). `keep_shape=true` keeps every row and column (equal cells are
+    /// `NaN`, or the original value when `keep_equal=true`); `keep_equal=true`
+    /// renders equal cells as their value instead of `NaN`. (align_axis=0 row
+    /// stacking is tracked separately under br-frankenpandas-lqu84.)
+    pub fn compare_with_options(
+        &self,
+        other: &Self,
+        result_names: (&str, &str),
+        keep_shape: bool,
+        keep_equal: bool,
+    ) -> Result<Self, FrameError> {
         if self.index != other.index || self.column_order != other.column_order {
             return Err(FrameError::CompatibilityRejected(
                 "compare requires DataFrames with identical index and columns".to_owned(),
@@ -40086,19 +40102,24 @@ impl DataFrame {
                     col_has_diff = true;
                     self_vals.push(sv.clone());
                     other_vals.push(ov.clone());
+                } else if keep_equal {
+                    // Equal cell, but keep_equal renders the real value.
+                    self_vals.push(sv.clone());
+                    other_vals.push(ov.clone());
                 } else {
                     self_vals.push(Scalar::Null(NullKind::NaN));
                     other_vals.push(Scalar::Null(NullKind::NaN));
                 }
             }
 
-            if col_has_diff {
+            // keep_shape keeps every column pair even when fully equal.
+            if keep_shape || col_has_diff {
                 diff_cols.push((format!("{col_name}_{}", result_names.0), self_vals));
                 diff_cols.push((format!("{col_name}_{}", result_names.1), other_vals));
             }
         }
 
-        if diff_cols.is_empty() {
+        if diff_cols.is_empty() && !keep_shape {
             // No differences found - return empty DataFrame.
             // Per br-frankenpandas-mu31x: preserve self.index.name on the
             // empty result, matching pandas df.compare.
@@ -40106,14 +40127,18 @@ impl DataFrame {
             return Self::new(empty_index, BTreeMap::new());
         }
 
-        // Filter to only rows with differences
-        let diff_indices: Vec<usize> = has_diff
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &d)| if d { Some(i) } else { None })
-            .collect();
+        // keep_shape keeps every row; otherwise filter to rows with a difference.
+        let row_indices: Vec<usize> = if keep_shape {
+            (0..n).collect()
+        } else {
+            has_diff
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &d)| if d { Some(i) } else { None })
+                .collect()
+        };
 
-        let new_labels: Vec<IndexLabel> = diff_indices
+        let new_labels: Vec<IndexLabel> = row_indices
             .iter()
             .map(|&i| self.index.labels()[i].clone())
             .collect();
@@ -40121,13 +40146,13 @@ impl DataFrame {
         let mut columns = BTreeMap::new();
         let mut column_order = Vec::new();
         for (name, vals) in &diff_cols {
-            let filtered: Vec<Scalar> = diff_indices.iter().map(|&i| vals[i].clone()).collect();
+            let filtered: Vec<Scalar> = row_indices.iter().map(|&i| vals[i].clone()).collect();
             columns.insert(name.clone(), Column::from_values(filtered)?);
             column_order.push(name.clone());
         }
 
         // Per br-frankenpandas-mu31x: pandas df.compare preserves
-        // self.index.name on the diff-row result.
+        // self.index.name on the result.
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         Self::new_with_column_order(new_index, columns, column_order)
     }
@@ -63553,6 +63578,86 @@ mod tests {
         assert!(diff.column("a_other").is_none());
         assert_eq!(diff.column("a_lhs").unwrap().values()[0], Scalar::Int64(2));
         assert_eq!(diff.column("a_rhs").unwrap().values()[0], Scalar::Int64(9));
+    }
+
+    fn dataframe_compare_xy_fixture() -> (DataFrame, DataFrame) {
+        let df1 = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("y", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(9), Scalar::Int64(3)]),
+                ("y", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(8)]),
+            ],
+        )
+        .unwrap();
+        (df1, df2)
+    }
+
+    #[test]
+    fn dataframe_compare_keep_shape_keeps_all_rows_and_columns() {
+        // Verified vs live pandas 2.2.3: keep_shape keeps every row/col, equal
+        // cells are NaN, differing cells show values.
+        let (df1, df2) = dataframe_compare_xy_fixture();
+        let out = df1
+            .compare_with_options(&df2, ("self", "other"), true, false)
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        for col in ["x_self", "x_other", "y_self", "y_other"] {
+            assert!(out.column(col).is_some(), "missing {col}");
+        }
+        // Row 0: all equal -> all NaN.
+        assert!(out.column("x_self").unwrap().values()[0].is_missing());
+        assert!(out.column("y_other").unwrap().values()[0].is_missing());
+        // Row 1: x differs (2 vs 9), y equal -> NaN.
+        assert_eq!(out.column("x_self").unwrap().values()[1], Scalar::Int64(2));
+        assert_eq!(out.column("x_other").unwrap().values()[1], Scalar::Int64(9));
+        assert!(out.column("y_self").unwrap().values()[1].is_missing());
+        // Row 2: y differs (3 vs 8), x equal -> NaN.
+        assert_eq!(out.column("y_self").unwrap().values()[2], Scalar::Int64(3));
+        assert_eq!(out.column("y_other").unwrap().values()[2], Scalar::Int64(8));
+        assert!(out.column("x_other").unwrap().values()[2].is_missing());
+    }
+
+    #[test]
+    fn dataframe_compare_keep_equal_shows_equal_cell_values() {
+        // keep_equal renders equal cells as their value (not NaN); default shape
+        // still drops the all-equal row 0. Verified vs live pandas 2.2.3.
+        let (df1, df2) = dataframe_compare_xy_fixture();
+        let out = df1
+            .compare_with_options(&df2, ("self", "other"), false, true)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        // Result row 0 == source row 1: x 2/9, y equal -> shown as 2/2.
+        assert_eq!(out.column("x_self").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(out.column("x_other").unwrap().values()[0], Scalar::Int64(9));
+        assert_eq!(out.column("y_self").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(out.column("y_other").unwrap().values()[0], Scalar::Int64(2));
+        // Result row 1 == source row 2: x equal -> 3/3, y 3/8.
+        assert_eq!(out.column("x_self").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(out.column("x_other").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(out.column("y_other").unwrap().values()[1], Scalar::Int64(8));
+    }
+
+    #[test]
+    fn dataframe_compare_keep_shape_on_identical_keeps_full_shape() {
+        // Identical frames: default -> empty; keep_shape -> full shape, all NaN.
+        let (df1, _) = dataframe_compare_xy_fixture();
+        assert_eq!(df1.compare(&df1).unwrap().len(), 0);
+        let kept = df1
+            .compare_with_options(&df1, ("self", "other"), true, false)
+            .unwrap();
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept.column_names().len(), 4);
+        for col in ["x_self", "x_other", "y_self", "y_other"] {
+            assert!(kept.column(col).unwrap().values().iter().all(Scalar::is_missing));
+        }
     }
 
     // --- Series.str formatting & predicates tests ---

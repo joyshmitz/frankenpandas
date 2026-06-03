@@ -12201,3 +12201,50 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-SORT3: descending counterpart of MR-SORT2. sort_values(ascending=false)
+    /// output key column is monotonic NON-INCREASING, with missing/NaN still
+    /// sorted to the END (pandas na_position="last" holds for both directions).
+    /// The ascending and descending sortedness fast-paths (typed sortedness for
+    /// dense sort keys, fi6zx) are separate code; this guards the descending one.
+    #[test]
+    fn prop_dataframe_sort_values_descending_output_key_is_antitonic(
+        df in arb_numeric_dataframe(12),
+    ) {
+        if df.index().len() < 2 {
+            return Ok(());
+        }
+        let sorted = df
+            .sort_values("a", false)
+            .expect("sort_values(\"a\", false) must succeed for numeric inputs");
+        let vals = sorted.column("a").unwrap().values().to_vec();
+        let mut prev: Option<f64> = None;
+        let mut seen_missing = false;
+        for v in &vals {
+            let f = match v {
+                Scalar::Int64(i) => Some(*i as f64),
+                Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                _ => None,
+            };
+            match f {
+                Some(x) => {
+                    prop_assert!(
+                        !seen_missing,
+                        "non-missing value {} appeared after a missing/NaN — NaN must sort last",
+                        x
+                    );
+                    if let Some(p) = prev {
+                        prop_assert!(p >= x, "key column not non-increasing after descending sort: {} < {}", p, x);
+                    }
+                    prev = Some(x);
+                }
+                None => {
+                    seen_missing = true;
+                }
+            }
+        }
+    }
+}

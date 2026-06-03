@@ -85,6 +85,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     str::FromStr,
+    sync::{Mutex, OnceLock},
 };
 
 use chrono::{
@@ -2172,12 +2173,89 @@ fn arithmetic_op_name(op: ArithmeticOp) -> &'static str {
 
 fn semantic_index_identity(role: &str, index: &Index) -> SemanticIndexIdentity {
     let fingerprint = index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
+    semantic_index_identity_from_fingerprint(role, index, fingerprint)
+}
+
+fn semantic_index_identity_from_fingerprint(
+    role: &str,
+    index: &Index,
+    fingerprint: String,
+) -> SemanticIndexIdentity {
     SemanticIndexIdentity {
         role: role.to_owned(),
         len: index.len(),
         has_duplicates: index.has_duplicates(),
         fingerprint,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SortedUniqueUnionFingerprintKey {
+    left_fingerprint: String,
+    right_fingerprint: String,
+    left_len: usize,
+    right_len: usize,
+}
+
+const SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX: usize = 4096;
+
+static SORTED_UNIQUE_UNION_FINGERPRINT_CACHE: OnceLock<
+    Mutex<HashMap<SortedUniqueUnionFingerprintKey, String>>,
+> = OnceLock::new();
+
+fn semantic_sorted_unique_union_output_fingerprint(
+    left_index: &Index,
+    right_index: &Index,
+    output_index: &Index,
+    left_fingerprint: &str,
+    right_fingerprint: &str,
+) -> Option<String> {
+    if left_index.has_duplicates()
+        || right_index.has_duplicates()
+        || !left_index.is_sorted()
+        || !right_index.is_sorted()
+    {
+        return None;
+    }
+
+    let actual_left_fingerprint =
+        left_index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
+    let actual_right_fingerprint =
+        right_index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
+    if actual_left_fingerprint != left_fingerprint || actual_right_fingerprint != right_fingerprint
+    {
+        return None;
+    }
+
+    let key = SortedUniqueUnionFingerprintKey {
+        left_fingerprint: actual_left_fingerprint,
+        right_fingerprint: actual_right_fingerprint,
+        left_len: left_index.len(),
+        right_len: right_index.len(),
+    };
+    let cache = SORTED_UNIQUE_UNION_FINGERPRINT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(fingerprint) = cache
+        .lock()
+        .expect("sorted unique union fingerprint cache poisoned")
+        .get(&key)
+        .cloned()
+    {
+        return Some(fingerprint);
+    }
+
+    let fingerprint =
+        output_index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
+    let mut guard = cache
+        .lock()
+        .expect("sorted unique union fingerprint cache poisoned");
+    if let Some(cached) = guard.get(&key) {
+        return Some(cached.clone());
+    }
+    if guard.len() >= SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX {
+        guard.clear();
+    }
+    guard.insert(key, fingerprint.clone());
+    Some(fingerprint)
 }
 
 fn semantic_index_labels_fingerprint(labels: &[IndexLabel]) -> String {
@@ -2250,15 +2328,26 @@ fn record_alignment_semantic_witness(
     if !ledger.records_semantic_witnesses() {
         return;
     }
+    let left_identity = semantic_index_identity("left", left_index);
+    let right_identity = semantic_index_identity("right", right_index);
+    let output_identity = semantic_sorted_unique_union_output_fingerprint(
+        left_index,
+        right_index,
+        output_index,
+        &left_identity.fingerprint,
+        &right_identity.fingerprint,
+    )
+    .map_or_else(
+        || semantic_index_identity("output", output_index),
+        |fingerprint| semantic_index_identity_from_fingerprint("output", output_index, fingerprint),
+    );
+
     ledger.push_semantic_witness(SemanticWitnessRecord::new(
         operation,
         materialization_reason,
         align_mode_name(alignment_mode),
-        vec![
-            semantic_index_identity("left", left_index),
-            semantic_index_identity("right", right_index),
-        ],
-        semantic_index_identity("output", output_index),
+        vec![left_identity, right_identity],
+        output_identity,
         "missing aligned operands materialize as column nulls/NaNs before arithmetic; existing column kernels preserve pandas-observable null/NaN propagation",
         "exact indexes preserve input order; unique outer alignment emits sorted labels; duplicate-aware outer alignment preserves left encounter order then right-only labels",
     ));
@@ -45374,7 +45463,11 @@ impl GroupByResample<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::Path};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        path::Path,
+        sync::Mutex,
+    };
 
     use chrono::Duration;
     use fp_columnar::Column;
@@ -45385,10 +45478,14 @@ mod tests {
 
     use super::{
         CsvQuoting, DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions,
-        DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
-        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, align_union_sorted_unique, cut,
+        DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel,
+        SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
+        SortedUniqueUnionFingerprintKey, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
+        align_union, align_union_duplicate_aware, align_union_sorted_unique, cut,
         datetime64_label_from_naive, index_to_frame, index_to_series, parse_datetime64_nanos,
-        parse_naive_datetime_value, qcut, semantic_integer_index_labels_fingerprint, to_numeric,
+        parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
+        semantic_index_identity, semantic_integer_index_labels_fingerprint,
+        semantic_sorted_unique_union_output_fingerprint, to_numeric,
         typed_dense_values_already_sorted,
     };
 
@@ -45583,6 +45680,220 @@ mod tests {
 
         let string_labels = vec![IndexLabel::Utf8("x".to_owned())];
         assert!(semantic_integer_index_labels_fingerprint(&string_labels).is_none());
+    }
+
+    #[test]
+    fn sorted_unique_union_fingerprint_cache_preserves_output_identity() {
+        let left =
+            Index::new(vec![0_i64.into(), 2_i64.into(), 4_i64.into()]).rename_index(Some("idx"));
+        let right =
+            Index::new(vec![1_i64.into(), 2_i64.into(), 5_i64.into()]).rename_index(Some("idx"));
+        let plan = align_union_sorted_unique(&left, &right);
+        let left_identity = semantic_index_identity("left", &left);
+        let right_identity = semantic_index_identity("right", &right);
+        let reference = semantic_index_identity("output", &plan.union_index);
+
+        let first = semantic_sorted_unique_union_output_fingerprint(
+            &left,
+            &right,
+            &plan.union_index,
+            &left_identity.fingerprint,
+            &right_identity.fingerprint,
+        )
+        .expect("sorted unique fingerprint");
+        let second_plan = align_union_sorted_unique(&left, &right);
+        let second = semantic_sorted_unique_union_output_fingerprint(
+            &left,
+            &right,
+            &second_plan.union_index,
+            &left_identity.fingerprint,
+            &right_identity.fingerprint,
+        )
+        .expect("cached sorted unique fingerprint");
+
+        assert_eq!(first, reference.fingerprint);
+        assert_eq!(second, reference.fingerprint);
+    }
+
+    #[test]
+    fn sorted_unique_union_fingerprint_rejects_mismatched_input_fingerprints() {
+        let left = Index::new(vec![0_i64.into(), 2_i64.into(), 4_i64.into()]);
+        let right = Index::new(vec![1_i64.into(), 2_i64.into(), 5_i64.into()]);
+        let plan = align_union_sorted_unique(&left, &right);
+        let left_identity = semantic_index_identity("left", &left);
+        let right_identity = semantic_index_identity("right", &right);
+
+        assert!(
+            semantic_sorted_unique_union_output_fingerprint(
+                &left,
+                &right,
+                &plan.union_index,
+                "fake-left-fingerprint",
+                &right_identity.fingerprint,
+            )
+            .is_none()
+        );
+        assert!(
+            semantic_sorted_unique_union_output_fingerprint(
+                &left,
+                &right,
+                &plan.union_index,
+                &left_identity.fingerprint,
+                "fake-right-fingerprint",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn alignment_semantic_witness_uses_exact_output_identity_with_cache() {
+        let left =
+            Index::new(vec![0_i64.into(), 2_i64.into(), 4_i64.into()]).rename_index(Some("left"));
+        let right =
+            Index::new(vec![1_i64.into(), 2_i64.into(), 5_i64.into()]).rename_index(Some("right"));
+        let plan = align_union_sorted_unique(&left, &right);
+
+        let mut ledger = EvidenceLedger::new();
+        record_alignment_semantic_witness(
+            &mut ledger,
+            "series.add",
+            AlignMode::Outer,
+            &left,
+            &right,
+            &plan.union_index,
+            "series_binary_arithmetic_materialization",
+        );
+        let first = ledger
+            .semantic_witnesses()
+            .first()
+            .expect("semantic witness");
+
+        let mut cached_ledger = EvidenceLedger::new();
+        record_alignment_semantic_witness(
+            &mut cached_ledger,
+            "series.add",
+            AlignMode::Outer,
+            &left,
+            &right,
+            &plan.union_index,
+            "series_binary_arithmetic_materialization",
+        );
+        let cached = cached_ledger
+            .semantic_witnesses()
+            .first()
+            .expect("semantic witness");
+        let direct_output = semantic_index_identity("output", &plan.union_index);
+
+        assert_eq!(first.output_index_identity, direct_output);
+        assert_eq!(cached.output_index_identity, direct_output);
+        assert_eq!(first.operation, cached.operation);
+        assert_eq!(first.materialization_reason, cached.materialization_reason);
+        assert_eq!(first.alignment_mode, cached.alignment_mode);
+        assert_eq!(first.input_index_identity, cached.input_index_identity);
+        assert_eq!(first.null_nan_policy, cached.null_nan_policy);
+        assert_eq!(
+            first.output_ordering_contract,
+            cached.output_ordering_contract
+        );
+    }
+
+    #[test]
+    fn alignment_semantic_witness_falls_back_for_duplicate_or_unsorted_indexes() {
+        let duplicate_left = Index::new(vec![0_i64.into(), 0_i64.into(), 2_i64.into()]);
+        let duplicate_right = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let (duplicate_output, _, _) =
+            align_union_duplicate_aware(&duplicate_left, &duplicate_right);
+        assert!(
+            semantic_sorted_unique_union_output_fingerprint(
+                &duplicate_left,
+                &duplicate_right,
+                &duplicate_output,
+                &semantic_index_identity("left", &duplicate_left).fingerprint,
+                &semantic_index_identity("right", &duplicate_right).fingerprint,
+            )
+            .is_none()
+        );
+
+        let unsorted_left = Index::new(vec![2_i64.into(), 0_i64.into()]);
+        let unsorted_right = Index::new(vec![1_i64.into(), 3_i64.into()]);
+        let unsorted_plan = align_union(&unsorted_left, &unsorted_right);
+        assert!(
+            semantic_sorted_unique_union_output_fingerprint(
+                &unsorted_left,
+                &unsorted_right,
+                &unsorted_plan.union_index,
+                &semantic_index_identity("left", &unsorted_left).fingerprint,
+                &semantic_index_identity("right", &unsorted_right).fingerprint,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn sorted_unique_union_fingerprint_cache_eviction_preserves_identity() {
+        let cache =
+            SORTED_UNIQUE_UNION_FINGERPRINT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let mut guard = cache
+                .lock()
+                .expect("sorted unique union fingerprint cache poisoned");
+            guard.clear();
+            for i in 0..SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX {
+                guard.insert(
+                    SortedUniqueUnionFingerprintKey {
+                        left_fingerprint: format!("left-{i}"),
+                        right_fingerprint: format!("right-{i}"),
+                        left_len: i,
+                        right_len: i + 1,
+                    },
+                    format!("out-{i}"),
+                );
+            }
+        }
+
+        let left = Index::new(vec![10_i64.into(), 20_i64.into()]);
+        let right = Index::new(vec![15_i64.into(), 25_i64.into()]);
+        let plan = align_union_sorted_unique(&left, &right);
+        let reference = semantic_index_identity("output", &plan.union_index);
+        let got = semantic_sorted_unique_union_output_fingerprint(
+            &left,
+            &right,
+            &plan.union_index,
+            &semantic_index_identity("left", &left).fingerprint,
+            &semantic_index_identity("right", &right).fingerprint,
+        )
+        .expect("eviction miss should recompute output fingerprint");
+
+        assert_eq!(got, reference.fingerprint);
+    }
+
+    #[test]
+    fn sorted_unique_union_fingerprint_cache_is_thread_safe() {
+        let left = Index::new(vec![0_i64.into(), 2_i64.into(), 4_i64.into()]);
+        let right = Index::new(vec![1_i64.into(), 3_i64.into(), 5_i64.into()]);
+        let plan = align_union_sorted_unique(&left, &right);
+        let left_identity = semantic_index_identity("left", &left);
+        let right_identity = semantic_index_identity("right", &right);
+        let reference = semantic_index_identity("output", &plan.union_index);
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                handles.push(scope.spawn(|| {
+                    semantic_sorted_unique_union_output_fingerprint(
+                        &left,
+                        &right,
+                        &plan.union_index,
+                        &left_identity.fingerprint,
+                        &right_identity.fingerprint,
+                    )
+                    .expect("sorted unique fingerprint")
+                }));
+            }
+            for handle in handles {
+                assert_eq!(handle.join().expect("thread"), reference.fingerprint);
+            }
+        });
     }
 
     #[test]
@@ -83686,9 +83997,7 @@ mod tests {
         let values: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
         let s = Series::from_values("s", labels, values.clone()).unwrap();
         let typed = s.sum().unwrap();
-        let scalar_fold = values
-            .iter()
-            .fold(0.0_f64, |a, v| a + v.to_f64().unwrap());
+        let scalar_fold = values.iter().fold(0.0_f64, |a, v| a + v.to_f64().unwrap());
         assert_eq!(typed, Scalar::Float64(scalar_fold));
     }
 

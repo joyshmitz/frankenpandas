@@ -213,6 +213,13 @@ fn run_golden(scenario: &str, n: usize) {
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
+        "join_1to1" => {
+            let left = build_join_frame("left_value", n, n, 7);
+            let right = build_join_frame("right_value", n, n, 13);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -329,6 +336,17 @@ fn main() {
             // ~n^2/cardinality rows, which is where the ~36x cost lives.
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "join_1to1" => {
+            // Unique keys on both sides (cardinality = n) -> 1:1 join, output n
+            // rows. Output gather is O(n); per-row composite-key extraction
+            // (2n allocations) is the dominant non-gather cost here.
+            let left = build_join_frame("left_value", n, n, 7);
+            let right = build_join_frame("right_value", n, n, 13);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());

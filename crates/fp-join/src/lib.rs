@@ -693,7 +693,12 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
     }
 }
 
-type CompositeJoinKey = Vec<JoinKeyComponent>;
+/// A row's composite join key. Inline storage for the single-key case (the
+/// overwhelmingly common join shape) avoids a heap allocation per row during
+/// key extraction; multi-column keys spill to the heap as before. `SmallVec`
+/// shares `Vec`'s `Hash`/`Eq`/`Ord`/`Deref<[T]>` semantics, so the join result
+/// (key equality, grouping, output order) is bit-identical.
+type CompositeJoinKey = smallvec::SmallVec<[JoinKeyComponent; 1]>;
 
 fn collect_join_key_columns<'a>(
     frame: &'a fp_frame::DataFrame,
@@ -717,7 +722,7 @@ fn collect_composite_keys(key_columns: &[&Column]) -> Vec<CompositeJoinKey> {
     let mut out = Vec::with_capacity(row_count);
 
     for row in 0..row_count {
-        let mut parts = Vec::with_capacity(key_columns.len());
+        let mut parts: CompositeJoinKey = smallvec::SmallVec::with_capacity(key_columns.len());
         for column in key_columns {
             parts.push(scalar_to_key_component(&column.values()[row]));
         }

@@ -1007,6 +1007,8 @@ pub enum ColumnError {
     InvalidMaskType { dtype: DType },
     #[error("column dtype mismatch: left={left:?}, right={right:?}")]
     DTypeMismatch { left: DType, right: DType },
+    #[error("Integers to negative integer powers are not allowed.")]
+    NegativeIntegerPower,
     #[error(transparent)]
     Type(#[from] TypeError),
 }
@@ -2200,8 +2202,14 @@ impl Column {
         if matches!(out_dtype, DType::Bool) {
             out_dtype = DType::Int64;
         }
-        // Div and Pow always produce Float64; Mod and FloorDiv preserve int if no zero divisors
-        if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) {
+        // Div always produces Float64. Pow keeps Int64 for int**int (numpy/pandas
+        // semantics: 2 ** 3 -> int64 8, not float), but promotes to Float64 for any
+        // float operand. Mod and FloorDiv preserve int if there are no zero divisors.
+        if matches!(op, ArithmeticOp::Div) {
+            out_dtype = DType::Float64;
+        } else if matches!(op, ArithmeticOp::Pow)
+            && !(self.dtype == DType::Int64 && right.dtype == DType::Int64)
+        {
             out_dtype = DType::Float64;
         }
 
@@ -2244,10 +2252,18 @@ impl Column {
                         ArithmeticOp::Add => lhs_i64.wrapping_add(rhs_i64),
                         ArithmeticOp::Sub => lhs_i64.wrapping_sub(rhs_i64),
                         ArithmeticOp::Mul => lhs_i64.wrapping_mul(rhs_i64),
-                        ArithmeticOp::Div
-                        | ArithmeticOp::Mod
-                        | ArithmeticOp::Pow
-                        | ArithmeticOp::FloorDiv => unreachable!(),
+                        // int ** int stays int64 (numpy/pandas). A negative integer
+                        // exponent raises, matching numpy's "Integers to negative
+                        // integer powers are not allowed." Overflow wraps like int64.
+                        ArithmeticOp::Pow => {
+                            if rhs_i64 < 0 {
+                                return Err(ColumnError::NegativeIntegerPower);
+                            }
+                            lhs_i64.wrapping_pow(u32::try_from(rhs_i64).unwrap_or(u32::MAX))
+                        }
+                        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
+                            unreachable!()
+                        }
                     };
                     return Ok(Scalar::Int64(result));
                 }
@@ -8328,7 +8344,7 @@ impl CrackIndex {
 mod tests {
     use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
-    use super::{ArithmeticOp, Column, ColumnData, SparseColumn, ValidityMask};
+    use super::{ArithmeticOp, Column, ColumnData, ColumnError, SparseColumn, ValidityMask};
 
     #[test]
     fn reindex_injects_missing_values() {
@@ -9319,6 +9335,45 @@ mod tests {
         assert!(matches!(floordiv.values()[0], Scalar::Float64(v) if (v - 3.0).abs() < 1e-10));
         assert!(matches!(floordiv.values()[1], Scalar::Float64(v) if (v - 0.0).abs() < 1e-10));
         assert!(matches!(floordiv.values()[2], Scalar::Float64(v) if (v - -2.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn int_pow_stays_int64_and_negative_exponent_raises_3w0xn() {
+        // br-frankenpandas-3w0xn: int ** int stays int64 (numpy/pandas: 2 ** 3
+        // == 8, not 8.0), and a negative integer exponent raises.
+        let base =
+            Column::from_values(vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(10)])
+                .expect("base");
+        let exp =
+            Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(2)])
+                .expect("exp");
+        let pow = base.binary_numeric(&exp, ArithmeticOp::Pow).expect("int pow");
+        assert_eq!(pow.dtype(), DType::Int64);
+        assert_eq!(pow.values()[0], Scalar::Int64(8));
+        assert_eq!(pow.values()[1], Scalar::Int64(9));
+        assert_eq!(pow.values()[2], Scalar::Int64(100));
+
+        // Negative integer exponent raises (numpy ValueError analogue).
+        let neg_exp =
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(-1), Scalar::Int64(2)])
+                .expect("neg_exp");
+        let err = base
+            .binary_numeric(&neg_exp, ArithmeticOp::Pow)
+            .expect_err("negative integer power must raise");
+        assert!(matches!(err, ColumnError::NegativeIntegerPower));
+
+        // A float operand promotes the whole op to Float64.
+        let exp_f = Column::from_values(vec![
+            Scalar::Float64(3.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(2.0),
+        ])
+        .expect("exp_f");
+        let pow_f = base
+            .binary_numeric(&exp_f, ArithmeticOp::Pow)
+            .expect("mixed int/float pow");
+        assert_eq!(pow_f.dtype(), DType::Float64);
+        assert!(matches!(pow_f.values()[0], Scalar::Float64(v) if (v - 8.0).abs() < 1e-10));
     }
 
     #[test]

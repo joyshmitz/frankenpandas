@@ -19,6 +19,7 @@ fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
+rustc-hash = "2"
 thiserror = { workspace = true }
 
 [package.metadata.docs.rs]

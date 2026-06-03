@@ -1298,6 +1298,7 @@ dependencies = [
  "fp-index",
  "fp-runtime",
  "fp-types",
+ "rustc-hash",
  "thiserror 2.0.18",
 ]
 

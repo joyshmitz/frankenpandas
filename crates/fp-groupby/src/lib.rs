@@ -62,7 +62,14 @@
 //! - **fp-types** ([`Scalar`], [`NullKind`], [`Timedelta`]) for
 //!   the underlying value machinery.
 
-use std::{cmp::Ordering, collections::HashMap, mem::size_of};
+use std::{cmp::Ordering, mem::size_of};
+
+// Group accumulation maps key on GroupKeyRef and read group ORDER from a
+// separate `ordering` Vec (first-seen order), never from map iteration. So the
+// hasher is observationally invisible: swapping SipHash -> FxHash changes only
+// bucket placement, not any output value or order. FxHash (rustc-hash) is pure
+// safe Rust; on the hot string-key path it is ~2x the std SipHasher.
+use rustc_hash::FxHashMap;
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
@@ -241,7 +248,7 @@ fn groupby_sum_with_global_allocator(
     // AG-08: Store (source_index, sum) instead of (Scalar, sum) to eliminate
     // per-group key.clone() allocations. Reconstruct IndexLabel at output phase.
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut slot = HashMap::<GroupKeyRef<'_>, (usize, f64)>::new();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, f64)>::default();
 
     for (pos, (key, value)) in aligned_keys_values
         .iter()
@@ -305,7 +312,7 @@ fn groupby_sum_with_arena(
     // instead of cloned Scalar to eliminate per-group allocations.
     let arena = Bump::new();
     let mut ordering = BumpVec::<GroupKeyRef<'_>>::new_in(&arena);
-    let mut slot = HashMap::<GroupKeyRef<'_>, (usize, f64)>::new();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, f64)>::default();
 
     for (pos, (key, value)) in aligned_keys_values
         .iter()
@@ -347,7 +354,7 @@ fn groupby_sum_with_arena(
 fn emit_groupby_result<'a>(
     source_keys: &[Scalar],
     ordering: &[GroupKeyRef<'a>],
-    slot: &mut HashMap<GroupKeyRef<'a>, (usize, f64)>,
+    slot: &mut FxHashMap<GroupKeyRef<'a>, (usize, f64)>,
 ) -> Result<Series, GroupByError> {
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
@@ -487,7 +494,7 @@ fn groupby_sum_timedelta64(
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut slot = HashMap::<GroupKeyRef<'_>, (usize, i64)>::new();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, i64)>::default();
 
     for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
         if options.dropna && key.is_missing() {
@@ -773,7 +780,7 @@ pub fn groupby_agg(
 
     // Collect groups: key_ref -> (source_idx, non-null values, total count).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut groups = HashMap::<GroupKeyRef<'_>, (usize, Vec<Scalar>, usize)>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Vec<Scalar>, usize)>::default();
 
     for (pos, (key, value)) in key_vals.iter().zip(val_vals.iter()).enumerate() {
         if options.dropna && key.is_missing() {

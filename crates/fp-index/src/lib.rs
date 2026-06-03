@@ -75,7 +75,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
     sync::OnceLock,
 };
@@ -5996,7 +5996,7 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.values.iter().collect::<HashSet<_>>().len()
+        self.values.iter().collect::<FxHashSet<_>>().len()
     }
 
     #[must_use]
@@ -6484,7 +6484,7 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.union(other)`. Mixed-freq rejects.
     pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let mut seen = HashSet::<Period>::new();
+        let mut seen = FxHashSet::<Period>::default();
         let values: Vec<Period> = self
             .values
             .iter()
@@ -6530,7 +6530,7 @@ impl PeriodIndex {
         self.ensure_compatible_freq(other)?;
         let self_set: FxHashSet<&Period> =self.values.iter().collect();
         let other_set: FxHashSet<&Period> =other.values.iter().collect();
-        let mut seen = HashSet::<Period>::new();
+        let mut seen = FxHashSet::<Period>::default();
         let mut values = Vec::<Period>::new();
         for p in &self.values {
             if !other_set.contains(p) && seen.insert(*p) {
@@ -7105,7 +7105,7 @@ impl PeriodIndex {
     /// Per-position membership mask, matching `pd.PeriodIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[Period]) -> Vec<bool> {
-        let needle: HashSet<Period> = values.iter().copied().collect();
+        let needle: FxHashSet<Period> = values.iter().copied().collect();
         self.values.iter().map(|p| needle.contains(p)).collect()
     }
 
@@ -8396,7 +8396,7 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let unique: HashSet<&String> = self.labels.iter().collect();
+        let unique: FxHashSet<&String> = self.labels.iter().collect();
         unique.len() == self.labels.len()
     }
 
@@ -8424,7 +8424,7 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.labels.iter().collect::<HashSet<_>>().len()
+        self.labels.iter().collect::<FxHashSet<_>>().len()
     }
 
     #[must_use]
@@ -8716,7 +8716,7 @@ impl CategoricalIndex {
                 )));
             }
         }
-        let removals_set: HashSet<&String> = removals.iter().collect();
+        let removals_set: FxHashSet<&String> = removals.iter().collect();
         let categories: Vec<String> = self
             .categories
             .iter()
@@ -8735,7 +8735,7 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.remove_unused_categories()`.
     #[must_use]
     pub fn remove_unused_categories(&self) -> Self {
-        let used: HashSet<&String> = self.labels.iter().collect();
+        let used: FxHashSet<&String> = self.labels.iter().collect();
         let categories: Vec<String> = self
             .categories
             .iter()
@@ -8806,7 +8806,7 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let existing: HashSet<&String> = self.categories.iter().collect();
+        let existing: FxHashSet<&String> = self.categories.iter().collect();
         for cat in &new {
             if !existing.contains(cat) {
                 return Err(IndexError::InvalidArgument(format!(
@@ -8814,7 +8814,7 @@ impl CategoricalIndex {
                 )));
             }
         }
-        let new_set: HashSet<&String> = new.iter().collect();
+        let new_set: FxHashSet<&String> = new.iter().collect();
         if new_set.len() != new.len() {
             return Err(IndexError::InvalidArgument(
                 "reorder_categories: new categories contain duplicates".to_owned(),
@@ -9034,8 +9034,8 @@ impl CategoricalIndex {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let right_set: HashSet<&&String> = right.iter().collect();
-            let mut seen = HashSet::<&String>::new();
+            let right_set: FxHashSet<&&String> = right.iter().collect();
+            let mut seen = FxHashSet::<&String>::default();
             left.into_iter()
                 .filter(|label| right_set.contains(label) && seen.insert(label))
                 .cloned()
@@ -9048,7 +9048,7 @@ impl CategoricalIndex {
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let mut seen = HashSet::<&String>::new();
+            let mut seen = FxHashSet::<&String>::default();
             left.into_iter()
                 .chain(right)
                 .filter(|label| seen.insert(label))
@@ -9062,9 +9062,9 @@ impl CategoricalIndex {
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let left_set: HashSet<&&String> = left.iter().collect();
-            let right_set: HashSet<&&String> = right.iter().collect();
-            let mut seen = HashSet::<&String>::new();
+            let left_set: FxHashSet<&&String> = left.iter().collect();
+            let right_set: FxHashSet<&&String> = right.iter().collect();
+            let mut seen = FxHashSet::<&String>::default();
             let mut out = Vec::<String>::new();
             for label in &left {
                 if !right_set.contains(label) && seen.insert(*label) {
@@ -9087,8 +9087,8 @@ impl CategoricalIndex {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like set_op_via_string applies for union/intersection).
         let mut out = self.set_op_via_string(other, |left, right| {
-            let right_set: HashSet<&&String> = right.iter().collect();
-            let mut seen = HashSet::<&String>::new();
+            let right_set: FxHashSet<&&String> = right.iter().collect();
+            let mut seen = FxHashSet::<&String>::default();
             left.into_iter()
                 .filter(|label| !right_set.contains(label) && seen.insert(label))
                 .cloned()
@@ -9240,7 +9240,7 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[String]) -> Vec<bool> {
-        let needle: HashSet<&String> = values.iter().collect();
+        let needle: FxHashSet<&String> = values.iter().collect();
         self.labels.iter().map(|l| needle.contains(l)).collect()
     }
 
@@ -9416,7 +9416,7 @@ impl CategoricalIndex {
     /// ordered flag rolls through. The result keeps the index name.
     #[must_use]
     pub fn unique(&self) -> Self {
-        let mut seen = HashSet::<&String>::new();
+        let mut seen = FxHashSet::<&String>::default();
         let mut uniques = Vec::<String>::new();
         for label in &self.labels {
             if seen.insert(label) {

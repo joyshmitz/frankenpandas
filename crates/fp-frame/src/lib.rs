@@ -690,6 +690,22 @@ fn scalar_key_skip_missing(value: &Scalar) -> Option<ScalarKey<'_>> {
     }
 }
 
+fn float_semantic_eq(left: f64, right: f64) -> bool {
+    if left.is_nan() && right.is_nan() {
+        return true;
+    }
+    if left == right {
+        return true;
+    }
+    let diff = (left - right).abs();
+    let max_abs = left.abs().max(right.abs());
+    if max_abs == 0.0 {
+        diff < f64::EPSILON
+    } else {
+        diff / max_abs < 1e-14
+    }
+}
+
 fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
     match (left, right) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs == rhs,
@@ -26802,6 +26818,48 @@ impl DataFrame {
         })
     }
 
+    fn subset_has_all_valid_unique_column(&self, subset: &[String]) -> bool {
+        subset.iter().any(|name| {
+            let column = self.columns.get(name).expect("selected column must exist");
+            if !column.validity().all() {
+                return false;
+            }
+            match column.dtype() {
+                DType::Float64 => {
+                    let mut values = Vec::with_capacity(column.len());
+                    for value in column.values() {
+                        match value {
+                            Scalar::Float64(value) if !value.is_nan() => values.push(*value),
+                            _ => return false,
+                        }
+                    }
+                    values.sort_by(|left, right| left.total_cmp(right));
+                    values
+                        .windows(2)
+                        .all(|pair| !float_semantic_eq(pair[0], pair[1]))
+                }
+                DType::Bool
+                | DType::BoolNullable
+                | DType::Int64
+                | DType::Int64Nullable
+                | DType::Utf8
+                | DType::Categorical
+                | DType::Timedelta64
+                | DType::Datetime64
+                | DType::Period => {
+                    let mut seen = HashSet::with_capacity(column.len());
+                    for value in column.values() {
+                        if value.is_missing() || !seen.insert(scalar_key_allow_missing(value)) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                DType::Null | DType::Interval | DType::Sparse => false,
+            }
+        })
+    }
+
     fn reset_index_column_name(&self) -> Result<String, FrameError> {
         // Named index: pandas restores the former index under the index's NAME
         // (df.set_index('t').reset_index() -> column 't'). A collision with an
@@ -28563,6 +28621,15 @@ impl DataFrame {
         keep: DuplicateKeep,
         ignore_index: bool,
     ) -> Result<Self, FrameError> {
+        if !ignore_index {
+            let selected_columns = self.resolve_column_selector(subset)?;
+            if !selected_columns.is_empty()
+                && self.subset_has_all_valid_unique_column(&selected_columns)
+            {
+                return Ok(self.clone());
+            }
+        }
+
         let duplicated = self.duplicated(subset, keep)?;
         let mut saw_duplicate = false;
         let mut saw_unexpected_marker = false;
@@ -32261,13 +32328,27 @@ impl DataFrame {
                 }
                 // Cell (i, j): col i is "x", col j is "y" — exactly as before.
                 mat[i * n + j] = Self::finalize_pairwise_stat(
-                    stat, min_periods, count, sum_x, sum_y, sum_xy, sum_x2, sum_y2,
+                    stat,
+                    min_periods,
+                    count,
+                    sum_x,
+                    sum_y,
+                    sum_xy,
+                    sum_x2,
+                    sum_y2,
                 );
                 if i != j {
                     // Cell (j, i): col j is "x", col i is "y" — swap marginals so
                     // the (n * mean_x * mean_y) association matches the old pass.
                     mat[j * n + i] = Self::finalize_pairwise_stat(
-                        stat, min_periods, count, sum_y, sum_x, sum_xy, sum_y2, sum_x2,
+                        stat,
+                        min_periods,
+                        count,
+                        sum_y,
+                        sum_x,
+                        sum_xy,
+                        sum_y2,
+                        sum_x2,
                     );
                 }
             }
@@ -51408,6 +51489,80 @@ mod tests {
             reset.column("value").unwrap().values(),
             df.column("value").unwrap().values()
         );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_unique_selected_column_preserves_keep_variants() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "value",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(11.0),
+                        Scalar::Float64(12.0),
+                    ],
+                ),
+            ],
+            vec!["r0".into(), "r1".into(), "r2".into()],
+        )
+        .unwrap();
+
+        assert!(df.subset_has_all_valid_unique_column(&["value".to_owned()]));
+        assert!(!df.subset_has_all_valid_unique_column(&["key".to_owned()]));
+
+        for keep in [
+            DuplicateKeep::First,
+            DuplicateKeep::Last,
+            DuplicateKeep::None,
+        ] {
+            let out = df.drop_duplicates(None, keep, false).unwrap();
+            assert_eq!(out.index().labels(), df.index().labels());
+            assert_eq!(out.column_names(), df.column_names());
+            assert_eq!(
+                out.column("key").unwrap().values(),
+                df.column("key").unwrap().values()
+            );
+            assert_eq!(
+                out.column("value").unwrap().values(),
+                df.column("value").unwrap().values()
+            );
+        }
+
+        let subset = vec!["key".to_owned()];
+        let out = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from("r0"), IndexLabel::from("r2")]
+        );
+        assert_eq!(
+            out.column("key").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            out.column("value").unwrap().values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(12.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_unique_column_guard_respects_float_semantics() {
+        let df = DataFrame::from_dict(
+            &["value"],
+            vec![(
+                "value",
+                vec![Scalar::Float64(1.0), Scalar::Float64(1.0 + 1e-16)],
+            )],
+        )
+        .unwrap();
+
+        assert!(!df.subset_has_all_valid_unique_column(&["value".to_owned()]));
     }
 
     #[test]

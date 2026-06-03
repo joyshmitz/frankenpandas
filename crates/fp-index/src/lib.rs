@@ -12416,7 +12416,7 @@ impl MultiIndex {
                 length: self.nlevels(),
             });
         }
-        let lookup: std::collections::HashSet<&IndexLabel> = values.iter().collect();
+        let lookup: FxHashSet<&IndexLabel> = values.iter().collect();
         Ok(self.levels[level]
             .iter()
             .map(|label| lookup.contains(label))

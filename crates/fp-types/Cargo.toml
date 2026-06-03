@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
 

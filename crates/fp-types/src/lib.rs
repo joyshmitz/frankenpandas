@@ -3737,7 +3737,7 @@ pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
 
 /// Count of unique non-missing values.
 pub fn nannunique(values: &[Scalar]) -> Scalar {
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet;
     #[derive(Hash, PartialEq, Eq)]
     enum ScalarKey<'a> {
         Bool(bool),
@@ -3750,7 +3750,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Interval(u64, u64, IntervalClosed),
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for val in values {
         if val.is_missing() {
             continue;

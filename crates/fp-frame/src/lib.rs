@@ -3862,7 +3862,35 @@ impl Series {
     /// Matches `pd.Series.combine_first(other)`: uses outer alignment,
     /// then for each position takes self's value if non-null, else other's.
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union_plan(&self.index, &other.index);
+        // pandas combine_first uses the SORTED union of the two indexes when
+        // they differ (Index.union sorts), but keeps the original order when the
+        // indexes are identical. align_union_plan's unique path returns the
+        // labels in left-then-new order (unsorted), which diverged — e.g.
+        // combine_first of index [x,y,z] with [x,y,z,w] gave [x,y,z,w] instead
+        // of pandas' [w,x,y,z]. Mirror binary_op_with_fill's alignment dispatch.
+        // Verified vs live pandas 2.2.3 (identical-but-unsorted index is kept;
+        // differing indexes are sorted).
+        let plan = if self.index.has_duplicates() || other.index.has_duplicates() {
+            // Duplicate labels align cartesian-style (unchanged from before);
+            // checked BEFORE the identical-index fast path so identical
+            // duplicate indexes still take this path, not the positional one.
+            let (union_index, left_positions, right_positions) =
+                align_union_duplicate_aware(&self.index, &other.index);
+            AlignmentPlan {
+                union_index,
+                left_positions,
+                right_positions,
+            }
+        } else if self.index == other.index {
+            let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
+            AlignmentPlan {
+                union_index: self.index.clone(),
+                left_positions: positions.clone(),
+                right_positions: positions,
+            }
+        } else {
+            align_union_sorted_unique(&self.index, &other.index)
+        };
         validate_alignment_plan(&plan)?;
 
         let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -33752,7 +33780,9 @@ impl DataFrame {
     /// of indices and columns. For overlapping positions, uses self's value
     /// if non-null, else other's value.
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
-        // Build union of index labels (preserving order: self first, then new from other)
+        // Build the union of index labels. pandas combine_first returns the
+        // SORTED union when the indexes differ, but keeps the original order
+        // when they are identical (Index.union). Verified vs live pandas 2.2.3.
         let mut seen = std::collections::HashSet::new();
         let mut union_labels = Vec::new();
         for label in self.index.labels() {
@@ -33765,8 +33795,12 @@ impl DataFrame {
                 union_labels.push(label.clone());
             }
         }
+        if self.index != other.index {
+            union_labels.sort();
+        }
 
-        // Build union of columns (preserving order: self first, then new from other)
+        // Build the union of columns. pandas combine_first sorts the column
+        // union (e.g. [b, a] -> [a, b]). Verified vs live pandas 2.2.3.
         let mut col_order = Vec::new();
         let mut col_set = std::collections::HashSet::new();
         for name in &self.column_order {
@@ -33779,6 +33813,7 @@ impl DataFrame {
                 col_order.push(name.clone());
             }
         }
+        col_order.sort();
 
         // Build lookup maps for self and other
         let self_idx: BTreeMap<&IndexLabel, usize> = self
@@ -47760,6 +47795,66 @@ mod tests {
 
         let result = left.combine_first(&right).unwrap();
         assert_eq!(result.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn combine_first_sorts_differing_union_index() {
+        // pandas combine_first returns the SORTED union when indexes differ.
+        // Verified vs live pandas 2.2.3: index [x,y,z] combined with [x,y,z,w]
+        // -> [w,x,y,z], values [40,1,20,3] (self wins where present).
+        let left = Series::from_values(
+            "x",
+            vec!["x".into(), "y".into(), "z".into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec!["x".into(), "y".into(), "z".into(), "w".into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &["w".into(), "x".into(), "y".into(), "z".into()]
+        );
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(40), Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn combine_first_identical_unsorted_index_keeps_order() {
+        // When the indexes are identical, order is preserved (not re-sorted).
+        // Verified vs live pandas 2.2.3: index [3,1,2] stays [3,1,2].
+        let left = Series::from_values(
+            "x",
+            vec![3_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![3_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[3_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(3)]
+        );
     }
 
     #[test]

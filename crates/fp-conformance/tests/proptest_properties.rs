@@ -11740,3 +11740,55 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — Index set-algebra invariants (fp-index).
+// union/intersection/difference/symmetric_difference must realize the
+// corresponding label-set operation (order aside) and stay duplicate-free.
+// pandas Index set ops produce these same sets (it additionally sorts by
+// default; fp-index intentionally keeps discovery order at this layer, see
+// DISC-013 — so these assert set membership, not ordering).
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-IDXSET1: the four Index set ops equal their set-theoretic definitions
+    /// on the deduplicated label sets, return duplicate-free indexes, and
+    /// satisfy `symmetric_difference == union − intersection`.
+    #[test]
+    fn prop_index_set_ops_match_set_semantics((a, b) in arb_index_pair(12)) {
+        use std::collections::HashSet;
+        let as_set = |idx: &Index| -> HashSet<IndexLabel> { idx.labels().iter().cloned().collect() };
+        let no_dups = |idx: &Index| -> bool {
+            let labels = idx.labels();
+            labels.iter().collect::<HashSet<&IndexLabel>>().len() == labels.len()
+        };
+        let sa = as_set(&a);
+        let sb = as_set(&b);
+
+        let u = a.union(&b);
+        prop_assert!(no_dups(&u), "union produced duplicate labels");
+        prop_assert_eq!(as_set(&u), sa.union(&sb).cloned().collect::<HashSet<_>>(), "union set mismatch");
+
+        let i = a.intersection(&b);
+        prop_assert!(no_dups(&i), "intersection produced duplicate labels");
+        prop_assert_eq!(as_set(&i), sa.intersection(&sb).cloned().collect::<HashSet<_>>(), "intersection set mismatch");
+
+        let d = a.difference(&b);
+        prop_assert!(no_dups(&d), "difference produced duplicate labels");
+        prop_assert_eq!(as_set(&d), sa.difference(&sb).cloned().collect::<HashSet<_>>(), "difference set mismatch");
+
+        let sd = a.symmetric_difference(&b);
+        prop_assert!(no_dups(&sd), "symmetric_difference produced duplicate labels");
+        prop_assert_eq!(
+            as_set(&sd),
+            sa.symmetric_difference(&sb).cloned().collect::<HashSet<_>>(),
+            "symmetric_difference set mismatch"
+        );
+
+        // Cross-relation independent of the above: symdiff == union − intersection.
+        let union_minus_inter: HashSet<IndexLabel> = as_set(&u).difference(&as_set(&i)).cloned().collect();
+        prop_assert_eq!(as_set(&sd), union_minus_inter, "symdiff != union - intersection");
+    }
+}

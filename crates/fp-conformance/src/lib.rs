@@ -7539,7 +7539,13 @@ fn fuzz_expected_column_arith_dtype(
     if matches!(out_dtype, DType::Bool) {
         out_dtype = DType::Int64;
     }
-    if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) {
+    if matches!(op, ArithmeticOp::Div) {
+        out_dtype = DType::Float64;
+    }
+    // Per br-frankenpandas-3w0xn: Int64 ** Int64 stays Int64 (numpy/pandas:
+    // int**int -> int64, with negative integer exponents raising in the kernel
+    // before this oracle runs). Any float operand promotes Pow to Float64.
+    if matches!(op, ArithmeticOp::Pow) && !matches!(out_dtype, DType::Int64) {
         out_dtype = DType::Float64;
     }
     if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) && matches!(out_dtype, DType::Int64)
@@ -7602,7 +7608,11 @@ fn fuzz_column_arith_oracle_scalar(
             ArithmeticOp::Mul => lhs.wrapping_mul(rhs),
             ArithmeticOp::Mod => fuzz_python_mod_i64(lhs, rhs),
             ArithmeticOp::FloorDiv => fuzz_python_floor_div_i64(lhs, rhs),
-            ArithmeticOp::Div | ArithmeticOp::Pow => {
+            // Per br-frankenpandas-3w0xn: Int64 ** Int64 wraps like numpy for a
+            // non-negative exponent. A negative exponent raises in Column::pow,
+            // so the harness errors before reaching this oracle (rhs >= 0 here).
+            ArithmeticOp::Pow => lhs.wrapping_pow(u32::try_from(rhs).unwrap_or(u32::MAX)),
+            ArithmeticOp::Div => {
                 return Err(format!(
                     "int oracle received unsupported op {:?} for dtype {:?}",
                     op, out_dtype

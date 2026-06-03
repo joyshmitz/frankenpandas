@@ -8418,6 +8418,9 @@ impl Series {
                         } else {
                             Scalar::Timedelta64(a_ns.saturating_sub(*b_ns))
                         }
+                    } else if let (Scalar::Bool(a_b), Scalar::Bool(b_b)) = (&vals[i], &vals[j]) {
+                        // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
+                        Scalar::Bool(a_b != b_b)
                     } else {
                         match (vals[i].to_f64(), vals[j].to_f64()) {
                             (Ok(a), Ok(b)) => Scalar::Float64(a - b),
@@ -17604,6 +17607,10 @@ impl SeriesGroupBy<'_> {
                             return Scalar::Null(NullKind::NaT);
                         }
                         return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
+                    }
+                    // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
+                    if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (value, previous) {
+                        return Scalar::Bool(cur_b != prev_b);
                     }
                     if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
                         Scalar::Float64(current - prev)
@@ -43805,6 +43812,10 @@ impl DataFrameGroupBy<'_> {
                             return Scalar::Null(NullKind::NaT);
                         }
                         return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
+                    }
+                    // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
+                    if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (v, prev) {
+                        return Scalar::Bool(cur_b != prev_b);
                     }
                     if let (Ok(a), Ok(b)) = (v.to_f64(), prev.to_f64()) {
                         Scalar::Float64(a - b)
@@ -104983,15 +104994,13 @@ mod tests {
     fn dataframe_diff_handles_bool_columns() {
         let df = fcf80_bool_df();
         let out = df.diff(1).unwrap();
-        // pandas: diff(1) on Bool col [T, F, T] → [NaN, -1, 1] (cast to Int64)
+        // pandas 2.2.3: diff(1) on Bool col [T, F, T] is XOR (cur != prev) ->
+        // [NaN, True, True] as a bool result (older pandas gave numeric -1/1).
+        // Verified vs live pandas 2.2.3.
         let vals = out.column("flags").unwrap().values();
         assert!(matches!(&vals[0], Scalar::Null(_)));
-        match (&vals[1], &vals[2]) {
-            // Accept either Int64 or Float64 representation; pandas itself
-            // promotes to Float64 because of the leading NaN.
-            (Scalar::Int64(-1), Scalar::Int64(1)) | (Scalar::Float64(_), Scalar::Float64(_)) => {}
-            other => panic!("unexpected diff values: {other:?}"),
-        }
+        assert_eq!(vals[1], Scalar::Bool(true)); // F != T
+        assert_eq!(vals[2], Scalar::Bool(true)); // T != F
     }
 
     #[test]

@@ -6035,10 +6035,14 @@ impl Column {
         // Per br-frankenpandas-e607u: Timedelta64 diff preserves dtype
         // matching pandas, instead of forcing Float64 output and NaN-ing
         // via the to_f64-else catch-all.
-        let out_dtype = if self.dtype == DType::Timedelta64 {
-            DType::Timedelta64
-        } else {
-            DType::Float64
+        // Per pandas 2.2.3: Bool.diff() is XOR (cur != prev), yielding a bool
+        // result with a missing leading element — NOT numeric subtraction
+        // (older pandas gave [-1, 0, 1]). Timedelta64 keeps its dtype; all other
+        // numeric types diff as Float64.
+        let out_dtype = match self.dtype {
+            DType::Timedelta64 => DType::Timedelta64,
+            DType::Bool => DType::Bool,
+            _ => DType::Float64,
         };
         if len == 0 || periods == 0 {
             let null = if out_dtype == DType::Timedelta64 {
@@ -6075,6 +6079,11 @@ impl Column {
                 } else {
                     out.push(Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns)));
                 }
+                continue;
+            }
+            if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (cur, prev) {
+                // pandas 2.2.3 Bool.diff() == (cur XOR prev).
+                out.push(Scalar::Bool(cur_b != prev_b));
                 continue;
             }
             match (cur.to_f64(), prev.to_f64()) {

@@ -974,6 +974,17 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     if target == DType::Utf8 {
         return Ok(Scalar::Utf8(scalar_to_string_for_astype(value)));
     }
+    // Per br-frankenpandas-cyi4h: pandas astype(bool) (the numpy bool dtype)
+    // treats a float NaN as truthy -> True (bool(nan) is True), unlike the
+    // nullable 'boolean' dtype which keeps NA. FP's NaN=missing model would
+    // otherwise fall through to the missing branch below and yield a null.
+    // Verified vs live pandas 2.2.3.
+    if target == DType::Bool
+        && let Scalar::Float64(v) = &value
+        && v.is_nan()
+    {
+        return Ok(Scalar::Bool(true));
+    }
     if value.is_missing() {
         return Ok(Scalar::missing_for_dtype(target));
     }
@@ -4740,9 +4751,8 @@ mod tests {
     #[test]
     fn cast_to_bool_uses_pandas_nonzero_truthiness() {
         // pandas astype(bool): zero -> False, any nonzero -> True (not just 0/1),
-        // -0.0 -> False. Verified vs live pandas 2.2.3. (NaN is intercepted as
-        // missing upstream by FP's NaN=missing model, so NaN->bool yields a null
-        // rather than pandas' numpy True; that edge is tracked separately.)
+        // -0.0 -> False, and NaN -> True (numpy bool(nan), br-cyi4h). Verified vs
+        // live pandas 2.2.3.
         let cases_int: &[(i64, bool)] = &[(0, false), (1, true), (-3, true), (2, true)];
         for (v, expected) in cases_int {
             assert_eq!(
@@ -4757,6 +4767,8 @@ mod tests {
             (0.1, true),
             (2.5, true),
             (1.0, true),
+            // pandas astype(bool): NaN is truthy -> True (numpy bool). br-cyi4h.
+            (f64::NAN, true),
         ];
         for (v, expected) in cases_float {
             assert_eq!(

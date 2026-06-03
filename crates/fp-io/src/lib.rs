@@ -1112,7 +1112,7 @@ pub fn write_latex_string_with_options(
         row.extend(headers.iter().map(|name| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             match value {
-                Some(scalar) => scalar_to_table_with_na(scalar, &options.na_rep),
+                Some(scalar) => scalar_to_latex_cell(scalar, &options.na_rep),
                 None => options.na_rep.clone(),
             }
         }));
@@ -2524,6 +2524,20 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
         other => scalar_to_csv(other),
+    }
+}
+
+/// LaTeX cell formatter. pandas `to_latex` renders floats with its default
+/// `float_format` of six decimal places (`1.0` -> "1.000000", `0.1234567` ->
+/// "0.123457"), unlike the str(float) form used by to_csv/to_html. Integers and
+/// other scalars keep the shared table formatting. Verified vs pandas 2.2.3.
+fn scalar_to_latex_cell(scalar: &Scalar, na_rep: &str) -> String {
+    match scalar {
+        Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        // Rust `{:.6}` matches Python `%.6f` (round-half-to-even) and renders
+        // infinities as "inf"/"-inf", exactly as pandas to_latex does.
+        Scalar::Float64(v) => format!("{v:.6}"),
+        other => scalar_to_table_with_na(other, na_rep),
     }
 }
 
@@ -11507,11 +11521,45 @@ mod tests {
                 "row\\_id &  &  \\\\\n",
                 "\\midrule\n",
                 "r\\&1 & A|B & NA \\\\\n",
-                "r\\_2 & under\\_score & 2 \\\\\n",
+                "r\\_2 & under\\_score & 2.000000 \\\\\n",
                 "\\bottomrule\n",
                 "\\end{tabular}\n",
             )
         );
+    }
+
+    #[test]
+    fn to_latex_floats_use_six_decimal_places_like_pandas() {
+        // pandas to_latex default float_format is %.6f. Verified vs pandas 2.2.3:
+        // 1.0->"1.000000", -2.5->"-2.500000", 0.1234567->"0.123457" (rounded),
+        // inf->"inf". Other writers (csv/html) keep str(float).
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(-2.5),
+            Scalar::Float64(0.1234567),
+            Scalar::Float64(f64::INFINITY),
+        ];
+        let col = Column::new(DType::Float64, values).expect("col");
+        let mut cols = BTreeMap::new();
+        cols.insert("a".to_string(), col);
+        let index = Index::from_i64((0..4).collect());
+        let frame =
+            DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).expect("frame");
+
+        let out = write_latex_string_with_options(
+            &frame,
+            &LatexWriteOptions {
+                include_index: false,
+                na_rep: "NaN".to_owned(),
+                index_label: None,
+                escape: true,
+            },
+        )
+        .expect("latex");
+        assert!(out.contains("1.000000 \\\\"), "got: {out}");
+        assert!(out.contains("-2.500000 \\\\"), "got: {out}");
+        assert!(out.contains("0.123457 \\\\"), "got: {out}");
+        assert!(out.contains("inf \\\\"), "got: {out}");
     }
 
     #[test]

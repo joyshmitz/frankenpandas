@@ -72,7 +72,7 @@ use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
-use fp_types::{Scalar, TypeError};
+use fp_types::{DType, Scalar, TypeError};
 // Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
 // output row order comes from probe-side iteration and per-key insertion-order
 // position Vecs, never from map iteration. So SipHash -> FxHash (rustc-hash,
@@ -908,6 +908,34 @@ fn insert_merged_output_column(
     Ok(())
 }
 
+fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> bool {
+    if left_key.len() != right_key.len()
+        || left_key.dtype() != DType::Int64
+        || right_key.dtype() != DType::Int64
+        || !left_key.validity().all()
+        || !right_key.validity().all()
+    {
+        return false;
+    }
+
+    left_key.values().iter().zip(right_key.values()).all(
+        |(left, right)| matches!((left, right), (Scalar::Int64(left), Scalar::Int64(right)) if left.cmp(right).is_eq()),
+    )
+}
+
+fn identity_merge_column(
+    column: &Column,
+    row_count: usize,
+    identity_positions: &mut Option<Vec<usize>>,
+) -> Column {
+    if column.validity().all() {
+        return column.clone();
+    }
+
+    let positions = identity_positions.get_or_insert_with(|| (0..row_count).collect());
+    column.take_positions(positions)
+}
+
 fn resolve_merge_indicator_name(indicator_name: Option<&str>) -> Result<Option<String>, JoinError> {
     let Some(name) = indicator_name else {
         return Ok(None);
@@ -1040,6 +1068,74 @@ fn build_single_key_inner_merge_output(
     })
 }
 
+fn build_single_key_ordered_identity_inner_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<MergedDataFrame, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+    debug_assert_eq!(left_on[0], right_on[0]);
+
+    let n = left.len();
+    debug_assert_eq!(n, right.len());
+    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::new();
+    let mut identity_positions = None;
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+    let shared_key_names = left_on.iter().copied().collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        let output = identity_merge_column(col, n, &mut identity_positions);
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, output)?;
+    }
+
+    for name in right.column_names() {
+        if right_key_name_set.contains(name.as_str()) {
+            continue;
+        }
+
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        let output = identity_merge_column(col, n, &mut identity_positions);
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, output)?;
+    }
+
+    Ok(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    })
+}
+
 fn merge_single_key_inner_unsorted(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -1051,6 +1147,14 @@ fn merge_single_key_inner_unsorted(
 ) -> Result<MergedDataFrame, JoinError> {
     debug_assert_eq!(left_key_columns.len(), 1);
     debug_assert_eq!(right_key_columns.len(), 1);
+
+    if left_on[0] == right_on[0]
+        && ordered_identity_int64_keys_match(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_identity_inner_merge_output(
+            left, right, left_on, right_on, suffixes,
+        );
+    }
 
     let left_keys = collect_single_join_keys(left_key_columns[0]);
     let right_keys = collect_single_join_keys(right_key_columns[0]);
@@ -2994,6 +3098,60 @@ mod tests {
                 Scalar::Int64(201),
             ]
         );
+    }
+
+    #[test]
+    fn merge_inner_ordered_identity_matches_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(30),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "w",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
     }
 
     #[test]

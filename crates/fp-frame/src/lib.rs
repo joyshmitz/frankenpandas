@@ -41682,6 +41682,20 @@ impl DataFrameGroupBy<'_> {
                 Scalar::Int64(total)
             }
             DType::Categorical => fp_types::nansum(group_vals),
+            // Per br-frankenpandas-6lnll: pandas groupby.sum() on an object/string
+            // column concatenates each group's non-null values in encounter order
+            // (skipna), exactly like Series::sum (br-f031e). The catch-all below
+            // would route Utf8 through nansum, whose to_f64() fails on strings and
+            // silently produces Float64(0.0). Empty / all-null group -> "".
+            DType::Utf8 => {
+                let mut joined = String::new();
+                for value in group_vals {
+                    if let Scalar::Utf8(s) = value {
+                        joined.push_str(s);
+                    }
+                }
+                Scalar::Utf8(joined)
+            }
             DType::Timedelta64 => {
                 let mut total = 0_i128;
                 for value in group_vals {
@@ -91763,6 +91777,44 @@ mod tests {
         let grouped = df.groupby(&["key"]).unwrap().sum().unwrap();
         let output = format!("{grouped}");
         assert_text_golden("groupby_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_sum_string_column_concatenates_6lnll() {
+        // pandas df.groupby(k)['s'].sum() concatenates object/string values per
+        // group (skipna), like Series.sum. Previously fp-frame's sum_group_vals
+        // routed Utf8 through nansum -> Float64(0.0). Verified vs pandas 2.2.3:
+        // group a -> "xy" (skips the null), b -> "z".
+        let df = DataFrame::from_dict(
+            &["key", "s"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "s",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().sum().unwrap();
+        let col = grouped.column("s").expect("s column");
+        assert_eq!(
+            col.values(),
+            &[Scalar::Utf8("xy".into()), Scalar::Utf8("z".into())]
+        );
     }
 
     #[test]

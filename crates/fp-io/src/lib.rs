@@ -586,6 +586,9 @@ enum CsvTypedColumnValues {
     Float64(Vec<f64>),
 }
 
+const SIMPLE_NUMERIC_CSV_PARALLEL_MIN_BYTES: usize = 1 << 20;
+const SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS: usize = 4;
+
 fn trim_ascii_field(mut field: &[u8]) -> &[u8] {
     while let Some((first, rest)) = field.split_first() {
         if first.is_ascii_whitespace() {
@@ -720,6 +723,194 @@ fn build_typed_numeric_csv_frame(
     DataFrame::new_with_column_order(index, out_columns, column_order).map_err(IoError::from)
 }
 
+fn simple_numeric_csv_parallel_worker_count(data_len: usize) -> usize {
+    if data_len < SIMPLE_NUMERIC_CSV_PARALLEL_MIN_BYTES {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS)
+}
+
+fn split_simple_numeric_csv_chunks(
+    data: &[u8],
+    worker_count: usize,
+) -> Option<Vec<(usize, usize)>> {
+    if worker_count < 2 || data.is_empty() {
+        return None;
+    }
+
+    let target_len = data.len().div_ceil(worker_count);
+    let mut chunks = Vec::with_capacity(worker_count);
+    let mut start = 0usize;
+    while start < data.len() {
+        let mut end = start.saturating_add(target_len).min(data.len());
+        if end < data.len() {
+            let relative_newline = data[end..].iter().position(|byte| *byte == b'\n')?;
+            end += relative_newline + 1;
+        }
+        if end <= start {
+            return None;
+        }
+        chunks.push((start, end));
+        start = end;
+    }
+
+    (chunks.len() > 1).then_some(chunks)
+}
+
+fn parse_simple_numeric_csv_chunk(
+    data: &[u8],
+    header_count: usize,
+) -> Option<(Vec<CsvTypedColumnValues>, i64)> {
+    let row_hint = data.len() / (header_count * 8).max(1);
+    let mut typed_columns: Vec<CsvTypedColumnValues> = (0..header_count)
+        .map(|_| CsvTypedColumnValues::Int64(Vec::with_capacity(row_hint)))
+        .collect();
+    let mut row_count: i64 = 0;
+    let mut column_idx = 0usize;
+    let mut field_start = 0usize;
+
+    for (idx, byte) in data.iter().copied().enumerate() {
+        match byte {
+            b'"' => return None,
+            b'\r' if data.get(idx + 1).copied() != Some(b'\n') => return None,
+            b',' | b'\n' => {
+                if column_idx >= header_count {
+                    return None;
+                }
+                let field = &data[field_start..idx];
+                if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field) {
+                    return None;
+                }
+
+                if byte == b',' {
+                    column_idx += 1;
+                    if column_idx >= header_count {
+                        return None;
+                    }
+                } else {
+                    if column_idx + 1 != header_count {
+                        return None;
+                    }
+                    row_count += 1;
+                    column_idx = 0;
+                }
+                field_start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if field_start < data.len() {
+        if column_idx >= header_count {
+            return None;
+        }
+        let field = &data[field_start..];
+        if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field)
+            || column_idx + 1 != header_count
+        {
+            return None;
+        }
+        row_count += 1;
+    } else if column_idx != 0 {
+        return None;
+    }
+
+    (row_count > 0).then_some((typed_columns, row_count))
+}
+
+fn merge_simple_numeric_csv_chunks(
+    parsed_chunks: Vec<(Vec<CsvTypedColumnValues>, i64)>,
+    header_count: usize,
+) -> Option<(Vec<CsvTypedColumnValues>, i64)> {
+    let mut final_is_float = vec![false; header_count];
+    let mut row_count = 0i64;
+    for (columns, rows) in &parsed_chunks {
+        if columns.len() != header_count {
+            return None;
+        }
+        row_count = row_count.checked_add(*rows)?;
+        for (idx, column) in columns.iter().enumerate() {
+            final_is_float[idx] |= matches!(column, CsvTypedColumnValues::Float64(_));
+        }
+    }
+
+    let capacity = usize::try_from(row_count).ok()?;
+    let mut merged: Vec<CsvTypedColumnValues> = final_is_float
+        .into_iter()
+        .map(|is_float| {
+            if is_float {
+                CsvTypedColumnValues::Float64(Vec::with_capacity(capacity))
+            } else {
+                CsvTypedColumnValues::Int64(Vec::with_capacity(capacity))
+            }
+        })
+        .collect();
+
+    for (columns, _) in parsed_chunks {
+        for (dst, src) in merged.iter_mut().zip(columns) {
+            match (dst, src) {
+                (CsvTypedColumnValues::Int64(dst), CsvTypedColumnValues::Int64(src)) => {
+                    dst.extend(src);
+                }
+                (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Int64(src)) => {
+                    dst.extend(src.into_iter().map(|value| value as f64));
+                }
+                (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Float64(src)) => {
+                    dst.extend(src);
+                }
+                (CsvTypedColumnValues::Int64(_), CsvTypedColumnValues::Float64(_)) => {
+                    return None;
+                }
+            }
+        }
+    }
+
+    Some((merged, row_count))
+}
+
+fn parse_simple_numeric_csv_parallel_chunks(
+    data: &[u8],
+    header_count: usize,
+    worker_count: usize,
+) -> Option<(Vec<CsvTypedColumnValues>, i64)> {
+    let chunks = split_simple_numeric_csv_chunks(data, worker_count)?;
+    let parsed_chunks = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|&(start, end)| {
+                let chunk = &data[start..end];
+                scope.spawn(move || parse_simple_numeric_csv_chunk(chunk, header_count))
+            })
+            .collect();
+
+        let mut parsed = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let result = handle.join().ok().flatten()?;
+            parsed.push(result);
+        }
+        Some(parsed)
+    })?;
+
+    merge_simple_numeric_csv_chunks(parsed_chunks, header_count)
+}
+
+fn try_read_csv_str_simple_typed_numeric_parallel(
+    data: &[u8],
+    headers: &[String],
+    header_count: usize,
+) -> Result<Option<DataFrame>, IoError> {
+    let worker_count = simple_numeric_csv_parallel_worker_count(data.len());
+    let Some((typed_columns, row_count)) =
+        parse_simple_numeric_csv_parallel_chunks(data, header_count, worker_count)
+    else {
+        return Ok(None);
+    };
+
+    build_typed_numeric_csv_frame(headers, typed_columns, row_count).map(Some)
+}
+
 fn try_read_csv_str_simple_typed_numeric(
     input: &str,
     headers: &[String],
@@ -743,6 +934,12 @@ fn try_read_csv_str_simple_typed_numeric(
     let data = &bytes[header_end + 1..];
     if data.is_empty() {
         return Ok(None);
+    }
+
+    if let Some(frame) =
+        try_read_csv_str_simple_typed_numeric_parallel(data, headers, header_count)?
+    {
+        return Ok(Some(frame));
     }
 
     let row_hint = input.len() / (header_count * 8).max(1);
@@ -13471,6 +13668,37 @@ mod tests {
         assert_eq!(
             fast.column("f").expect("f").values()[1],
             Scalar::Float64(0.5)
+        );
+    }
+
+    #[test]
+    fn read_csv_simple_parallel_chunks_preserve_order_and_promotion() {
+        use std::fmt::Write as _;
+
+        let headers = vec!["i".to_owned(), "f".to_owned()];
+        let mut data = String::new();
+        for row in 0..32 {
+            let float_value = row as f64 * 0.25;
+            writeln!(data, "{row},{float_value}").expect("write row");
+        }
+
+        let (columns, row_count) =
+            super::parse_simple_numeric_csv_parallel_chunks(data.as_bytes(), headers.len(), 3)
+                .expect("parallel chunk parse");
+        let frame = super::build_typed_numeric_csv_frame(&headers, columns, row_count)
+            .expect("frame build");
+
+        assert_eq!(frame.len(), 32);
+        assert_eq!(frame.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(frame.column("f").expect("f").dtype(), DType::Float64);
+        assert_eq!(frame.column("i").expect("i").values()[0], Scalar::Int64(0));
+        assert_eq!(
+            frame.column("i").expect("i").values()[31],
+            Scalar::Int64(31)
+        );
+        assert_eq!(
+            frame.column("f").expect("f").values()[31],
+            Scalar::Float64(7.75)
         );
     }
 

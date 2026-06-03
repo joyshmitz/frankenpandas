@@ -68,6 +68,14 @@ use std::{
     mem::size_of,
 };
 
+// Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
+// output row order comes from probe-side iteration and per-key insertion-order
+// position Vecs, never from map iteration. So SipHash -> FxHash (rustc-hash,
+// pure safe Rust) is observationally invisible. SipHash over these label/key
+// byte images is pathologically slow (cf. fp-index dedup 3-4x); FxHash collapses
+// the build+probe hashing cost on the merge hot path.
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
@@ -176,9 +184,9 @@ fn join_series_with_trace(
 ) -> Result<(JoinedSeries, JoinExecutionTrace), JoinError> {
     // AG-02: borrowed-key HashMap eliminates right-index label clones during build phase.
     let right_map = if matches!(join_type, JoinType::Right) {
-        HashMap::<&IndexLabel, Vec<usize>>::new()
+        FxHashMap::<&IndexLabel, Vec<usize>>::default()
     } else {
-        let mut m = HashMap::<&IndexLabel, Vec<usize>>::new();
+        let mut m = FxHashMap::<&IndexLabel, Vec<usize>>::default();
         for (pos, label) in right.index().labels().iter().enumerate() {
             m.entry(label).or_default().push(pos);
         }
@@ -187,7 +195,7 @@ fn join_series_with_trace(
 
     // For Right/Outer joins, also build a left_map.
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = HashMap::<&IndexLabel, Vec<usize>>::new();
+        let mut m = FxHashMap::<&IndexLabel, Vec<usize>>::default();
         for (pos, label) in left.index().labels().iter().enumerate() {
             m.entry(label).or_default().push(pos);
         }
@@ -233,8 +241,8 @@ fn join_series_with_trace(
 fn estimate_output_rows(
     left: &Series,
     right: &Series,
-    right_map: &HashMap<&IndexLabel, Vec<usize>>,
-    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
+    right_map: &FxHashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&FxHashMap<&IndexLabel, Vec<usize>>>,
     join_type: JoinType,
 ) -> usize {
     if matches!(join_type, JoinType::Right) {
@@ -358,8 +366,8 @@ fn join_series_with_global_allocator(
     left: &Series,
     right: &Series,
     join_type: JoinType,
-    right_map: &HashMap<&IndexLabel, Vec<usize>>,
-    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
+    right_map: &FxHashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&FxHashMap<&IndexLabel, Vec<usize>>>,
     output_rows: usize,
 ) -> Result<JoinedSeries, JoinError> {
     let mut out_labels = Vec::with_capacity(output_rows);
@@ -460,8 +468,8 @@ fn join_series_with_arena(
     left: &Series,
     right: &Series,
     join_type: JoinType,
-    right_map: &HashMap<&IndexLabel, Vec<usize>>,
-    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
+    right_map: &FxHashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&FxHashMap<&IndexLabel, Vec<usize>>>,
     output_rows: usize,
 ) -> Result<JoinedSeries, JoinError> {
     let arena = Bump::new();
@@ -733,7 +741,7 @@ fn collect_composite_keys(key_columns: &[&Column]) -> Vec<CompositeJoinKey> {
 }
 
 fn has_duplicate_composite_keys(keys: &[CompositeJoinKey]) -> bool {
-    let mut seen = HashSet::with_capacity(keys.len());
+    let mut seen = FxHashSet::with_capacity_and_hasher(keys.len(), Default::default());
     for key in keys {
         if !seen.insert(key) {
             return true;
@@ -1041,7 +1049,10 @@ pub fn merge_dataframes_on_with_options(
         join_type,
         JoinType::Inner | JoinType::Left | JoinType::Outer
     ) {
-        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity(right_keys.len());
+        let mut m = FxHashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity_and_hasher(
+            right_keys.len(),
+            Default::default(),
+        );
         for (pos, key) in right_keys.iter().enumerate() {
             m.entry(key).or_default().push(pos);
         }
@@ -1051,7 +1062,10 @@ pub fn merge_dataframes_on_with_options(
     };
 
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity(left_keys.len());
+        let mut m = FxHashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity_and_hasher(
+            left_keys.len(),
+            Default::default(),
+        );
         for (pos, key) in left_keys.iter().enumerate() {
             m.entry(key).or_default().push(pos);
         }

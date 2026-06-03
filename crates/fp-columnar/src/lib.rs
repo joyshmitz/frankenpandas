@@ -2205,11 +2205,10 @@ impl Column {
         // Div always produces Float64. Pow keeps Int64 for int**int (numpy/pandas
         // semantics: 2 ** 3 -> int64 8, not float), but promotes to Float64 for any
         // float operand. Mod and FloorDiv preserve int if there are no zero divisors.
-        if matches!(op, ArithmeticOp::Div) {
-            out_dtype = DType::Float64;
-        } else if matches!(op, ArithmeticOp::Pow)
-            && !(self.dtype == DType::Int64 && right.dtype == DType::Int64)
-        {
+        let int_pow = matches!(op, ArithmeticOp::Pow)
+            && self.dtype == DType::Int64
+            && right.dtype == DType::Int64;
+        if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) && !int_pow {
             out_dtype = DType::Float64;
         }
 
@@ -7050,12 +7049,14 @@ impl Column {
                     if decimals >= 0 {
                         out.push(Scalar::Int64(*x));
                     } else {
-                        let rounded = ((*x as f64) * factor).round() / factor;
+                        // np.around uses round-half-to-even (banker's), e.g.
+                        // around([25], -1) -> 20, not 30.
+                        let rounded = ((*x as f64) * factor).round_ties_even() / factor;
                         out.push(Scalar::Int64(rounded as i64));
                     }
                 }
                 Scalar::Float64(x) => {
-                    let rounded = (*x * factor).round() / factor;
+                    let rounded = (*x * factor).round_ties_even() / factor;
                     out.push(Scalar::Float64(rounded));
                 }
                 _ => {
@@ -14082,7 +14083,7 @@ mod tests {
             let r2 = col.around(0).unwrap();
             assert!((r2.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
             assert!((r2.values()[1].to_f64().unwrap() - 6.0).abs() < 1e-10);
-            // Round to -1 (tens) - uses round-half-away-from-zero
+            // Round to -1 (tens) - np.around uses round-half-to-even (banker's)
             let col2 = Column::from_values(vec![
                 Scalar::Float64(15.0),
                 Scalar::Float64(24.0),
@@ -14093,6 +14094,38 @@ mod tests {
             assert!((r3.values()[0].to_f64().unwrap() - 20.0).abs() < 1e-10);
             assert!((r3.values()[1].to_f64().unwrap() - 20.0).abs() < 1e-10);
             assert!((r3.values()[2].to_f64().unwrap() - 40.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn around_uses_numpy_half_even_ties() {
+            // np.around is round-half-to-EVEN, matching pd.Series.round. The old
+            // implementation used f64::round (half away from zero), diverging on
+            // exact .5 ties: np.around([0.5,1.5,2.5,3.5]) == [0,2,2,4].
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.5),
+                Scalar::Float64(-2.5),
+            ])
+            .unwrap();
+            let r = col.around(0).unwrap();
+            let got: Vec<f64> = r.values().iter().map(|v| v.to_f64().unwrap()).collect();
+            assert_eq!(got, vec![0.0, 2.0, 2.0, 4.0, -2.0]);
+
+            // Negative decimals: np.around([15,25,35], -1) == [20,20,40] (25->20).
+            let tens = Column::from_values(vec![
+                Scalar::Float64(15.0),
+                Scalar::Float64(25.0),
+                Scalar::Float64(35.0),
+            ])
+            .unwrap();
+            let rt = tens.around(-1).unwrap();
+            let gott: Vec<f64> = rt.values().iter().map(|v| v.to_f64().unwrap()).collect();
+            assert_eq!(gott, vec![20.0, 20.0, 40.0]);
+
+            // around must agree with round (both banker's).
+            assert_eq!(col.around(0).unwrap().values(), col.round(0).unwrap().values());
         }
 
         #[test]

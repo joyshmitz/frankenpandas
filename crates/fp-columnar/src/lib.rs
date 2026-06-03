@@ -5118,10 +5118,11 @@ impl Column {
 
     /// Linearly interpolate missing numeric values.
     ///
-    /// Matches `pd.Series.interpolate(method='linear')` for the
-    /// default contiguous case. Only interior missing runs are
-    /// interpolated — leading/trailing nulls stay null (matches
-    /// pandas `limit_direction='forward'` default). Non-numeric
+    /// Matches `pd.Series.interpolate(method='linear')` with the
+    /// default `limit_direction='forward'`: interior missing runs are
+    /// linearly interpolated, LEADING nulls stay null (forward fill
+    /// cannot reach them), and TRAILING nulls are forward-filled with
+    /// the last valid value (pandas does not extrapolate). Non-numeric
     /// columns return a type error. Result dtype is always Float64.
     pub fn interpolate_linear(&self) -> Result<Self, ColumnError> {
         let len = self.values.len();
@@ -5160,6 +5161,14 @@ impl Column {
                     let step = (k + 1) as f64;
                     floats[j] = Some(before + (after - before) * (step / span));
                 }
+            }
+            // Trailing nulls (after the last valid value) are forward-filled
+            // with that value — pandas' default limit_direction='forward' carries
+            // it forward rather than extrapolating. Leading nulls (before `start`)
+            // are intentionally left null. (br-frankenpandas-8ic7c)
+            let last_valid = floats[end].expect("last valid anchor");
+            for slot in floats.iter_mut().skip(end + 1) {
+                *slot = Some(last_valid);
             }
         }
 
@@ -12189,7 +12198,12 @@ mod tests {
         }
 
         #[test]
-        fn interpolate_leaves_leading_and_trailing_nulls_null() {
+        fn interpolate_leading_null_stays_null_trailing_forward_fills() {
+            // pandas Series.interpolate(method='linear') default
+            // limit_direction='forward': leading NaN stays NaN, interior is
+            // interpolated, trailing NaN is forward-filled with the last valid
+            // value (NOT extrapolated). [nan,2,nan,4,nan] -> [nan,2,3,4,4].
+            // (br-frankenpandas-8ic7c)
             let col = Column::from_values(vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(2.0),
@@ -12207,7 +12221,30 @@ mod tests {
                 r.values()[2]
             );
             assert_eq!(r.values()[3], Scalar::Float64(4.0));
-            assert!(r.values()[4].is_missing());
+            // Trailing NaN forward-filled with the last valid value (4.0).
+            assert_eq!(r.values()[4], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn interpolate_trailing_run_forward_fills_without_extrapolating() {
+            // [2,4,nan,nan] -> [2,4,4,4] (ffill), NOT [2,4,6,8] (extrapolation).
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let r = col.interpolate_linear().expect("interpolate");
+            assert_eq!(
+                r.values(),
+                &[
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(4.0),
+                ]
+            );
         }
 
         #[test]

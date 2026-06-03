@@ -830,7 +830,9 @@ impl Clone for Column {
     fn clone(&self) -> Self {
         Self {
             dtype: self.dtype,
-            values: self.values.clone(),
+            values: self
+                .clone_dense_values_from_cache()
+                .unwrap_or_else(|| self.values.clone()),
             validity: self.validity.clone(),
             data: None,
         }
@@ -1163,6 +1165,46 @@ fn round_i64_negative_decimals(value: i64, decimals: i32) -> i64 {
 }
 
 impl Column {
+    fn clone_dense_values_from_cache(&self) -> Option<Vec<Scalar>> {
+        if self.validity.len() != self.values.len()
+            || self.validity.count_valid() != self.values.len()
+        {
+            return None;
+        }
+
+        match (&self.data, self.dtype) {
+            (Some(ColumnData::Bool(data)), DType::Bool | DType::BoolNullable)
+                if data.len() == self.values.len() =>
+            {
+                Some(data.iter().copied().map(Scalar::Bool).collect())
+            }
+            (Some(ColumnData::Int64(data)), DType::Int64 | DType::Int64Nullable)
+                if data.len() == self.values.len() =>
+            {
+                Some(data.iter().copied().map(Scalar::Int64).collect())
+            }
+            (Some(ColumnData::Float64(data)), DType::Float64)
+                if data.len() == self.values.len() =>
+            {
+                Some(data.iter().copied().map(Scalar::Float64).collect())
+            }
+            (Some(ColumnData::Timedelta64(data)), DType::Timedelta64)
+                if data.len() == self.values.len() =>
+            {
+                Some(data.iter().copied().map(Scalar::Timedelta64).collect())
+            }
+            (Some(ColumnData::Datetime64(data)), DType::Datetime64)
+                if data.len() == self.values.len() =>
+            {
+                Some(data.iter().copied().map(Scalar::Datetime64).collect())
+            }
+            (Some(ColumnData::Period(data)), DType::Period) if data.len() == self.values.len() => {
+                Some(data.iter().copied().map(Scalar::Period).collect())
+            }
+            _ => None,
+        }
+    }
+
     fn cached_data_for_values(dtype: DType, values: &[Scalar]) -> Option<ColumnData> {
         match dtype {
             DType::Bool
@@ -8453,6 +8495,52 @@ mod tests {
         assert!(column.data.is_some());
         assert!(cloned.data.is_none());
         assert_eq!(column, cloned);
+    }
+
+    #[test]
+    fn dense_primitive_clone_materializes_values_from_typed_cache() {
+        let column = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(3.25),
+            ],
+        )
+        .expect("column should build");
+
+        assert_eq!(
+            column.clone_dense_values_from_cache(),
+            Some(vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(3.25),
+            ])
+        );
+
+        let cloned = column.clone();
+        assert_eq!(cloned.values(), column.values());
+        assert_eq!(cloned.validity(), column.validity());
+        assert!(cloned.data.is_none());
+    }
+
+    #[test]
+    fn dense_primitive_clone_falls_back_for_missing_values() {
+        let column = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .expect("column should build");
+
+        assert!(column.clone_dense_values_from_cache().is_none());
+        let cloned = column.clone();
+        assert_eq!(cloned.values(), column.values());
+        assert_eq!(cloned.validity(), column.validity());
+        assert!(cloned.data.is_none());
     }
 
     #[test]

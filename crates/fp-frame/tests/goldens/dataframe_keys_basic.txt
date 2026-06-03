@@ -1,1 +1,1 @@
-Index(Index { labels: [Utf8("a")], name: None, duplicate_cache: OnceLock(<uninit>), sort_order_cache: OnceLock(<uninit>) })
+Index(Index { labels: [Utf8("a")], name: None, duplicate_cache: OnceLock(<uninit>), sort_order_cache: OnceLock(<uninit>), semantic_fingerprint_cache: OnceLock(<uninit>) })

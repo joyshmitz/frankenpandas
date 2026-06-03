@@ -11883,3 +11883,47 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-SORT1: sort_values is a row permutation — every column's multiset of
+    /// values is conserved under the sort gather (no value dropped, duplicated,
+    /// or corrupted). Values are Debug-canonicalized so the comparison captures
+    /// exact null kind and float bits. Hardens the sort_single gather path
+    /// (the primitive-gather kernel, fi6zx typed-columnar work).
+    #[test]
+    fn prop_dataframe_sort_values_conserves_column_multisets(df in arb_numeric_dataframe(12)) {
+        if df.index().len() == 0 {
+            return Ok(());
+        }
+        let names: Vec<String> = df.column_names().iter().map(|s| (*s).clone()).collect();
+        let key = names[0].clone();
+        for asc in [true, false] {
+            let sorted = match df.sort_values(&key, asc) {
+                Ok(s) => s,
+                Err(_) => return Ok(()),
+            };
+            prop_assert_eq!(sorted.index().len(), df.index().len(), "sort changed row count");
+            for name in &names {
+                let mut a: Vec<String> = df
+                    .column(name.as_str())
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect();
+                let mut b: Vec<String> = sorted
+                    .column(name.as_str())
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect();
+                a.sort();
+                b.sort();
+                prop_assert_eq!(&a, &b, "sort({}, asc={}) did not conserve column {} multiset", key, asc, name);
+            }
+        }
+    }
+}

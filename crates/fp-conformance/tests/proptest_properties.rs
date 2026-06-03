@@ -12034,3 +12034,41 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-HEAD1: head(k)/tail(k) gather contiguous source rows exactly — head
+    /// is the first min(k,len) rows, tail is the last min(k,len) rows, value
+    /// and null kind preserved (k may exceed len). Hardens the contiguous-range
+    /// gather path (the primitive-gather kernel, fi6zx).
+    #[test]
+    fn prop_dataframe_head_tail_gather_contiguous_rows(
+        (df, k) in arb_numeric_dataframe(12).prop_flat_map(|df| {
+            let n = df.index().len() as i64;
+            (Just(df), 0_i64..=(n + 2))
+        })
+    ) {
+        let n = df.index().len();
+        if n == 0 {
+            return Ok(());
+        }
+        let m = (k.max(0) as usize).min(n);
+        let h = match df.head(k) { Ok(h) => h, Err(_) => return Ok(()) };
+        let t = match df.tail(k) { Ok(t) => t, Err(_) => return Ok(()) };
+        prop_assert_eq!(h.index().len(), m, "head row count");
+        prop_assert_eq!(t.index().len(), m, "tail row count");
+        let eqv = |s: &Scalar, o: &Scalar| -> bool {
+            s == o || (matches!(s, Scalar::Float64(f) if f.is_nan()) && o.is_missing())
+        };
+        for name in df.column_names() {
+            let src = df.column(name.as_str()).unwrap().values().to_vec();
+            let hv = h.column(name.as_str()).unwrap().values().to_vec();
+            let tv = t.column(name.as_str()).unwrap().values().to_vec();
+            for i in 0..m {
+                prop_assert!(eqv(&src[i], &hv[i]), "head col {} row {}: {:?} != {:?}", name, i, &hv[i], &src[i]);
+                prop_assert!(eqv(&src[n - m + i], &tv[i]), "tail col {} row {} (src {}): {:?} != {:?}", name, i, n - m + i, &tv[i], &src[n - m + i]);
+            }
+        }
+    }
+}

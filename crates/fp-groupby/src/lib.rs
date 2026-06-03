@@ -235,6 +235,13 @@ fn groupby_sum_with_global_allocator(
     if is_timedelta_values(aligned_values_values) {
         return groupby_sum_timedelta64(aligned_keys_values, aligned_values_values, options);
     }
+    // Per br-frankenpandas-f031e sister gap: pandas groupby.sum() on object/
+    // string concatenates per group (skipna), like Series::sum. The f64 paths
+    // below call value.to_f64() which fails on Utf8, silently producing all-zero
+    // Float64 output. Route uniformly-Utf8 values to the string-concat path.
+    if is_utf8_values(aligned_values_values) {
+        return groupby_sum_utf8(aligned_keys_values, aligned_values_values, options);
+    }
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64(
         aligned_keys_values,
         aligned_values_values,
@@ -296,6 +303,11 @@ fn groupby_sum_with_arena(
     // the global-allocator typed path here.
     if is_timedelta_values(aligned_values_values) {
         return groupby_sum_timedelta64(aligned_keys_values, aligned_values_values, options);
+    }
+    // Per br-frankenpandas-f031e sister gap: string columns concatenate per
+    // group (see global-allocator path). Reuse the same typed string path.
+    if is_utf8_values(aligned_values_values) {
+        return groupby_sum_utf8(aligned_keys_values, aligned_values_values, options);
     }
     // AG-06: Arena-backed dense path intermediates.
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64_arena(
@@ -545,6 +557,85 @@ fn groupby_sum_timedelta64(
     }
 
     let out_column = Column::new(DType::Timedelta64, out_values)?;
+    Ok(Series::new("sum", Index::new(out_index), out_column)?)
+}
+
+/// Detect uniformly-Utf8 value input (allowing Null missing markers). Mirrors
+/// `is_timedelta_values` — true only when at least one non-missing value is
+/// `Utf8` and no other dtype appears. Routes `groupby_sum` to the string-concat
+/// path instead of silently dropping every value through the f64 accumulator.
+fn is_utf8_values(values: &[Scalar]) -> bool {
+    let mut saw_utf8 = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Utf8(_) => saw_utf8 = true,
+            _ => return false,
+        }
+    }
+    saw_utf8
+}
+
+/// Per br-frankenpandas-f031e sister gap: object/string `groupby.sum()`
+/// concatenates each group's non-null values in encounter order, matching
+/// pandas and FP `Series::sum`. Default skipna=True, so missing values are
+/// skipped; an empty / all-null group yields `Scalar::Utf8("")`.
+fn groupby_sum_utf8(
+    keys: &[Scalar],
+    values: &[Scalar],
+    options: GroupByOptions,
+) -> Result<Series, GroupByError> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, String)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if options.dropna && key.is_missing() {
+            continue;
+        }
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = slot.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, String::new())
+        });
+        if let Scalar::Utf8(s) = value {
+            entry.1.push_str(s);
+        }
+    }
+
+    if options.sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            slot.get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, joined) = slot
+            .remove(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaN)
+            | Scalar::Null(NullKind::NaT)
+            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(Scalar::Utf8(joined));
+    }
+
+    let out_column = Column::new(DType::Utf8, out_values)?;
     Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
@@ -1480,6 +1571,56 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(out.values(), &[Scalar::Float64(6.0), Scalar::Float64(4.0)]);
+    }
+
+    #[test]
+    fn groupby_sum_concatenates_string_values_like_pandas() {
+        // pandas df.groupby(k)['s'].sum() concatenates object/string values per
+        // group (skipna), matching Series::sum (br-f031e). Previously the f64
+        // accumulator dropped every string -> Float64(0.0). Verified vs pandas
+        // 2.2.3: groups a -> "xy" (skips the null), b -> "z".
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .expect("keys");
+
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("z".to_owned()),
+            ],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Utf8("xy".to_owned()),
+                Scalar::Utf8("z".to_owned()),
+            ]
+        );
     }
 
     #[test]

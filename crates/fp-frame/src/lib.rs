@@ -28564,15 +28564,28 @@ impl DataFrame {
         ignore_index: bool,
     ) -> Result<Self, FrameError> {
         let duplicated = self.duplicated(subset, keep)?;
+        let mut saw_duplicate = false;
+        let mut saw_unexpected_marker = false;
         let keep_positions = duplicated
             .values()
             .iter()
             .enumerate()
             .filter_map(|(position, value)| match value {
                 Scalar::Bool(false) => Some(position),
-                _ => None,
+                Scalar::Bool(true) => {
+                    saw_duplicate = true;
+                    None
+                }
+                _ => {
+                    saw_unexpected_marker = true;
+                    None
+                }
             })
             .collect::<Vec<_>>();
+
+        if !ignore_index && !saw_duplicate && !saw_unexpected_marker {
+            return Ok(self.clone());
+        }
 
         let out = self.take_rows_by_positions(&keep_positions)?;
         if ignore_index {
@@ -51342,6 +51355,58 @@ mod tests {
                 Scalar::Utf8("y".to_owned()),
                 Scalar::Utf8("z".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_all_unique_preserves_observable_state() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "value",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(11.0),
+                        Scalar::Float64(12.0),
+                    ],
+                ),
+            ],
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap();
+
+        let out = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
+        assert_eq!(out.index().labels(), df.index().labels());
+        assert_eq!(out.column_names(), df.column_names());
+        assert_eq!(
+            out.column("id").unwrap().values(),
+            df.column("id").unwrap().values()
+        );
+        assert_eq!(
+            out.column("value").unwrap().values(),
+            df.column("value").unwrap().values()
+        );
+
+        let reset = df
+            .drop_duplicates(None, DuplicateKeep::First, true)
+            .unwrap();
+        assert_eq!(
+            reset.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
+        assert_eq!(
+            reset.column("value").unwrap().values(),
+            df.column("value").unwrap().values()
         );
     }
 

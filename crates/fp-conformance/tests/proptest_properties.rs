@@ -12152,3 +12152,52 @@ proptest! {
         prop_assert_eq!(false_count, idx.unique().len());
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-SORT2: sort_values(ascending) output's key column is monotonic
+    /// non-decreasing, with missing/NaN sorted to the END (pandas default
+    /// na_position="last"). Directly guards the sortedness fast-path work
+    /// (typed sortedness for dense sort keys, fi6zx): a wrong "already sorted"
+    /// detection would leave the output unsorted, and a bad NaN placement would
+    /// surface here. Complements the idempotence / multiset-conservation MRs,
+    /// which do not assert the OUTPUT is actually ordered.
+    #[test]
+    fn prop_dataframe_sort_values_output_key_is_monotonic(
+        df in arb_numeric_dataframe(12),
+    ) {
+        if df.index().len() < 2 {
+            return Ok(());
+        }
+        let sorted = df
+            .sort_values("a", true)
+            .expect("sort_values(\"a\", true) must succeed for numeric inputs");
+        let vals = sorted.column("a").unwrap().values().to_vec();
+        let mut prev: Option<f64> = None;
+        let mut seen_missing = false;
+        for v in &vals {
+            let f = match v {
+                Scalar::Int64(i) => Some(*i as f64),
+                Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                _ => None,
+            };
+            match f {
+                Some(x) => {
+                    prop_assert!(
+                        !seen_missing,
+                        "non-missing value {} appeared after a missing/NaN — NaN must sort last",
+                        x
+                    );
+                    if let Some(p) = prev {
+                        prop_assert!(p <= x, "key column not non-decreasing after sort: {} > {}", p, x);
+                    }
+                    prev = Some(x);
+                }
+                None => {
+                    seen_missing = true;
+                }
+            }
+        }
+    }
+}

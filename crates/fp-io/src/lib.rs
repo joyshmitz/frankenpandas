@@ -2318,6 +2318,11 @@ fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Null(_) => na_rep.to_owned(),
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        // pandas to_csv renders floats via Python str(float): whole numbers keep
+        // ".0" ("1.0", not "1") and extreme magnitudes use signed two-digit
+        // scientific notation. The table writers (latex/markdown/html) use the
+        // separate scalar_to_table_with_na path and keep their own formatting.
+        Scalar::Float64(v) => format_pandas_float(*v),
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
         other => scalar_to_csv(other),
     }
@@ -2441,6 +2446,29 @@ fn parse_scalar(field: &str) -> Scalar {
     }
 
     Scalar::Utf8(field.to_owned())
+}
+
+/// Format an f64 the way pandas `to_csv` does (Python `str(float)`): keep a
+/// trailing ".0" on whole numbers ("1.0", not Rust Display's "1"), shortest
+/// round-trip for decimals, and signed two-digit scientific notation
+/// ("1e+16" / "1e-05") for very large / small magnitudes. Verified vs live
+/// pandas 2.2.3. NaN must be handled by the caller (it becomes na_rep).
+fn format_pandas_float(v: f64) -> String {
+    // Rust's Debug formatter gives the shortest round-trip representation and,
+    // unlike Display, keeps ".0" on whole numbers and switches to scientific
+    // notation at Python's repr boundaries. Only the exponent spelling differs
+    // (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so normalize that.
+    let s = format!("{v:?}");
+    match s.split_once('e') {
+        None => s,
+        Some((mantissa, exp)) => {
+            let (sign, digits) = match exp.strip_prefix('-') {
+                Some(d) => ('-', d),
+                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+            };
+            format!("{mantissa}e{sign}{digits:0>2}")
+        }
+    }
 }
 
 fn scalar_to_csv(scalar: &Scalar) -> String {
@@ -11083,6 +11111,7 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
+        format_pandas_float,
         CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HdfReadOptions, HdfWriteOptions,
         HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
         MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
@@ -12720,6 +12749,45 @@ mod tests {
     }
 
     #[test]
+    fn to_csv_float_format_matches_pandas_str() {
+        // pandas to_csv writes floats via Python str(float): whole numbers keep
+        // ".0", decimals use the shortest round-trip, and extreme magnitudes use
+        // signed two-digit scientific notation. Verified vs live pandas 2.2.3.
+        let cases: &[(f64, &str)] = &[
+            (1.0, "1.0"),
+            (3.0, "3.0"),
+            (100.0, "100.0"),
+            (-7.0, "-7.0"),
+            (2.5, "2.5"),
+            (0.5, "0.5"),
+            (0.1, "0.1"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (1234567890123456.0, "1234567890123456.0"),
+            (1e16, "1e+16"),
+            (1e20, "1e+20"),
+            (1e-5, "1e-05"),
+            (0.0001, "0.0001"),
+            (1e-7, "1e-07"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(&format_pandas_float(*v), expected, "format_pandas_float({v})");
+        }
+    }
+
+    #[test]
+    fn to_csv_single_column_nan_quotes_empty_and_keeps_float_repr() {
+        // The lone empty NaN field is already quoted as "" by the csv writer so
+        // read_csv doesn't drop it (NOT a blank line). The real fix here is the
+        // float repr: 1.0/3.0 must stay "1.0"/"3.0", not collapse to "1"/"3".
+        let frame = read_csv_str("x\n1.0\nNaN\n3.0\n").expect("read");
+        assert!(frame.column("x").unwrap().values()[1].is_missing());
+        let out = write_csv_string(&frame).expect("write");
+        assert_eq!(out, "x\n1.0\n\"\"\n3.0\n");
+    }
+
+    #[test]
     fn test_csv_capacity_hint_reasonable() {
         // Generate a ~1MB CSV and verify it parses correctly.
         // The capacity hint (input.len / (cols*8)) should avoid excessive reallocs.
@@ -13385,8 +13453,9 @@ mod tests {
         let output = write_csv_string(&frame).expect("write");
 
         // Golden reference: columns in BTreeMap order; Bool(true) coerced to Float64
-        // in column c (which has Float64 + Bool → Float64), so true → 1.
-        let expected = "a,b,c\n1,hello,3.14\n2,,1\n3,world,\n";
+        // in column c (which has Float64 + Bool → Float64), so true → 1.0. A Float64
+        // column writes whole values with a trailing ".0" like pandas (str(float)).
+        let expected = "a,b,c\n1,hello,3.14\n2,,1.0\n3,world,\n";
         assert_eq!(
             output, expected,
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"

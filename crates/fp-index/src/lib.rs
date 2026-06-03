@@ -20591,4 +20591,58 @@ mod tests {
         // (A,5) > (A,1) but (A,1) < (B,3) so decreasing also fails.
         assert!(!mi.is_monotonic_decreasing());
     }
+
+    #[test]
+    fn index_lookup_methods_match_pandas() {
+        use super::{Index, IndexLabel};
+        let i = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(7),
+        ]);
+
+        // get_indexer (exact): -1/None for labels not present (verified vs
+        // pandas Index([1,3,5,7]).get_indexer([2,3,6,7]) == [-1,1,-1,3]).
+        let target = Index::new(vec![
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(7),
+        ]);
+        assert_eq!(i.get_indexer(&target), vec![None, Some(1), None, Some(3)], "get_indexer exact");
+
+        // searchsorted left/right (pandas: 3->1/2, 4->2, 8->4, 0->0).
+        assert_eq!(i.searchsorted(&IndexLabel::Int64(3), "left").unwrap(), 1);
+        assert_eq!(i.searchsorted(&IndexLabel::Int64(3), "right").unwrap(), 2);
+        assert_eq!(i.searchsorted(&IndexLabel::Int64(4), "left").unwrap(), 2);
+        assert_eq!(i.searchsorted(&IndexLabel::Int64(8), "left").unwrap(), 4);
+        assert_eq!(i.searchsorted(&IndexLabel::Int64(0), "left").unwrap(), 0);
+
+        // asof: last label <= key (pandas: 4->3, 0->NaN, 7->7, 10->7).
+        assert_eq!(i.asof(&IndexLabel::Int64(4)), Some(IndexLabel::Int64(3)), "asof 4");
+        assert_eq!(i.asof(&IndexLabel::Int64(0)), None, "asof before all");
+        assert_eq!(i.asof(&IndexLabel::Int64(7)), Some(IndexLabel::Int64(7)), "asof exact");
+        assert_eq!(i.asof(&IndexLabel::Int64(10)), Some(IndexLabel::Int64(7)), "asof after all");
+
+        // factorize: first-appearance order (pandas: ['b','a','b','c'] ->
+        // codes [0,1,0,2], uniques ['b','a','c']).
+        let f = Index::new(vec![
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+        ]);
+        let (codes, uniques) = f.factorize();
+        assert_eq!(codes, vec![0_isize, 1, 0, 2], "factorize codes");
+        assert_eq!(
+            uniques.labels(),
+            &[
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("c".into())
+            ],
+            "factorize uniques"
+        );
+    }
 }

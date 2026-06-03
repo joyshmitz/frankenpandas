@@ -2075,7 +2075,7 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_slice_end: Option<usize>,
     #[serde(default)]
-    pub str_get_index: Option<usize>,
+    pub str_get_index: Option<i64>,
     #[serde(default)]
     pub str_repeat_n: Option<usize>,
     #[serde(default)]
@@ -3496,7 +3496,7 @@ struct OracleRequest {
     #[serde(default)]
     str_sub: Option<String>,
     #[serde(default)]
-    str_get_index: Option<usize>,
+    str_get_index: Option<i64>,
     #[serde(default)]
     str_fillchar: Option<char>,
     #[serde(default)]

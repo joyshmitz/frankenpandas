@@ -21181,11 +21181,21 @@ impl StringAccessor<'_> {
     /// Extract character at position from each string.
     ///
     /// Matches `pd.Series.str.get(i)`. Returns NaN if index is out of bounds.
-    pub fn get(&self, i: usize) -> Result<Series, FrameError> {
+    pub fn get(&self, i: i64) -> Result<Series, FrameError> {
+        // Per br-frankenpandas: pandas str.get supports NEGATIVE indices
+        // (Python-style) — get(-1) is the last character, get(-len-1) is out of
+        // range. Out-of-range (either direction) yields NaN. Verified vs live
+        // pandas 2.2.3: ["abc","de","f"].str.get(-1) -> ["c","e","f"];
+        // .str.get(-3) -> ["a", nan, nan]; .str.get(-4) -> all nan.
         self.apply_str(
             |s| {
+                let n = s.chars().count() as i64;
+                let idx = if i < 0 { i + n } else { i };
+                if idx < 0 || idx >= n {
+                    return Scalar::Null(NullKind::NaN);
+                }
                 s.chars()
-                    .nth(i)
+                    .nth(idx as usize)
                     .map_or(Scalar::Null(NullKind::NaN), |c| Scalar::Utf8(c.to_string()))
             },
             self.series.name(),
@@ -65699,6 +65709,41 @@ mod tests {
         let result2 = s.str().get(4).unwrap();
         assert_eq!(result2.values()[0], Scalar::Utf8("o".to_owned()));
         assert!(result2.values()[1].is_missing()); // out of bounds
+    }
+
+    #[test]
+    fn str_get_negative_index() {
+        // pandas str.get supports Python-style negative indexing; out-of-range
+        // (either direction) -> NaN. Verified vs live pandas 2.2.3:
+        //   ["hello","ab"].str.get(-1) -> ["o","b"]
+        //   .str.get(-2) -> ["l","a"]; .str.get(-3) -> ["l", nan]
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("hello".to_owned()),
+                Scalar::Utf8("ab".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let last = s.str().get(-1).unwrap();
+        assert_eq!(last.values()[0], Scalar::Utf8("o".to_owned()));
+        assert_eq!(last.values()[1], Scalar::Utf8("b".to_owned()));
+
+        let second_last = s.str().get(-2).unwrap();
+        assert_eq!(second_last.values()[0], Scalar::Utf8("l".to_owned()));
+        assert_eq!(second_last.values()[1], Scalar::Utf8("a".to_owned()));
+
+        // -3 is in range for "hello" ('l') but out of range for "ab" -> NaN.
+        let third_last = s.str().get(-3).unwrap();
+        assert_eq!(third_last.values()[0], Scalar::Utf8("l".to_owned()));
+        assert!(third_last.values()[1].is_missing());
+
+        // Far-negative out of range on both -> all NaN.
+        let oob = s.str().get(-10).unwrap();
+        assert!(oob.values()[0].is_missing());
+        assert!(oob.values()[1].is_missing());
     }
 
     #[test]

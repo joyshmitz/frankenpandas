@@ -2171,17 +2171,67 @@ fn arithmetic_op_name(op: ArithmeticOp) -> &'static str {
 }
 
 fn semantic_index_identity(role: &str, index: &Index) -> SemanticIndexIdentity {
-    let fingerprint = index.semantic_labels_fingerprint_with(|labels| {
-        let fingerprint_payload =
-            serde_json::to_vec(labels).unwrap_or_else(|_| format!("{labels:?}").into_bytes());
-        fp_runtime::semantic_fingerprint_bytes(&fingerprint_payload)
-    });
+    let fingerprint = index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
     SemanticIndexIdentity {
         role: role.to_owned(),
         len: index.len(),
         has_duplicates: index.has_duplicates(),
         fingerprint,
     }
+}
+
+fn semantic_index_labels_fingerprint(labels: &[IndexLabel]) -> String {
+    semantic_integer_index_labels_fingerprint(labels).unwrap_or_else(|| {
+        let fingerprint_payload =
+            serde_json::to_vec(labels).unwrap_or_else(|_| format!("{labels:?}").into_bytes());
+        fp_runtime::semantic_fingerprint_bytes(&fingerprint_payload)
+    })
+}
+
+fn semantic_integer_index_labels_fingerprint(labels: &[IndexLabel]) -> Option<String> {
+    let mut builder = fp_runtime::SemanticFingerprintBuilder::new();
+    builder.update(b"[");
+    for (position, label) in labels.iter().enumerate() {
+        if position != 0 {
+            builder.update(b",");
+        }
+        let (kind, value) = semantic_integer_label_kind_value(label)?;
+        builder.update(b"{\"kind\":\"");
+        builder.update(kind);
+        builder.update(b"\",\"value\":");
+        update_i64_decimal(&mut builder, value);
+        builder.update(b"}");
+    }
+    builder.update(b"]");
+    Some(builder.finish())
+}
+
+fn semantic_integer_label_kind_value(label: &IndexLabel) -> Option<(&'static [u8], i64)> {
+    match label {
+        IndexLabel::Int64(value) => Some((b"int64", *value)),
+        IndexLabel::Timedelta64(value) => Some((b"timedelta64", *value)),
+        IndexLabel::Datetime64(value) => Some((b"datetime64", *value)),
+        IndexLabel::Utf8(_) => None,
+    }
+}
+
+fn update_i64_decimal(builder: &mut fp_runtime::SemanticFingerprintBuilder, value: i64) {
+    if value < 0 {
+        builder.update(b"-");
+    }
+
+    let mut remaining = value.unsigned_abs();
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    builder.update(&digits[cursor..]);
 }
 
 fn record_alignment_semantic_witness(
@@ -45404,7 +45454,8 @@ mod tests {
         DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
         TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, align_union_sorted_unique, cut,
         datetime64_label_from_naive, index_to_frame, index_to_series, parse_datetime64_nanos,
-        parse_naive_datetime_value, qcut, to_numeric, typed_dense_values_already_sorted,
+        parse_naive_datetime_value, qcut, semantic_integer_index_labels_fingerprint, to_numeric,
+        typed_dense_values_already_sorted,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -45580,6 +45631,24 @@ mod tests {
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(plan.union_index.name(), None);
+    }
+
+    #[test]
+    fn semantic_integer_label_fingerprint_matches_serde_json() {
+        let labels = vec![
+            IndexLabel::Int64(i64::MIN),
+            IndexLabel::Timedelta64(-7),
+            IndexLabel::Datetime64(42),
+            IndexLabel::Int64(i64::MAX),
+        ];
+        let fast =
+            semantic_integer_index_labels_fingerprint(&labels).expect("integer labels fast path");
+        let payload = serde_json::to_vec(&labels).expect("serialize labels");
+        let reference = fp_runtime::semantic_fingerprint_bytes(&payload);
+        assert_eq!(fast, reference);
+
+        let string_labels = vec![IndexLabel::Utf8("x".to_owned())];
+        assert!(semantic_integer_index_labels_fingerprint(&string_labels).is_none());
     }
 
     #[test]

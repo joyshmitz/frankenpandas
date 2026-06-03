@@ -612,10 +612,43 @@ pub fn semantic_fingerprint_bytes(bytes: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(bytes))
 }
 
+#[derive(Debug)]
+pub struct SemanticFingerprintBuilder {
+    hasher: Sha256,
+}
+
+impl Default for SemanticFingerprintBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SemanticFingerprintBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+    }
+
+    #[must_use]
+    pub fn finish(self) -> String {
+        format!("sha256:{}", sha256_digest_hex(self.hasher.finalize()))
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
+    sha256_digest_hex(digest)
+}
+
+fn sha256_digest_hex(digest: impl IntoIterator<Item = u8>) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(digest.len() * 2);
+    let mut hex = String::with_capacity(64);
     for byte in digest {
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));

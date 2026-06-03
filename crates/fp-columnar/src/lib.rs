@@ -86,6 +86,24 @@ impl ValidityMask {
         Self { words, len }
     }
 
+    /// Build a validity mask from a contiguous `f64` buffer, marking NaN
+    /// positions invalid. pandas treats float NaN as missing, so this mirrors
+    /// what `from_values` would produce for the equivalent `Scalar::Float64`
+    /// values (`Scalar::is_missing` is true for NaN). See
+    /// [`Column::from_f64_values`].
+    #[must_use]
+    pub fn from_f64(data: &[f64]) -> Self {
+        let len = data.len();
+        let word_count = len.div_ceil(64);
+        let mut words = vec![0_u64; word_count];
+        for (idx, &v) in data.iter().enumerate() {
+            if !v.is_nan() {
+                words[idx / 64] |= 1_u64 << (idx % 64);
+            }
+        }
+        Self { words, len }
+    }
+
     #[must_use]
     pub fn all_valid(len: usize) -> Self {
         let word_count = len.div_ceil(64);
@@ -1441,10 +1459,22 @@ impl Column {
     #[must_use]
     pub fn from_f64_values(data: Vec<f64>) -> Self {
         let len = data.len();
+        // pandas treats NaN in a float column as MISSING. The Scalar path
+        // (Column::new -> ValidityMask::from_values) already marks NaN invalid
+        // via Scalar::is_missing, so this typed-ingestion path must agree —
+        // otherwise a caller passing NaN gets a column claiming all-valid and
+        // as_f64_slice would hand the NaN out as a real value. Fast all-valid
+        // path (cheap u64::MAX fill) when no NaN is present; per-bit mask only
+        // when one is. (br-frankenpandas-jyhf7)
+        let validity = if data.iter().any(|v| v.is_nan()) {
+            ValidityMask::from_f64(&data)
+        } else {
+            ValidityMask::all_valid(len)
+        };
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64(data.clone()),
-            validity: ValidityMask::all_valid(len),
+            validity,
             data: Some(ColumnData::Float64(data)),
         }
     }
@@ -9573,6 +9603,47 @@ mod tests {
         if let ScalarValues::LazyAllValidFloat64 { values, .. } = &right.values {
             assert!(values.get().is_none());
         }
+    }
+
+    #[test]
+    fn from_f64_values_marks_nan_missing_like_scalar_path() {
+        // br-frankenpandas-jyhf7: typed ingestion must treat NaN as missing,
+        // matching Column::new(Float64, scalars). Otherwise a NaN-bearing column
+        // claims all-valid and as_f64_slice leaks the NaN as a real value.
+        let typed = Column::from_f64_values(vec![1.0, f64::NAN, 3.0, f64::NAN]);
+        let scalar = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .expect("scalar col");
+
+        // Per-position validity agrees with the Scalar path.
+        for idx in 0..typed.len() {
+            assert_eq!(
+                typed.validity().get(idx),
+                scalar.validity().get(idx),
+                "validity mismatch at {idx}"
+            );
+        }
+        assert!(typed.validity().get(0));
+        assert!(!typed.validity().get(1));
+        assert!(typed.validity().get(2));
+        assert!(!typed.validity().get(3));
+        assert_eq!(typed.validity().count_valid(), 2);
+
+        // A NaN-bearing column must NOT expose its raw f64 slice (the typed
+        // fast path is only valid when every value is present).
+        assert!(typed.as_f64_slice().is_none());
+
+        // No-NaN columns keep the all-valid fast path and expose the slice.
+        let clean = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        assert!(clean.validity().all());
+        assert_eq!(clean.as_f64_slice(), Some([1.0, 2.0, 3.0].as_slice()));
     }
 
     #[test]

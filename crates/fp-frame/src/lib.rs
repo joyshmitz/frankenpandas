@@ -2307,7 +2307,7 @@ fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
         .map(|label| right_map.get(label).copied())
         .collect();
 
-    let mut union_index = Index::new(union_labels);
+    let mut union_index = Index::new_known_unique(union_labels);
     if left.name() == right.name() {
         union_index = union_index.set_names(left.name());
     }
@@ -2366,7 +2366,7 @@ fn align_union_merge_sorted(left: &Index, right: &Index) -> AlignmentPlan {
         right_cursor += 1;
     }
 
-    let mut union_index = Index::new(union_labels);
+    let mut union_index = Index::new_known_unique(union_labels);
     if left.name() == right.name() {
         union_index = union_index.set_names(left.name());
     }

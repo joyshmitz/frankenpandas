@@ -307,6 +307,19 @@ impl Index {
         }
     }
 
+    /// Construct an index whose caller has already proven all labels unique.
+    ///
+    /// This preserves the public `Index::new` surface while letting alignment
+    /// builders carry their uniqueness proof into the runtime duplicate cache.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn new_known_unique(labels: Vec<IndexLabel>) -> Self {
+        debug_assert!(!detect_duplicates(&labels));
+        let index = Self::new(labels);
+        let _ = index.duplicate_cache.set(false);
+        index
+    }
+
     #[must_use]
     pub fn from_i64(values: Vec<i64>) -> Self {
         Self::new(values.into_iter().map(IndexLabel::from).collect())
@@ -12904,6 +12917,13 @@ mod tests {
     fn duplicate_detection_matches_index_surface() {
         let index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert!(index.has_duplicates());
+    }
+
+    #[test]
+    fn known_unique_constructor_seeds_duplicate_cache() {
+        let index = Index::new_known_unique(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        assert_eq!(index.duplicate_cache.get(), Some(&false));
+        assert!(!index.has_duplicates());
     }
 
     #[test]

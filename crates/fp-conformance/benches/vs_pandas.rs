@@ -244,6 +244,17 @@ fn bench_df_cumsum(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_series_sum(c: &mut Criterion) {
+    let mut group = c.benchmark_group("series/sum_float64");
+    for &n in SIZES {
+        let series = build_series(n);
+        group.bench_with_input(BenchmarkId::new("rows", n), &series, |b, s| {
+            b.iter(|| s.sum().expect("sum"))
+        });
+    }
+    group.finish();
+}
+
 // ============================================================================
 // CATEGORY 3: GroupBy (weight: 0.20)
 // ============================================================================
@@ -499,7 +510,8 @@ criterion_group!(
     bench_df_filter_bool,
     bench_df_drop_duplicates,
     bench_df_value_counts,
-    bench_df_cumsum
+    bench_df_cumsum,
+    bench_series_sum
 );
 
 criterion_group!(

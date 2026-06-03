@@ -1433,6 +1433,36 @@ impl Column {
         }
     }
 
+    /// Borrow the column's contiguous `f64` buffer when this is an all-valid
+    /// `Float64` column, enabling typed/SIMD reductions without the per-element
+    /// `Scalar` match. Returns `None` for any other dtype or when the column
+    /// has missing values — callers fall back to the `Scalar` path, which is
+    /// the only path that must reason about missingness. Per
+    /// br-frankenpandas-lei31.
+    #[must_use]
+    pub fn as_f64_slice(&self) -> Option<&[f64]> {
+        if self.dtype == DType::Float64
+            && self.validity.all()
+            && let Some(ColumnData::Float64(data)) = &self.data
+        {
+            return Some(data.as_slice());
+        }
+        None
+    }
+
+    /// Borrow the column's contiguous `i64` buffer when this is an all-valid
+    /// `Int64` column. See [`Column::as_f64_slice`].
+    #[must_use]
+    pub fn as_i64_slice(&self) -> Option<&[i64]> {
+        if self.dtype == DType::Int64
+            && self.validity.all()
+            && let Some(ColumnData::Int64(data)) = &self.data
+        {
+            return Some(data.as_slice());
+        }
+        None
+    }
+
     /// Gather a new column from the given row positions of `self`.
     ///
     /// This is the fast path for materialization (`take`, `iloc`, boolean

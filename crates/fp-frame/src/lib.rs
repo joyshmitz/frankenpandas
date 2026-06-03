@@ -7464,6 +7464,15 @@ impl Series {
             _ => {}
         }
 
+        // Typed fast path (br-frankenpandas-lei31): an all-valid Float64 column
+        // sums its contiguous f64 buffer directly, skipping the per-element
+        // Scalar match + is_missing check. Bit-identical to the Scalar left-fold
+        // below — same values, same order, and all-valid means nothing is
+        // skipped, so `Iterator::sum` (a 0.0-seeded left-fold) matches exactly.
+        if let Some(data) = self.column.as_f64_slice() {
+            return Ok(Scalar::Float64(data.iter().sum()));
+        }
+
         let mut total = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -83666,6 +83675,21 @@ mod tests {
             rh.column().values()[2],
             Scalar::Utf8("2024-01-01 02:00:00".to_string())
         );
+    }
+
+    #[test]
+    fn series_sum_typed_path_matches_scalar_path_lei31() {
+        // The Float64 typed fast path (Column::as_f64_slice + Iterator::sum) must
+        // be bit-identical to the Scalar left-fold for an all-valid column.
+        let n = 1000usize;
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
+        let s = Series::from_values("s", labels, values.clone()).unwrap();
+        let typed = s.sum().unwrap();
+        let scalar_fold = values
+            .iter()
+            .fold(0.0_f64, |a, v| a + v.to_f64().unwrap());
+        assert_eq!(typed, Scalar::Float64(scalar_fold));
     }
 
     #[test]

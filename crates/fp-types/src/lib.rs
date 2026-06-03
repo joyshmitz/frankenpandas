@@ -1410,31 +1410,33 @@ impl Timedelta {
             return "NaT".to_string();
         }
 
-        let comp = Self::components(nanos);
-        let sign = if nanos < 0 { "-" } else { "" };
+        // pandas / Python timedelta normalize via FLOOR division: the days
+        // component can be negative while the time-of-day remainder is always
+        // non-negative, and a negative-days value prints a '+' before the time
+        // (e.g. -1s -> "-1 days +23:59:59", not "-0 days 00:00:01"). Compute the
+        // components with Euclidean div/rem so the remainder is in [0, 1 day).
+        let days = nanos.div_euclid(Self::NANOS_PER_DAY);
+        let rem = nanos.rem_euclid(Self::NANOS_PER_DAY);
+        let hours = rem / Self::NANOS_PER_HOUR;
+        let minutes = (rem % Self::NANOS_PER_HOUR) / Self::NANOS_PER_MIN;
+        let seconds = (rem % Self::NANOS_PER_MIN) / Self::NANOS_PER_SEC;
+        let frac = rem % Self::NANOS_PER_SEC;
 
-        let time_part = format!("{:02}:{:02}:{:02}", comp.hours, comp.minutes, comp.seconds);
-
-        let frac = comp.milliseconds * 1_000_000 + comp.microseconds * 1_000 + comp.nanoseconds;
+        let time_part = format!("{hours:02}:{minutes:02}:{seconds:02}");
+        // '+' joins the negative day count to the positive time remainder.
+        let sep = if days < 0 { "+" } else { "" };
 
         if frac > 0 {
             // pandas renders the sub-second part with microsecond precision
             // (6 digits) unless a sub-microsecond (nanosecond) component is
-            // present, in which case it widens to 9 digits. FP previously
-            // always used 9, so e.g. 1.5s printed ".500000000" not ".500000".
+            // present, in which case it widens to 9 digits.
             if frac % 1_000 == 0 {
-                format!(
-                    "{}{} days {}.{:06}",
-                    sign,
-                    comp.days.abs(),
-                    time_part,
-                    frac / 1_000
-                )
+                format!("{days} days {sep}{time_part}.{:06}", frac / 1_000)
             } else {
-                format!("{}{} days {}.{:09}", sign, comp.days.abs(), time_part, frac)
+                format!("{days} days {sep}{time_part}.{frac:09}")
             }
         } else {
-            format!("{}{} days {}", sign, comp.days.abs(), time_part)
+            format!("{days} days {sep}{time_part}")
         }
     }
 
@@ -5294,6 +5296,29 @@ mod tests {
             Timedelta::format(123_456_789),
             "0 days 00:00:00.123456789"
         );
+    }
+
+    #[test]
+    fn timedelta_format_negative_uses_python_borrow_form() {
+        use super::Timedelta;
+        // pandas/Python normalize negatives via floor division: the days count
+        // goes negative, the time remainder stays non-negative, and a '+' joins
+        // them. Verified vs live pandas 2.2.3.
+        assert_eq!(Timedelta::format(-1_000_000_000), "-1 days +23:59:59");
+        assert_eq!(
+            Timedelta::format(-Timedelta::NANOS_PER_DAY),
+            "-1 days +00:00:00"
+        );
+        assert_eq!(
+            Timedelta::format(-25 * Timedelta::NANOS_PER_HOUR),
+            "-2 days +23:00:00"
+        );
+        assert_eq!(
+            Timedelta::format(-1_500_000_000),
+            "-1 days +23:59:58.500000"
+        );
+        assert_eq!(Timedelta::format(-500), "-1 days +23:59:59.999999500");
+        assert_eq!(Timedelta::format(-1), "-1 days +23:59:59.999999999");
     }
 
     #[test]

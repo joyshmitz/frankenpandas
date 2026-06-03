@@ -2332,6 +2332,52 @@ fn values_already_sorted_with_na_position(
     })
 }
 
+fn typed_dense_values_already_sorted(
+    values: &[Scalar],
+    dtype: DType,
+    ascending: bool,
+) -> Option<bool> {
+    match dtype {
+        DType::Int64 | DType::Int64Nullable => {
+            let mut previous: Option<i64> = None;
+            for value in values {
+                let current = match value {
+                    Scalar::Int64(value) => *value,
+                    _ => return None,
+                };
+                if let Some(previous) = previous {
+                    let order = previous.cmp(&current);
+                    let order = if ascending { order } else { order.reverse() };
+                    if order == Ordering::Greater {
+                        return Some(false);
+                    }
+                }
+                previous = Some(current);
+            }
+            Some(true)
+        }
+        DType::Float64 => {
+            let mut previous: Option<f64> = None;
+            for value in values {
+                let current = match value {
+                    Scalar::Float64(value) if !value.is_nan() => *value,
+                    _ => return None,
+                };
+                if let Some(previous) = previous {
+                    let order = previous.partial_cmp(&current).unwrap_or(Ordering::Equal);
+                    let order = if ascending { order } else { order.reverse() };
+                    if order == Ordering::Greater {
+                        return Some(false);
+                    }
+                }
+                previous = Some(current);
+            }
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 fn typed_dense_sort_order(values: &[Scalar], dtype: DType, ascending: bool) -> Option<Vec<usize>> {
     match dtype {
         DType::Int64 | DType::Int64Nullable => {
@@ -29009,7 +29055,16 @@ impl DataFrame {
         }
 
         let na_first = na_position == "first";
-        if values_already_sorted_with_na_position(sort_column.values(), ascending, na_first) {
+        let already_sorted =
+            typed_dense_values_already_sorted(sort_column.values(), sort_column.dtype(), ascending)
+                .unwrap_or_else(|| {
+                    values_already_sorted_with_na_position(
+                        sort_column.values(),
+                        ascending,
+                        na_first,
+                    )
+                });
+        if already_sorted {
             return Ok(self.clone());
         }
 
@@ -45115,7 +45170,7 @@ mod tests {
         DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
         TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, align_union_sorted_unique, cut,
         datetime64_label_from_naive, index_to_frame, index_to_series, parse_datetime64_nanos,
-        parse_naive_datetime_value, qcut, to_numeric,
+        parse_naive_datetime_value, qcut, to_numeric, typed_dense_values_already_sorted,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -52478,6 +52533,45 @@ mod tests {
                 IndexLabel::from("r2"),
                 IndexLabel::from("r4"),
             ]
+        );
+    }
+
+    #[test]
+    fn typed_dense_values_already_sorted_matches_supported_dense_semantics() {
+        let ascending_ints = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)];
+        assert_eq!(
+            typed_dense_values_already_sorted(&ascending_ints, DType::Int64, true),
+            Some(true)
+        );
+        assert_eq!(
+            typed_dense_values_already_sorted(&ascending_ints, DType::Int64, false),
+            Some(false)
+        );
+
+        let descending_floats = vec![
+            Scalar::Float64(3.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(-0.0),
+        ];
+        assert_eq!(
+            typed_dense_values_already_sorted(&descending_floats, DType::Float64, false),
+            Some(true)
+        );
+        assert_eq!(
+            typed_dense_values_already_sorted(&descending_floats, DType::Float64, true),
+            Some(false)
+        );
+
+        let with_nan = vec![Scalar::Float64(1.0), Scalar::Float64(f64::NAN)];
+        assert_eq!(
+            typed_dense_values_already_sorted(&with_nan, DType::Float64, true),
+            None
+        );
+        let unsupported = vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())];
+        assert_eq!(
+            typed_dense_values_already_sorted(&unsupported, DType::Utf8, true),
+            None
         );
     }
 

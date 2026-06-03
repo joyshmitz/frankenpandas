@@ -1087,12 +1087,26 @@ fn float_to_string_for_astype(value: f64) -> String {
         return "nan".to_owned();
     }
     if value.is_infinite() {
-        return value.to_string();
+        return value.to_string(); // "inf" / "-inf"
     }
-    if value.fract() == 0.0 {
-        return format!("{value:.1}");
+    // pandas astype(str) renders floats via Python str(float): whole numbers
+    // keep ".0", decimals use the shortest round-trip, and extreme magnitudes use
+    // scientific notation ("1e+16", "1e-05"). Rust's Debug formatter matches this
+    // (shortest round-trip, ".0" on whole numbers, scientific at Python's
+    // boundaries); only the exponent spelling differs (Rust "1e16"/"1e-5" vs
+    // Python "1e+16"/"1e-05"), so normalize that. The old `{:.1}` whole / Display
+    // decimal path lost scientific notation (1e16 -> "10000000000000000.0").
+    let s = format!("{value:?}");
+    match s.split_once('e') {
+        None => s,
+        Some((mantissa, exp)) => {
+            let (sign, digits) = match exp.strip_prefix('-') {
+                Some(d) => ('-', d),
+                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+            };
+            format!("{mantissa}e{sign}{digits:0>2}")
+        }
     }
-    value.to_string()
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -4693,6 +4707,34 @@ mod tests {
         // Int64Nullable -> Int64 is also identity
         let result2 = cast_scalar(&val, DType::Int64).unwrap();
         assert_eq!(result2, Scalar::Int64(42));
+    }
+
+    #[test]
+    fn cast_float_to_utf8_uses_pandas_str_float_with_scientific() {
+        // pandas astype(str) of floats == Python str(float): whole -> ".0",
+        // shortest round-trip decimals, scientific (e+NN/e-NN) for large/small,
+        // inf -> "inf", NaN -> "nan". Verified vs live pandas 2.2.3. (Previously
+        // large/small lost scientific notation, e.g. 1e16 -> "10000000000000000.0".)
+        let cases: &[(f64, &str)] = &[
+            (1.0, "1.0"),
+            (2.5, "2.5"),
+            (100.0, "100.0"),
+            (0.1, "0.1"),
+            (0.0001, "0.0001"),
+            (1e16, "1e+16"),
+            (1e20, "1e+20"),
+            (1e-5, "1e-05"),
+            (1e-7, "1e-07"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(*v), DType::Utf8).unwrap(),
+                Scalar::Utf8((*expected).to_owned()),
+                "float {v} -> str"
+            );
+        }
     }
 
     #[test]

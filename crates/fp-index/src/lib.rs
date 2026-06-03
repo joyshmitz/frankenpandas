@@ -73,22 +73,16 @@
 //!   the alignment algebra here for binary ops.
 //! - **fp-join** consumes alignment plans for merge-style joins.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fmt,
-    sync::OnceLock,
-};
+use std::{borrow::Cow, collections::HashMap, fmt, sync::OnceLock};
 
+use chrono::Datelike;
+use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 // Dedup / set-op seen-sets key on &IndexLabel and read output order from the
 // INPUT scan (first-seen filter / positional bool), never from map iteration —
 // so the hasher is observationally invisible. FxHash (rustc-hash, pure safe
 // Rust) replaces the std SipHasher on these hot membership maps; public-return
 // maps (position_map_first, groupby) keep std HashMap to avoid an API change.
 use rustc_hash::{FxHashMap, FxHashSet};
-
-use chrono::Datelike;
-use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -278,6 +272,9 @@ pub struct Index {
     /// AG-13: Cached sort order for adaptive backend selection.
     #[serde(skip)]
     sort_order_cache: OnceLock<SortOrder>,
+    /// Runtime-only cache for labels-derived AACE semantic fingerprints.
+    #[serde(skip)]
+    semantic_fingerprint_cache: OnceLock<String>,
 }
 
 impl PartialEq for Index {
@@ -306,6 +303,7 @@ impl Index {
             name: None,
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
         }
     }
 
@@ -342,6 +340,16 @@ impl Index {
     #[must_use]
     pub fn labels(&self) -> &[IndexLabel] {
         &self.labels
+    }
+
+    #[must_use]
+    pub fn semantic_labels_fingerprint_with<F>(&self, compute: F) -> String
+    where
+        F: FnOnce(&[IndexLabel]) -> String,
+    {
+        self.semantic_fingerprint_cache
+            .get_or_init(|| compute(&self.labels))
+            .clone()
     }
 
     /// Return the index name (matches `pd.Index.name`).
@@ -3051,7 +3059,7 @@ impl DatetimeIndex {
     /// `i64::MIN` to test for NAT.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: FxHashSet<i64> =values.iter().copied().collect();
+        let needle: FxHashSet<i64> = values.iter().copied().collect();
         self.index
             .labels()
             .iter()
@@ -3298,7 +3306,7 @@ impl DatetimeIndex {
     /// from `self`.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -3353,7 +3361,7 @@ impl DatetimeIndex {
     /// `pd.DatetimeIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -3386,7 +3394,7 @@ impl DatetimeIndex {
     /// `pd.DatetimeIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: FxHashSet<i64> =self
+        let self_set: FxHashSet<i64> = self
             .index
             .labels()
             .iter()
@@ -3395,7 +3403,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -5347,7 +5355,7 @@ impl TimedeltaIndex {
     /// of nanosecond durations; pass `Timedelta::NAT` to test for NAT.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: FxHashSet<i64> =values.iter().copied().collect();
+        let needle: FxHashSet<i64> = values.iter().copied().collect();
         self.index
             .labels()
             .iter()
@@ -5597,7 +5605,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.intersection(other)`.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -5652,7 +5660,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -5684,7 +5692,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: FxHashSet<i64> =self
+        let self_set: FxHashSet<i64> = self
             .index
             .labels()
             .iter()
@@ -5693,7 +5701,7 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let other_set: FxHashSet<i64> =other
+        let other_set: FxHashSet<i64> = other
             .index
             .labels()
             .iter()
@@ -5967,7 +5975,7 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let unique: FxHashSet<&Period> =self.values.iter().collect();
+        let unique: FxHashSet<&Period> = self.values.iter().collect();
         unique.len() == self.values.len()
     }
 
@@ -6463,7 +6471,7 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.intersection(other)`. Mixed-freq rejects.
     pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let other_set: FxHashSet<&Period> =other.values.iter().collect();
+        let other_set: FxHashSet<&Period> = other.values.iter().collect();
         let mut seen = FxHashSet::<&Period>::default();
         let values: Vec<Period> = self
             .values
@@ -6507,7 +6515,7 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.difference(other)`. Mixed-freq rejects.
     pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let other_set: FxHashSet<&Period> =other.values.iter().collect();
+        let other_set: FxHashSet<&Period> = other.values.iter().collect();
         let mut seen = FxHashSet::<&Period>::default();
         let values: Vec<Period> = self
             .values
@@ -6529,8 +6537,8 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.symmetric_difference(other)`. Mixed-freq rejects.
     pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let self_set: FxHashSet<&Period> =self.values.iter().collect();
-        let other_set: FxHashSet<&Period> =other.values.iter().collect();
+        let self_set: FxHashSet<&Period> = self.values.iter().collect();
+        let other_set: FxHashSet<&Period> = other.values.iter().collect();
         let mut seen = FxHashSet::<Period>::default();
         let mut values = Vec::<Period>::new();
         for p in &self.values {
@@ -7932,7 +7940,7 @@ impl RangeIndex {
     /// Per-position membership mask, matching `pd.RangeIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: FxHashSet<i64> =values.iter().copied().collect();
+        let needle: FxHashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
     }
 
@@ -8101,7 +8109,7 @@ impl RangeIndex {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
         self.set_op_via_int(other, |left, right| {
-            let right_set: FxHashSet<i64> =right.into_iter().collect();
+            let right_set: FxHashSet<i64> = right.into_iter().collect();
             let mut seen = FxHashSet::<i64>::default();
             left.into_iter()
                 .filter(|v| right_set.contains(v) && seen.insert(*v))
@@ -8129,7 +8137,7 @@ impl RangeIndex {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like union/intersection). Build inline rather than
         // routing through set_op_via_int's shared-name logic.
-        let right_set: FxHashSet<i64> =other.values().into_iter().collect();
+        let right_set: FxHashSet<i64> = other.values().into_iter().collect();
         let mut seen = FxHashSet::<i64>::default();
         let labels: Vec<IndexLabel> = self
             .values()
@@ -8149,8 +8157,8 @@ impl RangeIndex {
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
         self.set_op_via_int(other, |left, right| {
-            let left_set: FxHashSet<i64> =left.iter().copied().collect();
-            let right_set: FxHashSet<i64> =right.iter().copied().collect();
+            let left_set: FxHashSet<i64> = left.iter().copied().collect();
+            let right_set: FxHashSet<i64> = right.iter().copied().collect();
             let mut seen = FxHashSet::<i64>::default();
             let mut out = Vec::new();
             for v in left {
@@ -11901,8 +11909,10 @@ impl MultiIndex {
             return (vec![-1; target.len()], (0..target.len()).collect());
         }
 
-        let mut positions =
-            FxHashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity_and_hasher(self.len(), Default::default());
+        let mut positions = FxHashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity_and_hasher(
+            self.len(),
+            Default::default(),
+        );
         for row in 0..self.len() {
             let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();
             positions.entry(key).or_default().push(row);
@@ -11945,8 +11955,10 @@ impl MultiIndex {
             return Ok(vec![-1; target.len()]);
         }
 
-        let mut positions =
-            FxHashMap::<Vec<IndexLabel>, isize>::with_capacity_and_hasher(self.len(), Default::default());
+        let mut positions = FxHashMap::<Vec<IndexLabel>, isize>::with_capacity_and_hasher(
+            self.len(),
+            Default::default(),
+        );
         for row in 0..self.len() {
             positions
                 .entry(self.tuple_at(row))
@@ -12901,6 +12913,25 @@ mod tests {
 
         let fresh_index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert_eq!(index_with_cache, fresh_index);
+    }
+
+    #[test]
+    fn semantic_fingerprint_cache_reuses_label_result() {
+        let index = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        let calls = std::cell::Cell::new(0);
+
+        let first = index.semantic_labels_fingerprint_with(|labels| {
+            calls.set(calls.get() + 1);
+            format!("labels:{}", labels.len())
+        });
+        let second = index.semantic_labels_fingerprint_with(|_| {
+            calls.set(calls.get() + 1);
+            "changed".to_owned()
+        });
+
+        assert_eq!(first, "labels:3");
+        assert_eq!(second, "labels:3");
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -20639,7 +20670,11 @@ mod tests {
             IndexLabel::Int64(6),
             IndexLabel::Int64(7),
         ]);
-        assert_eq!(i.get_indexer(&target), vec![None, Some(1), None, Some(3)], "get_indexer exact");
+        assert_eq!(
+            i.get_indexer(&target),
+            vec![None, Some(1), None, Some(3)],
+            "get_indexer exact"
+        );
 
         // searchsorted left/right (pandas: 3->1/2, 4->2, 8->4, 0->0).
         assert_eq!(i.searchsorted(&IndexLabel::Int64(3), "left").unwrap(), 1);
@@ -20649,10 +20684,22 @@ mod tests {
         assert_eq!(i.searchsorted(&IndexLabel::Int64(0), "left").unwrap(), 0);
 
         // asof: last label <= key (pandas: 4->3, 0->NaN, 7->7, 10->7).
-        assert_eq!(i.asof(&IndexLabel::Int64(4)), Some(IndexLabel::Int64(3)), "asof 4");
+        assert_eq!(
+            i.asof(&IndexLabel::Int64(4)),
+            Some(IndexLabel::Int64(3)),
+            "asof 4"
+        );
         assert_eq!(i.asof(&IndexLabel::Int64(0)), None, "asof before all");
-        assert_eq!(i.asof(&IndexLabel::Int64(7)), Some(IndexLabel::Int64(7)), "asof exact");
-        assert_eq!(i.asof(&IndexLabel::Int64(10)), Some(IndexLabel::Int64(7)), "asof after all");
+        assert_eq!(
+            i.asof(&IndexLabel::Int64(7)),
+            Some(IndexLabel::Int64(7)),
+            "asof exact"
+        );
+        assert_eq!(
+            i.asof(&IndexLabel::Int64(10)),
+            Some(IndexLabel::Int64(7)),
+            "asof after all"
+        );
 
         // factorize: first-appearance order (pandas: ['b','a','b','c'] ->
         // codes [0,1,0,2], uniques ['b','a','c']).

@@ -1766,20 +1766,35 @@ fn merge_asof_grouped(
     let left_group_keys = build_group_keys(left, by_cols)?;
     let right_group_keys = build_group_keys(right, by_cols)?;
 
-    // Group left rows by their group key (to check sorting per-group)
-    let mut left_groups: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+    // Group rows by their group key, tracking first-seen key order so the
+    // per-group sort validation below is DETERMINISTIC. The previous code
+    // iterated the std HashMap directly, whose RandomState seed varies per
+    // run — so when more than one group was unsorted, *which* group's error
+    // surfaced was non-deterministic run-to-run. First-seen order also matches
+    // pandas' appearance-ordered processing. FxHashMap (vs SipHash) is now a
+    // pure speedup: group lookups are by `.get()` and validation walks the
+    // explicit order vector, never the map's iteration order.
+    let mut left_order: Vec<Vec<String>> = Vec::new();
+    let mut left_groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
     for (idx, key) in left_group_keys.iter().enumerate() {
+        if !left_groups.contains_key(key) {
+            left_order.push(key.clone());
+        }
         left_groups.entry(key.clone()).or_default().push(idx);
     }
 
-    // Group right rows by their group key
-    let mut right_groups: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+    let mut right_order: Vec<Vec<String>> = Vec::new();
+    let mut right_groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
     for (idx, key) in right_group_keys.iter().enumerate() {
+        if !right_groups.contains_key(key) {
+            right_order.push(key.clone());
+        }
         right_groups.entry(key.clone()).or_default().push(idx);
     }
 
-    // Check sorting within each left group
-    for (group_key, indices) in &left_groups {
+    // Check sorting within each left group (first-seen order).
+    for group_key in &left_order {
+        let indices = &left_groups[group_key];
         let group_vals: Vec<f64> = indices.iter().map(|&i| left_vals[i]).collect();
         ensure_sorted_non_decreasing(&group_vals, "left", on).map_err(|_| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
@@ -1789,8 +1804,9 @@ fn merge_asof_grouped(
         })?;
     }
 
-    // Check sorting within each right group
-    for (group_key, indices) in &right_groups {
+    // Check sorting within each right group (first-seen order).
+    for group_key in &right_order {
+        let indices = &right_groups[group_key];
         let group_vals: Vec<f64> = indices.iter().map(|&i| right_vals[i]).collect();
         ensure_sorted_non_decreasing(&group_vals, "right", on).map_err(|_| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(

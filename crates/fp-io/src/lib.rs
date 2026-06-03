@@ -321,6 +321,33 @@ impl Default for CsvReadOptions {
     }
 }
 
+fn csv_read_options_match_default_fast_path(options: &CsvReadOptions) -> bool {
+    options.delimiter == b','
+        && options.has_headers
+        && options.na_values.is_empty()
+        && options.keep_default_na
+        && options.na_filter
+        && options.index_col.is_none()
+        && options.usecols.is_none()
+        && options.nrows.is_none()
+        && options.skiprows == 0
+        && options.dtype.is_none()
+        && options.parse_dates.is_none()
+        && options.parse_date_combinations.is_none()
+        && options.parse_date_combinations_named.is_none()
+        && options.comment.is_none()
+        && options.true_values.is_empty()
+        && options.false_values.is_empty()
+        && options.decimal == b'.'
+        && options.on_bad_lines == CsvOnBadLines::Error
+        && options.thousands.is_none()
+        && options.skipfooter == 0
+        && options.quotechar == b'"'
+        && options.escapechar.is_none()
+        && options.doublequote
+        && options.lineterminator.is_none()
+}
+
 /// Options for [`read_fwf_str`] and [`read_fwf`].
 ///
 /// Callers can supply either `colspecs` (explicit `(start, end)`
@@ -3668,6 +3695,10 @@ fn should_skip_bad_csv_record(
 // ── CSV with options ───────────────────────────────────────────────────
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
+    if csv_read_options_match_default_fast_path(options) {
+        return read_csv_str(input);
+    }
+
     let mut builder = ReaderBuilder::new();
     builder
         .has_headers(false)
@@ -14001,6 +14032,59 @@ mod tests {
         let input = "name,age\nalice,30\n";
         let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
         assert_eq!(frame.index().len(), 1);
+    }
+
+    #[test]
+    fn read_csv_with_default_options_matches_read_csv_str() {
+        for input in [
+            "i,f,s\n1,2.5,abc\n3,4.0,def\n",
+            "flag\ntrue\nfalse\nmaybe\n",
+        ] {
+            let expected = read_csv_str(input).expect("default read");
+            let actual =
+                read_csv_with_options(input, &CsvReadOptions::default()).expect("options read");
+
+            assert_eq!(actual.index().len(), expected.index().len());
+            assert_eq!(actual.column_names(), expected.column_names());
+            for name in expected.column_names() {
+                let expected_col = expected.column(name).expect("expected column");
+                let actual_col = actual.column(name).expect("actual column");
+                assert_eq!(actual_col.dtype(), expected_col.dtype());
+                assert_eq!(actual_col.values(), expected_col.values());
+            }
+        }
+    }
+
+    #[test]
+    fn csv_default_options_fast_path_excludes_behavioral_options() {
+        assert!(super::csv_read_options_match_default_fast_path(
+            &CsvReadOptions::default()
+        ));
+
+        for options in [
+            CsvReadOptions {
+                delimiter: b'\t',
+                ..CsvReadOptions::default()
+            },
+            CsvReadOptions {
+                na_filter: false,
+                ..CsvReadOptions::default()
+            },
+            CsvReadOptions {
+                nrows: Some(1),
+                ..CsvReadOptions::default()
+            },
+            CsvReadOptions {
+                comment: Some(b'#'),
+                ..CsvReadOptions::default()
+            },
+            CsvReadOptions {
+                thousands: Some(b','),
+                ..CsvReadOptions::default()
+            },
+        ] {
+            assert!(!super::csv_read_options_match_default_fast_path(&options));
+        }
     }
 
     #[test]

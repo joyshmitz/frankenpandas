@@ -10399,9 +10399,20 @@ impl Series {
 
     /// Percentage change between current and prior element.
     ///
-    /// Matches `series.pct_change(periods=1)`. Returns a float Series where
-    /// the first `periods` elements are NaN. Missing values propagate as NaN.
+    /// Matches `series.pct_change(periods=1)`. pandas 2.2.3 applies the default
+    /// `fill_method='pad'` (forward-fill) BEFORE computing — so an interior
+    /// missing value uses the last valid observation, e.g.
+    /// `[1.0, nan, 4.0].pct_change()` is `[NaN, 0.0, 3.0]`, not all-NaN.
+    /// (br-frankenpandas-5ioai) Use [`pct_change_with_fill`] with
+    /// `fill_method=None` for the no-fill variant.
     pub fn pct_change(&self, periods: usize) -> Result<Self, FrameError> {
+        self.pct_change_with_fill(periods, Some("pad"), None)
+    }
+
+    /// Percentage change without any null fill — interior missing values
+    /// propagate as NaN. The shared core behind [`pct_change`] (after the
+    /// default forward-fill) and [`pct_change_with_fill`].
+    fn pct_change_core(&self, periods: usize) -> Result<Self, FrameError> {
         let len = self.len();
         let mut out = Vec::with_capacity(len);
 
@@ -10446,10 +10457,10 @@ impl Series {
     /// Percentage change with optional null fill before computation.
     ///
     /// Matches `series.pct_change(periods, fill_method=..., limit=...)`.
-    /// `fill_method` is `None` (pandas 2.2 default — no fill), `"ffill"` /
-    /// `"pad"` (forward-fill missing values), or `"bfill"` / `"backfill"`
-    /// (backward-fill). `limit` caps consecutive fills; it is ignored when
-    /// `fill_method` is `None`.
+    /// `fill_method` is `"ffill"` / `"pad"` (forward-fill missing values, the
+    /// pandas 2.2.3 default used by [`pct_change`]), `"bfill"` / `"backfill"`
+    /// (backward-fill), or `None` (no fill — interior NaN propagates). `limit`
+    /// caps consecutive fills; it is ignored when `fill_method` is `None`.
     pub fn pct_change_with_fill(
         &self,
         periods: usize,
@@ -10468,7 +10479,7 @@ impl Series {
                 }
             },
         };
-        filled.pct_change(periods)
+        filled.pct_change_core(periods)
     }
 
     /// Convert Series to a single-column DataFrame.
@@ -55049,7 +55060,10 @@ mod tests {
     }
 
     #[test]
-    fn series_pct_change_timedelta64_nat_propagates_naeja() {
+    fn series_pct_change_timedelta64_nat_forward_fills_naeja() {
+        // pandas 2.2.3 pct_change default fill_method='pad' forward-fills the
+        // NaT before computing: [1h, NaT, 2h] -> filled [1h, 1h, 2h] ->
+        // [NaN, (1h-1h)/1h=0, (2h-1h)/1h=1]. (br-frankenpandas-5ioai)
         let one_hour = 3_600 * 1_000_000_000_i64;
         let s = Series::from_values(
             "x",
@@ -55064,8 +55078,34 @@ mod tests {
 
         let result = s.pct_change(1).unwrap();
         assert!(result.values()[0].is_missing());
-        assert!(result.values()[1].is_missing()); // NaT current → NaN
-        assert!(result.values()[2].is_missing()); // NaT previous → NaN
+        assert!((result.values()[1].to_f64().unwrap() - 0.0).abs() < 1e-10);
+        assert!((result.values()[2].to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_pct_change_forward_fills_interior_nan_5ioai() {
+        // pandas default ffill: [1.0, nan, 4.0].pct_change() -> [NaN, 0.0, 3.0];
+        // no-fill (fill_method=None) -> [NaN, NaN, NaN].
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let filled = s.pct_change(1).unwrap();
+        assert!(filled.values()[0].is_missing());
+        assert!((filled.values()[1].to_f64().unwrap() - 0.0).abs() < 1e-10);
+        assert!((filled.values()[2].to_f64().unwrap() - 3.0).abs() < 1e-10);
+
+        let no_fill = s.pct_change_with_fill(1, None, None).unwrap();
+        assert!(no_fill.values()[0].is_missing());
+        assert!(no_fill.values()[1].is_missing());
+        assert!(no_fill.values()[2].is_missing());
     }
 
     #[test]
@@ -55130,9 +55170,13 @@ mod tests {
         )
         .unwrap();
 
+        // pandas default fill_method='pad' forward-fills the null first:
+        // [100, NaN, 200] -> [100, 100, 200] -> [NaN, 0.0, 1.0].
+        // (br-frankenpandas-5ioai)
         let result = s.pct_change(1).unwrap();
-        assert!(result.values()[1].is_missing()); // null previous -> NaN
-        assert!(result.values()[2].is_missing()); // null at i-1 -> NaN
+        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        assert_eq!(result.values()[2], Scalar::Float64(1.0));
     }
 
     #[test]
@@ -55175,7 +55219,11 @@ mod tests {
     }
 
     #[test]
-    fn series_pct_change_with_fill_none_matches_pct_change() {
+    fn series_pct_change_no_nan_default_equals_no_fill() {
+        // With no missing values, the default (fill_method='pad') and the
+        // explicit no-fill path produce identical results — forward-fill is a
+        // no-op. (They diverge once an interior NaN is present; see
+        // series_pct_change_forward_fills_interior_nan_5ioai.)
         let s = Series::from_values(
             "x",
             vec!["a".into(), "b".into(), "c".into()],

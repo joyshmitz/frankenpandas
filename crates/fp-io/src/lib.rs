@@ -13516,6 +13516,17 @@ mod tests {
     }
 
     #[test]
+    fn json_write_non_finite_floats_as_null_like_pandas() {
+        // pandas to_json(orient="records") converts inf / -inf / NaN to JSON
+        // `null` (JSON has no inf/nan literals). Verified vs pandas 2.2.3:
+        // read_csv("x\n1.5\ninf\n-inf\n").to_json(orient="records")
+        //   == [{"x":1.5},{"x":null},{"x":null}]
+        let frame = read_csv_str("x\n1.5\ninf\n-inf\n").expect("parse");
+        let json = write_json_string(&frame, JsonOrient::Records).expect("json");
+        assert_eq!(json, r#"[{"x":1.5},{"x":null},{"x":null}]"#);
+    }
+
+    #[test]
     fn csv_default_na_token_set_matches_pandas_table() {
         let default_tokens = [
             "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND",

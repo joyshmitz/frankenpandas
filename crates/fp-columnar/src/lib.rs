@@ -10512,7 +10512,11 @@ mod tests {
                             )
                         })
                         .collect();
-                    assert_eq!(got.values(), expected.as_slice(), "f64 op {op:?} probe {probe}");
+                    assert_eq!(
+                        got.values(),
+                        expected.as_slice(),
+                        "f64 op {op:?} probe {probe}"
+                    );
                 }
                 // Float64 column vs Int64 scalar (f64-promotion branch).
                 let got = Column::from_f64_values(f64_vals.clone())
@@ -10534,7 +10538,9 @@ mod tests {
                 let expected: Vec<Scalar> = i64_vals
                     .iter()
                     .map(|&v| {
-                        Scalar::Bool(scalar_compare(&Scalar::Int64(v), &Scalar::Int64(0), op).unwrap())
+                        Scalar::Bool(
+                            scalar_compare(&Scalar::Int64(v), &Scalar::Int64(0), op).unwrap(),
+                        )
                     })
                     .collect();
                 assert_eq!(got.values(), expected.as_slice(), "i64 op {op:?}");
@@ -13797,10 +13803,34 @@ mod tests {
         }
 
         #[test]
-        fn astype_lossy_float_to_int_errors() {
-            let col = Column::from_values(vec![Scalar::Float64(1.5)]).expect("col");
-            let err = col.astype(DType::Int64).unwrap_err();
-            assert!(matches!(err, crate::ColumnError::Type(_)));
+        fn astype_finite_float_to_int_truncates_toward_zero() {
+            // pandas astype(int64) truncates finite floats toward zero
+            // (br-frankenpandas-qcutc); only non-finite values raise.
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.9),
+                Scalar::Float64(-1.5),
+                Scalar::Float64(-2.9),
+                Scalar::Float64(0.4),
+            ])
+            .expect("col");
+            let out = col.astype(DType::Int64).expect("truncating cast");
+            assert_eq!(
+                out.values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(-1),
+                    Scalar::Int64(-2),
+                    Scalar::Int64(0),
+                ]
+            );
+            // Non-finite still raises.
+            let inf = Column::from_values(vec![Scalar::Float64(f64::INFINITY)]).expect("col");
+            assert!(matches!(
+                inf.astype(DType::Int64).unwrap_err(),
+                crate::ColumnError::Type(_)
+            ));
         }
     }
 

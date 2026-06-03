@@ -1720,6 +1720,23 @@ fn days_in_month(year: i64, month: u32) -> Option<u32> {
     Some(days[(month - 1) as usize])
 }
 
+/// Number of ISO-8601 weeks in a year (52 or 53).
+///
+/// A year has 53 ISO weeks iff its first day falls on a Thursday, or it is a
+/// leap year whose first day is a Wednesday — captured by the dominical
+/// closed form `p(year) == 4 || p(year - 1) == 3`, where
+/// `p(y) = (y + ⌊y/4⌋ − ⌊y/100⌋ + ⌊y/400⌋) mod 7` is the weekday of Dec 31.
+fn iso_weeks_in_year(year: i64) -> i64 {
+    fn p(y: i64) -> i64 {
+        (y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400)).rem_euclid(7)
+    }
+    if p(year) == 4 || p(year - 1) == 3 {
+        53
+    } else {
+        52
+    }
+}
+
 /// A nanosecond-precision point in time, Unix-epoch anchored.
 ///
 /// Phase 2 scope: construction, arithmetic, equality, ordering, serde.
@@ -2307,11 +2324,17 @@ impl Timestamp {
         }
         let doy = self.dayofyear()?;
         let dow = self.dayofweek()?;
+        let year = self.year()?;
         let iso_dow = if dow == 6 { 7 } else { dow + 1 };
         let week = (doy - iso_dow + 10) / 7;
+        // ISO-8601 has 53-week years, so the clamps must consult the actual
+        // week count, not hardcode 52/1: a week<1 belongs to the LAST week of
+        // the previous year (52 OR 53), and a week beyond this year's count
+        // wraps to week 1 of the next year. pandas isocalendar().week agrees:
+        // 2021-01-01 -> 53 (2020 is a 53-week year), 2026-12-31 -> 53.
         if week < 1 {
-            Some(52)
-        } else if week > 52 {
+            Some(iso_weeks_in_year(year - 1))
+        } else if week > iso_weeks_in_year(year) {
             Some(1)
         } else {
             Some(week)
@@ -7058,6 +7081,40 @@ mod tests {
 
         assert_eq!(Timestamp::nat().weekofyear(), None);
         assert_eq!(Timestamp::nat().week(), None);
+    }
+
+    #[test]
+    fn timestamp_weekofyear_iso_53_week_boundaries() {
+        // ISO-8601 53-week-year boundaries vs pandas 2.2.3 isocalendar().week.
+        // (br-frankenpandas-xmfmd) Date -> nanos via days since 1970-01-01.
+        fn week_of(date_days: i64) -> Option<i64> {
+            Timestamp::from_nanos(date_days * Timedelta::NANOS_PER_DAY).weekofyear()
+        }
+        // Days from 1970-01-01 for each date (UTC, no tz).
+        // 2021-01-01 -> week 53 (2020 is a 53-week year); FP used to give 52.
+        assert_eq!(week_of(18_628), Some(53)); // 2021-01-01
+        // 2016-01-01 -> week 53 (2015 is a 53-week year).
+        assert_eq!(week_of(16_801), Some(53)); // 2016-01-01
+        // 2026-12-31 -> week 53; FP used to give 1.
+        assert_eq!(week_of(20_818), Some(53)); // 2026-12-31
+        // 2020-12-31 -> week 53.
+        assert_eq!(week_of(18_627), Some(53)); // 2020-12-31
+        // Cases that must stay correct (non-53 boundaries):
+        assert_eq!(week_of(19_358), Some(52)); // 2023-01-01 -> week 52
+        assert_eq!(week_of(20_087), Some(1)); // 2024-12-30 -> week 1
+        assert_eq!(week_of(18_260), Some(1)); // 2019-12-30 -> week 1
+    }
+
+    #[test]
+    fn iso_weeks_in_year_53_week_years() {
+        use super::iso_weeks_in_year;
+        // Known 53-week years; everything else is 52.
+        for y in [2004, 2009, 2015, 2020, 2026] {
+            assert_eq!(iso_weeks_in_year(y), 53, "{y} should have 53 ISO weeks");
+        }
+        for y in [2018, 2019, 2021, 2022, 2023, 2024] {
+            assert_eq!(iso_weeks_in_year(y), 52, "{y} should have 52 ISO weeks");
+        }
     }
 
     #[test]

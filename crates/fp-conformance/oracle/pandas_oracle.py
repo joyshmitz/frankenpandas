@@ -4211,19 +4211,24 @@ def op_series_str_pad(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_series_str_slice(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    # Per br-frankenpandas-9f9e78. Mirrors fp-frame Series::str.slice(start, end).
+    # Per br-frankenpandas-9f9e78. Mirrors fp-frame Series::str.slice, which now
+    # supports full Python slice semantics: start/stop/step are all optional and
+    # may be negative (step may be a negative integer for reversal, but not 0).
     left = payload.get("left")
     if left is None:
         raise OracleError("series_str_slice requires left payload")
     start = payload.get("str_slice_start")
-    if not isinstance(start, int) or start < 0:
-        raise OracleError("series_str_slice str_slice_start must be a non-negative integer")
+    if start is not None and not isinstance(start, int):
+        raise OracleError("series_str_slice str_slice_start must be an integer or null")
     end = payload.get("str_slice_end")
-    if end is not None and (not isinstance(end, int) or end < 0):
-        raise OracleError("series_str_slice str_slice_end must be a non-negative integer or null")
+    if end is not None and not isinstance(end, int):
+        raise OracleError("series_str_slice str_slice_end must be an integer or null")
+    step = payload.get("str_slice_step")
+    if step is not None and (not isinstance(step, int) or step == 0):
+        raise OracleError("series_str_slice str_slice_step must be a non-zero integer or null")
     series = fixture_series_from_payload(pd, left, "series_str_slice")
     try:
-        out = series.str.slice(start, end)
+        out = series.str.slice(start, end, step)
     except Exception as exc:
         raise OracleError(f"series_str_slice failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}

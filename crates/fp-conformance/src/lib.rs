@@ -2071,9 +2071,11 @@ pub struct PacketFixture {
     #[serde(default)]
     pub str_sub: Option<String>,
     #[serde(default)]
-    pub str_slice_start: Option<usize>,
+    pub str_slice_start: Option<i64>,
     #[serde(default)]
-    pub str_slice_end: Option<usize>,
+    pub str_slice_end: Option<i64>,
+    #[serde(default)]
+    pub str_slice_step: Option<i64>,
     #[serde(default)]
     pub str_get_index: Option<i64>,
     #[serde(default)]
@@ -3486,9 +3488,11 @@ struct OracleRequest {
     #[serde(default)]
     str_normalize_form: Option<String>,
     #[serde(default)]
-    str_slice_start: Option<usize>,
+    str_slice_start: Option<i64>,
     #[serde(default)]
-    str_slice_end: Option<usize>,
+    str_slice_end: Option<i64>,
+    #[serde(default)]
+    str_slice_step: Option<i64>,
     #[serde(default)]
     str_split_pat: Option<String>,
     #[serde(default)]
@@ -13073,6 +13077,7 @@ fn capture_live_oracle_expected(
         str_normalize_form: fixture.str_normalize_form.clone(),
         str_slice_start: fixture.str_slice_start,
         str_slice_end: fixture.str_slice_end,
+        str_slice_step: fixture.str_slice_step,
         str_split_pat: fixture.str_split_pat.clone(),
         str_split_n: fixture.str_split_n,
         str_sub: fixture.str_sub.clone(),
@@ -16623,13 +16628,15 @@ fn execute_series_module_utility_fixture_operation(
             series.str().rfind(sub).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrSlice => {
-            let start = fixture
-                .str_slice_start
-                .ok_or_else(|| "str_slice_start required for series_str_slice".to_owned())?;
-            let end = fixture.str_slice_end;
+            // start/stop/step are all optional (Python slice semantics); a
+            // missing start no longer errors — None means "from the beginning".
             series
                 .str()
-                .slice(start, end)
+                .slice(
+                    fixture.str_slice_start,
+                    fixture.str_slice_end,
+                    fixture.str_slice_step,
+                )
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrGet => {

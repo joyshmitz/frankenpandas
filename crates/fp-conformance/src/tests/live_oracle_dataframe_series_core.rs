@@ -16545,8 +16545,9 @@ fn live_oracle_series_str_slice_with_end() {
     let actual = series
         .str()
         .slice(
-            fixture.str_slice_start.expect("str_slice_start"),
+            fixture.str_slice_start,
             fixture.str_slice_end,
+            fixture.str_slice_step,
         )
         .expect("str slice");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
@@ -36329,7 +36330,10 @@ fn live_oracle_series_str_slice_no_end() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().slice(2, fixture.str_slice_end).expect("slice");
+    let actual = series
+        .str()
+        .slice(Some(2), fixture.str_slice_end, fixture.str_slice_step)
+        .expect("slice");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -36994,7 +36998,7 @@ fn live_oracle_series_str_slice_with_unicode() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().slice(0, Some(3)).expect("slice");
+    let actual = series.str().slice(Some(0), Some(3), None).expect("slice");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 

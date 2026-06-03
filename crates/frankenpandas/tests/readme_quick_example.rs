@@ -3550,7 +3550,7 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     let _ = s.str().endswith("o")?;
 
     // Transform.
-    let _ = s.str().slice(0, Some(3))?;
+    let _ = s.str().slice(Some(0), Some(3), None)?;
     let _ = s.str().repeat(2)?;
     let _ = s.str().pad(10, "right", ' ')?;
     let _ = s.str().zfill(8)?;

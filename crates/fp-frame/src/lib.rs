@@ -467,6 +467,65 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
     }
 }
 
+/// Extract `chars[start:stop:step]` using CPython slice semantics (negative
+/// indices resolve from the end; a negative step walks backwards). Mirrors
+/// CPython's `PySlice_AdjustIndices`. `step` must be non-zero (callers reject 0).
+fn python_slice_chars(
+    chars: &[char],
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+) -> String {
+    let n = chars.len() as i64;
+    let step = step.unwrap_or(1);
+    debug_assert_ne!(step, 0);
+    let (lower, upper) = if step < 0 { (-1_i64, n - 1) } else { (0_i64, n) };
+    let clamp = |idx: i64| -> i64 {
+        if idx < 0 {
+            let shifted = idx + n;
+            if shifted < lower { lower } else { shifted }
+        } else if idx > upper {
+            upper
+        } else {
+            idx
+        }
+    };
+    let begin = match start {
+        Some(s) => clamp(s),
+        None => {
+            if step < 0 {
+                upper
+            } else {
+                lower
+            }
+        }
+    };
+    let end = match stop {
+        Some(s) => clamp(s),
+        None => {
+            if step < 0 {
+                lower
+            } else {
+                upper
+            }
+        }
+    };
+    let mut out = String::new();
+    let mut i = begin;
+    if step > 0 {
+        while i < end {
+            out.push(chars[i as usize]);
+            i += step;
+        }
+    } else {
+        while i > end {
+            out.push(chars[i as usize]);
+            i += step;
+        }
+    }
+    out
+}
+
 fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
     match value {
         Scalar::Int64(v) => IndexLabel::Int64(*v),
@@ -20270,13 +20329,25 @@ impl StringAccessor<'_> {
     }
 
     /// Slice each string from start to end.
-    pub fn slice(&self, start: usize, end: Option<usize>) -> Result<Series, FrameError> {
+    pub fn slice(
+        &self,
+        start: Option<i64>,
+        stop: Option<i64>,
+        step: Option<i64>,
+    ) -> Result<Series, FrameError> {
+        // pandas str.slice mirrors Python's s[start:stop:step], including
+        // NEGATIVE indices and a (possibly negative) step. Verified vs live
+        // pandas 2.2.3: "abcdef".str.slice(-3) -> "def"; .slice(0, -1) ->
+        // "abcde"; .slice(step=2) -> "ace"; .slice(step=-1) -> "fedcba".
+        if step == Some(0) {
+            return Err(FrameError::CompatibilityRejected(
+                "slice step cannot be zero".to_owned(),
+            ));
+        }
         self.apply_str(
             |s| {
                 let chars: Vec<char> = s.chars().collect();
-                let stop = end.unwrap_or(chars.len()).min(chars.len());
-                let begin = start.min(stop);
-                Scalar::Utf8(chars[begin..stop].iter().collect())
+                Scalar::Utf8(python_slice_chars(&chars, start, stop, step))
             },
             self.series.name(),
         )
@@ -58107,8 +58178,40 @@ mod tests {
             vec![Scalar::Utf8("hello world".into())],
         )
         .unwrap();
-        let result = s.str().slice(0, Some(5)).unwrap();
+        let result = s.str().slice(Some(0), Some(5), None).unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
+    }
+
+    #[test]
+    fn str_slice_negative_and_step() {
+        // pandas str.slice == Python s[start:stop:step] incl. negatives + step.
+        // Verified vs live pandas 2.2.3 on "abcdef" / "xy".
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("abcdef".into()),
+                Scalar::Utf8("xy".into()),
+            ],
+        )
+        .unwrap();
+        let check = |start, stop, step, a: &str, b: &str| {
+            let r = s.str().slice(start, stop, step).unwrap();
+            assert_eq!(r.values()[0], Scalar::Utf8(a.into()), "abcdef {start:?}:{stop:?}:{step:?}");
+            assert_eq!(r.values()[1], Scalar::Utf8(b.into()), "xy {start:?}:{stop:?}:{step:?}");
+        };
+        check(Some(-3), None, None, "def", "xy"); // negative start
+        check(Some(0), Some(-1), None, "abcde", "x"); // negative stop
+        check(None, None, Some(2), "ace", "x"); // step
+        check(None, None, Some(-1), "fedcba", "yx"); // reverse
+        check(Some(1), Some(5), Some(2), "bd", "y"); // start:stop:step
+        check(Some(-1), None, Some(-1), "fedcba", "yx"); // negative start, reverse
+
+        // step == 0 is rejected like pandas.
+        assert!(matches!(
+            s.str().slice(None, None, Some(0)),
+            Err(FrameError::CompatibilityRejected(_))
+        ));
     }
 
     #[test]
@@ -93798,7 +93901,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = s.str().slice(0, Some(3)).unwrap();
+        let result = s.str().slice(Some(0), Some(3), None).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_slice_basic.txt", &output);
     }

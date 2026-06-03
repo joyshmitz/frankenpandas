@@ -3155,6 +3155,71 @@ mod tests {
     }
 
     #[test]
+    fn merge_inner_ordered_identity_falls_back_for_non_identity_keys() {
+        let cases = [
+            (
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            ),
+            (
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            ),
+        ];
+
+        for (left_keys, right_keys) in cases {
+            let left = DataFrame::from_dict(
+                &["id", "v"],
+                vec![
+                    ("id", left_keys),
+                    (
+                        "v",
+                        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                    ),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["id", "w"],
+                vec![
+                    ("id", right_keys),
+                    (
+                        "w",
+                        vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                    ),
+                ],
+            )
+            .unwrap();
+
+            let maybe_fast = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+            let generic = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["id"],
+                &["id"],
+                JoinType::Inner,
+                MergeExecutionOptions {
+                    validate_mode: Some(MergeValidateMode::OneToOne),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(maybe_fast.index, generic.index);
+            assert_eq!(maybe_fast.column_order, generic.column_order);
+            assert_eq!(maybe_fast.columns, generic.columns);
+        }
+    }
+
+    #[test]
     fn merge_default_suffixes_match_pandas() {
         // Overlapping non-key column "v" gets pandas default _x/_y suffixes.
         // Verified vs pandas 2.2.3: left{k:[1,2,3],v:[10,20,30]} merged inner on

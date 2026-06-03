@@ -978,7 +978,7 @@ impl Index {
         dropna: bool,
     ) -> (Vec<(IndexLabel, usize)>, usize) {
         let mut seen_order: Vec<IndexLabel> = Vec::new();
-        let mut counts: HashMap<IndexLabel, usize> = HashMap::new();
+        let mut counts: FxHashMap<IndexLabel, usize> = FxHashMap::default();
         let mut total = 0usize;
         for label in &self.labels {
             if dropna && label.is_missing() {
@@ -6152,7 +6152,7 @@ impl PeriodIndex {
                 }
             }
             DuplicateKeep::None => {
-                let mut counts = HashMap::<&Period, usize>::new();
+                let mut counts = FxHashMap::<&Period, usize>::default();
                 for period in &self.values {
                     *counts.entry(period).or_insert(0) += 1;
                 }
@@ -6767,7 +6767,7 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.get_indexer_non_unique(targets)`.
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[Period]) -> (Vec<isize>, Vec<usize>) {
-        let mut by_value = HashMap::<Period, Vec<usize>>::new();
+        let mut by_value = FxHashMap::<Period, Vec<usize>>::default();
         for (i, period) in self.values.iter().enumerate() {
             by_value.entry(*period).or_default().push(i);
         }
@@ -6800,7 +6800,7 @@ impl PeriodIndex {
     /// where `-1` means "missing".
     #[must_use]
     pub fn get_indexer(&self, targets: &[Period]) -> Vec<isize> {
-        let mut positions = HashMap::<Period, isize>::new();
+        let mut positions = FxHashMap::<Period, isize>::default();
         for (i, period) in self.values.iter().enumerate() {
             positions
                 .entry(*period)
@@ -7149,7 +7149,7 @@ impl PeriodIndex {
     /// missing-value sentinel so all codes are non-negative.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
-        let mut positions = HashMap::<&Period, isize>::new();
+        let mut positions = FxHashMap::<&Period, isize>::default();
         let mut uniques = Vec::<Period>::new();
         let mut codes = Vec::with_capacity(self.values.len());
         for period in &self.values {
@@ -10985,7 +10985,7 @@ impl MultiIndex {
         self.levels
             .iter()
             .map(|level| {
-                let mut positions = HashMap::<IndexLabel, isize>::new();
+                let mut positions = FxHashMap::<IndexLabel, isize>::default();
                 let mut next_code = 0_isize;
                 level
                     .iter()
@@ -11929,7 +11929,8 @@ impl MultiIndex {
             return Ok(vec![-1; target.len()]);
         }
 
-        let mut positions = HashMap::<Vec<IndexLabel>, isize>::with_capacity(self.len());
+        let mut positions =
+            FxHashMap::<Vec<IndexLabel>, isize>::with_capacity_and_hasher(self.len(), Default::default());
         for row in 0..self.len() {
             positions
                 .entry(self.tuple_at(row))

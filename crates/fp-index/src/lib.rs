@@ -3050,7 +3050,7 @@ impl DatetimeIndex {
     /// `i64::MIN` to test for NAT.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: HashSet<i64> = values.iter().copied().collect();
+        let needle: FxHashSet<i64> =values.iter().copied().collect();
         self.index
             .labels()
             .iter()
@@ -3297,7 +3297,7 @@ impl DatetimeIndex {
     /// from `self`.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -3306,7 +3306,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let nanos: Vec<i64> = self
             .index
             .labels()
@@ -3327,7 +3327,7 @@ impl DatetimeIndex {
     /// matching `pd.DatetimeIndex.union(other)`.
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let mut nanos: Vec<i64> = Vec::new();
         for label in self
             .index
@@ -3352,7 +3352,7 @@ impl DatetimeIndex {
     /// `pd.DatetimeIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -3361,7 +3361,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let nanos: Vec<i64> = self
             .index
             .labels()
@@ -3385,7 +3385,7 @@ impl DatetimeIndex {
     /// `pd.DatetimeIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: HashSet<i64> = self
+        let self_set: FxHashSet<i64> =self
             .index
             .labels()
             .iter()
@@ -3394,7 +3394,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -3403,7 +3403,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let mut nanos: Vec<i64> = Vec::new();
         for label in self.index.labels() {
             if let IndexLabel::Datetime64(n) = label
@@ -5346,7 +5346,7 @@ impl TimedeltaIndex {
     /// of nanosecond durations; pass `Timedelta::NAT` to test for NAT.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: HashSet<i64> = values.iter().copied().collect();
+        let needle: FxHashSet<i64> =values.iter().copied().collect();
         self.index
             .labels()
             .iter()
@@ -5596,7 +5596,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.intersection(other)`.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -5605,7 +5605,7 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let nanos: Vec<i64> = self
             .index
             .labels()
@@ -5626,7 +5626,7 @@ impl TimedeltaIndex {
     /// matching `pd.TimedeltaIndex.union(other)`.
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let mut nanos: Vec<i64> = Vec::new();
         for label in self
             .index
@@ -5651,7 +5651,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -5660,7 +5660,7 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let nanos: Vec<i64> = self
             .index
             .labels()
@@ -5683,7 +5683,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: HashSet<i64> = self
+        let self_set: FxHashSet<i64> =self
             .index
             .labels()
             .iter()
@@ -5692,7 +5692,7 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let other_set: HashSet<i64> = other
+        let other_set: FxHashSet<i64> =other
             .index
             .labels()
             .iter()
@@ -5701,7 +5701,7 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let mut seen = HashSet::<i64>::new();
+        let mut seen = FxHashSet::<i64>::default();
         let mut nanos: Vec<i64> = Vec::new();
         for label in self.index.labels() {
             if let IndexLabel::Timedelta64(n) = label
@@ -5966,7 +5966,7 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let unique: HashSet<&Period> = self.values.iter().collect();
+        let unique: FxHashSet<&Period> =self.values.iter().collect();
         unique.len() == self.values.len()
     }
 
@@ -6116,7 +6116,7 @@ impl PeriodIndex {
     /// Preserves the index name.
     #[must_use]
     pub fn unique(&self) -> Self {
-        let mut seen = HashSet::<&Period>::new();
+        let mut seen = FxHashSet::<&Period>::default();
         let mut uniques = Vec::<Period>::new();
         for period in &self.values {
             if seen.insert(period) {
@@ -6136,7 +6136,7 @@ impl PeriodIndex {
         let mut result = vec![false; self.values.len()];
         match keep {
             DuplicateKeep::First => {
-                let mut seen = HashSet::<&Period>::new();
+                let mut seen = FxHashSet::<&Period>::default();
                 for (i, period) in self.values.iter().enumerate() {
                     if !seen.insert(period) {
                         result[i] = true;
@@ -6144,7 +6144,7 @@ impl PeriodIndex {
                 }
             }
             DuplicateKeep::Last => {
-                let mut seen = HashSet::<&Period>::new();
+                let mut seen = FxHashSet::<&Period>::default();
                 for (i, period) in self.values.iter().enumerate().rev() {
                     if !seen.insert(period) {
                         result[i] = true;
@@ -6462,8 +6462,8 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.intersection(other)`. Mixed-freq rejects.
     pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let other_set: HashSet<&Period> = other.values.iter().collect();
-        let mut seen = HashSet::<&Period>::new();
+        let other_set: FxHashSet<&Period> =other.values.iter().collect();
+        let mut seen = FxHashSet::<&Period>::default();
         let values: Vec<Period> = self
             .values
             .iter()
@@ -6506,8 +6506,8 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.difference(other)`. Mixed-freq rejects.
     pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let other_set: HashSet<&Period> = other.values.iter().collect();
-        let mut seen = HashSet::<&Period>::new();
+        let other_set: FxHashSet<&Period> =other.values.iter().collect();
+        let mut seen = FxHashSet::<&Period>::default();
         let values: Vec<Period> = self
             .values
             .iter()
@@ -6528,8 +6528,8 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.symmetric_difference(other)`. Mixed-freq rejects.
     pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_compatible_freq(other)?;
-        let self_set: HashSet<&Period> = self.values.iter().collect();
-        let other_set: HashSet<&Period> = other.values.iter().collect();
+        let self_set: FxHashSet<&Period> =self.values.iter().collect();
+        let other_set: FxHashSet<&Period> =other.values.iter().collect();
         let mut seen = HashSet::<Period>::new();
         let mut values = Vec::<Period>::new();
         for p in &self.values {
@@ -7931,7 +7931,7 @@ impl RangeIndex {
     /// Per-position membership mask, matching `pd.RangeIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: HashSet<i64> = values.iter().copied().collect();
+        let needle: FxHashSet<i64> =values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
     }
 
@@ -8100,8 +8100,8 @@ impl RangeIndex {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
         self.set_op_via_int(other, |left, right| {
-            let right_set: HashSet<i64> = right.into_iter().collect();
-            let mut seen = HashSet::<i64>::new();
+            let right_set: FxHashSet<i64> =right.into_iter().collect();
+            let mut seen = FxHashSet::<i64>::default();
             left.into_iter()
                 .filter(|v| right_set.contains(v) && seen.insert(*v))
                 .collect()
@@ -8113,7 +8113,7 @@ impl RangeIndex {
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
         self.set_op_via_int(other, |left, right| {
-            let mut seen = HashSet::<i64>::new();
+            let mut seen = FxHashSet::<i64>::default();
             left.into_iter()
                 .chain(right)
                 .filter(|v| seen.insert(*v))
@@ -8128,8 +8128,8 @@ impl RangeIndex {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like union/intersection). Build inline rather than
         // routing through set_op_via_int's shared-name logic.
-        let right_set: HashSet<i64> = other.values().into_iter().collect();
-        let mut seen = HashSet::<i64>::new();
+        let right_set: FxHashSet<i64> =other.values().into_iter().collect();
+        let mut seen = FxHashSet::<i64>::default();
         let labels: Vec<IndexLabel> = self
             .values()
             .into_iter()
@@ -8148,9 +8148,9 @@ impl RangeIndex {
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
         self.set_op_via_int(other, |left, right| {
-            let left_set: HashSet<i64> = left.iter().copied().collect();
-            let right_set: HashSet<i64> = right.iter().copied().collect();
-            let mut seen = HashSet::<i64>::new();
+            let left_set: FxHashSet<i64> =left.iter().copied().collect();
+            let right_set: FxHashSet<i64> =right.iter().copied().collect();
+            let mut seen = FxHashSet::<i64>::default();
             let mut out = Vec::new();
             for v in left {
                 if !right_set.contains(&v) && seen.insert(v) {

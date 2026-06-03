@@ -13490,6 +13490,32 @@ mod tests {
     }
 
     #[test]
+    fn csv_scalar_inference_matches_pandas_2_2_3() {
+        // Per-cell type inference verified against pandas 2.2.3 read_csv.
+        let cell = |csv: &str| {
+            let frame = read_csv_str(&format!("x\n{csv}\n")).expect("parse");
+            frame.column("x").unwrap().values()[0].clone()
+        };
+        // Signed / leading-zero integers parse as Int64 (Rust + pandas agree).
+        assert_eq!(cell("+1"), Scalar::Int64(1));
+        assert_eq!(cell("01"), Scalar::Int64(1));
+        assert_eq!(cell("-5"), Scalar::Int64(-5));
+        // Scientific notation is float64 in pandas.
+        assert_eq!(cell("1e3"), Scalar::Float64(1000.0));
+        // inf / -inf are float values (NOT default-NA tokens, unlike nan).
+        assert_eq!(cell("inf"), Scalar::Float64(f64::INFINITY));
+        assert_eq!(cell("-inf"), Scalar::Float64(f64::NEG_INFINITY));
+        // Bool inference is case-insensitive in pandas 2.2.3.
+        assert_eq!(cell("TRUE"), Scalar::Bool(true));
+        assert_eq!(cell("true"), Scalar::Bool(true));
+        assert_eq!(cell("False"), Scalar::Bool(false));
+        // Surrounding whitespace is trimmed before numeric inference.
+        assert_eq!(cell(" 1 "), Scalar::Int64(1));
+        // Non-numeric, non-bool stays Utf8.
+        assert_eq!(cell("hello"), Scalar::Utf8("hello".into()));
+    }
+
+    #[test]
     fn csv_default_na_token_set_matches_pandas_table() {
         let default_tokens = [
             "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND",

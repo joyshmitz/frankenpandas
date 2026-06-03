@@ -9936,13 +9936,19 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     // then append unseen labels from subsequent indexes in encounter order.
     // This matches iterative align_union(sort=False) semantics while avoiding
     // the O(N*K) pairwise alignment cascade.
-    let mut seen: std::collections::HashSet<IndexLabel> = std::collections::HashSet::with_capacity(
+    // Borrow labels into the membership set (no clone per label) and clone only
+    // the first-seen ones into the output. The prior version cloned EVERY label
+    // into an owned HashSet<IndexLabel> (even duplicates) — clone-bound. Borrowed
+    // keys + FxHashSet leave only the unique-label output clones. The borrow is
+    // valid: every &IndexLabel comes from `indexes`, which outlives this scan.
+    let mut seen: FxHashSet<&IndexLabel> = FxHashSet::with_capacity_and_hasher(
         indexes.iter().map(|idx| idx.labels().len()).sum(),
+        Default::default(),
     );
     let mut union_labels: Vec<IndexLabel> = Vec::new();
     for idx in indexes {
         for label in idx.labels() {
-            if seen.insert(label.clone()) {
+            if seen.insert(label) {
                 union_labels.push(label.clone());
             }
         }

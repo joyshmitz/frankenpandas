@@ -3474,6 +3474,10 @@ struct OracleRequest {
     #[serde(default)]
     regex_pattern: Option<String>,
     #[serde(default)]
+    str_prefix: Option<String>,
+    #[serde(default)]
+    str_suffix: Option<String>,
+    #[serde(default)]
     melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     melt_value_vars: Option<Vec<String>>,
@@ -13019,6 +13023,8 @@ fn capture_live_oracle_expected(
         end_time: fixture.end_time.clone(),
         string_sep: fixture.string_sep.clone(),
         regex_pattern: fixture.regex_pattern.clone(),
+        str_prefix: fixture.str_prefix.clone(),
+        str_suffix: fixture.str_suffix.clone(),
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),

@@ -54,6 +54,8 @@
 //! - **fp-index** uses [`Column`] internally for some MultiIndex
 //!   level storage.
 
+use std::sync::OnceLock;
+
 use fp_types::{
     DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, Timedelta, Timestamp,
     TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
@@ -817,10 +819,101 @@ fn vectorized_binary_i64(
     Some((out, combined))
 }
 
+enum ScalarValues {
+    Eager(Vec<Scalar>),
+    LazyAllValidFloat64 {
+        data: Vec<f64>,
+        values: OnceLock<Vec<Scalar>>,
+    },
+}
+
+impl ScalarValues {
+    fn from_vec(values: Vec<Scalar>) -> Self {
+        Self::Eager(values)
+    }
+
+    fn lazy_all_valid_float64(data: Vec<f64>) -> Self {
+        Self::LazyAllValidFloat64 {
+            data,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn as_slice(&self) -> &[Scalar] {
+        match self {
+            Self::Eager(values) => values,
+            Self::LazyAllValidFloat64 { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
+                .as_slice(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Eager(values) => values.len(),
+            Self::LazyAllValidFloat64 { data, .. } => data.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Clone for ScalarValues {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Eager(values) => Self::Eager(values.clone()),
+            Self::LazyAllValidFloat64 { data, .. } => Self::lazy_all_valid_float64(data.clone()),
+        }
+    }
+}
+
+impl std::ops::Deref for ScalarValues {
+    type Target = [Scalar];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a ScalarValues {
+    type Item = &'a Scalar;
+    type IntoIter = std::slice::Iter<'a, Scalar>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl PartialEq for ScalarValues {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl std::fmt::Debug for ScalarValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl Serialize for ScalarValues {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScalarValues {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<Scalar>::deserialize(deserializer).map(Self::Eager)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Column {
     dtype: DType,
-    values: Vec<Scalar>,
+    values: ScalarValues,
     validity: ValidityMask,
     #[serde(skip)]
     data: Option<ColumnData>,
@@ -832,7 +925,7 @@ impl Clone for Column {
             dtype: self.dtype,
             values: self
                 .clone_dense_values_from_cache()
-                .unwrap_or_else(|| self.values.clone()),
+                .map_or_else(|| self.values.clone(), ScalarValues::from_vec),
             validity: self.validity.clone(),
             data: None,
         }
@@ -1269,7 +1362,7 @@ impl Column {
             dtype,
             validity,
             data: Self::cached_data_for_values(dtype, &coerced),
-            values: coerced,
+            values: ScalarValues::from_vec(coerced),
         })
     }
 
@@ -1304,6 +1397,15 @@ impl Column {
     pub fn take_positions(&self, positions: &[usize]) -> Self {
         let n = positions.len();
         if self.validity.all() {
+            if let Some(data) = self.take_cached_all_valid_float64_positions(positions) {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             let values = self
                 .take_all_valid_primitive_positions(positions)
                 .unwrap_or_else(|| {
@@ -1314,7 +1416,7 @@ impl Column {
                 });
             return Self {
                 dtype: self.dtype,
-                values,
+                values: ScalarValues::from_vec(values),
                 validity: ValidityMask::all_valid(n),
                 data: None,
             };
@@ -1331,10 +1433,22 @@ impl Column {
         }
         Self {
             dtype: self.dtype,
-            values,
+            values: ScalarValues::from_vec(values),
             validity: ValidityMask { words, len: n },
             data: None,
         }
+    }
+
+    fn take_cached_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Vec<f64>> {
+        let data = match (self.dtype, self.data.as_ref()?) {
+            (DType::Float64, ColumnData::Float64(data)) => data,
+            _ => return None,
+        };
+        let mut values = Vec::with_capacity(positions.len());
+        for &pos in positions {
+            values.push(data[pos]);
+        }
+        Some(values)
     }
 
     fn take_all_valid_primitive_positions(&self, positions: &[usize]) -> Option<Vec<Scalar>> {
@@ -1824,7 +1938,7 @@ impl Column {
     /// that change the internal storage shape.
     #[must_use]
     pub fn to_vec(&self) -> Vec<Scalar> {
-        self.values.clone()
+        self.values.to_vec()
     }
 
     /// Alias for [`to_vec`](Self::to_vec), matching `pd.Series.to_list()`.
@@ -1857,7 +1971,7 @@ impl Column {
     /// an owned copy rather than potentially a view.
     #[must_use]
     pub fn flatten(&self) -> Vec<Scalar> {
-        self.values.clone()
+        self.values.to_vec()
     }
 
     /// Convert to array, matching `np.asarray()`.
@@ -3281,7 +3395,7 @@ impl Column {
                 right: values.len(),
             });
         }
-        let mut out = self.values.clone();
+        let mut out = self.values.to_vec();
         for (&i, v) in indices.iter().zip(values) {
             if i >= out.len() {
                 return Err(ColumnError::LengthMismatch {
@@ -3462,7 +3576,7 @@ impl Column {
     ///
     /// Matches `pd.Series[::-1]` / `iloc[::-1]`. Dtype is preserved.
     pub fn reverse(&self) -> Result<Self, ColumnError> {
-        let mut values = self.values.clone();
+        let mut values = self.values.to_vec();
         values.reverse();
         Self::new(self.dtype, values)
     }
@@ -7958,7 +8072,7 @@ impl Column {
     ///
     /// Matches np.union1d().
     pub fn union1d(&self, other: &Self) -> Result<Self, ColumnError> {
-        let mut combined = self.values.clone();
+        let mut combined = self.values.to_vec();
         combined.extend(other.values().iter().cloned());
         let temp = Self::new(self.dtype, combined)?;
         temp.unique()
@@ -8345,7 +8459,9 @@ impl CrackIndex {
 mod tests {
     use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
-    use super::{ArithmeticOp, Column, ColumnData, ColumnError, SparseColumn, ValidityMask};
+    use super::{
+        ArithmeticOp, Column, ColumnData, ColumnError, ScalarValues, SparseColumn, ValidityMask,
+    };
 
     #[test]
     fn reindex_injects_missing_values() {
@@ -8480,6 +8596,63 @@ mod tests {
         .expect("validated materialization");
 
         assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn float64_take_positions_defers_scalar_materialization() {
+        let column = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.25),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(9.5),
+            ],
+        )
+        .expect("column should build");
+
+        let positions = [2, 0, 1, 2];
+        let gathered = column.take_positions(&positions);
+
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
+            "Float64 gather should defer scalar materialization"
+        );
+        if let ScalarValues::LazyAllValidFloat64 { data, values } = &gathered.values {
+            assert_eq!(
+                data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                vec![
+                    9.5f64.to_bits(),
+                    1.25f64.to_bits(),
+                    (-0.0f64).to_bits(),
+                    9.5f64.to_bits(),
+                ]
+            );
+            assert!(values.get().is_none());
+        }
+        assert_eq!(gathered.len(), positions.len());
+        assert_eq!(
+            gathered.validity(),
+            &ValidityMask::all_valid(positions.len())
+        );
+
+        let expected = Column::new(
+            DType::Float64,
+            positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect(),
+        )
+        .expect("validated materialization");
+
+        assert_eq!(gathered.values(), expected.values());
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
+            "Float64 gather should stay lazy after read"
+        );
+        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &gathered.values {
+            assert!(values.get().is_some());
+        }
         assert_eq!(gathered.validity(), expected.validity());
     }
 
@@ -9342,13 +9515,13 @@ mod tests {
     fn int_pow_stays_int64_and_negative_exponent_raises_3w0xn() {
         // br-frankenpandas-3w0xn: int ** int stays int64 (numpy/pandas: 2 ** 3
         // == 8, not 8.0), and a negative integer exponent raises.
-        let base =
-            Column::from_values(vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(10)])
-                .expect("base");
-        let exp =
-            Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(2)])
-                .expect("exp");
-        let pow = base.binary_numeric(&exp, ArithmeticOp::Pow).expect("int pow");
+        let base = Column::from_values(vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(10)])
+            .expect("base");
+        let exp = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(2)])
+            .expect("exp");
+        let pow = base
+            .binary_numeric(&exp, ArithmeticOp::Pow)
+            .expect("int pow");
         assert_eq!(pow.dtype(), DType::Int64);
         assert_eq!(pow.values()[0], Scalar::Int64(8));
         assert_eq!(pow.values()[1], Scalar::Int64(9));
@@ -14125,7 +14298,10 @@ mod tests {
             assert_eq!(gott, vec![20.0, 20.0, 40.0]);
 
             // around must agree with round (both banker's).
-            assert_eq!(col.around(0).unwrap().values(), col.round(0).unwrap().values());
+            assert_eq!(
+                col.around(0).unwrap().values(),
+                col.round(0).unwrap().values()
+            );
         }
 
         #[test]

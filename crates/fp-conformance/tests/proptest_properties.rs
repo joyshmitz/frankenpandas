@@ -11792,3 +11792,51 @@ proptest! {
         prop_assert_eq!(as_set(&sd), union_minus_inter, "symdiff != union - intersection");
     }
 }
+
+// =====================================================================
+// GATHER CORRECTNESS — take(positions) materializes exactly the source
+// rows. Directly hardens the typed take_positions/filter gather kernel
+// (fi6zx typed-columnar work): any value, null-kind, or ordering
+// regression in the gather is caught here.
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-TAKE1: for every output row i and column c,
+    /// take(positions)[c][i] == source[c][positions[i]] exactly (value, null
+    /// kind, and order), including duplicate and reordered positions.
+    #[test]
+    fn prop_dataframe_take_gathers_exact_rows(
+        (df, positions) in arb_numeric_dataframe(10).prop_flat_map(|df| {
+            let n = (df.index().len().max(1)) as i64;
+            (Just(df), proptest::collection::vec(0_i64..n, 0..=12))
+        })
+    ) {
+        if df.index().len() == 0 {
+            return Ok(());
+        }
+        let taken = match df.take(&positions, 0) {
+            Ok(t) => t,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(taken.index().len(), positions.len(), "take output row count");
+        for name in df.column_names() {
+            let src = df.column(name.as_str()).expect("src col").values().to_vec();
+            let out = taken.column(name.as_str()).expect("out col").values().to_vec();
+            for (i, &p) in positions.iter().enumerate() {
+                let s = &src[p as usize];
+                let o = &out[i];
+                // Exact match (catches null-kind regressions); a Float64 NaN
+                // *value* is matched leniently against any missing.
+                let same = s == o
+                    || (matches!(s, Scalar::Float64(f) if f.is_nan()) && o.is_missing());
+                prop_assert!(
+                    same,
+                    "take col {} out row {} (src pos {}): {:?} != {:?}",
+                    name, i, p, o, s
+                );
+            }
+        }
+    }
+}

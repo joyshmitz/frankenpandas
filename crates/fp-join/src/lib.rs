@@ -68,6 +68,11 @@ use std::{
     mem::size_of,
 };
 
+use bumpalo::{Bump, collections::Vec as BumpVec};
+use fp_columnar::{Column, ColumnError};
+use fp_frame::{FrameError, Series};
+use fp_index::{Index, IndexLabel};
+use fp_types::{Scalar, TypeError};
 // Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
 // output row order comes from probe-side iteration and per-key insertion-order
 // position Vecs, never from map iteration. So SipHash -> FxHash (rustc-hash,
@@ -75,12 +80,6 @@ use std::{
 // byte images is pathologically slow (cf. fp-index dedup 3-4x); FxHash collapses
 // the build+probe hashing cost on the merge hot path.
 use rustc_hash::{FxHashMap, FxHashSet};
-
-use bumpalo::{Bump, collections::Vec as BumpVec};
-use fp_columnar::{Column, ColumnError};
-use fp_frame::{FrameError, Series};
-use fp_index::{Index, IndexLabel};
-use fp_types::{Scalar, TypeError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,7 +451,7 @@ fn join_series_with_global_allocator(
 
     // Per br-frankenpandas-wp0n6: pandas Series.join preserves shared
     // index name (preserved when both operands agree, None when they differ).
-    let shared_name = if left.index().name() == right.index().name() {
+    let shared_name = if left.index().name().eq(&right.index().name()) {
         left.index().name().map(str::to_owned)
     } else {
         None
@@ -559,7 +558,7 @@ fn join_series_with_arena(
 
     // Per br-frankenpandas-ceces: pandas Series.join preserves shared
     // index name. Sister to join_series fix (wp0n6).
-    let shared_name = if left.index().name() == right.index().name() {
+    let shared_name = if left.index().name().eq(&right.index().name()) {
         left.index().name().map(str::to_owned)
     } else {
         None
@@ -707,6 +706,7 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
 /// shares `Vec`'s `Hash`/`Eq`/`Ord`/`Deref<[T]>` semantics, so the join result
 /// (key equality, grouping, output order) is bit-identical.
 type CompositeJoinKey = smallvec::SmallVec<[JoinKeyComponent; 1]>;
+type JoinPositionBucket = smallvec::SmallVec<[usize; 1]>;
 
 fn collect_join_key_columns<'a>(
     frame: &'a fp_frame::DataFrame,
@@ -1049,7 +1049,7 @@ pub fn merge_dataframes_on_with_options(
         join_type,
         JoinType::Inner | JoinType::Left | JoinType::Outer
     ) {
-        let mut m = FxHashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity_and_hasher(
+        let mut m = FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
             right_keys.len(),
             Default::default(),
         );
@@ -1062,7 +1062,7 @@ pub fn merge_dataframes_on_with_options(
     };
 
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = FxHashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity_and_hasher(
+        let mut m = FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
             left_keys.len(),
             Default::default(),
         );
@@ -2786,21 +2786,56 @@ mod tests {
         // k=[2,3], v_x=[20,30], v_y=[200,300].
         let idx: Vec<_> = (0..3).map(|i| (i as i64).into()).collect();
         let left = fp_frame::DataFrame::from_series(vec![
-            fp_frame::Series::from_values("k", idx.clone(), vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]).unwrap(),
-            fp_frame::Series::from_values("v", idx.clone(), vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]).unwrap(),
+            fp_frame::Series::from_values(
+                "k",
+                idx.clone(),
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "v",
+                idx.clone(),
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
         ])
         .unwrap();
         let right = fp_frame::DataFrame::from_series(vec![
-            fp_frame::Series::from_values("k", idx.clone(), vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]).unwrap(),
-            fp_frame::Series::from_values("v", idx, vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)]).unwrap(),
+            fp_frame::Series::from_values(
+                "k",
+                idx.clone(),
+                vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "v",
+                idx,
+                vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)],
+            )
+            .unwrap(),
         ])
         .unwrap();
         let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
 
-        assert_eq!(merged.columns.get("k").unwrap().values(), &[Scalar::Int64(2), Scalar::Int64(3)], "k");
-        assert_eq!(merged.columns.get("v_x").unwrap().values(), &[Scalar::Int64(20), Scalar::Int64(30)], "v_x");
-        assert_eq!(merged.columns.get("v_y").unwrap().values(), &[Scalar::Int64(200), Scalar::Int64(300)], "v_y");
-        assert!(merged.columns.get("v").is_none(), "bare 'v' should be suffixed away");
+        assert_eq!(
+            merged.columns.get("k").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)],
+            "k"
+        );
+        assert_eq!(
+            merged.columns.get("v_x").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)],
+            "v_x"
+        );
+        assert_eq!(
+            merged.columns.get("v_y").unwrap().values(),
+            &[Scalar::Int64(200), Scalar::Int64(300)],
+            "v_y"
+        );
+        assert!(
+            !merged.columns.contains_key("v"),
+            "bare 'v' should be suffixed away"
+        );
     }
 
     #[test]

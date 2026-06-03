@@ -9248,7 +9248,7 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.get_indexer_non_unique(targets)`.
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[String]) -> (Vec<isize>, Vec<usize>) {
-        let mut by_value = HashMap::<&String, Vec<usize>>::new();
+        let mut by_value = FxHashMap::<&String, Vec<usize>>::default();
         for (i, label) in self.labels.iter().enumerate() {
             by_value.entry(label).or_default().push(i);
         }
@@ -9273,7 +9273,7 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.get_indexer(targets)`.
     #[must_use]
     pub fn get_indexer(&self, targets: &[String]) -> Vec<isize> {
-        let mut positions = HashMap::<&String, isize>::new();
+        let mut positions = FxHashMap::<&String, isize>::default();
         for (i, label) in self.labels.iter().enumerate() {
             positions
                 .entry(label)
@@ -9451,7 +9451,7 @@ impl CategoricalIndex {
     #[must_use]
     pub fn value_counts(&self) -> Vec<(String, usize)> {
         let mut order = Vec::<&String>::new();
-        let mut counts = HashMap::<&String, usize>::new();
+        let mut counts = FxHashMap::<&String, usize>::default();
         for label in &self.labels {
             let entry = counts.entry(label).or_insert_with(|| {
                 order.push(label);
@@ -9471,7 +9471,7 @@ impl CategoricalIndex {
     /// the same categories list.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
-        let mut positions = HashMap::<&String, isize>::new();
+        let mut positions = FxHashMap::<&String, isize>::default();
         let mut uniques = Vec::<String>::new();
         let mut codes = Vec::with_capacity(self.labels.len());
         for label in &self.labels {
@@ -9531,8 +9531,8 @@ pub enum AlignMode {
     Outer,
 }
 
-fn index_position_groups(index: &Index) -> HashMap<IndexLabel, Vec<usize>> {
-    let mut groups: HashMap<IndexLabel, Vec<usize>> = HashMap::new();
+fn index_position_groups(index: &Index) -> FxHashMap<IndexLabel, Vec<usize>> {
+    let mut groups: FxHashMap<IndexLabel, Vec<usize>> = FxHashMap::default();
     for (pos, label) in index.labels().iter().enumerate() {
         groups.entry(label.clone()).or_default().push(pos);
     }
@@ -11886,7 +11886,8 @@ impl MultiIndex {
             return (vec![-1; target.len()], (0..target.len()).collect());
         }
 
-        let mut positions = HashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity(self.len());
+        let mut positions =
+            FxHashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity_and_hasher(self.len(), Default::default());
         for row in 0..self.len() {
             let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();
             positions.entry(key).or_default().push(row);
@@ -11982,8 +11983,10 @@ impl MultiIndex {
         if len == 0 {
             return out;
         }
-        let mut first_seen: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
-        let mut counts: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
+        let mut first_seen: FxHashMap<Vec<IndexLabel>, usize> =
+            FxHashMap::with_capacity_and_hasher(len, Default::default());
+        let mut counts: FxHashMap<Vec<IndexLabel>, usize> =
+            FxHashMap::with_capacity_and_hasher(len, Default::default());
 
         for row in 0..len {
             let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();

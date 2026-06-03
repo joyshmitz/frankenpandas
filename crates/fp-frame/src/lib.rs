@@ -5977,6 +5977,16 @@ impl Series {
         };
         let effective_lower = lower.filter(|v| !v.is_nan());
         let effective_upper = upper.filter(|v| !v.is_nan());
+        // Per pandas GH 2747: when both scalar bounds are present and reversed
+        // (lower > upper), pandas swaps them, so clip(7, 3) == clip(3, 7) and
+        // returns [3, 5, 7] for [1, 5, 9] (NOT numpy's collapse-to-upper
+        // [3, 3, 3]). NaN bounds are already normalized to None above, so they
+        // never participate in the swap (clip(7, NaN) stays a one-sided clip).
+        // Verified vs live pandas 2.2.3, including Int64 dtype preservation.
+        let (effective_lower, effective_upper) = match (effective_lower, effective_upper) {
+            (Some(lo), Some(hi)) if lo > hi => (Some(hi), Some(lo)),
+            other => other,
+        };
         let has_nulls = self.column.values().iter().any(|v| v.is_missing());
         let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
             && is_integer_bound(lower)
@@ -49280,6 +49290,55 @@ mod tests {
         assert_eq!(clipped.values()[0], Scalar::Int64(2));
         assert_eq!(clipped.values()[1], Scalar::Int64(2));
         assert_eq!(clipped.values()[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_clip_reversed_scalar_bounds_swap_gh2747() {
+        // Per pandas GH 2747: scalar lower > upper is swapped, so clip(7, 3)
+        // behaves as clip(3, 7). Verified vs live pandas 2.2.3:
+        // pd.Series([1,5,9]).clip(7, 3) -> [3, 5, 7] (NOT numpy's [3, 3, 3]).
+        let s = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(7.0), Some(3.0)).unwrap();
+        assert_eq!(clipped.values()[0], Scalar::Float64(3.0));
+        assert_eq!(clipped.values()[1], Scalar::Float64(5.0));
+        assert_eq!(clipped.values()[2], Scalar::Float64(9.0_f64.min(7.0)));
+        assert_eq!(clipped.values()[2], Scalar::Float64(7.0));
+
+        // Int64 dtype is preserved through the swap (pandas keeps int64).
+        let si = Series::from_values(
+            "i",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(9)],
+        )
+        .unwrap();
+        let ci = si.clip(Some(7.0), Some(3.0)).unwrap();
+        assert_eq!(ci.values()[0], Scalar::Int64(3));
+        assert_eq!(ci.values()[1], Scalar::Int64(5));
+        assert_eq!(ci.values()[2], Scalar::Int64(7));
+
+        // A NaN bound is normalized to None and must NOT trigger a swap:
+        // clip(7, NaN) stays a one-sided lower clip -> [7, 7, 9].
+        let cn = s.clip(Some(7.0), Some(f64::NAN)).unwrap();
+        assert_eq!(cn.values()[0], Scalar::Float64(7.0));
+        assert_eq!(cn.values()[1], Scalar::Float64(7.0));
+        assert_eq!(cn.values()[2], Scalar::Float64(9.0));
     }
 
     #[test]

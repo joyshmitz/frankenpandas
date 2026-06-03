@@ -11648,3 +11648,95 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — abs invariants, median/quantile cross-path,
+// nlargest vs sorted-desc cross-path. Each ties an op to either its own
+// algebraic invariant or a second independent code path that must agree.
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-ABS1: abs is non-negative and idempotent, preserves length and null
+    /// positions, and equals the scalar magnitude elementwise.
+    #[test]
+    fn prop_abs_is_nonneg_idempotent_magnitude(series in arb_numeric_series("absmr", 12)) {
+        let absd = match series.abs() { Ok(s) => s, Err(_) => return Ok(()) };
+        let inp = series.column().values().to_vec();
+        let out = absd.column().values().to_vec();
+        prop_assert_eq!(out.len(), inp.len(), "abs changed length");
+        for i in 0..inp.len() {
+            prop_assert_eq!(out[i].is_missing(), inp[i].is_missing(), "abs changed null-ness at {}", i);
+            if let Some(o) = mm_f64(&out[i]) {
+                prop_assert!(o >= -1e-12, "abs[{}]={} is negative", i, o);
+                if let Some(x) = mm_f64(&inp[i]) {
+                    let tol = 1e-9 * (1.0 + x.abs());
+                    prop_assert!((o - x.abs()).abs() <= tol, "abs[{}]={} != |{}|", i, o, x);
+                }
+            }
+        }
+        // Idempotence: abs of a non-negative series is itself.
+        let again = match absd.abs() { Ok(s) => s, Err(_) => return Ok(()) };
+        let av = again.column().values();
+        for i in 0..out.len() {
+            match (mm_f64(&out[i]), mm_f64(&av[i])) {
+                (Some(a), Some(b)) => prop_assert!((a - b).abs() <= 1e-9 * (1.0 + a.abs()), "abs not idempotent at {}", i),
+                (None, None) => {}
+                _ => prop_assert!(false, "abs idempotence null mismatch at {}", i),
+            }
+        }
+    }
+
+    /// MR-MQ1: `median` and `quantile(0.5)` are independent implementations of
+    /// the same statistic and must agree (both drop NaN, linear interpolation).
+    #[test]
+    fn prop_median_equals_quantile_half(series in arb_numeric_series("medq", 12)) {
+        let med = match series.median() { Ok(s) => s, Err(_) => return Ok(()) };
+        let q50 = match series.quantile(0.5) { Ok(s) => s, Err(_) => return Ok(()) };
+        match (mm_f64(&med), mm_f64(&q50)) {
+            (Some(a), Some(b)) => {
+                let tol = 1e-9 * (1.0 + a.abs().max(b.abs()));
+                prop_assert!((a - b).abs() <= tol, "median {} != quantile(0.5) {}", a, b);
+            }
+            (None, None) => {}
+            _ => prop_assert!(false, "median/quantile(0.5) missingness disagree: {:?} vs {:?}", med, q50),
+        }
+    }
+
+    /// MR-NL1: on a no-null, no-tie series, `nlargest(k)` equals the first k
+    /// values of a descending sort (two independent selection paths), and each
+    /// selected value is >= every value not selected.
+    #[test]
+    fn prop_nlargest_matches_sorted_desc(series in arb_unique_numeric_series("nlk", 14)) {
+        let vals = series.column().values();
+        if vals.is_empty() || vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let nums: Vec<f64> = vals.iter().filter_map(mm_f64).collect();
+        if nums.len() != vals.len() {
+            return Ok(());
+        }
+        // Skip if ties (nlargest vs sort tie-break order may legitimately differ).
+        let mut sorted = nums.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Ok(());
+        }
+        let k = (nums.len() / 2).max(1);
+        let nl = match series.nlargest(k) { Ok(s) => s, Err(_) => return Ok(()) };
+        let desc = match series.sort_values(false) { Ok(s) => s, Err(_) => return Ok(()) };
+        let nlv: Vec<f64> = nl.column().values().iter().filter_map(mm_f64).collect();
+        let topk: Vec<f64> = desc.column().values().iter().take(k).filter_map(mm_f64).collect();
+        prop_assert_eq!(nlv.len(), k, "nlargest returned {} values, expected {}", nlv.len(), k);
+        prop_assert_eq!(topk.len(), k);
+        for i in 0..k {
+            prop_assert!((nlv[i] - topk[i]).abs() < 1e-9, "nlargest[{}]={} != sorted-desc[{}]={}", i, nlv[i], i, topk[i]);
+        }
+        // The smallest selected value dominates every non-selected value.
+        let threshold = nlv.iter().cloned().fold(f64::INFINITY, f64::min);
+        for &v in desc.column().values().iter().skip(k).filter_map(mm_f64).collect::<Vec<_>>().iter() {
+            prop_assert!(threshold >= v - 1e-9, "non-selected {} exceeds nlargest threshold {}", v, threshold);
+        }
+    }
+}

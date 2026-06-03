@@ -12004,9 +12004,9 @@ impl MultiIndex {
                 // First occurrence kept; a key already seen earlier is a dup.
                 let mut seen: FxHashSet<Vec<IndexLabel>> =
                     FxHashSet::with_capacity_and_hasher(len, Default::default());
-                for row in 0..len {
+                for (row, slot) in out.iter_mut().enumerate() {
                     if !seen.insert(key_at(row)) {
-                        out[row] = true;
+                        *slot = true;
                     }
                 }
             }
@@ -12028,9 +12028,9 @@ impl MultiIndex {
                 for row in 0..len {
                     *counts.entry(key_at(row)).or_insert(0) += 1;
                 }
-                for row in 0..len {
+                for (row, slot) in out.iter_mut().enumerate() {
                     if counts[&key_at(row)] > 1 {
-                        out[row] = true;
+                        *slot = true;
                     }
                 }
             }

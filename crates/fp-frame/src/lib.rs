@@ -33163,8 +33163,12 @@ impl DataFrame {
         }
         drop(idx_map);
 
-        // Sort by count descending
-        key_counts.sort_by_key(|entry| std::cmp::Reverse(entry.2));
+        // Sort by count descending; pandas breaks count ties by the row's
+        // composite key ASCENDING (numeric-aware), NOT by first occurrence —
+        // verified vs live pandas 2.2.3: value_counts of rows [10,10,2,2,5]
+        // orders (2)=2, (10)=2, (5)=1. composite_key_cmp gives the same
+        // numeric tuple ordering used by groupby key sorting.
+        key_counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| composite_key_cmp(&a.0, &b.0)));
 
         let labels: Vec<IndexLabel> = key_counts
             .iter()

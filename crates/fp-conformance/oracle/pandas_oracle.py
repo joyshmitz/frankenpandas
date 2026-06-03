@@ -3688,18 +3688,11 @@ def op_dataframe_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
             return str(int(v)) if v == int(v) else repr(v)
         return str(v)
 
-    rows = [tuple(frame.iloc[i].tolist()) for i in range(len(frame))]
-    first_occ: dict[tuple, int] = {}
-    for i, r in enumerate(rows):
-        first_occ.setdefault(r, i)
-
+    # Keep pandas' native value_counts ordering: count descending, with count
+    # ties broken by the composite key ASCENDING (numeric-aware). FP now matches
+    # this (composite_key_cmp); previously the oracle re-sorted to FP's
+    # first-occurrence tie order, masking the divergence.
     items = list(out.items())
-    items.sort(
-        key=lambda it: (
-            -it[1],
-            first_occ.get(it[0] if isinstance(it[0], tuple) else (it[0],), len(rows)),
-        )
-    )
 
     index_labels = [
         {

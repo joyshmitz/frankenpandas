@@ -479,7 +479,11 @@ fn python_slice_chars(
     let n = chars.len() as i64;
     let step = step.unwrap_or(1);
     debug_assert_ne!(step, 0);
-    let (lower, upper) = if step < 0 { (-1_i64, n - 1) } else { (0_i64, n) };
+    let (lower, upper) = if step < 0 {
+        (-1_i64, n - 1)
+    } else {
+        (0_i64, n)
+    };
     let clamp = |idx: i64| -> i64 {
         if idx < 0 {
             let shifted = idx + n;
@@ -2167,13 +2171,16 @@ fn arithmetic_op_name(op: ArithmeticOp) -> &'static str {
 }
 
 fn semantic_index_identity(role: &str, index: &Index) -> SemanticIndexIdentity {
-    let fingerprint_payload = serde_json::to_vec(index.labels())
-        .unwrap_or_else(|_| format!("{:?}", index.labels()).into_bytes());
+    let fingerprint = index.semantic_labels_fingerprint_with(|labels| {
+        let fingerprint_payload =
+            serde_json::to_vec(labels).unwrap_or_else(|_| format!("{labels:?}").into_bytes());
+        fp_runtime::semantic_fingerprint_bytes(&fingerprint_payload)
+    });
     SemanticIndexIdentity {
         role: role.to_owned(),
         len: index.len(),
         has_duplicates: index.has_duplicates(),
-        fingerprint: fp_runtime::semantic_fingerprint_bytes(&fingerprint_payload),
+        fingerprint,
     }
 }
 
@@ -47832,7 +47839,11 @@ mod tests {
         let left = Series::from_values(
             "x",
             vec!["x".into(), "y".into(), "z".into()],
-            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
         )
         .unwrap();
         let right = Series::from_values(
@@ -47853,7 +47864,12 @@ mod tests {
         );
         assert_eq!(
             result.values(),
-            &[Scalar::Int64(40), Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(3)]
+            &[
+                Scalar::Int64(40),
+                Scalar::Int64(1),
+                Scalar::Int64(20),
+                Scalar::Int64(3)
+            ]
         );
     }
 
@@ -47864,7 +47880,11 @@ mod tests {
         let left = Series::from_values(
             "x",
             vec![3_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
         )
         .unwrap();
         let right = Series::from_values(
@@ -58341,16 +58361,21 @@ mod tests {
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Utf8("abcdef".into()),
-                Scalar::Utf8("xy".into()),
-            ],
+            vec![Scalar::Utf8("abcdef".into()), Scalar::Utf8("xy".into())],
         )
         .unwrap();
         let check = |start, stop, step, a: &str, b: &str| {
             let r = s.str().slice(start, stop, step).unwrap();
-            assert_eq!(r.values()[0], Scalar::Utf8(a.into()), "abcdef {start:?}:{stop:?}:{step:?}");
-            assert_eq!(r.values()[1], Scalar::Utf8(b.into()), "xy {start:?}:{stop:?}:{step:?}");
+            assert_eq!(
+                r.values()[0],
+                Scalar::Utf8(a.into()),
+                "abcdef {start:?}:{stop:?}:{step:?}"
+            );
+            assert_eq!(
+                r.values()[1],
+                Scalar::Utf8(b.into()),
+                "xy {start:?}:{stop:?}:{step:?}"
+            );
         };
         check(Some(-3), None, None, "def", "xy"); // negative start
         check(Some(0), Some(-1), None, "abcde", "x"); // negative stop
@@ -65462,7 +65487,11 @@ mod tests {
         let r = s1.div_fill(&s2, 1.0).unwrap();
         assert_eq!(r.values()[0], Scalar::Float64(f64::INFINITY)); // 5/0
         assert_eq!(r.values()[1], Scalar::Float64(f64::NEG_INFINITY)); // -5/0
-        assert!(r.values()[2].is_missing(), "0/0 -> NaN, got {:?}", r.values()[2]);
+        assert!(
+            r.values()[2].is_missing(),
+            "0/0 -> NaN, got {:?}",
+            r.values()[2]
+        );
         // fill path: left missing -> fill(1) / 0 -> +inf
         assert_eq!(r.values()[3], Scalar::Float64(f64::INFINITY));
     }
@@ -76777,10 +76806,7 @@ mod tests {
         // live pandas 2.2.3. (Sibling cluster of br 5btt1.)
         let df = DataFrame::from_dict(
             &["a"],
-            vec![(
-                "a",
-                vec![Scalar::Float64(-7.0), Scalar::Float64(7.0)],
-            )],
+            vec![("a", vec![Scalar::Float64(-7.0), Scalar::Float64(7.0)])],
         )
         .unwrap();
 
@@ -76801,7 +76827,10 @@ mod tests {
 
         // div by zero -> +/-inf (sign of numerator).
         let d = df.div_scalar(0.0).unwrap();
-        assert_eq!(d.columns()["a"].values()[0], Scalar::Float64(f64::NEG_INFINITY));
+        assert_eq!(
+            d.columns()["a"].values()[0],
+            Scalar::Float64(f64::NEG_INFINITY)
+        );
         assert_eq!(d.columns()["a"].values()[1], Scalar::Float64(f64::INFINITY));
     }
 
@@ -82741,12 +82770,8 @@ mod tests {
     fn test_str_slice_replace_negative() {
         // pandas str.slice_replace supports Python negative start/stop.
         // Verified vs live pandas 2.2.3 on "abcde".
-        let s = Series::from_values(
-            "w",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("abcde".into())],
-        )
-        .unwrap();
+        let s = Series::from_values("w", vec![0_i64.into()], vec![Scalar::Utf8("abcde".into())])
+            .unwrap();
         let check = |start, stop, repl: &str, expect: &str| {
             let r = s.str().slice_replace(start, stop, repl).unwrap();
             assert_eq!(
@@ -104942,13 +104967,16 @@ mod tests {
         assert_eq!(with_both.index().name(), Some("ax"));
     }
 
-    // ── DataFrame Bool-column numeric ops parity (br-frankenpandas-fcf80) ─
+    // ── DataFrame Bool-column ops parity (br-frankenpandas-fcf80) ─
     //
-    // pandas treats Bool as numeric in cumsum/cumprod/cummax/cummin/diff/
-    // shift/abs (casts to Int64). The Series-level ops already handle Bool
-    // correctly; the DataFrame layer's apply_per_column gate previously
-    // skipped Bool columns as a no-op. These tests lock in the fixed
-    // delegation.
+    // pandas 2.2.3 Bool-column behavior (NOT a blanket "cast to Int64"):
+    //   cumsum/cumprod -> Int64   (numeric accumulation)
+    //   cummax/cummin  -> Bool    (running extrema stay boolean)
+    //   diff           -> Bool    (XOR: cur != prev; br-frankenpandas-55smx)
+    //   shift/abs      -> Bool    (dtype preserved)
+    // The Series-level ops handle Bool correctly; the DataFrame layer's
+    // apply_per_column gate previously skipped Bool columns as a no-op. These
+    // tests lock in the fixed delegation.
 
     fn fcf80_bool_df() -> DataFrame {
         let mut cols = BTreeMap::new();
@@ -106680,7 +106708,12 @@ mod tests {
             Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8(v.into())]).unwrap()
         };
         assert_eq!(
-            mk("ab").str().pad(5, "both", '*').unwrap().column().values()[0],
+            mk("ab")
+                .str()
+                .pad(5, "both", '*')
+                .unwrap()
+                .column()
+                .values()[0],
             Scalar::Utf8("**ab*".into())
         );
         assert_eq!(
@@ -106688,7 +106721,12 @@ mod tests {
             Scalar::Utf8("*a**".into())
         );
         assert_eq!(
-            mk("ab").str().pad(6, "both", '*').unwrap().column().values()[0],
+            mk("ab")
+                .str()
+                .pad(6, "both", '*')
+                .unwrap()
+                .column()
+                .values()[0],
             Scalar::Utf8("**ab**".into())
         );
         // center() delegates to pad(both) and must agree.

@@ -1,0 +1,12 @@
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.

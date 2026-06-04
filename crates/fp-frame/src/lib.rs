@@ -42846,6 +42846,50 @@ impl DataFrameGroupBy<'_> {
             labels.push(self.group_key_label(first_row));
         }
 
+        // Dense single-pass accumulation precompute: a single all-valid Int64
+        // grouping key (bounded range) yields gid-per-row + a group_order→gid
+        // map, letting sum/mean/count over all-valid Float64 value columns
+        // accumulate in one hash-free, clone-free pass per column. Bit-identical
+        // to the per-group gather: nansum/nanmean over an all-valid Float64
+        // group is a row-order left-fold (sum, sum/count), exactly what the
+        // dense accumulator reproduces; count of an all-valid column is the
+        // group size. Other funcs / non-Float64 / multi-col keys fall through.
+        let dense: Option<(Vec<usize>, Vec<usize>, usize)> =
+            if matches!(func_name, "sum" | "mean" | "count") && self.by.len() == 1 {
+                self.df.columns[&self.by[0]]
+                    .as_i64_slice()
+                    .and_then(|keys| {
+                        i64_dense_histogram_range(keys).map(|(min, range)| {
+                            let mut gid_table = vec![usize::MAX; range];
+                            let mut gid_per_row = vec![0usize; keys.len()];
+                            let mut ngroups = 0usize;
+                            for (row, &k) in keys.iter().enumerate() {
+                                let slot = (k as i128 - min as i128) as usize;
+                                let g = if gid_table[slot] == usize::MAX {
+                                    gid_table[slot] = ngroups;
+                                    ngroups += 1;
+                                    ngroups - 1
+                                } else {
+                                    gid_table[slot]
+                                };
+                                gid_per_row[row] = g;
+                            }
+                            let go_gid: Vec<usize> = group_order
+                                .iter()
+                                .map(|gk| match gk[0] {
+                                    ScalarKey::Int64(v) => {
+                                        gid_table[(v as i128 - min as i128) as usize]
+                                    }
+                                    _ => unreachable!("single Int64 key"),
+                                })
+                                .collect();
+                            (go_gid, gid_per_row, ngroups)
+                        })
+                    })
+            } else {
+                None
+            };
+
         // Aggregate each value column
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
@@ -42853,6 +42897,47 @@ impl DataFrameGroupBy<'_> {
         for col_name in &value_cols {
             let col = &self.df.columns[col_name];
             let mut agg_vals = Vec::with_capacity(n_groups);
+
+            // Dense path for all-valid Float64 value columns.
+            if let Some((go_gid, gid_per_row, ngroups)) = &dense
+                && let Some(vals) = col.as_f64_slice()
+            {
+                let ng = *ngroups;
+                match func_name {
+                    "sum" => {
+                        let mut acc = vec![0.0_f64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            acc[gid_per_row[row]] += v;
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
+                    }
+                    "count" => {
+                        let mut cnt = vec![0i64; ng];
+                        for &g in gid_per_row {
+                            cnt[g] += 1;
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cnt[g])));
+                    }
+                    _ => {
+                        // mean
+                        let mut acc = vec![0.0_f64; ng];
+                        let mut cnt = vec![0u64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            acc[g] += v;
+                            cnt[g] += 1;
+                        }
+                        agg_vals.extend(
+                            go_gid
+                                .iter()
+                                .map(|&g| Scalar::Float64(acc[g] / cnt[g] as f64)),
+                        );
+                    }
+                }
+                result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+                col_order.push(col_name.clone());
+                continue;
+            }
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
@@ -115458,6 +115543,196 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dataframe_groupby_dense_float_agg_matches_reference() {
+        // df.groupby([int]).{sum,mean,count} over all-valid Float64 value
+        // columns exercises the dense single-pass accumulation path. Must be
+        // bit-identical to a row-order left-fold reference (sorted groups).
+        let mut state: u64 = 0x9216_D5D9_8979_FB1B;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 200) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 8) as i64 - 4).collect();
+            let vals: Vec<f64> = (0..n).map(|_| (next() % 1000) as f64 / 4.0).collect();
+            let df = DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    ("k", keys.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("v", vals.iter().map(|&v| Scalar::Float64(v)).collect()),
+                ],
+            )
+            .unwrap();
+
+            let mut distinct: Vec<i64> = keys.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            // Row-order left-fold sum/count per sorted group.
+            let group_f64 = |g: i64| -> Vec<f64> {
+                keys.iter()
+                    .zip(&vals)
+                    .filter(|(k, _)| **k == g)
+                    .map(|(_, &v)| v)
+                    .collect()
+            };
+            let want_sum: Vec<f64> = distinct
+                .iter()
+                .map(|&g| group_f64(g).iter().sum())
+                .collect();
+            let want_cnt: Vec<i64> = distinct
+                .iter()
+                .map(|&g| group_f64(g).len() as i64)
+                .collect();
+            let want_mean: Vec<f64> = distinct
+                .iter()
+                .map(|&g| {
+                    let gv = group_f64(g);
+                    gv.iter().sum::<f64>() / gv.len() as f64
+                })
+                .collect();
+
+            let gb = df.groupby(&["k"]).unwrap();
+            let labels_of = |res: &DataFrame| -> Vec<i64> {
+                res.index()
+                    .labels()
+                    .iter()
+                    .map(|l| match l {
+                        IndexLabel::Int64(v) => *v,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect()
+            };
+            let f64_of = |res: &DataFrame| -> Vec<f64> {
+                res.column("v")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => *x,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect()
+            };
+            let i64_of = |res: &DataFrame| -> Vec<i64> {
+                res.column("v")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect()
+            };
+
+            let s = gb.sum().unwrap();
+            assert_eq!(labels_of(&s), distinct, "trial {trial} sum labels");
+            for (g, w) in f64_of(&s).iter().zip(&want_sum) {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "trial {trial} sum (left-fold must match)"
+                );
+            }
+            let m = gb.mean().unwrap();
+            for (g, w) in f64_of(&m).iter().zip(&want_mean) {
+                assert!((g - w).abs() < 1e-9, "trial {trial} mean");
+            }
+            assert_eq!(
+                i64_of(&gb.count().unwrap()),
+                want_cnt,
+                "trial {trial} count"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_groupby_dense_sum_timing() {
+        use std::time::Instant;
+        let rows = 2_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x6C44_5202_8A1E_3FB7;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let keys: Vec<i64> = (0..rows).map(|_| (next() % 10_000) as i64).collect();
+        let v0: Vec<f64> = (0..rows).map(|_| (next() % 1000) as f64).collect();
+        let v1: Vec<f64> = (0..rows).map(|_| (next() % 1000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..rows as i64).map(IndexLabel::Int64).collect();
+        let mk = || {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert("k".to_owned(), Column::from_i64_values(keys.clone()));
+            cols.insert("v0".to_owned(), Column::from_f64_values(v0.clone()));
+            cols.insert("v1".to_owned(), Column::from_f64_values(v1.clone()));
+            DataFrame::new_with_column_order(
+                Index::new(labels.clone()),
+                cols,
+                vec!["k".to_owned(), "v0".to_owned(), "v1".to_owned()],
+            )
+            .unwrap()
+        };
+
+        // NEW: dense-agg df.groupby.sum (this commit).
+        let df = mk();
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= df.groupby(&["k"]).unwrap().sum().unwrap().shape().0;
+        }
+        let dense = t0.elapsed();
+
+        // OLD agg: dense grouping (gid) + per-group Scalar gather + nansum —
+        // the path this commit replaces, isolating the aggregation lever.
+        let (dmin, drange) = {
+            let mut mn = keys[0];
+            let mut mx = keys[0];
+            for &k in &keys {
+                mn = mn.min(k);
+                mx = mx.max(k);
+            }
+            (mn, (mx - mn + 1) as usize)
+        };
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let mut gid_table = vec![usize::MAX; drange];
+            let mut positions: Vec<Vec<usize>> = Vec::new();
+            for (row, &k) in keys.iter().enumerate() {
+                let slot = (k - dmin) as usize;
+                let g = if gid_table[slot] == usize::MAX {
+                    gid_table[slot] = positions.len();
+                    positions.push(Vec::new());
+                    positions.len() - 1
+                } else {
+                    gid_table[slot]
+                };
+                positions[g].push(row);
+            }
+            let mut s = 0usize;
+            for col in [&df.columns["v0"], &df.columns["v1"]] {
+                for pos in &positions {
+                    let gvals: Vec<Scalar> = pos.iter().map(|&i| col.values()[i].clone()).collect();
+                    let _ = fp_types::nansum(&gvals);
+                    s += 1;
+                }
+            }
+            chk2 ^= s;
+        }
+        let scalar = t1.elapsed();
+        eprintln!(
+            "df.groupby([int]).sum agg {rows}x2 f64 keys=10k x{iters}: dense={dense:?} old_gather_nansum={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+            scalar.as_secs_f64() / dense.as_secs_f64()
+        );
     }
 
     #[test]

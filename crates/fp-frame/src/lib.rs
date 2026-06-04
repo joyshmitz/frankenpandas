@@ -46787,12 +46787,37 @@ mod tests {
         if actual_normalized.ends_with('\n') {
             actual_normalized.pop();
         }
+        // fp-index's Index Debug includes `label_identity: <n>`, a runtime-only
+        // global atomic counter (non-deterministic across test execution order).
+        // Strip it from both sides so Index-Debug goldens stay stable. Per
+        // br-frankenpandas-stale-golden-frame-2riql.
+        let actual_normalized = strip_volatile_label_identity(&actual_normalized);
+        let expected = strip_volatile_label_identity(&expected);
         assert_eq!(
             actual_normalized,
             expected,
             "golden mismatch for {}",
             golden_path.display()
         );
+    }
+
+    /// Remove every `label_identity: <digits>, ` occurrence (fp-index Index
+    /// Debug's runtime-only counter) so golden comparisons are deterministic.
+    fn strip_volatile_label_identity(s: &str) -> String {
+        const MARKER: &str = "label_identity: ";
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(pos) = rest.find(MARKER) {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + MARKER.len()..];
+            let digits_end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            let tail = &after[digits_end..];
+            rest = tail.strip_prefix(", ").unwrap_or(tail);
+        }
+        out.push_str(rest);
+        out
     }
 
     fn expect_float64(value: &Scalar) -> f64 {

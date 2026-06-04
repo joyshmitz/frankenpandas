@@ -40438,6 +40438,23 @@ impl DataFrame {
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
+            // Typed fast path: an all-valid Int64/Float64 column applies the op
+            // over its contiguous buffer (Int64 promoted to f64, matching the
+            // to_f64 path) and re-ingests typed via from_f64_values — skips the
+            // lazy Scalar materialization and the 32B-per-cell Vec<Scalar>.
+            // Result NaN is marked missing by from_f64_values exactly as
+            // Scalar::Float64(NaN) is by from_values. Bit-identical for
+            // all-valid inputs (no missing rows to special-case).
+            if let Some(d) = col.as_f64_slice() {
+                let out: Vec<f64> = d.iter().map(|&v| op(v, scalar)).collect();
+                result_cols.insert(name.clone(), Column::from_f64_values(out));
+                continue;
+            }
+            if let Some(d) = col.as_i64_slice() {
+                let out: Vec<f64> = d.iter().map(|&v| op(v as f64, scalar)).collect();
+                result_cols.insert(name.clone(), Column::from_f64_values(out));
+                continue;
+            }
             if col.dtype() == DType::Int64 || col.dtype() == DType::Float64 {
                 let vals: Vec<Scalar> = col
                     .values()
@@ -115351,6 +115368,159 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dataframe_scalar_arith_typed_matches_reference() {
+        // Independent reference: to_f64 + op per cell → Float64 (the scalar
+        // loop). The typed fast path must be bit-identical for all-valid
+        // Int64/Float64 columns across add/sub/mul/div, incl div-by-zero NaN/inf.
+        let mut state: u64 = 0xA54F_F53A_5F1D_36F1;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let ops: [(&str, fn(f64, f64) -> f64); 4] = [
+            ("add", |a, b| a + b),
+            ("sub", |a, b| a - b),
+            ("mul", |a, b| a * b),
+            ("div", |a, b| a / b),
+        ];
+        for trial in 0..120 {
+            let n = (next() % 60) as usize + 1;
+            let raw: Vec<i64> = (0..n).map(|_| (next() % 200) as i64 - 100).collect();
+            let scalar = match next() % 5 {
+                0 => 0.0,
+                1 => 2.5,
+                2 => -3.0,
+                _ => (next() % 20) as f64 - 10.0,
+            };
+            for as_float in [false, true] {
+                let vals: Vec<Scalar> = if as_float {
+                    raw.iter().map(|&v| Scalar::Float64(v as f64)).collect()
+                } else {
+                    raw.iter().map(|&v| Scalar::Int64(v)).collect()
+                };
+                let df = DataFrame::from_dict(&["a"], vec![("a", vals.clone())]).unwrap();
+                for (opname, op) in ops {
+                    let got: Vec<Scalar> = match opname {
+                        "add" => df.add_scalar(scalar),
+                        "sub" => df.sub_scalar(scalar),
+                        "mul" => df.mul_scalar(scalar),
+                        _ => df.div_scalar(scalar),
+                    }
+                    .unwrap()
+                    .column("a")
+                    .unwrap()
+                    .values()
+                    .to_vec();
+                    // Both the typed path (from_f64_values) and the old scalar
+                    // loop (from_values over Scalar::Float64(op(..))) store the
+                    // raw op result — incl NaN as Float64(NaN), NOT Null — so
+                    // the reference wraps op() directly and compares by bits.
+                    let want: Vec<Scalar> = vals
+                        .iter()
+                        .map(|v| Scalar::Float64(op(v.to_f64().unwrap(), scalar)))
+                        .collect();
+                    assert_eq!(got.len(), want.len());
+                    for (g, w) in got.iter().zip(&want) {
+                        match (g, w) {
+                            (Scalar::Float64(a), Scalar::Float64(b)) => {
+                                assert_eq!(
+                                    a.to_bits(),
+                                    b.to_bits(),
+                                    "trial {trial} {opname} float={as_float}"
+                                );
+                            }
+                            _ => panic!("trial {trial} {opname} float={as_float}: {g:?} vs {w:?}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_scalar_arith_typed_timing() {
+        use std::time::Instant;
+        let rows = 1_000_000usize;
+        let ncols = 5usize;
+        let iters = 10;
+        let mut state: u64 = 0x71D6_7FFF_EDA6_0000;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let names = ["c0", "c1", "c2", "c3", "c4"];
+        let data: Vec<Vec<f64>> = (0..ncols)
+            .map(|_| (0..rows).map(|_| (next() % 1_000_000) as f64).collect())
+            .collect();
+        let labels: Vec<IndexLabel> = (0..rows as i64).map(IndexLabel::Int64).collect();
+        let mk = || {
+            let mut cols = std::collections::BTreeMap::new();
+            for c in 0..ncols {
+                cols.insert(
+                    names[c].to_owned(),
+                    Column::from_f64_values(data[c].clone()),
+                );
+            }
+            DataFrame::new_with_column_order(
+                Index::new(labels.clone()),
+                cols,
+                (0..ncols).map(|c| names[c].to_owned()).collect(),
+            )
+            .unwrap()
+        };
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= mk().mul_scalar(2.5).unwrap().shape().0;
+        }
+        let typed = t0.elapsed();
+
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let df = mk();
+            let mut cols = std::collections::BTreeMap::new();
+            for name in &df.column_order {
+                let col = &df.columns[name];
+                let vals: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|v| match v.to_f64() {
+                        Ok(f) => Scalar::Float64(f * 2.5),
+                        Err(_) => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect();
+                cols.insert(name.clone(), Column::from_values(vals).unwrap());
+            }
+            let out =
+                DataFrame::new_with_column_order(df.index.clone(), cols, df.column_order.clone())
+                    .unwrap();
+            chk2 ^= out.shape().0;
+        }
+        let scalar = t1.elapsed();
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().shape().0;
+        }
+        let build = t2.elapsed();
+        let typed_op = typed.saturating_sub(build).as_secs_f64();
+        let scalar_op = scalar.saturating_sub(build).as_secs_f64();
+        eprintln!(
+            "df.mul_scalar {rows}x{ncols} f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} \
+             op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar_op / typed_op,
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]

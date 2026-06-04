@@ -42390,6 +42390,44 @@ impl DataFrameGroupBy<'_> {
     /// Internal: build groups as (composite_key -> Vec<row_index>).
     fn build_groups(&self) -> (Vec<GroupKey<'_>>, GroupMap<'_>) {
         let n = self.df.len();
+
+        // Dense fast path: a single all-valid Int64 grouping column (bounded
+        // range) assigns group ids via a direct-address table — no per-row
+        // Vec<ScalarKey> heap allocation and no per-row hashing (the dominant
+        // build_groups cost). All-valid ⇒ no missing keys, so dropna does not
+        // change the result. Output is bit-identical: same first-seen
+        // group_order and groups map, then the same optional sort.
+        if self.by.len() == 1
+            && let Some(keys) = self.df.columns[&self.by[0]].as_i64_slice()
+            && let Some((min, range)) = i64_dense_histogram_range(keys)
+        {
+            let mut gid = vec![usize::MAX; range];
+            let mut group_order: Vec<GroupKey<'_>> = Vec::new();
+            let mut positions: Vec<Vec<usize>> = Vec::new();
+            for (row, &k) in keys.iter().enumerate() {
+                let slot = (k as i128 - min as i128) as usize;
+                let g = gid[slot];
+                let g = if g == usize::MAX {
+                    let ng = group_order.len();
+                    gid[slot] = ng;
+                    group_order.push(vec![ScalarKey::Int64(k)]);
+                    positions.push(Vec::new());
+                    ng
+                } else {
+                    g
+                };
+                positions[g].push(row);
+            }
+            let mut groups: GroupMap<'_> = HashMap::with_capacity(group_order.len());
+            for (g, key) in group_order.iter().enumerate() {
+                groups.insert(key.clone(), std::mem::take(&mut positions[g]));
+            }
+            if self.sort {
+                group_order.sort_by(|a, b| composite_key_cmp(a, b));
+            }
+            return (group_order, groups);
+        }
+
         let mut group_order: Vec<GroupKey<'_>> = Vec::new();
         let mut groups: GroupMap<'_> = HashMap::new();
 
@@ -115420,6 +115458,161 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dataframe_groupby_dense_build_groups_matches_reference() {
+        // df.groupby([int_col]).{sum,count,max} (default sort=true) over an
+        // all-valid Int64 key must match a sorted-group reference. Exercises
+        // the dense build_groups path + its sort branch; agg logic is unchanged.
+        let mut state: u64 = 0x1F83_D9AB_FB41_BD6B;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 200) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 8) as i64 - 4).collect();
+            let vals: Vec<i64> = (0..n).map(|_| (next() % 100) as i64).collect();
+            let df = DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    ("k", keys.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("v", vals.iter().map(|&v| Scalar::Int64(v)).collect()),
+                ],
+            )
+            .unwrap();
+
+            // Sorted distinct keys + per-group sum/count/max.
+            let mut distinct: Vec<i64> = keys.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            let agg = |sel: &dyn Fn(&[i64]) -> i64| -> Vec<i64> {
+                distinct
+                    .iter()
+                    .map(|&g| {
+                        let gv: Vec<i64> = keys
+                            .iter()
+                            .zip(&vals)
+                            .filter(|(k, _)| **k == g)
+                            .map(|(_, &v)| v)
+                            .collect();
+                        sel(&gv)
+                    })
+                    .collect()
+            };
+            let want_sum = agg(&|gv| gv.iter().sum());
+            let want_count = agg(&|gv| gv.len() as i64);
+            let want_max = agg(&|gv| *gv.iter().max().unwrap());
+
+            let gb = df.groupby(&["k"]).unwrap();
+            let check = |res: &DataFrame, want: &[i64], op: &str| {
+                let labels: Vec<i64> = res
+                    .index()
+                    .labels()
+                    .iter()
+                    .map(|l| match l {
+                        IndexLabel::Int64(v) => *v,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(labels, distinct, "trial {trial} {op} labels");
+                let got: Vec<i64> = res
+                    .column("v")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        Scalar::Float64(x) => *x as i64,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, want, "trial {trial} {op} values");
+            };
+            check(&gb.sum().unwrap(), &want_sum, "sum");
+            check(&gb.count().unwrap(), &want_count, "count");
+            check(&gb.max().unwrap(), &want_max, "max");
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_groupby_dense_timing() {
+        use std::time::Instant;
+        let rows = 2_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let keys: Vec<i64> = (0..rows).map(|_| (next() % 10_000) as i64).collect();
+
+        // Clean grouping-only A/B isolating the build_groups lever.
+        // DENSE: direct-address group-id table (no per-row alloc, no hashing).
+        let (dmin, drange) = {
+            let mut mn = keys[0];
+            let mut mx = keys[0];
+            for &k in &keys {
+                if k < mn {
+                    mn = k;
+                }
+                if k > mx {
+                    mx = k;
+                }
+            }
+            (mn, (mx - mn + 1) as usize)
+        };
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            let mut gid = vec![usize::MAX; drange];
+            let mut order: Vec<Vec<ScalarKey>> = Vec::new();
+            let mut positions: Vec<Vec<usize>> = Vec::new();
+            for (row, &k) in keys.iter().enumerate() {
+                let slot = (k - dmin) as usize;
+                let g = gid[slot];
+                let g = if g == usize::MAX {
+                    let ng = order.len();
+                    gid[slot] = ng;
+                    order.push(vec![ScalarKey::Int64(k)]);
+                    positions.push(Vec::new());
+                    ng
+                } else {
+                    g
+                };
+                positions[g].push(row);
+            }
+            chk ^= order.len();
+        }
+        let dense = t0.elapsed();
+
+        // OLD: per-row Vec<ScalarKey> heap alloc + HashMap<Vec<ScalarKey>,Vec<usize>>.
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let mut group_order: Vec<Vec<ScalarKey>> = Vec::new();
+            let mut groups: std::collections::HashMap<Vec<ScalarKey>, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (row, &k) in keys.iter().enumerate() {
+                let key = vec![ScalarKey::Int64(k)];
+                if !groups.contains_key(&key) {
+                    group_order.push(key.clone());
+                }
+                groups.entry(key).or_default().push(row);
+            }
+            chk2 ^= group_order.len();
+        }
+        let scalar = t1.elapsed();
+        eprintln!(
+            "build_groups {rows} rows keys=10k x{iters}: dense={dense:?} old_veckey_hashmap={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+            scalar.as_secs_f64() / dense.as_secs_f64()
+        );
     }
 
     #[test]

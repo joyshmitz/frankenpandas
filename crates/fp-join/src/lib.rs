@@ -1011,6 +1011,65 @@ fn ordered_unique_int64_left_match_positions(
     Some(right_positions)
 }
 
+type OptionalJoinPositions = (Vec<Option<usize>>, Vec<Option<usize>>);
+
+fn ordered_unique_int64_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = strictly_increasing_int64_key_values(left_key)?;
+    let right_values = strictly_increasing_int64_key_values(right_key)?;
+
+    let mut left_positions =
+        Vec::<Option<usize>>::with_capacity(left_values.len().saturating_add(right_values.len()));
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(left_positions.capacity());
+    let mut left_idx = 0usize;
+    let mut right_idx = 0usize;
+
+    while left_idx < left_values.len() && right_idx < right_values.len() {
+        let left_value = match &left_values[left_idx] {
+            Scalar::Int64(value) => *value,
+            _ => return None,
+        };
+        let right_value = match &right_values[right_idx] {
+            Scalar::Int64(value) => *value,
+            _ => return None,
+        };
+
+        match left_value.cmp(&right_value) {
+            Ordering::Equal => {
+                left_positions.push(Some(left_idx));
+                right_positions.push(Some(right_idx));
+                left_idx += 1;
+                right_idx += 1;
+            }
+            Ordering::Less => {
+                left_positions.push(Some(left_idx));
+                right_positions.push(None);
+                left_idx += 1;
+            }
+            Ordering::Greater => {
+                left_positions.push(None);
+                right_positions.push(Some(right_idx));
+                right_idx += 1;
+            }
+        }
+    }
+
+    while left_idx < left_values.len() {
+        left_positions.push(Some(left_idx));
+        right_positions.push(None);
+        left_idx += 1;
+    }
+    while right_idx < right_values.len() {
+        left_positions.push(None);
+        right_positions.push(Some(right_idx));
+        right_idx += 1;
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn identity_merge_column(
     column: &Column,
     row_count: usize,
@@ -1213,6 +1272,118 @@ fn build_single_key_ordered_unique_left_merge_output(
         }
 
         let reindexed = col.reindex_by_positions(right_positions)?;
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+    }
+
+    Ok(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    })
+}
+
+fn build_single_key_ordered_unique_outer_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_positions: &[Option<usize>],
+    right_positions: &[Option<usize>],
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<MergedDataFrame, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+    debug_assert_eq!(left_positions.len(), right_positions.len());
+
+    let n = left_positions.len();
+    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::new();
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+
+    let mut shared_name_positions = HashMap::<&str, (usize, usize)>::new();
+    if left_on[0] == right_on[0] {
+        shared_name_positions.insert(left_on[0], (0, 0));
+    }
+    let shared_key_names = shared_name_positions
+        .keys()
+        .copied()
+        .collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        if left_key_name_set.contains(name.as_str()) {
+            if let Some((left_key_idx, right_key_idx)) = shared_name_positions.get(name.as_str()) {
+                let left_key_col = left
+                    .columns()
+                    .get(left_on[*left_key_idx])
+                    .expect("left key column must exist");
+                let right_key_col = right
+                    .columns()
+                    .get(right_on[*right_key_idx])
+                    .expect("right key column must exist");
+                let values = left_positions
+                    .iter()
+                    .zip(right_positions.iter())
+                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                    })
+                    .collect::<Vec<_>>();
+                insert_merged_output_column(
+                    &mut columns,
+                    &mut column_order,
+                    name.clone(),
+                    Column::from_values(values)?,
+                )?;
+            } else {
+                insert_merged_output_column(
+                    &mut columns,
+                    &mut column_order,
+                    name.clone(),
+                    reindex_outer_join_column(col, left_positions)?,
+                )?;
+            }
+            continue;
+        }
+
+        let reindexed = reindex_outer_join_column(col, left_positions)?;
+        let out_name = if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+    }
+
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        if right_key_name_set.contains(name.as_str())
+            && shared_name_positions.contains_key(name.as_str())
+        {
+            continue;
+        }
+
+        let reindexed = reindex_outer_join_column(col, right_positions)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -1480,6 +1651,25 @@ pub fn merge_dataframes_on_with_options(
             right,
             left_on,
             right_on,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_mode.is_none()
+        && let Some((left_positions, right_positions)) =
+            ordered_unique_int64_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
             &right_positions,
             &suffixes,
         );
@@ -3663,6 +3853,88 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Int64(200));
         assert!(right_values[3].is_missing());
         assert_eq!(right_values[4], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn merge_outer_ordered_unique_int64_subset_matches_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(3)],
+                ),
+                (
+                    "v",
+                    vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(13)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(300),
+                        Scalar::Int64(500),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(5)
+            ]
+        );
+        let left_values = fast.columns.get("v").unwrap().values();
+        assert_eq!(left_values[0], Scalar::Float64(10.0));
+        assert_eq!(left_values[1], Scalar::Float64(11.0));
+        assert!(left_values[2].is_missing());
+        assert_eq!(left_values[3], Scalar::Float64(13.0));
+        assert!(left_values[4].is_missing());
+        let right_values = fast.columns.get("w").unwrap().values();
+        assert_eq!(right_values[0], Scalar::Float64(100.0));
+        assert!(right_values[1].is_missing());
+        assert_eq!(right_values[2], Scalar::Float64(200.0));
+        assert_eq!(right_values[3], Scalar::Float64(300.0));
+        assert_eq!(right_values[4], Scalar::Float64(500.0));
     }
 
     #[test]

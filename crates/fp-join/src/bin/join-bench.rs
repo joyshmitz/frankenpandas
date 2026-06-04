@@ -3,7 +3,10 @@
 use std::time::Instant;
 
 use fp_frame::DataFrame;
-use fp_join::{JoinType, merge_dataframes};
+use fp_join::{
+    JoinType, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
+    merge_dataframes_on_with_options,
+};
 use fp_types::Scalar;
 
 fn parse_arg<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -40,6 +43,11 @@ fn parse_join_type(default: JoinType) -> JoinType {
     default
 }
 
+fn has_flag(name: &str) -> bool {
+    let flag = format!("--{name}");
+    std::env::args().skip(1).any(|arg| arg == flag)
+}
+
 fn quantile_ns(sorted_ns: &[u128], q: f64) -> u128 {
     if sorted_ns.is_empty() {
         return 0;
@@ -70,6 +78,69 @@ fn build_frame(
     Ok(frame)
 }
 
+fn build_ordered_unique_frame(
+    value_name: &str,
+    rows: usize,
+    multiplier: i64,
+    even_keys: bool,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let mut id_values = Vec::with_capacity(rows);
+    let mut payload_values = Vec::with_capacity(rows);
+
+    for i in 0..rows {
+        let key = if even_keys { i.saturating_mul(2) } else { i };
+        id_values.push(Scalar::Int64(key as i64));
+        payload_values.push(Scalar::Int64(((i as i64 * multiplier + 11) % 10_007).abs()));
+    }
+
+    let frame = DataFrame::from_dict(
+        &["id", value_name],
+        vec![("id", id_values), (value_name, payload_values)],
+    )?;
+    Ok(frame)
+}
+
+fn merge_once(
+    left: &DataFrame,
+    right: &DataFrame,
+    join_type: JoinType,
+    force_generic: bool,
+) -> Result<MergedDataFrame, Box<dyn std::error::Error>> {
+    if force_generic {
+        return Ok(merge_dataframes_on_with_options(
+            left,
+            right,
+            &["id"],
+            &["id"],
+            join_type,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )?);
+    }
+
+    Ok(merge_dataframes(left, right, "id", join_type)?)
+}
+
+fn golden_dump(frame: &MergedDataFrame) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("nrows={}\n", frame.index.len()));
+    for label in frame.index.labels() {
+        out.push_str(&format!("{label:?}|"));
+    }
+    out.push('\n');
+    for name in &frame.column_order {
+        let col = frame.columns.get(name).expect("column listed in order");
+        out.push_str(&format!("col {name} dtype={:?}\n", col.dtype()));
+        for value in col.values() {
+            out.push_str(&format!("{value:?};"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = parse_arg("rows", 50_000usize);
     let right_rows = parse_arg("right-rows", rows);
@@ -77,12 +148,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iters = parse_arg("iters", 20usize);
     let warmup = parse_arg("warmup", 3usize);
     let join_type = parse_join_type(JoinType::Inner);
+    let ordered_unique = has_flag("ordered-unique");
+    let force_generic = has_flag("force-generic");
+    let golden = has_flag("golden");
 
-    let left = build_frame("left_value", rows, key_cardinality, 7)?;
-    let right = build_frame("right_value", right_rows, key_cardinality, 13)?;
+    let (left, right) = if ordered_unique {
+        (
+            build_ordered_unique_frame("left_value", rows, 7, false)?,
+            build_ordered_unique_frame("right_value", right_rows, 13, true)?,
+        )
+    } else {
+        (
+            build_frame("left_value", rows, key_cardinality, 7)?,
+            build_frame("right_value", right_rows, key_cardinality, 13)?,
+        )
+    };
+
+    if golden {
+        let merged = merge_once(&left, &right, join_type, force_generic)?;
+        print!("{}", golden_dump(&merged));
+        return Ok(());
+    }
 
     for _ in 0..warmup {
-        let _ = merge_dataframes(&left, &right, "id", join_type)?;
+        let _ = merge_once(&left, &right, join_type, force_generic)?;
     }
 
     let mut durations_ns = Vec::with_capacity(iters);
@@ -91,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for _ in 0..iters {
         let start = Instant::now();
-        let merged = merge_dataframes(&left, &right, "id", join_type)?;
+        let merged = merge_once(&left, &right, join_type, force_generic)?;
         durations_ns.push(start.elapsed().as_nanos());
 
         let id_column = merged
@@ -136,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!(
-        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
+        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} ordered_unique={ordered_unique} force_generic={force_generic} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
     );
 
     Ok(())

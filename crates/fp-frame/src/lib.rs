@@ -2636,6 +2636,25 @@ fn int_needle_membership_bitset(test_values: &[Scalar]) -> Option<(i64, Vec<bool
 /// column (1B/elem) instead of a Vec<Scalar::Bool> (32B/elem). Bit-identical:
 /// with only Int64 needles `IsinIndex::contains(Int64)` reduces to
 /// `ints.contains`, exactly what the bitset encodes.
+/// Build an isna/notna mask column from a column's ValidityMask directly
+/// (bit-packed, dtype-agnostic) with a typed Bool output — no Scalar
+/// materialization, no 32B-per-cell Vec<Scalar::Bool>. `want_missing=true`
+/// yields isna (1 where invalid); `false` yields notna (1 where valid). The
+/// mask is built FROM is_missing, so this is bit-identical to mapping
+/// `Scalar::Bool(value.is_missing())` over the values.
+fn column_na_mask(col: &Column, want_missing: bool) -> Column {
+    let validity = col.validity();
+    let n = col.len();
+    let flags: Vec<bool> = if validity.all() {
+        vec![!want_missing; n]
+    } else if want_missing {
+        (0..n).map(|i| !validity.get(i)).collect()
+    } else {
+        (0..n).map(|i| validity.get(i)).collect()
+    };
+    Column::from_bool_values(flags)
+}
+
 fn isin_apply_column(
     col: &Column,
     idx: &IsinIndex<'_>,
@@ -28919,12 +28938,7 @@ impl DataFrame {
                 .columns
                 .get(name)
                 .expect("column name listed in order must exist");
-            let mask_values = column
-                .values()
-                .iter()
-                .map(|value| Scalar::Bool(value.is_missing()))
-                .collect::<Vec<_>>();
-            columns.insert(name.clone(), Column::from_values(mask_values)?);
+            columns.insert(name.clone(), column_na_mask(column, true));
         }
 
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -28940,12 +28954,7 @@ impl DataFrame {
                 .columns
                 .get(name)
                 .expect("column name listed in order must exist");
-            let mask_values = column
-                .values()
-                .iter()
-                .map(|value| Scalar::Bool(!value.is_missing()))
-                .collect::<Vec<_>>();
-            columns.insert(name.clone(), Column::from_values(mask_values)?);
+            columns.insert(name.clone(), column_na_mask(column, false));
         }
 
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -115342,6 +115351,148 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dataframe_isna_notna_validity_matches_reference() {
+        // df.isna/notna via the validity-mask helper must match per-cell
+        // is_missing across mixed-dtype columns with nulls/NaN.
+        let mut state: u64 = 0x6C62_72E0_7BB0_1442;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 50) as usize + 1;
+            let col_a: Vec<Scalar> = (0..n)
+                .map(|_| match next() % 4 {
+                    0 => Scalar::Null(NullKind::NaN),
+                    1 => Scalar::Float64(f64::NAN),
+                    _ => Scalar::Float64((next() % 500) as f64),
+                })
+                .collect();
+            let col_b: Vec<Scalar> = (0..n)
+                .map(|_| match next() % 3 {
+                    0 => Scalar::Null(NullKind::Null),
+                    _ => Scalar::Int64((next() % 500) as i64),
+                })
+                .collect();
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![("a", col_a.clone()), ("b", col_b.clone())],
+            )
+            .unwrap();
+            let isna = df.isna().unwrap();
+            let notna = df.notna().unwrap();
+            for (name, src) in [("a", &col_a), ("b", &col_b)] {
+                let gi: Vec<bool> = isna
+                    .column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| matches!(v, Scalar::Bool(true)))
+                    .collect();
+                let gn: Vec<bool> = notna
+                    .column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| matches!(v, Scalar::Bool(true)))
+                    .collect();
+                let wi: Vec<bool> = src.iter().map(|v| v.is_missing()).collect();
+                assert_eq!(gi, wi, "trial {trial} col {name} isna");
+                assert_eq!(
+                    gn,
+                    wi.iter().map(|&b| !b).collect::<Vec<_>>(),
+                    "trial {trial} col {name} notna"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_isna_validity_timing_vs_scalar() {
+        use std::time::Instant;
+        let rows = 1_000_000usize;
+        let ncols = 5usize;
+        let iters = 10;
+        let mut state: u64 = 0xBB67_AE85_84CA_A73B;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let names = ["c0", "c1", "c2", "c3", "c4"];
+        let data: Vec<Vec<f64>> = (0..ncols)
+            .map(|_| (0..rows).map(|_| (next() % 1_000_000) as f64).collect())
+            .collect();
+        let labels: Vec<IndexLabel> = (0..rows as i64).map(IndexLabel::Int64).collect();
+        // Lazy typed columns (from_f64_values) — the realistic case where the
+        // old path pays Scalar materialization that the validity read avoids.
+        let mk = || {
+            let mut cols = std::collections::BTreeMap::new();
+            for c in 0..ncols {
+                cols.insert(
+                    names[c].to_owned(),
+                    Column::from_f64_values(data[c].clone()),
+                );
+            }
+            DataFrame::new_with_column_order(
+                Index::new(labels.clone()),
+                cols,
+                (0..ncols).map(|c| names[c].to_owned()).collect(),
+            )
+            .unwrap()
+        };
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= mk().isna().unwrap().shape().0;
+        }
+        let typed = t0.elapsed();
+
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let df = mk();
+            let mut columns = std::collections::BTreeMap::new();
+            for name in &df.column_order {
+                let col = &df.columns[name];
+                let mask: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|v| Scalar::Bool(v.is_missing()))
+                    .collect();
+                columns.insert(name.clone(), Column::from_values(mask).unwrap());
+            }
+            let out = DataFrame::new_with_column_order(
+                df.index.clone(),
+                columns,
+                df.column_order.clone(),
+            )
+            .unwrap();
+            chk2 ^= out.shape().0;
+        }
+        let scalar = t1.elapsed();
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().shape().0;
+        }
+        let build = t2.elapsed();
+        let typed_op = typed.saturating_sub(build).as_secs_f64();
+        let scalar_op = scalar.saturating_sub(build).as_secs_f64();
+        eprintln!(
+            "df.isna {rows}x{ncols} f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} \
+             op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar_op / typed_op,
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]

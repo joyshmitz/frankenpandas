@@ -42428,6 +42428,86 @@ impl DataFrameGroupBy<'_> {
             return (group_order, groups);
         }
 
+        // Multi-column composite-int dense fast path: when every grouping
+        // column is an all-valid Int64 slice and the product of their value
+        // spans fits the direct-address cap, pack the keys into one mixed-radix
+        // dense index — no per-row Vec<ScalarKey> heap alloc and no hashing.
+        // All-valid ⇒ no missing keys (dropna irrelevant). Output is
+        // bit-identical: first-seen group_order of composite Int64 keys, same
+        // groups map, then the same optional sort.
+        if self.by.len() >= 2 && n > 0 {
+            let mut slices: Vec<&[i64]> = Vec::with_capacity(self.by.len());
+            let mut mins: Vec<i64> = Vec::with_capacity(self.by.len());
+            let mut ranges: Vec<usize> = Vec::with_capacity(self.by.len());
+            let mut ok = true;
+            for name in &self.by {
+                if let Some(s) = self.df.columns[name].as_i64_slice() {
+                    let mut mn = s[0];
+                    let mut mx = s[0];
+                    for &v in s {
+                        if v < mn {
+                            mn = v;
+                        } else if v > mx {
+                            mx = v;
+                        }
+                    }
+                    slices.push(s);
+                    mins.push(mn);
+                    ranges.push((mx as i128 - mn as i128 + 1) as usize);
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            let combined: u128 = if ok {
+                ranges
+                    .iter()
+                    .fold(1u128, |acc, &r| acc.saturating_mul(r as u128))
+            } else {
+                u128::MAX
+            };
+            if ok && combined <= (1u128 << 24) && combined <= (n as u128).saturating_mul(16) {
+                let combined = combined as usize;
+                let ncol = ranges.len();
+                let mut strides = vec![1usize; ncol];
+                for c in (0..ncol - 1).rev() {
+                    strides[c] = strides[c + 1] * ranges[c + 1];
+                }
+                let mut gid = vec![usize::MAX; combined];
+                let mut group_order: Vec<GroupKey<'_>> = Vec::new();
+                let mut positions: Vec<Vec<usize>> = Vec::new();
+                #[allow(clippy::needless_range_loop)] // row indexes every key slice
+                for row in 0..n {
+                    let mut slot = 0usize;
+                    for c in 0..ncol {
+                        slot += (slices[c][row] as i128 - mins[c] as i128) as usize * strides[c];
+                    }
+                    let g = if gid[slot] == usize::MAX {
+                        let ng = group_order.len();
+                        gid[slot] = ng;
+                        group_order.push(
+                            (0..ncol)
+                                .map(|c| ScalarKey::Int64(slices[c][row]))
+                                .collect(),
+                        );
+                        positions.push(Vec::new());
+                        ng
+                    } else {
+                        gid[slot]
+                    };
+                    positions[g].push(row);
+                }
+                let mut groups: GroupMap<'_> = HashMap::with_capacity(group_order.len());
+                for (g, key) in group_order.iter().enumerate() {
+                    groups.insert(key.clone(), std::mem::take(&mut positions[g]));
+                }
+                if self.sort {
+                    group_order.sort_by(|a, b| composite_key_cmp(a, b));
+                }
+                return (group_order, groups);
+            }
+        }
+
         let mut group_order: Vec<GroupKey<'_>> = Vec::new();
         let mut groups: GroupMap<'_> = HashMap::new();
 
@@ -115941,6 +116021,134 @@ mod test_select_columns_perf_76e1fd {
             "df.groupby([int]).sum agg {rows}x2 f64 keys=10k x{iters}: dense={dense:?} old_gather_nansum={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
             scalar.as_secs_f64() / dense.as_secs_f64()
         );
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_groupby_multicol_dense_timing() {
+        use std::time::Instant;
+        let rows = 2_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0xF1BB_CDCB_FA53_E0AD;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let ka: Vec<i64> = (0..rows).map(|_| (next() % 1000) as i64).collect();
+        let kb: Vec<i64> = (0..rows).map(|_| (next() % 10) as i64).collect();
+
+        // DENSE: mixed-radix composite slot (range_a * range_b = 10k slots).
+        let (amin, arange) = (0i64, 1000usize);
+        let (bmin, brange) = (0i64, 10usize);
+        let stride_a = brange;
+        let combined = arange * brange;
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            let mut gid = vec![usize::MAX; combined];
+            let mut order: Vec<Vec<ScalarKey>> = Vec::new();
+            let mut positions: Vec<Vec<usize>> = Vec::new();
+            for row in 0..rows {
+                let slot = (ka[row] - amin) as usize * stride_a + (kb[row] - bmin) as usize;
+                let g = if gid[slot] == usize::MAX {
+                    let ng = order.len();
+                    gid[slot] = ng;
+                    order.push(vec![ScalarKey::Int64(ka[row]), ScalarKey::Int64(kb[row])]);
+                    positions.push(Vec::new());
+                    ng
+                } else {
+                    gid[slot]
+                };
+                positions[g].push(row);
+            }
+            chk ^= order.len();
+        }
+        let dense = t0.elapsed();
+
+        // OLD: per-row Vec<ScalarKey> heap alloc + HashMap.
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let mut group_order: Vec<Vec<ScalarKey>> = Vec::new();
+            let mut groups: std::collections::HashMap<Vec<ScalarKey>, Vec<usize>> =
+                std::collections::HashMap::new();
+            for row in 0..rows {
+                let key = vec![ScalarKey::Int64(ka[row]), ScalarKey::Int64(kb[row])];
+                if !groups.contains_key(&key) {
+                    group_order.push(key.clone());
+                }
+                groups.entry(key).or_default().push(row);
+            }
+            chk2 ^= group_order.len();
+        }
+        let scalar = t1.elapsed();
+        eprintln!(
+            "build_groups 2-col {rows} rows x{iters}: dense={dense:?} old_veckey_hashmap={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+            scalar.as_secs_f64() / dense.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_multicol_dense_matches_reference() {
+        // df.groupby([int_a, int_b]).sum (default sort=true) over all-valid
+        // Int64 keys must match a lexicographically-sorted composite-group
+        // reference. Exercises the multi-column mixed-radix dense build_groups.
+        let mut state: u64 = 0xC3A5_C85C_97CB_3127;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 150) as usize + 1;
+            let ka: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let kb: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let vals: Vec<i64> = (0..n).map(|_| (next() % 100) as i64).collect();
+            let df = DataFrame::from_dict(
+                &["a", "b", "v"],
+                vec![
+                    ("a", ka.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("b", kb.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("v", vals.iter().map(|&v| Scalar::Int64(v)).collect()),
+                ],
+            )
+            .unwrap();
+
+            // Sorted distinct (a,b) pairs + per-group sum.
+            let mut pairs: Vec<(i64, i64)> = ka.iter().zip(&kb).map(|(&a, &b)| (a, b)).collect();
+            pairs.sort_unstable();
+            pairs.dedup();
+            let want_sum: Vec<i64> = pairs
+                .iter()
+                .map(|&(a, b)| {
+                    ka.iter()
+                        .zip(&kb)
+                        .zip(&vals)
+                        .filter(|((x, y), _)| **x == a && **y == b)
+                        .map(|(_, &v)| v)
+                        .sum()
+                })
+                .collect();
+
+            let res = df.groupby(&["a", "b"]).unwrap().sum().unwrap();
+            // as_index default → composite labels; verify the value column sum.
+            let got: Vec<i64> = res
+                .column("v")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x,
+                    Scalar::Float64(x) => *x as i64,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(got, want_sum, "trial {trial} multicol sum (n={n})");
+            assert_eq!(res.shape().0, pairs.len(), "trial {trial} group count");
+        }
     }
 
     #[test]

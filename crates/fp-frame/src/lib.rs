@@ -17197,6 +17197,58 @@ impl SeriesGroupBy<'_> {
     where
         F: Fn(&[f64]) -> f64,
     {
+        // Dense-bucket fast path: an all-valid Int64 grouping key (bounded
+        // range) buckets the all-valid numeric values into per-group f64 Vecs
+        // via a hash-free direct-address group-id table — no per-row hashing,
+        // no Scalar materialization, no per-group filter_map. First-seen group
+        // order is preserved (group id assigned on first sight), and with
+        // all-valid values every group is non-empty, so this is bit-identical
+        // to the HashMap path: same order, same nums per group, same
+        // Float64(func(nums)) output, same by-name index.
+        if let Some(keys) = self.by.column.as_i64_slice()
+            && let Some((min, range)) = i64_dense_histogram_range(keys)
+        {
+            let vf = self.series.column.as_f64_slice();
+            let vi = self.series.column.as_i64_slice();
+            if vf.is_some() || vi.is_some() {
+                let mut gid = vec![usize::MAX; range];
+                let mut order: Vec<IndexLabel> = Vec::new();
+                let mut buckets: Vec<Vec<f64>> = Vec::new();
+                for (i, &k) in keys.iter().enumerate() {
+                    let slot = (k as i128 - min as i128) as usize;
+                    let g = gid[slot];
+                    let g = if g == usize::MAX {
+                        let ng = order.len();
+                        gid[slot] = ng;
+                        order.push(IndexLabel::Int64(k));
+                        buckets.push(Vec::new());
+                        ng
+                    } else {
+                        g
+                    };
+                    let x = if let Some(f) = vf {
+                        f[i]
+                    } else {
+                        vi.unwrap()[i] as f64
+                    };
+                    buckets[g].push(x);
+                }
+                let values: Vec<Scalar> = buckets
+                    .iter()
+                    .map(|nums| Scalar::Float64(func(nums)))
+                    .collect();
+                let by_name = self.by.name();
+                let idx_name = if by_name.is_empty() {
+                    None
+                } else {
+                    Some(by_name)
+                };
+                let index = Index::new(order).rename_index(idx_name);
+                let column = Column::from_values(values)?;
+                return Series::new(name, index, column);
+            }
+        }
+
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
@@ -115368,6 +115420,158 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn groupby_dense_agg_matches_reference() {
+        // Independent first-seen reference for Series.groupby(by).sum()/.mean()
+        // over all-valid Int64 keys + numeric values. The dense-bucket fast
+        // path must be bit-identical in group order, labels, and values.
+        let mut state: u64 = 0x3B97_4F2A_18CD_6E05;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 300) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 9) as i64 - 4).collect();
+            let vals: Vec<i64> = (0..n).map(|_| (next() % 200) as i64 - 100).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let by = Series::new(
+                "k".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_i64_values(keys.clone()),
+            )
+            .unwrap();
+            let series = Series::new(
+                "v".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(vals.clone()),
+            )
+            .unwrap();
+
+            // Reference: first-seen group order, accumulate f64 values.
+            let mut order: Vec<i64> = Vec::new();
+            let mut sums: Vec<f64> = Vec::new();
+            let mut counts: Vec<usize> = Vec::new();
+            for (&k, &v) in keys.iter().zip(&vals) {
+                let g = match order.iter().position(|&o| o == k) {
+                    Some(p) => p,
+                    None => {
+                        order.push(k);
+                        sums.push(0.0);
+                        counts.push(0);
+                        order.len() - 1
+                    }
+                };
+                sums[g] += v as f64;
+                counts[g] += 1;
+            }
+
+            let gb = series.groupby(&by).unwrap();
+            let mean_ref: Vec<f64> = sums
+                .iter()
+                .zip(&counts)
+                .map(|(s, &c)| s / c as f64)
+                .collect();
+            for (opname, want) in [("sum", sums.clone()), ("mean", mean_ref)] {
+                let got = if opname == "sum" { gb.sum() } else { gb.mean() }.unwrap();
+                let glabels: Vec<i64> = got
+                    .index()
+                    .labels()
+                    .iter()
+                    .map(|l| match l {
+                        IndexLabel::Int64(v) => *v,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                let gvals: Vec<f64> = got
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(f) => *f,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(glabels, order, "trial {trial} {opname} labels");
+                assert_eq!(gvals.len(), want.len());
+                for (g, w) in gvals.iter().zip(&want) {
+                    assert!((g - w).abs() < 1e-9, "trial {trial} {opname}: {g} vs {w}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn groupby_dense_sum_timing() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x510E_527F_ADE6_82D1;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        // 10k distinct integer groups.
+        let keys: Vec<i64> = (0..n).map(|_| (next() % 10_000) as i64).collect();
+        let vals: Vec<f64> = (0..n).map(|_| (next() % 1000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let by = Series::new(
+            "k".to_owned(),
+            Index::new(labels.clone()),
+            Column::from_i64_values(keys.clone()),
+        )
+        .unwrap();
+        let series = Series::new(
+            "v".to_owned(),
+            Index::new(labels),
+            Column::from_f64_values(vals.clone()),
+        )
+        .unwrap();
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= series.groupby(&by).unwrap().sum().unwrap().len();
+        }
+        let dense = t0.elapsed();
+
+        // OLD path: HashMap<ScalarKey,Vec<usize>> grouping + per-group filter/to_f64.
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let mut order: Vec<i64> = Vec::new();
+            let mut groups: std::collections::HashMap<i64, Vec<usize>> =
+                std::collections::HashMap::new();
+            let mut seen = std::collections::HashSet::new();
+            for (i, &k) in keys.iter().enumerate() {
+                if seen.insert(k) {
+                    order.push(k);
+                }
+                groups.entry(k).or_default().push(i);
+            }
+            let svals = series.column.values();
+            let mut s = 0usize;
+            for k in &order {
+                let nums: Vec<f64> = groups[k]
+                    .iter()
+                    .filter_map(|&idx| svals[idx].to_f64().ok())
+                    .collect();
+                let _: f64 = nums.iter().sum();
+                s += 1;
+            }
+            chk2 ^= s;
+        }
+        let scalar = t1.elapsed();
+        eprintln!(
+            "groupby.sum 5M i64 keys=10k x{iters}: dense={dense:?} hashmap={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+            scalar.as_secs_f64() / dense.as_secs_f64()
+        );
     }
 
     #[test]

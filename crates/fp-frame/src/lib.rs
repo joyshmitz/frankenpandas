@@ -9327,6 +9327,42 @@ impl Series {
             }
         };
 
+        // Typed fast path: an all-valid Int64/Float64 column with numeric
+        // bounds compares in f64 space (exactly what
+        // compare_non_missing_scalars_for_between does for numeric value+bound)
+        // over the contiguous buffer and emits a typed Bool column (1B/elem)
+        // instead of a Vec<Scalar::Bool> (32B/elem). All-valid ⇒ no missing
+        // rows, so this is bit-identical. Int64 self is compared as f64 to
+        // match the scalar path's to_f64() reduction.
+        if let (Ok(lo), Ok(hi)) = (left.to_f64(), right.to_f64()) {
+            let pred = |v: f64| {
+                let left_cmp = v.partial_cmp(&lo).unwrap_or(Ordering::Less);
+                let right_cmp = v.partial_cmp(&hi).unwrap_or(Ordering::Less);
+                match mode {
+                    InclusiveMode::Both => !left_cmp.is_lt() && !right_cmp.is_gt(),
+                    InclusiveMode::Neither => left_cmp.is_gt() && right_cmp.is_lt(),
+                    InclusiveMode::Left => !left_cmp.is_lt() && right_cmp.is_lt(),
+                    InclusiveMode::Right => left_cmp.is_gt() && !right_cmp.is_gt(),
+                }
+            };
+            // Borrow the contiguous buffer directly (no Vec<f64> copy); the
+            // f64 path also avoids materializing the lazy Scalar vector at all.
+            let flags: Option<Vec<bool>> = if let Some(d) = self.column.as_f64_slice() {
+                Some(d.iter().map(|&v| pred(v)).collect())
+            } else {
+                self.column
+                    .as_i64_slice()
+                    .map(|d| d.iter().map(|&v| pred(v as f64)).collect())
+            };
+            if let Some(flags) = flags {
+                return Series::new(
+                    self.name.clone(),
+                    self.index.clone(),
+                    Column::from_bool_values(flags),
+                );
+            }
+        }
+
         let values: Vec<Scalar> = self
             .column
             .values()
@@ -115266,6 +115302,169 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn between_typed_matches_reference() {
+        // Independent reference: f64-space bounds check per element (exactly the
+        // scalar path's compare_non_missing_scalars_for_between reduction). The
+        // typed fast path must be bit-identical across all four inclusive modes
+        // for all-valid Int64 and Float64 columns.
+        let mut state: u64 = 0xC2B2_AE3D_27D4_EB4F;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 200) as usize + 1;
+            let raw: Vec<i64> = (0..n).map(|_| (next() % 20) as i64 - 10).collect();
+            let lo = (next() % 14) as i64 - 7;
+            let hi = (next() % 14) as i64 - 7;
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+
+            for as_float in [false, true] {
+                let vals: Vec<Scalar> = if as_float {
+                    raw.iter()
+                        .map(|&v| Scalar::Float64(v as f64 / 2.0))
+                        .collect()
+                } else {
+                    raw.iter().map(|&v| Scalar::Int64(v)).collect()
+                };
+                let (lb, rb) = if as_float {
+                    (
+                        Scalar::Float64(lo as f64 / 2.0),
+                        Scalar::Float64(hi as f64 / 2.0),
+                    )
+                } else {
+                    (Scalar::Int64(lo), Scalar::Int64(hi))
+                };
+                let series = Series::new(
+                    "s".to_owned(),
+                    Index::new(labels.clone()),
+                    Column::from_values(vals.clone()).unwrap(),
+                )
+                .unwrap();
+
+                for mode in ["both", "neither", "left", "right"] {
+                    let got: Vec<bool> = series
+                        .between(&lb, &rb, mode)
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .map(|v| matches!(v, Scalar::Bool(true)))
+                        .collect();
+                    let lof = lb.to_f64().unwrap();
+                    let hif = rb.to_f64().unwrap();
+                    let want: Vec<bool> = vals
+                        .iter()
+                        .map(|v| {
+                            let x = v.to_f64().unwrap();
+                            let lc = x.partial_cmp(&lof).unwrap_or(std::cmp::Ordering::Less);
+                            let rc = x.partial_cmp(&hif).unwrap_or(std::cmp::Ordering::Less);
+                            match mode {
+                                "both" => !lc.is_lt() && !rc.is_gt(),
+                                "neither" => lc.is_gt() && rc.is_lt(),
+                                "left" => !lc.is_lt() && rc.is_lt(),
+                                _ => lc.is_gt() && !rc.is_gt(),
+                            }
+                        })
+                        .collect();
+                    assert_eq!(got, want, "trial {trial} float={as_float} mode={mode}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn between_typed_timing_vs_scalar() {
+        use std::{cmp::Ordering, time::Instant};
+        let n = 5_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let data: Vec<f64> = (0..n).map(|_| (next() % 1_000_000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let lo = Scalar::Float64(250_000.0);
+        let hi = Scalar::Float64(750_000.0);
+        let lof = 250_000.0f64;
+        let hif = 750_000.0f64;
+        // Cold-call: rebuild a fresh typed column each iter so the OLD path
+        // pays the Scalar materialization (values()) that the typed path
+        // avoids — the realistic cost of `between` as the first Scalar-
+        // consuming op on a typed column. The data.clone() is equal in both
+        // arms, so it cancels in the ratio.
+        let mk = || {
+            Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_f64_values(data.clone()),
+            )
+            .unwrap()
+        };
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            let r = mk().between(&lo, &hi, "both").unwrap();
+            chk ^= r
+                .values()
+                .iter()
+                .filter(|v| matches!(v, Scalar::Bool(true)))
+                .count();
+        }
+        let typed = t0.elapsed();
+
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let series = mk();
+            let values: Vec<Scalar> = series
+                .column
+                .values()
+                .iter()
+                .map(|val| {
+                    let x = val.to_f64().unwrap();
+                    let lc = x.partial_cmp(&lof).unwrap_or(Ordering::Less);
+                    let rc = x.partial_cmp(&hif).unwrap_or(Ordering::Less);
+                    Scalar::Bool(!lc.is_lt() && !rc.is_gt())
+                })
+                .collect();
+            let out = series
+                .with_labels_and_values_preserving_name(series.index.labels().to_vec(), values)
+                .unwrap();
+            chk2 ^= out
+                .values()
+                .iter()
+                .filter(|v| matches!(v, Scalar::Bool(true)))
+                .count();
+        }
+        let scalar = t1.elapsed();
+
+        // Isolate the shared per-iter column-rebuild (data.clone + from_f64_values)
+        // so the reported ratio reflects the between OPERATION, not the bench
+        // scaffold present equally in both arms.
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().len();
+        }
+        let build = t2.elapsed();
+        let typed_op = typed.saturating_sub(build).as_secs_f64();
+        let scalar_op = scalar.saturating_sub(build).as_secs_f64();
+        eprintln!(
+            "between 5M f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} \
+             op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar_op / typed_op,
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]

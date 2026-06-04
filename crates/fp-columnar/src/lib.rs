@@ -6476,11 +6476,20 @@ impl Column {
     /// sort to the end; stable.
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
-        if let Some(perm) = self.typed_radix_perm(true) {
+        self.argsort_with(true)
+    }
+
+    /// Stable sorting permutation in either direction. Uses the typed radix
+    /// fast path for all-valid Int64/Float64 columns (comparison-free) and the
+    /// `Scalar` na-last comparator otherwise. `take(&argsort_with(asc))` equals
+    /// `sort_values(asc)`. Missing values sort to the end regardless of `asc`.
+    #[must_use]
+    pub fn argsort_with(&self, ascending: bool) -> Vec<usize> {
+        if let Some(perm) = self.typed_radix_perm(ascending) {
             return perm;
         }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
-        indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, true));
+        indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         indexed.into_iter().map(|(i, _)| i).collect()
     }
 

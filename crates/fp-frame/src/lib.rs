@@ -4892,6 +4892,17 @@ impl Series {
             }
         }
         let na_first = na_position == "first";
+        // Typed radix fast path: an all-valid Int64/Float64 column has no
+        // missing values, so na_position is irrelevant and the order is a pure
+        // stable value sort — Column::argsort_with does it comparison-free over
+        // the contiguous buffer (bit-identical to compare_scalars_with_na_position,
+        // whose non-missing branch is the same cmp/partial_cmp).
+        if self.categorical.is_none()
+            && (self.column.as_i64_slice().is_some() || self.column.as_f64_slice().is_some())
+        {
+            let order = self.column.argsort_with(ascending);
+            return self.reorder_by_positions(&order);
+        }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         if self.categorical.is_some() {
             order.sort_by(|&left_pos, &right_pos| {
@@ -114966,5 +114977,61 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(xa.data.len(), 2);
         assert_eq!(xa.name, Some("vals".to_owned()));
         assert!(xa.coord("idx").is_some());
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn series_sort_values_typed_radix_timing() {
+        use std::{cmp::Ordering, time::Instant};
+        let n = 5_000_000usize;
+        let mut state: u64 = 0xABCD_1234_5678_9F01;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let data: Vec<i64> = (0..n).map(|_| next() as i64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let series = Series::new(
+            "s".to_owned(),
+            Index::new(labels),
+            Column::from_i64_values(data.clone()),
+        )
+        .unwrap();
+
+        let iters = 10;
+        // NEW: user-facing sort_values routes through Column::argsort_with radix.
+        let t0 = Instant::now();
+        let mut chk = 0i64;
+        for _ in 0..iters {
+            let sorted = series.sort_values(true).unwrap();
+            if let Scalar::Int64(v) = &sorted.values()[0] {
+                chk ^= *v;
+            }
+        }
+        let radix = t0.elapsed();
+
+        // OLD: positional sort_by the Scalar comparator, then reorder (the path
+        // this commit replaced). Same reorder_by_positions in both.
+        let t1 = Instant::now();
+        let mut chk2 = 0i64;
+        for _ in 0..iters {
+            let vals = series.values();
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&l, &r| match (&vals[l], &vals[r]) {
+                (Scalar::Int64(a), Scalar::Int64(b)) => a.cmp(b),
+                _ => Ordering::Equal,
+            });
+            let sorted = series.reorder_by_positions(&order).unwrap();
+            if let Scalar::Int64(v) = &sorted.values()[0] {
+                chk2 ^= *v;
+            }
+        }
+        let scalar = t1.elapsed();
+        eprintln!(
+            "series.sort_values 5M i64 x{iters}: radix={radix:?} scalar_cmp={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+            scalar.as_secs_f64() / radix.as_secs_f64()
+        );
     }
 }

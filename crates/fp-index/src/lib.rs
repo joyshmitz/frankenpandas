@@ -73,7 +73,15 @@
 //!   the alignment algebra here for binary ops.
 //! - **fp-join** consumes alignment plans for merge-style joins.
 
-use std::{borrow::Cow, collections::HashMap, fmt, sync::OnceLock};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+};
 
 use chrono::Datelike;
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
@@ -261,12 +269,24 @@ pub enum DuplicateKeep {
     None,
 }
 
+static INDEX_LABEL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static INDEX_LABEL_EQUALITY_CACHE: OnceLock<Mutex<FxHashMap<(u64, u64), bool>>> = OnceLock::new();
+
+const INDEX_LABEL_EQUALITY_CACHE_MAX: usize = 4096;
+
+fn next_index_label_identity() -> u64 {
+    INDEX_LABEL_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     labels: Vec<IndexLabel>,
     /// Optional name for the index (matches pandas `Index.name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// Runtime-only immutable identity for this label vector lineage.
+    #[serde(skip, default = "next_index_label_identity")]
+    label_identity: u64,
     #[serde(skip)]
     duplicate_cache: OnceLock<bool>,
     /// AG-13: Cached sort order for adaptive backend selection.
@@ -279,7 +299,7 @@ pub struct Index {
 
 impl PartialEq for Index {
     fn eq(&self, other: &Self) -> bool {
-        self.labels == other.labels
+        self.labels_equal(other)
     }
 }
 
@@ -295,16 +315,50 @@ fn detect_duplicates(labels: &[IndexLabel]) -> bool {
     false
 }
 
+fn ordered_label_identity_pair(left: u64, right: u64) -> (u64, u64) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
 impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
         Self {
             labels,
             name: None,
+            label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
         }
+    }
+
+    fn labels_equal(&self, other: &Self) -> bool {
+        if self.label_identity == other.label_identity {
+            return true;
+        }
+
+        let key = ordered_label_identity_pair(self.label_identity, other.label_identity);
+        let cache = INDEX_LABEL_EQUALITY_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+        if let Some(equal) = cache
+            .lock()
+            .expect("index label equality cache poisoned")
+            .get(&key)
+            .copied()
+        {
+            return equal;
+        }
+
+        let equal = self.labels == other.labels;
+        let mut guard = cache.lock().expect("index label equality cache poisoned");
+        if guard.len() >= INDEX_LABEL_EQUALITY_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(key, equal);
+        equal
     }
 
     /// Construct an index whose caller has already proven all labels unique.
@@ -981,7 +1035,7 @@ impl Index {
     /// `identical` for a name-sensitive check).
     #[must_use]
     pub fn equals(&self, other: &Self) -> bool {
-        self.labels == other.labels
+        self.labels_equal(other)
     }
 
     /// Strict equality including name.
@@ -990,7 +1044,7 @@ impl Index {
     /// the same order AND the same name.
     #[must_use]
     pub fn identical(&self, other: &Self) -> bool {
-        self.labels == other.labels && self.name == other.name
+        self.labels_equal(other) && self.name == other.name
     }
 
     fn value_counts_raw(
@@ -12740,6 +12794,17 @@ mod tests {
         validate_alignment_plan,
     };
 
+    fn int64_labels(index: &Index) -> Vec<i64> {
+        index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
     /// `Send + Sync` so `DataFrame` can be wrapped in `Arc` and shared
     /// across reader threads. A future refactor that reintroduces
@@ -12933,6 +12998,27 @@ mod tests {
 
         let fresh_index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert_eq!(index_with_cache, fresh_index);
+    }
+
+    #[test]
+    fn index_label_identity_cache_preserves_equality_contracts() {
+        let base = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        let clone = base.clone();
+        assert_eq!(base.label_identity, clone.label_identity);
+        assert_eq!(base, clone);
+
+        let renamed = clone.rename_index(Some("rows"));
+        assert_eq!(base.label_identity, renamed.label_identity);
+        assert!(base.equals(&renamed));
+        assert!(!base.identical(&renamed));
+
+        let independent_equal = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        assert_ne!(base.label_identity, independent_equal.label_identity);
+        assert_eq!(base, independent_equal);
+
+        let different = Index::new(vec![1_i64.into(), 2_i64.into(), 4_i64.into()]);
+        assert_ne!(base, different);
+        assert!(!base.equals(&different));
     }
 
     #[test]
@@ -16975,14 +17061,7 @@ mod tests {
 
         let r = super::RangeIndex::new(0, 3, 1).unwrap();
         let r_inserted = r.insert(1, 99)?;
-        let labels: Vec<i64> = r_inserted
-            .labels()
-            .iter()
-            .map(|label| match label {
-                super::IndexLabel::Int64(v) => *v,
-                _ => panic!("expected Int64 labels"),
-            })
-            .collect();
+        let labels = int64_labels(&r_inserted);
         assert_eq!(labels, vec![0, 99, 1, 2]);
         Ok(())
     }
@@ -17191,22 +17270,12 @@ mod tests {
     fn range_index_where_putmask_match_pandas_jw1kw() -> Result<(), super::IndexError> {
         let r = super::RangeIndex::new(0, 5, 1).unwrap().set_name("r");
 
-        let labels = |idx: &super::Index| -> Vec<i64> {
-            idx.labels()
-                .iter()
-                .map(|label| match label {
-                    super::IndexLabel::Int64(v) => *v,
-                    _ => panic!("expected Int64 labels"),
-                })
-                .collect()
-        };
-
         let masked = r.r#where(&[true, false, true, false, true], 99)?;
-        assert_eq!(labels(&masked), vec![0, 99, 2, 99, 4]);
+        assert_eq!(int64_labels(&masked), vec![0, 99, 2, 99, 4]);
         assert_eq!(masked.name(), Some("r"));
 
         let put = r.putmask(&[false, true, false, true, false], 99)?;
-        assert_eq!(labels(&put), vec![0, 99, 2, 99, 4]);
+        assert_eq!(int64_labels(&put), vec![0, 99, 2, 99, 4]);
 
         // Length mismatch.
         assert!(matches!(
@@ -17225,28 +17294,18 @@ mod tests {
         let left = super::RangeIndex::new(0, 5, 1).unwrap().set_name("r");
         let right = super::RangeIndex::new(3, 8, 1).unwrap().set_name("r");
 
-        let labels = |idx: &super::Index| -> Vec<i64> {
-            idx.labels()
-                .iter()
-                .map(|label| match label {
-                    super::IndexLabel::Int64(v) => *v,
-                    _ => panic!("expected Int64 labels"),
-                })
-                .collect()
-        };
-
         let inter = left.intersection(&right);
-        assert_eq!(labels(&inter), vec![3, 4]);
+        assert_eq!(int64_labels(&inter), vec![3, 4]);
         assert_eq!(inter.name(), Some("r"));
 
         let union = left.union(&right);
-        assert_eq!(labels(&union), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(int64_labels(&union), vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
         let diff = left.difference(&right);
-        assert_eq!(labels(&diff), vec![0, 1, 2]);
+        assert_eq!(int64_labels(&diff), vec![0, 1, 2]);
 
         let sym = left.symmetric_difference(&right);
-        assert_eq!(labels(&sym), vec![0, 1, 2, 5, 6, 7]);
+        assert_eq!(int64_labels(&sym), vec![0, 1, 2, 5, 6, 7]);
 
         // Mismatched names drop the name.
         let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
@@ -19155,25 +19214,11 @@ mod tests {
         let left = super::RangeIndex::new(0, 3, 1).unwrap();
         let right = super::RangeIndex::new(10, 12, 1).unwrap();
         let merged = left.append(&right);
-        let merged_labels: Vec<i64> = merged
-            .labels()
-            .iter()
-            .map(|label| match label {
-                super::IndexLabel::Int64(v) => *v,
-                _ => panic!("expected Int64 labels"),
-            })
-            .collect();
+        let merged_labels = int64_labels(&merged);
         assert_eq!(merged_labels, vec![0, 1, 2, 10, 11]);
 
         let trimmed = left.delete(1)?;
-        let trimmed_labels: Vec<i64> = trimmed
-            .labels()
-            .iter()
-            .map(|label| match label {
-                super::IndexLabel::Int64(v) => *v,
-                _ => panic!("expected Int64 labels"),
-            })
-            .collect();
+        let trimmed_labels = int64_labels(&trimmed);
         assert_eq!(trimmed_labels, vec![0, 2]);
 
         assert!(matches!(
@@ -19287,14 +19332,7 @@ mod tests {
     fn range_index_take_repeat_isin_match_pandas_bbgg3() -> Result<(), super::IndexError> {
         let r = super::RangeIndex::new(0, 5, 1).unwrap();
         let taken = r.take(&[2, 4, 0])?;
-        let labels: Vec<i64> = taken
-            .labels()
-            .iter()
-            .map(|label| match label {
-                super::IndexLabel::Int64(v) => *v,
-                _ => panic!("expected Int64 labels"),
-            })
-            .collect();
+        let labels = int64_labels(&taken);
         assert_eq!(labels, vec![2, 4, 0]);
 
         assert!(matches!(
@@ -19306,14 +19344,7 @@ mod tests {
         ));
 
         let repeated = r.repeat(2);
-        let repeat_labels: Vec<i64> = repeated
-            .labels()
-            .iter()
-            .map(|label| match label {
-                super::IndexLabel::Int64(v) => *v,
-                _ => panic!("expected Int64 labels"),
-            })
-            .collect();
+        let repeat_labels = int64_labels(&repeated);
         assert_eq!(repeat_labels, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
 
         let mask = r.isin(&[1, 3, 99]);

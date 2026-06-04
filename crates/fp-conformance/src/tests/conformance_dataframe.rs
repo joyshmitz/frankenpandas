@@ -681,3 +681,47 @@ fn series_mode_and_nlargest_nsmallest_keep_match_pandas() {
     // nsmallest keep='first': 1 (label 3) then first 3 (label 1).
     assert_eq!(labels_of(&t.nsmallest_keep(2, "first").expect("ns-first")), vec![3, 1]);
 }
+
+#[test]
+fn series_interpolate_linear_boundary_asymmetry_matches_pandas() {
+    // pandas default Series.interpolate(method='linear') has an asymmetric
+    // boundary rule: a LEADING NaN gap stays NaN (no backward fill), an
+    // INTERIOR gap is linearly interpolated, and a TRAILING gap is
+    // forward-filled with the last valid value (limit_direction='forward',
+    // NOT extrapolated). Verified vs pandas 2.2.3 for
+    // s = [NaN, 1, NaN, NaN, 4, NaN] => [NaN, 1, 2, 3, 4, 4].
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{NullKind, Scalar};
+
+    let nan = || Scalar::Null(NullKind::NaN);
+    let s = Series::new(
+        "s",
+        Index::new((0..6).map(IndexLabel::Int64).collect()),
+        Column::from_values(vec![
+            nan(),
+            Scalar::Float64(1.0),
+            nan(),
+            nan(),
+            Scalar::Float64(4.0),
+            nan(),
+        ])
+        .unwrap(),
+    )
+    .expect("series");
+
+    let got: Vec<Option<f64>> = s
+        .interpolate()
+        .expect("interpolate")
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok().filter(|x| !x.is_nan()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![None, Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(4.0)],
+        "interpolate boundary asymmetry diverged"
+    );
+}

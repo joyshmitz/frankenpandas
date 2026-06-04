@@ -358,3 +358,60 @@ fn conformance_dataframe_sort_index_unsorted_duplicate_ints() {
     .expect("fixture");
     check_dataframe_fixture(fixture);
 }
+
+#[test]
+fn dataframe_corr_cov_constant_and_singlerow_edges_match_pandas() {
+    // Differential edge cases for the corr/cov matrices (cod is actively
+    // rewriting these kernels). Verified vs pandas 2.2.3:
+    //   df = {a:[1,2,3], b:[2,4,6], c:[5,5,5]}
+    //   corr -> a/b perfectly correlated (1.0); EVERY pairing with the constant
+    //           column c (INCLUDING corr(c,c)) is NaN (zero variance), NOT 1.0.
+    //   cov  -> cov(a,a)=1, cov(a,b)=2, cov(b,b)=4; every cov with c is 0.0.
+    //   single-row frame -> corr is all NaN (n=1).
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let df = DataFrame::from_dict(
+        &["a", "b", "c"],
+        vec![
+            ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ("b", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)]),
+            ("c", vec![Scalar::Float64(5.0), Scalar::Float64(5.0), Scalar::Float64(5.0)]),
+        ],
+    )
+    .expect("frame");
+
+    let corr = df.corr().expect("corr");
+    let cval = |col: &str, i: usize| corr.column(col).unwrap().values()[i].to_f64();
+    // a/b block: perfect correlation.
+    assert!((cval("a", 0).unwrap() - 1.0).abs() < 1e-12);
+    assert!((cval("b", 0).unwrap() - 1.0).abs() < 1e-12);
+    assert!((cval("a", 1).unwrap() - 1.0).abs() < 1e-12);
+    // constant column c: every correlation is NaN, INCLUDING the diagonal.
+    assert!(corr.column("c").unwrap().values()[0].is_missing(), "corr(a,c) must be NaN");
+    assert!(corr.column("c").unwrap().values()[1].is_missing(), "corr(b,c) must be NaN");
+    assert!(
+        corr.column("c").unwrap().values()[2].is_missing(),
+        "corr(c,c) must be NaN for a zero-variance column (pandas), not 1.0"
+    );
+    assert!(corr.column("a").unwrap().values()[2].is_missing(), "corr(c,a) must be NaN");
+
+    let cov = df.cov().expect("cov");
+    let kov = |col: &str, i: usize| cov.column(col).unwrap().values()[i].to_f64().unwrap();
+    assert!((kov("a", 0) - 1.0).abs() < 1e-12); // var(a)
+    assert!((kov("b", 0) - 2.0).abs() < 1e-12); // cov(a,b)
+    assert!((kov("b", 1) - 4.0).abs() < 1e-12); // var(b)
+    // constant column: cov is 0.0 (NOT NaN).
+    assert!((kov("c", 0) - 0.0).abs() < 1e-12, "cov(a,c) must be 0.0");
+    assert!((kov("c", 2) - 0.0).abs() < 1e-12, "cov(c,c) must be 0.0");
+
+    // single-row frame: corr is all NaN.
+    let one = DataFrame::from_dict(
+        &["a", "b"],
+        vec![("a", vec![Scalar::Float64(1.0)]), ("b", vec![Scalar::Float64(2.0)])],
+    )
+    .expect("one-row frame");
+    let corr1 = one.corr().expect("corr1");
+    assert!(corr1.column("a").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
+    assert!(corr1.column("b").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
+}

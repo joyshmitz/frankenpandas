@@ -528,3 +528,64 @@ fn dataframe_corr_spearman_kendall_ties_and_nan_match_pandas() {
     assert!((off2("spearman") - (-2.0 / 3.0)).abs() < 1e-9, "spearman heavy ties: got {}", off2("spearman"));
     assert!((off2("kendall") - (-2.0 / 3.0)).abs() < 1e-9, "kendall heavy ties: got {}", off2("kendall"));
 }
+
+#[test]
+fn series_rank_all_methods_na_options_pct_match_pandas() {
+    // Differential guard vs pandas 2.2.3 for Series.rank across every tie-break
+    // method, na_option, pct scaling, and descending order. Input
+    // s = [3, 1, 1, NaN, 2, 1] (a 3-way tie at value 1, one NaN).
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{NullKind, Scalar};
+
+    let labels: Vec<IndexLabel> = (0..6).map(IndexLabel::Int64).collect();
+    let vals = vec![
+        Scalar::Float64(3.0),
+        Scalar::Float64(1.0),
+        Scalar::Float64(1.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(2.0),
+        Scalar::Float64(1.0),
+    ];
+    let s = Series::new("s", Index::new(labels), Column::from_values(vals).unwrap())
+        .expect("series");
+
+    let got = |r: &Series| -> Vec<Option<f64>> {
+        r.column()
+            .values()
+            .iter()
+            .map(|v| v.to_f64().ok().filter(|x| !x.is_nan()))
+            .collect()
+    };
+    let close = |a: &[Option<f64>], b: &[Option<f64>]| {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (Some(p), Some(q)) => (p - q).abs() < 1e-9,
+                (None, None) => true,
+                _ => false,
+            })
+    };
+    let n = None;
+    let f = Some;
+
+    let cases: &[(&str, bool, &str, bool, Vec<Option<f64>>)] = &[
+        ("average", true, "keep", false, vec![f(5.0), f(2.0), f(2.0), n, f(4.0), f(2.0)]),
+        ("min", true, "keep", false, vec![f(5.0), f(1.0), f(1.0), n, f(4.0), f(1.0)]),
+        ("max", true, "keep", false, vec![f(5.0), f(3.0), f(3.0), n, f(4.0), f(3.0)]),
+        ("first", true, "keep", false, vec![f(5.0), f(1.0), f(2.0), n, f(4.0), f(3.0)]),
+        ("dense", true, "keep", false, vec![f(3.0), f(1.0), f(1.0), n, f(2.0), f(1.0)]),
+        ("min", true, "bottom", false, vec![f(5.0), f(1.0), f(1.0), f(6.0), f(4.0), f(1.0)]),
+        ("min", true, "top", false, vec![f(6.0), f(2.0), f(2.0), f(1.0), f(5.0), f(2.0)]),
+        ("average", true, "keep", true, vec![f(1.0), f(0.4), f(0.4), n, f(0.8), f(0.4)]),
+        ("min", false, "keep", false, vec![f(1.0), f(3.0), f(3.0), n, f(2.0), f(3.0)]),
+    ];
+    for (method, asc, na, pct, want) in cases {
+        let r = s.rank_with_pct(method, *asc, na, *pct).expect("rank");
+        let g = got(&r);
+        assert!(
+            close(&g, want),
+            "rank(method={method}, asc={asc}, na={na}, pct={pct}) => {g:?}, want {want:?}"
+        );
+    }
+}

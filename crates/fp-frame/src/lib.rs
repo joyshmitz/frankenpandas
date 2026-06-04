@@ -42936,7 +42936,7 @@ impl DataFrameGroupBy<'_> {
         // group size. Other funcs / non-Float64 / multi-col keys fall through.
         let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
             func_name,
-            "sum" | "mean" | "count" | "min" | "max" | "var" | "std"
+            "sum" | "mean" | "count" | "min" | "max" | "var" | "std" | "first" | "last"
         ) && !self.by.is_empty()
         {
             // Gather all-valid Int64 key slices + per-column (min, span). Bail
@@ -43097,6 +43097,24 @@ impl DataFrameGroupBy<'_> {
                             }
                         }));
                     }
+                    "first" | "last" => {
+                        // FP groupby first/last = literal first/last element in
+                        // row order (no skipna); all-valid ⇒ every group is
+                        // non-empty. first seeds once, last overwrites.
+                        let want_first = func_name == "first";
+                        let mut cur = vec![0.0_f64; ng];
+                        let mut seen = vec![false; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            if !want_first {
+                                cur[g] = v;
+                            } else if !seen[g] {
+                                cur[g] = v;
+                                seen[g] = true;
+                            }
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(cur[g])));
+                    }
                     _ => {
                         // mean
                         let mut acc = vec![0.0_f64; ng];
@@ -43124,7 +43142,7 @@ impl DataFrameGroupBy<'_> {
             if let Some((go_gid, gid_per_row, ngroups)) = &dense
                 && matches!(
                     func_name,
-                    "min" | "max" | "count" | "var" | "std" | "sum" | "mean"
+                    "min" | "max" | "count" | "var" | "std" | "sum" | "mean" | "first" | "last"
                 )
                 && let Some(vals) = col.as_i64_slice()
             {
@@ -43175,6 +43193,21 @@ impl DataFrameGroupBy<'_> {
                                 seen[g] = true;
                             } else if (want_min && v < cur[g]) || (!want_min && v > cur[g]) {
                                 cur[g] = v;
+                            }
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
+                    }
+                    "first" | "last" => {
+                        let want_first = func_name == "first";
+                        let mut cur = vec![0i64; ng];
+                        let mut seen = vec![false; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            if !want_first {
+                                cur[g] = v;
+                            } else if !seen[g] {
+                                cur[g] = v;
+                                seen[g] = true;
                             }
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
@@ -115986,6 +116019,18 @@ mod test_select_columns_perf_76e1fd {
                     (None, None) => {}
                     _ => panic!("trial {trial} std null mismatch"),
                 }
+            }
+            // first/last: literal first/last group value in row order.
+            let want_first: Vec<f64> = distinct.iter().map(|&g| group_f64(g)[0]).collect();
+            let want_last: Vec<f64> = distinct
+                .iter()
+                .map(|&g| *group_f64(g).last().unwrap())
+                .collect();
+            for (g, w) in f64_of(&gb.first().unwrap()).iter().zip(&want_first) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} first");
+            }
+            for (g, w) in f64_of(&gb.last().unwrap()).iter().zip(&want_last) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} last");
             }
         }
     }

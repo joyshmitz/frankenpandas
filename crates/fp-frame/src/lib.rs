@@ -42854,41 +42854,44 @@ impl DataFrameGroupBy<'_> {
         // group is a row-order left-fold (sum, sum/count), exactly what the
         // dense accumulator reproduces; count of an all-valid column is the
         // group size. Other funcs / non-Float64 / multi-col keys fall through.
-        let dense: Option<(Vec<usize>, Vec<usize>, usize)> =
-            if matches!(func_name, "sum" | "mean" | "count") && self.by.len() == 1 {
-                self.df.columns[&self.by[0]]
-                    .as_i64_slice()
-                    .and_then(|keys| {
-                        i64_dense_histogram_range(keys).map(|(min, range)| {
-                            let mut gid_table = vec![usize::MAX; range];
-                            let mut gid_per_row = vec![0usize; keys.len()];
-                            let mut ngroups = 0usize;
-                            for (row, &k) in keys.iter().enumerate() {
-                                let slot = (k as i128 - min as i128) as usize;
-                                let g = if gid_table[slot] == usize::MAX {
-                                    gid_table[slot] = ngroups;
-                                    ngroups += 1;
-                                    ngroups - 1
-                                } else {
-                                    gid_table[slot]
-                                };
-                                gid_per_row[row] = g;
-                            }
-                            let go_gid: Vec<usize> = group_order
-                                .iter()
-                                .map(|gk| match gk[0] {
-                                    ScalarKey::Int64(v) => {
-                                        gid_table[(v as i128 - min as i128) as usize]
-                                    }
-                                    _ => unreachable!("single Int64 key"),
-                                })
-                                .collect();
-                            (go_gid, gid_per_row, ngroups)
-                        })
+        let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
+            func_name,
+            "sum" | "mean" | "count" | "min" | "max"
+        ) && self.by.len() == 1
+        {
+            self.df.columns[&self.by[0]]
+                .as_i64_slice()
+                .and_then(|keys| {
+                    i64_dense_histogram_range(keys).map(|(min, range)| {
+                        let mut gid_table = vec![usize::MAX; range];
+                        let mut gid_per_row = vec![0usize; keys.len()];
+                        let mut ngroups = 0usize;
+                        for (row, &k) in keys.iter().enumerate() {
+                            let slot = (k as i128 - min as i128) as usize;
+                            let g = if gid_table[slot] == usize::MAX {
+                                gid_table[slot] = ngroups;
+                                ngroups += 1;
+                                ngroups - 1
+                            } else {
+                                gid_table[slot]
+                            };
+                            gid_per_row[row] = g;
+                        }
+                        let go_gid: Vec<usize> = group_order
+                            .iter()
+                            .map(|gk| match gk[0] {
+                                ScalarKey::Int64(v) => {
+                                    gid_table[(v as i128 - min as i128) as usize]
+                                }
+                                _ => unreachable!("single Int64 key"),
+                            })
+                            .collect();
+                        (go_gid, gid_per_row, ngroups)
                     })
-            } else {
-                None
-            };
+                })
+        } else {
+            None
+        };
 
         // Aggregate each value column
         let mut result_cols = BTreeMap::new();
@@ -42918,6 +42921,25 @@ impl DataFrameGroupBy<'_> {
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cnt[g])));
                     }
+                    "min" | "max" => {
+                        // Seed each group with its first value (row order) and
+                        // update only on a strict compare — matches nanmin/nanmax
+                        // exactly (keeps the first of equal-comparing values, incl
+                        // -0.0/0.0). All-valid ⇒ no NaN, every group non-empty.
+                        let want_min = func_name == "min";
+                        let mut cur = vec![0.0_f64; ng];
+                        let mut seen = vec![false; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            if !seen[g] {
+                                cur[g] = v;
+                                seen[g] = true;
+                            } else if (want_min && v < cur[g]) || (!want_min && v > cur[g]) {
+                                cur[g] = v;
+                            }
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(cur[g])));
+                    }
                     _ => {
                         // mean
                         let mut acc = vec![0.0_f64; ng];
@@ -42933,6 +42955,40 @@ impl DataFrameGroupBy<'_> {
                                 .map(|&g| Scalar::Float64(acc[g] / cnt[g] as f64)),
                         );
                     }
+                }
+                result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+                col_order.push(col_name.clone());
+                continue;
+            }
+
+            // Dense path for all-valid Int64 value columns — min/max/count only
+            // (sum/mean need i128 accumulation / nanmean dtype rules). Int64
+            // min/max preserve dtype; nanmin/nanmax seed-first + strict compare.
+            if let Some((go_gid, gid_per_row, ngroups)) = &dense
+                && matches!(func_name, "min" | "max" | "count")
+                && let Some(vals) = col.as_i64_slice()
+            {
+                let ng = *ngroups;
+                if func_name == "count" {
+                    let mut cnt = vec![0i64; ng];
+                    for &g in gid_per_row {
+                        cnt[g] += 1;
+                    }
+                    agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cnt[g])));
+                } else {
+                    let want_min = func_name == "min";
+                    let mut cur = vec![0i64; ng];
+                    let mut seen = vec![false; ng];
+                    for (row, &v) in vals.iter().enumerate() {
+                        let g = gid_per_row[row];
+                        if !seen[g] {
+                            cur[g] = v;
+                            seen[g] = true;
+                        } else if (want_min && v < cur[g]) || (!want_min && v > cur[g]) {
+                            cur[g] = v;
+                        }
+                    }
+                    agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
                 }
                 result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
                 col_order.push(col_name.clone());
@@ -115649,6 +115705,30 @@ mod test_select_columns_perf_76e1fd {
                 want_cnt,
                 "trial {trial} count"
             );
+            let want_min: Vec<f64> = distinct
+                .iter()
+                .map(|&g| {
+                    group_f64(g)
+                        .into_iter()
+                        .reduce(|a, b| if b < a { b } else { a })
+                        .unwrap()
+                })
+                .collect();
+            let want_max: Vec<f64> = distinct
+                .iter()
+                .map(|&g| {
+                    group_f64(g)
+                        .into_iter()
+                        .reduce(|a, b| if b > a { b } else { a })
+                        .unwrap()
+                })
+                .collect();
+            for (g, w) in f64_of(&gb.min().unwrap()).iter().zip(&want_min) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} min");
+            }
+            for (g, w) in f64_of(&gb.max().unwrap()).iter().zip(&want_max) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} max");
+            }
         }
     }
 

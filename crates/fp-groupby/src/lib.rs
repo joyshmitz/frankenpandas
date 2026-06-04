@@ -1741,6 +1741,95 @@ mod tests {
     };
 
     #[test]
+    fn groupby_sum_dense_int64_keys_match_naive_reference_fuzz_xbrt8() {
+        use std::collections::BTreeMap;
+        // Differential guard for the dense int64-key sum bucket path (d43c1178):
+        // int64 keys (negative / null / duplicate / dense span) with Float64
+        // values route through try_groupby_sum_dense_int64. The result must equal
+        // a naive sorted group-sum reference (default options: dropna=true,
+        // sort=true, skipna). Integer-valued floats keep sums order-exact.
+        // (br-frankenpandas-xbrt8)
+        let mut st: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            st >> 33
+        };
+        for _ in 0..400 {
+            let n = (next() % 8 + 1) as usize;
+            let raw_keys: Vec<Option<i64>> = (0..n)
+                .map(|_| {
+                    let r = next() % 7;
+                    if r == 6 { None } else { Some(r as i64 - 3) }
+                })
+                .collect();
+            let raw_vals: Vec<Option<f64>> = (0..n)
+                .map(|i| {
+                    if next() % 5 == 0 {
+                        None
+                    } else {
+                        Some(((i as i64 + 1) * 10) as f64)
+                    }
+                })
+                .collect();
+
+            let keys = Series::from_values(
+                "k",
+                (0..n).map(|i| (i as i64).into()).collect(),
+                raw_keys
+                    .iter()
+                    .map(|k| k.map_or(Scalar::Null(NullKind::Null), Scalar::Int64))
+                    .collect(),
+            )
+            .unwrap();
+            let vals = Series::from_values(
+                "v",
+                (0..n).map(|i| (i as i64).into()).collect(),
+                raw_vals
+                    .iter()
+                    .map(|v| v.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64))
+                    .collect(),
+            )
+            .unwrap();
+
+            let out = groupby_sum(
+                &keys,
+                &vals,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut EvidenceLedger::new(),
+            )
+            .unwrap();
+
+            // Naive reference: drop null keys; a group exists per non-null key
+            // (even if all its values are null -> sum 0.0); sum non-null values;
+            // sorted ascending by key.
+            let mut groups: BTreeMap<i64, f64> = BTreeMap::new();
+            for i in 0..n {
+                if let Some(k) = raw_keys[i] {
+                    let entry = groups.entry(k).or_insert(0.0);
+                    if let Some(v) = raw_vals[i] {
+                        *entry += v;
+                    }
+                }
+            }
+            let exp_idx: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_val: Vec<Scalar> = groups.values().map(|&v| Scalar::Float64(v)).collect();
+            assert_eq!(
+                out.index().labels(),
+                exp_idx.as_slice(),
+                "index mismatch for keys={raw_keys:?}"
+            );
+            assert_eq!(
+                out.values(),
+                exp_val.as_slice(),
+                "values mismatch for keys={raw_keys:?} vals={raw_vals:?}"
+            );
+        }
+    }
+
+    #[test]
     fn groupby_sum_sorts_keys_by_default() {
         let keys = Series::from_values(
             "key",

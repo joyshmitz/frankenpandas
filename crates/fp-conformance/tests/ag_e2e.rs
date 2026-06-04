@@ -213,9 +213,11 @@ fn e2e_scenario1_full_dataframe_pipeline() {
     .expect("groupby");
 
     assert_eq!(grouped.index().labels(), &["eng".into(), "sales".into()]);
+    // pandas groupby.sum() preserves the integer dtype when no value is missing
+    // (br-frankenpandas-l75ms): Int64 in, Int64 out.
     assert_eq!(
         grouped.values(),
-        &[Scalar::Float64(310_000.0), Scalar::Float64(230_000.0)]
+        &[Scalar::Int64(310_000), Scalar::Int64(230_000)]
     );
 }
 

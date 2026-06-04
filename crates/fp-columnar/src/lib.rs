@@ -6918,42 +6918,70 @@ impl Column {
             }
         }
 
-        let mut uniques: Vec<Scalar> = Vec::new();
-        let mut idx_map: HashMap<LocalKey<'_>, i64> = HashMap::new();
-        let mut missing_position: Option<i64> = None;
-        let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
-
-        for value in &self.values {
-            if value.is_missing() {
-                if use_na_sentinel {
-                    codes.push(Scalar::Int64(-1));
-                } else if let Some(p) = missing_position {
-                    codes.push(Scalar::Int64(p));
+        let (mut codes, mut uniques): (Vec<Scalar>, Vec<Scalar>) = if let Some((data, min, range)) =
+            self.as_i64_slice()
+                .and_then(|d| i64_direct_address_range(d).map(|(m, r)| (d, m, r)))
+        {
+            // Hash-free direct-address factorize for a bounded-range all-valid
+            // Int64 column: a dense code table indexed by (v-min) assigns
+            // first-seen codes in O(n) with no hashing. All-valid ⇒ no
+            // missing/sentinel handling, so this is bit-identical to the
+            // HashMap path's first-seen code assignment.
+            let mut code_table = vec![-1i64; range];
+            let mut uniques: Vec<Scalar> = Vec::new();
+            let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                let existing = code_table[slot];
+                if existing < 0 {
+                    let code = uniques.len() as i64;
+                    code_table[slot] = code;
+                    uniques.push(Scalar::Int64(v));
+                    codes.push(Scalar::Int64(code));
                 } else {
-                    let code = uniques.len() as i64;
-                    missing_position = Some(code);
-                    uniques.push(value.clone());
-                    codes.push(Scalar::Int64(code));
-                }
-                continue;
-            }
-            let Some(key) = key_of(value) else {
-                // Defensive: non-missing value that maps to no key
-                // (shouldn't happen for valid Scalar variants).
-                codes.push(Scalar::Int64(-1));
-                continue;
-            };
-            match idx_map.get(&key) {
-                Some(&p) => codes.push(Scalar::Int64(p)),
-                None => {
-                    let code = uniques.len() as i64;
-                    idx_map.insert(key, code);
-                    uniques.push(value.clone());
-                    codes.push(Scalar::Int64(code));
+                    codes.push(Scalar::Int64(existing));
                 }
             }
-        }
-        drop(idx_map);
+            (codes, uniques)
+        } else {
+            let mut uniques: Vec<Scalar> = Vec::new();
+            let mut idx_map: HashMap<LocalKey<'_>, i64> = HashMap::new();
+            let mut missing_position: Option<i64> = None;
+            let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
+
+            for value in &self.values {
+                if value.is_missing() {
+                    if use_na_sentinel {
+                        codes.push(Scalar::Int64(-1));
+                    } else if let Some(p) = missing_position {
+                        codes.push(Scalar::Int64(p));
+                    } else {
+                        let code = uniques.len() as i64;
+                        missing_position = Some(code);
+                        uniques.push(value.clone());
+                        codes.push(Scalar::Int64(code));
+                    }
+                    continue;
+                }
+                let Some(key) = key_of(value) else {
+                    // Defensive: non-missing value that maps to no key
+                    // (shouldn't happen for valid Scalar variants).
+                    codes.push(Scalar::Int64(-1));
+                    continue;
+                };
+                match idx_map.get(&key) {
+                    Some(&p) => codes.push(Scalar::Int64(p)),
+                    None => {
+                        let code = uniques.len() as i64;
+                        idx_map.insert(key, code);
+                        uniques.push(value.clone());
+                        codes.push(Scalar::Int64(code));
+                    }
+                }
+            }
+            drop(idx_map);
+            (codes, uniques)
+        };
 
         if sort && !uniques.is_empty() {
             let mut ordering: Vec<usize> = (0..uniques.len()).collect();
@@ -11945,6 +11973,138 @@ mod tests {
                         "{label} trial {trial} argsort mismatch"
                     );
                 }
+            }
+        }
+
+        #[test]
+        fn factorize_direct_address_matches_reference() {
+            // Independent O(n^2) first-seen reference (linear position scan, no
+            // hashing/direct-address) for bounded-range all-valid Int64. The
+            // direct-address fast path must be bit-identical for codes AND
+            // uniques, both sort modes (use_na_sentinel is moot — all valid).
+            let mut state: u64 = 0x51A4_3C29_7E10_BB67;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                let data: Vec<i64> = (0..n).map(|_| (next() % 13) as i64 - 6).collect();
+
+                for sort in [false, true] {
+                    // Reference: first-seen codes via linear scan, then optional
+                    // stable sort of uniques + code remap.
+                    let mut uniques: Vec<i64> = Vec::new();
+                    let mut codes: Vec<i64> = Vec::with_capacity(n);
+                    for &v in &data {
+                        match uniques.iter().position(|&u| u == v) {
+                            Some(p) => codes.push(p as i64),
+                            None => {
+                                codes.push(uniques.len() as i64);
+                                uniques.push(v);
+                            }
+                        }
+                    }
+                    if sort {
+                        let mut order: Vec<usize> = (0..uniques.len()).collect();
+                        order.sort_by(|&a, &b| uniques[a].cmp(&uniques[b]));
+                        let mut remap = vec![0i64; uniques.len()];
+                        let sorted: Vec<i64> = order
+                            .iter()
+                            .enumerate()
+                            .map(|(new_pos, &orig)| {
+                                remap[orig] = new_pos as i64;
+                                uniques[orig]
+                            })
+                            .collect();
+                        for c in &mut codes {
+                            *c = remap[*c as usize];
+                        }
+                        uniques = sorted;
+                    }
+
+                    let col = Column::from_values(data.iter().map(|&v| Scalar::Int64(v)).collect())
+                        .expect("col");
+                    let (code_col, uniq_col) =
+                        col.factorize_with_options(sort, true).expect("factorize");
+                    let got_codes: Vec<i64> = code_col
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(c) => *c,
+                            _ => panic!("non-int code"),
+                        })
+                        .collect();
+                    let got_uniques: Vec<i64> = uniq_col
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(c) => *c,
+                            _ => panic!("non-int unique"),
+                        })
+                        .collect();
+                    assert_eq!(got_codes, codes, "trial {trial} sort={sort} codes");
+                    assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+        fn factorize_direct_address_timing_vs_hashmap() {
+            use std::{collections::HashMap, time::Instant};
+            let n = 5_000_000usize;
+            let iters = 10;
+            for cardinality in [1_000u64, 2_000_000u64] {
+                let mut state: u64 = 0x2468_ACE0_1357_9BDF ^ cardinality;
+                let mut next = || {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    state
+                };
+                let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
+
+                let col = Column::from_i64_values(data.clone());
+                let t0 = Instant::now();
+                let mut chk = 0i64;
+                for _ in 0..iters {
+                    let (codes, _u) = col.factorize_with_options(false, true).expect("da");
+                    if let Scalar::Int64(c) = &codes.values()[n - 1] {
+                        chk ^= *c;
+                    }
+                }
+                let direct = t0.elapsed();
+
+                // OLD: HashMap<i64,i64> first-seen code assignment over &[Scalar].
+                let scalar_col =
+                    Column::from_values(data.iter().map(|&v| Scalar::Int64(v)).collect())
+                        .expect("col");
+                let t1 = Instant::now();
+                let mut chk2 = 0i64;
+                for _ in 0..iters {
+                    let mut map: HashMap<i64, i64> = HashMap::new();
+                    let mut uniques = 0i64;
+                    let mut last = 0i64;
+                    for v in scalar_col.values() {
+                        if let Scalar::Int64(i) = v {
+                            let code = *map.entry(*i).or_insert_with(|| {
+                                let c = uniques;
+                                uniques += 1;
+                                c
+                            });
+                            last = code;
+                        }
+                    }
+                    chk2 ^= last;
+                }
+                let scalar = t1.elapsed();
+                eprintln!(
+                    "factorize 5M i64 card={cardinality} x{iters}: direct={direct:?} hashmap={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+                    scalar.as_secs_f64() / direct.as_secs_f64()
+                );
             }
         }
 

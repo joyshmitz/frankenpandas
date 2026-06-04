@@ -1409,7 +1409,23 @@ impl Column {
         } else if needs_coercion {
             values
                 .into_iter()
-                .map(|value| cast_scalar_owned(value, dtype))
+                .map(|value| {
+                    // Constructing a typed column with an explicit dtype is
+                    // STRICT: a non-integer float cannot be coerced to int64
+                    // (pandas DataFrame(dtype='int64') raises "Trying to coerce
+                    // float values to integers"), UNLIKE astype which truncates
+                    // toward zero. astype pre-truncates via cast_scalar, so this
+                    // coercion path only ever sees raw floats from the explicit
+                    // constructor. (br-frankenpandas-8nupg)
+                    if matches!(dtype, DType::Int64 | DType::Int64Nullable)
+                        && let Scalar::Float64(v) = &value
+                        && v.is_finite()
+                        && v.fract() != 0.0
+                    {
+                        return Err(TypeError::LossyFloatToInt { value: *v });
+                    }
+                    cast_scalar_owned(value, dtype)
+                })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             // No coercion needed: values already match dtype.
@@ -13989,6 +14005,21 @@ mod tests {
                 inf.astype(DType::Int64).unwrap_err(),
                 crate::ColumnError::Type(_)
             ));
+        }
+
+        #[test]
+        fn new_int64_from_lossy_float_errors_unlike_astype() {
+            // The typed constructor with an explicit dtype is STRICT, matching
+            // pandas DataFrame(dtype='int64') which raises on a non-integer
+            // float — unlike astype which truncates. (br-frankenpandas-8nupg)
+            let err = Column::new(DType::Int64, vec![Scalar::Float64(1.5)]).unwrap_err();
+            assert!(matches!(
+                err,
+                crate::ColumnError::Type(fp_types::TypeError::LossyFloatToInt { .. })
+            ));
+            // Integer-valued floats still coerce fine (1.0 -> 1).
+            let ok = Column::new(DType::Int64, vec![Scalar::Float64(2.0)]).expect("integer float");
+            assert_eq!(ok.values(), &[Scalar::Int64(2)]);
         }
     }
 

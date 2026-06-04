@@ -2479,6 +2479,21 @@ impl Column {
     }
 
     pub fn reindex_by_positions(&self, positions: &[Option<usize>]) -> Result<Self, ColumnError> {
+        let mut present_positions = Vec::with_capacity(positions.len());
+        let mut all_present = true;
+        for position in positions {
+            match position {
+                Some(idx) if *idx < self.len() => present_positions.push(*idx),
+                Some(_) | None => {
+                    all_present = false;
+                    break;
+                }
+            }
+        }
+        if all_present {
+            return Ok(self.take_positions(&present_positions));
+        }
+
         let values = positions
             .iter()
             .map(|slot| match slot {
@@ -9286,6 +9301,46 @@ mod tests {
     }
 
     #[test]
+    fn reindex_all_present_matches_materialization_and_keeps_float64_lazy() {
+        let column = Column::from_f64_values(vec![1.25, -0.0, f64::INFINITY]);
+
+        let positions = [Some(2), Some(0), Some(1), Some(2)];
+        let gathered = column
+            .reindex_by_positions(&positions)
+            .expect("all-present reindex should gather");
+
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
+            "all-present Float64 reindex should defer scalar materialization"
+        );
+        if let ScalarValues::LazyAllValidFloat64 { data, values } = &gathered.values {
+            assert_eq!(
+                data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                vec![
+                    f64::INFINITY.to_bits(),
+                    1.25f64.to_bits(),
+                    (-0.0f64).to_bits(),
+                    f64::INFINITY.to_bits(),
+                ]
+            );
+            assert!(values.get().is_none());
+        }
+
+        let expected = Column::new(
+            DType::Float64,
+            positions
+                .iter()
+                .map(|&position| column.values()[position.expect("present position")].clone())
+                .collect(),
+        )
+        .expect("validated scalar materialization");
+
+        assert_eq!(gathered.dtype(), expected.dtype());
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
     fn column_equality_ignores_skipped_typed_cache() {
         let column = Column::new(
             DType::Int64,
@@ -11947,7 +12002,7 @@ mod tests {
                         // Narrow range forces frequent ties; occasional wide value.
                         let r = next();
                         let v = if r % 7 == 0 {
-                            (r as i64) // full-width incl negatives via wraparound
+                            r as i64 // full-width incl negatives via wraparound
                         } else {
                             (r % 11) as i64 - 5
                         };

@@ -5504,6 +5504,89 @@ mod tests {
     }
 
     #[test]
+    fn merge_inner_int64_fast_paths_match_naive_reference_fuzz_jdupk() {
+        // Differential guard: merge_dataframes dispatches int64 single-key inner
+        // merges to ordered/identity/dense fast paths. Each MUST equal a naive
+        // left-major nested-loop join for arbitrary int64 keys (sorted/unsorted,
+        // unique/duplicate, overlapping/disjoint, negative). This is the
+        // isomorphism proof those perf paths owe; it caught the identity-path
+        // row-loss bug. (br-frankenpandas-rw0r5)
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        for _ in 0..400 {
+            let nl = (next() % 6 + 1) as usize;
+            let nr = (next() % 6 + 1) as usize;
+            // small key range forces collisions; offset gives negatives too
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 5) as i64 - 2).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 5) as i64 - 2).collect();
+
+            let left = DataFrame::from_dict(
+                &["id", "a"],
+                vec![
+                    ("id", lk.iter().map(|&k| Scalar::Int64(k)).collect()),
+                    ("a", (0..nl).map(|i| Scalar::Int64(i as i64 + 1000)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["id", "b"],
+                vec![
+                    ("id", rk.iter().map(|&k| Scalar::Int64(k)).collect()),
+                    ("b", (0..nr).map(|j| Scalar::Int64(j as i64 + 2000)).collect()),
+                ],
+            )
+            .unwrap();
+
+            let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+
+            // Naive reference: pandas inner merge is left-major, right-minor.
+            let mut exp_a = Vec::new();
+            let mut exp_b = Vec::new();
+            for i in 0..nl {
+                for j in 0..nr {
+                    if lk[i] == rk[j] {
+                        exp_a.push(Scalar::Int64(i as i64 + 1000));
+                        exp_b.push(Scalar::Int64(j as i64 + 2000));
+                    }
+                }
+            }
+            assert_eq!(
+                merged.columns.get("a").unwrap().values(),
+                exp_a.as_slice(),
+                "left payload mismatch for lk={lk:?} rk={rk:?}"
+            );
+            assert_eq!(
+                merged.columns.get("b").unwrap().values(),
+                exp_b.as_slice(),
+                "right payload mismatch for lk={lk:?} rk={rk:?}"
+            );
+
+            // Cardinality guard for left/right/outer (dtype/order independent —
+            // catches the row-loss class regardless of int->float promotion).
+            let inner_pairs = exp_a.len();
+            let left_only = (0..nl).filter(|&i| !rk.contains(&lk[i])).count();
+            let right_only = (0..nr).filter(|&j| !lk.contains(&rk[j])).count();
+            for (how, expected_rows) in [
+                (JoinType::Left, inner_pairs + left_only),
+                (JoinType::Right, inner_pairs + right_only),
+                (JoinType::Outer, inner_pairs + left_only + right_only),
+            ] {
+                let m = merge_dataframes(&left, &right, "id", how).unwrap();
+                assert_eq!(
+                    m.columns.get("id").unwrap().len(),
+                    expected_rows,
+                    "{how:?} cardinality mismatch for lk={lk:?} rk={rk:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn merge_null_nan_keys_metamorphic_unmatched_rows_do_not_disturb_inner_tn6qb8()
     -> Result<(), JoinError> {
         let left = DataFrame::from_dict(

@@ -5529,15 +5529,24 @@ impl Series {
     ///
     /// Matches `pd.Series.isna()`.
     pub fn isna(&self) -> Result<Self, FrameError> {
-        let labels = self.index.labels().to_vec();
-        let values = self
-            .column
-            .values()
-            .iter()
-            .map(|value| Scalar::Bool(value.is_missing()))
-            .collect::<Vec<_>>();
-        // Per br-frankenpandas-48vkl: preserve index name.
-        self.with_labels_and_values_preserving_name(labels, values)
+        // Read the validity mask directly (dtype-agnostic) instead of
+        // materializing the Scalar vector and testing is_missing per element.
+        // The mask is built from is_missing (validity.get(i) == !values[i]
+        // .is_missing()), so this is bit-identical, emits a typed Bool column
+        // (1B/elem vs 32B Scalar::Bool), and skips the lazy Scalar build.
+        let validity = self.column.validity();
+        let n = self.column.len();
+        let flags: Vec<bool> = if validity.all() {
+            vec![false; n]
+        } else {
+            (0..n).map(|i| !validity.get(i)).collect()
+        };
+        // Per br-frankenpandas-48vkl: preserve index name (self.index carries it).
+        Series::new(
+            self.name.clone(),
+            self.index.clone(),
+            Column::from_bool_values(flags),
+        )
     }
 
     /// Alias for `isna`.
@@ -5551,15 +5560,20 @@ impl Series {
     ///
     /// Matches `pd.Series.notna()`.
     pub fn notna(&self) -> Result<Self, FrameError> {
-        let labels = self.index.labels().to_vec();
-        let values = self
-            .column
-            .values()
-            .iter()
-            .map(|value| Scalar::Bool(!value.is_missing()))
-            .collect::<Vec<_>>();
-        // Per br-frankenpandas-48vkl: preserve index name.
-        self.with_labels_and_values_preserving_name(labels, values)
+        // Validity-mask direct read (see isna): notna(i) == validity.get(i).
+        let validity = self.column.validity();
+        let n = self.column.len();
+        let flags: Vec<bool> = if validity.all() {
+            vec![true; n]
+        } else {
+            (0..n).map(|i| validity.get(i)).collect()
+        };
+        // Per br-frankenpandas-48vkl: preserve index name (self.index carries it).
+        Series::new(
+            self.name.clone(),
+            self.index.clone(),
+            Column::from_bool_values(flags),
+        )
     }
 
     /// Alias for `notna`.
@@ -115328,6 +115342,121 @@ mod test_select_columns_perf_76e1fd {
                 }
             }
         }
+    }
+
+    #[test]
+    fn isna_notna_validity_matches_reference() {
+        // Independent reference: per-Scalar is_missing. The validity-mask path
+        // must be bit-identical (mask is built from is_missing) across dtypes,
+        // including NaN-as-missing floats, NaT, nulls, and all-valid columns.
+        let mut state: u64 = 0xE1F2_A3B4_C5D6_7081;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 200) as usize + 1;
+            let vals: Vec<Scalar> = (0..n)
+                .map(|_| match next() % 6 {
+                    0 => Scalar::Null(NullKind::NaN),
+                    1 => Scalar::Float64(f64::NAN),
+                    2 => Scalar::Null(NullKind::Null),
+                    _ => Scalar::Float64((next() % 1000) as f64),
+                })
+                .collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_values(vals.clone()).unwrap(),
+            )
+            .unwrap();
+
+            let want_isna: Vec<bool> = vals.iter().map(|v| v.is_missing()).collect();
+            let got_isna: Vec<bool> = series
+                .isna()
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| matches!(v, Scalar::Bool(true)))
+                .collect();
+            assert_eq!(got_isna, want_isna, "trial {trial} isna");
+            let got_notna: Vec<bool> = series
+                .notna()
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| matches!(v, Scalar::Bool(true)))
+                .collect();
+            let want_notna: Vec<bool> = want_isna.iter().map(|&b| !b).collect();
+            assert_eq!(got_notna, want_notna, "trial {trial} notna");
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn isna_validity_timing_vs_scalar() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x428A_2F98_D728_AE22;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let data: Vec<f64> = (0..n).map(|_| (next() % 1_000_000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let mk = || {
+            Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_f64_values(data.clone()),
+            )
+            .unwrap()
+        };
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= mk().isna().unwrap().len();
+        }
+        let typed = t0.elapsed();
+
+        // OLD path: materialize Scalar values + is_missing + Vec<Scalar::Bool>.
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let series = mk();
+            let out: Vec<Scalar> = series
+                .column
+                .values()
+                .iter()
+                .map(|v| Scalar::Bool(v.is_missing()))
+                .collect();
+            let s = series
+                .with_labels_and_values_preserving_name(series.index.labels().to_vec(), out)
+                .unwrap();
+            chk2 ^= s.len();
+        }
+        let scalar = t1.elapsed();
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().len();
+        }
+        let build = t2.elapsed();
+        let typed_op = typed.saturating_sub(build).as_secs_f64();
+        let scalar_op = scalar.saturating_sub(build).as_secs_f64();
+        eprintln!(
+            "isna 5M f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} \
+             op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar_op / typed_op,
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]

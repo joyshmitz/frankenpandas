@@ -42992,11 +42992,41 @@ impl DataFrameGroupBy<'_> {
             // (sum/mean need i128 accumulation / nanmean dtype rules). Int64
             // min/max preserve dtype; nanmin/nanmax seed-first + strict compare.
             if let Some((go_gid, gid_per_row, ngroups)) = &dense
-                && matches!(func_name, "min" | "max" | "count" | "var" | "std")
+                && matches!(
+                    func_name,
+                    "min" | "max" | "count" | "var" | "std" | "sum" | "mean"
+                )
                 && let Some(vals) = col.as_i64_slice()
             {
                 let ng = *ngroups;
                 match func_name {
+                    "sum" => {
+                        // i128 accumulate per group, exactly like
+                        // sum_group_vals(Int64): Int64 when it fits, else Float64.
+                        let mut acc = vec![0_i128; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            acc[gid_per_row[row]] += i128::from(v);
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| match i64::try_from(acc[g]) {
+                            Ok(v) => Scalar::Int64(v),
+                            Err(_) => Scalar::Float64(acc[g] as f64),
+                        }));
+                    }
+                    "mean" => {
+                        // nanmean(Int64) coerces to f64 then row-order sum/count.
+                        let mut sum = vec![0.0_f64; ng];
+                        let mut cnt = vec![0u64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            sum[g] += v as f64;
+                            cnt[g] += 1;
+                        }
+                        agg_vals.extend(
+                            go_gid
+                                .iter()
+                                .map(|&g| Scalar::Float64(sum[g] / cnt[g] as f64)),
+                        );
+                    }
                     "count" => {
                         let mut cnt = vec![0i64; ng];
                         for &g in gid_per_row {
@@ -115988,6 +116018,33 @@ mod test_select_columns_perf_76e1fd {
             check(&gb.sum().unwrap(), &want_sum, "sum");
             check(&gb.count().unwrap(), &want_count, "count");
             check(&gb.max().unwrap(), &want_max, "max");
+            // Int64 mean → Float64 (row-order f64 sum / count), bit-exact.
+            let want_mean: Vec<f64> = distinct
+                .iter()
+                .map(|&g| {
+                    let gv: Vec<i64> = keys
+                        .iter()
+                        .zip(&vals)
+                        .filter(|(k, _)| **k == g)
+                        .map(|(_, &v)| v)
+                        .collect();
+                    gv.iter().map(|&x| x as f64).sum::<f64>() / gv.len() as f64
+                })
+                .collect();
+            let mean_res = gb.mean().unwrap();
+            let got_mean: Vec<f64> = mean_res
+                .column("v")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) => *x,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            for (g, w) in got_mean.iter().zip(&want_mean) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} int mean");
+            }
         }
     }
 

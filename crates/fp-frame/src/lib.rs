@@ -12195,6 +12195,51 @@ impl Series {
         }
     }
 
+    fn kendall_no_tie_fast_slices(x: &[f64], y: &[f64]) -> Option<f64> {
+        if x.len() != y.len()
+            || x.iter()
+                .zip(y.iter())
+                .any(|(xv, yv)| !xv.is_finite() || !yv.is_finite())
+        {
+            return None;
+        }
+
+        let mut by_x: Vec<usize> = (0..x.len()).collect();
+        by_x.sort_by(|left, right| {
+            x[*left]
+                .partial_cmp(&x[*right])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if by_x
+            .windows(2)
+            .any(|window| (x[window[1]] - x[window[0]]).abs() < f64::EPSILON)
+        {
+            return None;
+        }
+
+        let mut y_order: Vec<f64> = by_x.iter().map(|idx| y[*idx]).collect();
+        let mut y_sorted = y_order.clone();
+        y_sorted
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+
+        if y_sorted
+            .windows(2)
+            .any(|window| (window[1] - window[0]).abs() < f64::EPSILON)
+        {
+            return None;
+        }
+
+        let discordant = Self::count_f64_inversions(&mut y_order) as f64;
+        let n = x.len() as f64;
+        let n_pairs = n * (n - 1.0) / 2.0;
+        if n_pairs < f64::EPSILON {
+            Some(f64::NAN)
+        } else {
+            Some((n_pairs - 2.0 * discordant) / n_pairs)
+        }
+    }
+
     fn count_f64_inversions(values: &mut [f64]) -> u64 {
         let mut scratch = values.to_vec();
         Self::count_f64_inversions_recursive(values, &mut scratch)
@@ -12261,6 +12306,22 @@ impl Series {
             fvals.push(Self::pairwise_numeric_value(v)?);
         }
         Some(Self::average_ranks(&fvals))
+    }
+
+    pub(crate) fn kendall_values_if_complete_finite(&self) -> Option<Vec<f64>> {
+        let vals = self.column().values();
+        if vals.len() < 2 {
+            return None;
+        }
+        let mut fvals = Vec::with_capacity(vals.len());
+        for v in vals {
+            let value = Self::pairwise_numeric_value(v)?;
+            if !value.is_finite() {
+                return None;
+            }
+            fvals.push(value);
+        }
+        Some(fvals)
     }
 
     /// Compute average ranks for a slice of values (used by Spearman).
@@ -32979,6 +33040,14 @@ impl DataFrame {
         } else {
             Vec::new()
         };
+        let kendall_values: Vec<Option<Vec<f64>>> = if method == "kendall" {
+            series_list
+                .iter()
+                .map(Series::kendall_values_if_complete_finite)
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Spearman and Kendall correlation matrices are exactly symmetric to the
         // last bit: spearman routes through `pearson_on_slices`, whose covariance
@@ -33005,9 +33074,21 @@ impl DataFrame {
                             .corr_spearman(&series_list[j])
                             .unwrap_or(f64::NAN),
                     },
-                    "kendall" => series_list[i]
-                        .corr_kendall(&series_list[j])
-                        .unwrap_or(f64::NAN),
+                    "kendall" => match (
+                        kendall_values.get(i).and_then(Option::as_ref),
+                        kendall_values.get(j).and_then(Option::as_ref),
+                    ) {
+                        (Some(left), Some(right)) => {
+                            Series::kendall_no_tie_fast_slices(left, right).unwrap_or_else(|| {
+                                series_list[i]
+                                    .corr_kendall(&series_list[j])
+                                    .unwrap_or(f64::NAN)
+                            })
+                        }
+                        _ => series_list[i]
+                            .corr_kendall(&series_list[j])
+                            .unwrap_or(f64::NAN),
+                    },
                     _ => f64::NAN,
                 };
                 mat[i * n + j] = val;
@@ -60820,6 +60901,9 @@ mod tests {
     fn kendall_no_tie_fast_matches_quadratic_counts() {
         let pairs = vec![(1.0, 3.0), (2.0, 1.0), (3.0, 4.0), (4.0, 2.0)];
         let fast = Series::kendall_no_tie_fast(&pairs).unwrap();
+        let x: Vec<f64> = pairs.iter().map(|(x, _)| *x).collect();
+        let y: Vec<f64> = pairs.iter().map(|(_, y)| *y).collect();
+        let slice_fast = Series::kendall_no_tie_fast_slices(&x, &y).unwrap();
 
         let mut concordant = 0_i64;
         let mut discordant = 0_i64;
@@ -60838,12 +60922,15 @@ mod tests {
         let n_pairs = (pairs.len() * (pairs.len() - 1)) as f64 / 2.0;
         let expected = (concordant - discordant) as f64 / n_pairs;
         assert!((fast - expected).abs() < 1e-12);
+        assert_eq!(slice_fast.to_bits(), fast.to_bits());
     }
 
     #[test]
     fn kendall_no_tie_fast_declines_ties_and_non_finite_values() {
         assert!(Series::kendall_no_tie_fast(&[(1.0, 1.0), (1.0, 2.0)]).is_none());
         assert!(Series::kendall_no_tie_fast(&[(1.0, 1.0), (f64::INFINITY, 2.0)]).is_none());
+        assert!(Series::kendall_no_tie_fast_slices(&[1.0, 1.0], &[1.0, 2.0]).is_none());
+        assert!(Series::kendall_no_tie_fast_slices(&[1.0, f64::INFINITY], &[1.0, 2.0]).is_none());
     }
 
     #[test]
@@ -60879,6 +60966,67 @@ mod tests {
         // Cross-correlation should be 1.0 for perfectly monotonic data
         let xy = expect_float64(&result.columns["y"].values()[0]);
         assert!((xy - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corr_kendall_dense_path_preserves_order_and_values() {
+        let labels = vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "z",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(40.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(10.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "m",
+                labels,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.corr_method("kendall").unwrap();
+        let names: Vec<&str> = result
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(names, vec!["z", "a", "m"]);
+        assert_eq!(result.columns["z"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(1.0));
+        assert_eq!(result.columns["m"].values()[2], Scalar::Float64(1.0));
+        assert_eq!(expect_float64(&result.columns["a"].values()[0]), -1.0);
+        assert_eq!(expect_float64(&result.columns["z"].values()[1]), -1.0);
+
+        let tau = expect_float64(&result.columns["m"].values()[0]);
+        assert!((tau - (2.0 / 3.0)).abs() < 1e-12);
+        assert_eq!(
+            expect_float64(&result.columns["z"].values()[2]).to_bits(),
+            tau.to_bits()
+        );
     }
 
     #[test]

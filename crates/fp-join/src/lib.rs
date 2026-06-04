@@ -923,6 +923,63 @@ fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> b
     )
 }
 
+fn strictly_increasing_int64_key_values(column: &Column) -> Option<&[Scalar]> {
+    if column.dtype() != DType::Int64 || !column.validity().all() {
+        return None;
+    }
+
+    let values = column.values();
+    let mut previous = None;
+    for value in values {
+        let current = match value {
+            Scalar::Int64(value) => *value,
+            _ => return None,
+        };
+        if previous.is_some_and(|previous| current <= previous) {
+            return None;
+        }
+        previous = Some(current);
+    }
+    Some(values)
+}
+
+fn ordered_unique_int64_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let left_values = strictly_increasing_int64_key_values(left_key)?;
+    let right_values = strictly_increasing_int64_key_values(right_key)?;
+
+    let mut left_positions = Vec::<usize>::with_capacity(left_values.len().min(right_values.len()));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    let mut left_idx = 0usize;
+    let mut right_idx = 0usize;
+
+    while left_idx < left_values.len() && right_idx < right_values.len() {
+        let left_value = match &left_values[left_idx] {
+            Scalar::Int64(value) => *value,
+            _ => return None,
+        };
+        let right_value = match &right_values[right_idx] {
+            Scalar::Int64(value) => *value,
+            _ => return None,
+        };
+
+        match left_value.cmp(&right_value) {
+            Ordering::Equal => {
+                left_positions.push(left_idx);
+                right_positions.push(right_idx);
+                left_idx += 1;
+                right_idx += 1;
+            }
+            Ordering::Less => left_idx += 1,
+            Ordering::Greater => right_idx += 1,
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn identity_merge_column(
     column: &Column,
     row_count: usize,
@@ -1153,6 +1210,19 @@ fn merge_single_key_inner_unsorted(
     {
         return build_single_key_ordered_identity_inner_merge_output(
             left, right, left_on, right_on, suffixes,
+        );
+    }
+    if let Some((left_positions, right_positions)) =
+        ordered_unique_int64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
         );
     }
 
@@ -3155,10 +3225,94 @@ mod tests {
     }
 
     #[test]
+    fn merge_inner_ordered_unique_int64_subset_matches_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(2),
+                        Scalar::Int64(4),
+                        Scalar::Int64(6),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(300),
+                        Scalar::Int64(400),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            fast.columns.get("v").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(12), Scalar::Int64(14)]
+        );
+        assert_eq!(
+            fast.columns.get("w").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)]
+        );
+    }
+
+    #[test]
     fn merge_inner_ordered_identity_falls_back_for_non_identity_keys() {
         let cases = [
             (
-                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+                vec![Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(4)],
                 vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
             ),
             (

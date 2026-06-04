@@ -114,7 +114,7 @@ fn merge_once(
             &["id"],
             join_type,
             MergeExecutionOptions {
-                validate_mode: Some(MergeValidateMode::OneToOne),
+                validate_mode: Some(MergeValidateMode::ManyToMany),
                 ..MergeExecutionOptions::default()
             },
         )?);

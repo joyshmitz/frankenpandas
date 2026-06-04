@@ -943,6 +943,19 @@ fn strictly_increasing_int64_key_values(column: &Column) -> Option<&[Scalar]> {
     Some(values)
 }
 
+fn all_valid_int64_key_values(column: &Column) -> Option<&[Scalar]> {
+    if column.dtype() != DType::Int64 || !column.validity().all() {
+        return None;
+    }
+
+    let values = column.values();
+    if values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
+        Some(values)
+    } else {
+        None
+    }
+}
+
 fn ordered_unique_int64_inner_positions(
     left_key: &Column,
     right_key: &Column,
@@ -1043,6 +1056,97 @@ fn ordered_unique_int64_right_match_positions(
 }
 
 type OptionalJoinPositions = (Vec<Option<usize>>, Vec<Option<usize>>);
+
+fn dense_int64_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = all_valid_int64_key_values(left_key)?;
+    let right_values = all_valid_int64_key_values(right_key)?;
+
+    let mut min_key = None::<i64>;
+    let mut max_key = None::<i64>;
+    for value in left_values.iter().chain(right_values.iter()) {
+        let Scalar::Int64(key) = value else {
+            return None;
+        };
+        min_key = Some(min_key.map_or(*key, |current| current.min(*key)));
+        max_key = Some(max_key.map_or(*key, |current| current.max(*key)));
+    }
+
+    let Some(min_key) = min_key else {
+        return Some((Vec::new(), Vec::new()));
+    };
+    let max_key = max_key.expect("max key exists when min key exists");
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+
+    let mut left_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+    let mut right_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+
+    for (pos, value) in left_values.iter().enumerate() {
+        let Scalar::Int64(key) = value else {
+            return None;
+        };
+        let bucket = usize::try_from(i128::from(*key) - i128::from(min_key)).ok()?;
+        left_buckets[bucket].push(pos);
+    }
+    for (pos, value) in right_values.iter().enumerate() {
+        let Scalar::Int64(key) = value else {
+            return None;
+        };
+        let bucket = usize::try_from(i128::from(*key) - i128::from(min_key)).ok()?;
+        right_buckets[bucket].push(pos);
+    }
+
+    let mut output_len = 0usize;
+    for (left_bucket, right_bucket) in left_buckets.iter().zip(right_buckets.iter()) {
+        let bucket_rows = match (left_bucket.is_empty(), right_bucket.is_empty()) {
+            (false, false) => left_bucket.len().checked_mul(right_bucket.len())?,
+            (false, true) => left_bucket.len(),
+            (true, false) => right_bucket.len(),
+            (true, true) => 0,
+        };
+        output_len = output_len.checked_add(bucket_rows)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(output_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(output_len);
+    for (left_bucket, right_bucket) in left_buckets.into_iter().zip(right_buckets) {
+        match (left_bucket.is_empty(), right_bucket.is_empty()) {
+            (false, false) => {
+                for left_pos in left_bucket {
+                    for &right_pos in &right_bucket {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (false, true) => {
+                for left_pos in left_bucket {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (true, false) => {
+                for right_pos in right_bucket {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+            (true, true) => {}
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
 
 fn ordered_unique_int64_outer_positions(
     left_key: &Column,
@@ -1794,6 +1898,25 @@ pub fn merge_dataframes_on_with_options(
         && validate_mode.is_none()
         && let Some((left_positions, right_positions)) =
             ordered_unique_int64_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_mode.is_none()
+        && let Some((left_positions, right_positions)) =
+            dense_int64_outer_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_ordered_unique_outer_merge_output(
             left,
@@ -4066,6 +4189,104 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Float64(200.0));
         assert_eq!(right_values[3], Scalar::Float64(300.0));
         assert_eq!(right_values[4], Scalar::Float64(500.0));
+    }
+
+    #[test]
+    fn merge_outer_dense_int64_duplicates_matches_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(15),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(0),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(200),
+                        Scalar::Int64(201),
+                        Scalar::Int64(300),
+                        Scalar::Int64(400),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(5),
+            ]
+        );
+        let left_values = fast.columns.get("v").unwrap().values();
+        assert_eq!(left_values[0], Scalar::Float64(11.0));
+        assert_eq!(left_values[1], Scalar::Float64(13.0));
+        assert_eq!(left_values[2], Scalar::Float64(10.0));
+        assert_eq!(left_values[5], Scalar::Float64(12.0));
+        assert!(left_values[6].is_missing());
+        assert_eq!(left_values[7], Scalar::Float64(15.0));
+        let right_values = fast.columns.get("w").unwrap().values();
+        assert_eq!(right_values[0], Scalar::Float64(400.0));
+        assert!(right_values[1].is_missing());
+        assert_eq!(right_values[2], Scalar::Float64(200.0));
+        assert_eq!(right_values[3], Scalar::Float64(201.0));
+        assert!(right_values[7].is_missing());
     }
 
     #[test]

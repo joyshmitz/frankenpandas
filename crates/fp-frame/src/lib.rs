@@ -33517,6 +33517,24 @@ impl DataFrame {
             .collect()
     }
 
+    fn pairwise_numeric_column_values(col: &Column, len: usize) -> Vec<f64> {
+        if let Some(data) = col.as_f64_slice()
+            && data.len() == len
+        {
+            return data.to_vec();
+        }
+
+        (0..len)
+            .map(|i| match &col.values()[i] {
+                // Per br-frankenpandas-qk3s0: extract ns for
+                // Timedelta64 before falling through to to_f64.
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => *ns as f64,
+                Scalar::Timedelta64(_) => f64::NAN,
+                other => other.to_f64().unwrap_or(f64::NAN),
+            })
+            .collect()
+    }
+
     /// Finalize a pairwise cov/corr cell from accumulated moments.
     ///
     /// Arithmetic is bit-identical to the historical per-pair inline form.
@@ -33766,18 +33784,7 @@ impl DataFrame {
 
         let col_data: Vec<Vec<f64>> = numeric_cols
             .iter()
-            .map(|name| {
-                let col = &self.columns[name];
-                (0..len)
-                    .map(|i| match &col.values()[i] {
-                        // Per br-frankenpandas-qk3s0: extract ns for
-                        // Timedelta64 before falling through to to_f64.
-                        Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => *ns as f64,
-                        Scalar::Timedelta64(_) => f64::NAN,
-                        other => other.to_f64().unwrap_or(f64::NAN),
-                    })
-                    .collect()
-            })
+            .map(|name| Self::pairwise_numeric_column_values(&self.columns[name], len))
             .collect();
 
         let _ = n;
@@ -33818,16 +33825,7 @@ impl DataFrame {
         // Extract f64 columns
         let col_data: Vec<Vec<f64>> = numeric_cols
             .iter()
-            .map(|name| {
-                let col = &self.columns[name];
-                (0..len)
-                    .map(|i| match &col.values()[i] {
-                        Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => *ns as f64,
-                        Scalar::Timedelta64(_) => f64::NAN,
-                        other => other.to_f64().unwrap_or(f64::NAN),
-                    })
-                    .collect()
-            })
+            .map(|name| Self::pairwise_numeric_column_values(&self.columns[name], len))
             .collect();
 
         let _ = n;

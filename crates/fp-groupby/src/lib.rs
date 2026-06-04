@@ -663,7 +663,12 @@ fn is_int64_or_bool_values(values: &[Scalar]) -> bool {
     let mut saw = false;
     for v in values {
         if v.is_missing() {
-            continue;
+            // pandas' non-nullable int/bool column promotes to Float64 the moment
+            // any value is missing (NaN cannot live in int64) — whether the gap
+            // came from alignment or was an explicit null — so groupby.sum() is
+            // Float64, NOT Int64. Do not take the Int64-preserving path.
+            // (br-frankenpandas-33d1h)
+            return false;
         }
         match v {
             Scalar::Int64(_) | Scalar::Bool(_) => saw = true,
@@ -2209,8 +2214,10 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        // "a": 5 + missing = 5.0; "b": missing + missing = 0.0
-        assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(0)]);
+        // pandas promotes an int column with a missing value to Float64, so the
+        // group sums are Float64: "a" = 5 + skipna = 5.0; "b" = all-missing = 0.0.
+        // (br-frankenpandas-33d1h)
+        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(0.0)]);
     }
 
     /// AG-08-T #7: 10000 unique keys -> all groups present, sums correct.

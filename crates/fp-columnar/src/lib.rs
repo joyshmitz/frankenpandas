@@ -1649,9 +1649,9 @@ impl Column {
         let len = data.len();
         Self {
             dtype: DType::Int64,
-            values: ScalarValues::lazy_all_valid_int64(data.clone()),
+            values: ScalarValues::lazy_all_valid_int64(data),
             validity: ValidityMask::all_valid(len),
-            data: Some(ColumnData::Int64(data)),
+            data: None,
         }
     }
 
@@ -1677,9 +1677,9 @@ impl Column {
         };
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64(data.clone()),
+            values: ScalarValues::lazy_all_valid_float64(data),
             validity,
-            data: Some(ColumnData::Float64(data)),
+            data: None,
         }
     }
 
@@ -1691,11 +1691,13 @@ impl Column {
     /// br-frankenpandas-lei31.
     #[must_use]
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
-        if self.dtype == DType::Float64
-            && self.validity.all()
-            && let Some(ColumnData::Float64(data)) = &self.data
-        {
-            return Some(data.as_slice());
+        if self.dtype == DType::Float64 && self.validity.all() {
+            if let Some(ColumnData::Float64(data)) = &self.data {
+                return Some(data.as_slice());
+            }
+            if let ScalarValues::LazyAllValidFloat64 { data, .. } = &self.values {
+                return Some(data.as_slice());
+            }
         }
         None
     }
@@ -1704,11 +1706,13 @@ impl Column {
     /// `Int64` column. See [`Column::as_f64_slice`].
     #[must_use]
     pub fn as_i64_slice(&self) -> Option<&[i64]> {
-        if self.dtype == DType::Int64
-            && self.validity.all()
-            && let Some(ColumnData::Int64(data)) = &self.data
-        {
-            return Some(data.as_slice());
+        if self.dtype == DType::Int64 && self.validity.all() {
+            if let Some(ColumnData::Int64(data)) = &self.data {
+                return Some(data.as_slice());
+            }
+            if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
+                return Some(data.as_slice());
+            }
         }
         None
     }
@@ -1723,9 +1727,9 @@ impl Column {
         let len = data.len();
         Self {
             dtype: DType::Bool,
-            values: ScalarValues::lazy_all_valid_bool(data.clone()),
+            values: ScalarValues::lazy_all_valid_bool(data),
             validity: ValidityMask::all_valid(len),
-            data: Some(ColumnData::Bool(data)),
+            data: None,
         }
     }
 
@@ -1733,11 +1737,13 @@ impl Column {
     /// `Bool` column. See [`Column::as_f64_slice`].
     #[must_use]
     pub fn as_bool_slice(&self) -> Option<&[bool]> {
-        if self.dtype == DType::Bool
-            && self.validity.all()
-            && let Some(ColumnData::Bool(data)) = &self.data
-        {
-            return Some(data.as_slice());
+        if self.dtype == DType::Bool && self.validity.all() {
+            if let Some(ColumnData::Bool(data)) = &self.data {
+                return Some(data.as_slice());
+            }
+            if let ScalarValues::LazyAllValidBool { data, .. } = &self.values {
+                return Some(data.as_slice());
+            }
         }
         None
     }
@@ -1811,10 +1817,7 @@ impl Column {
     }
 
     fn take_cached_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Vec<f64>> {
-        let data = match (self.dtype, self.data.as_ref()?) {
-            (DType::Float64, ColumnData::Float64(data)) => data,
-            _ => return None,
-        };
+        let data = self.as_f64_slice()?;
         let mut values = Vec::with_capacity(positions.len());
         for &pos in positions {
             values.push(data[pos]);
@@ -1886,6 +1889,37 @@ impl Column {
         &self,
         positions: &[usize],
     ) -> Option<Vec<Scalar>> {
+        match self.dtype {
+            DType::Bool => {
+                if let Some(data) = self.as_bool_slice() {
+                    let mut values = Vec::with_capacity(positions.len());
+                    for &pos in positions {
+                        values.push(Scalar::Bool(data[pos]));
+                    }
+                    return Some(values);
+                }
+            }
+            DType::Int64 => {
+                if let Some(data) = self.as_i64_slice() {
+                    let mut values = Vec::with_capacity(positions.len());
+                    for &pos in positions {
+                        values.push(Scalar::Int64(data[pos]));
+                    }
+                    return Some(values);
+                }
+            }
+            DType::Float64 => {
+                if let Some(data) = self.as_f64_slice() {
+                    let mut values = Vec::with_capacity(positions.len());
+                    for &pos in positions {
+                        values.push(Scalar::Float64(data[pos]));
+                    }
+                    return Some(values);
+                }
+            }
+            _ => {}
+        }
+
         let data = self.data.as_ref()?;
         let mut values = Vec::with_capacity(positions.len());
         match (self.dtype, data) {
@@ -15862,11 +15896,12 @@ mod tests {
     }
 
     #[test]
-    fn typed_all_valid_constructors_seed_dense_storage() {
+    fn typed_all_valid_constructors_keep_single_typed_backing() {
         let ints = Column::from_i64_values(vec![1, 2, 3]);
         assert_eq!(ints.dtype(), DType::Int64);
         assert!(ints.validity.all());
-        assert!(matches!(ints.data, Some(ColumnData::Int64(_))));
+        assert!(ints.data.is_none());
+        assert_eq!(ints.as_i64_slice(), Some([1, 2, 3].as_slice()));
         assert_eq!(
             ints.values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
@@ -15875,7 +15910,20 @@ mod tests {
         let floats = Column::from_f64_values(vec![1.5, -0.0, f64::INFINITY]);
         assert_eq!(floats.dtype(), DType::Float64);
         assert!(floats.validity.all());
-        assert!(matches!(floats.data, Some(ColumnData::Float64(_))));
+        assert!(floats.data.is_none());
+        assert_eq!(
+            floats.as_f64_slice().map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec![
+                1.5f64.to_bits(),
+                (-0.0f64).to_bits(),
+                f64::INFINITY.to_bits()
+            ])
+        );
         assert_eq!(
             floats.values(),
             &[

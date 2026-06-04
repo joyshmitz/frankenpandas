@@ -42936,7 +42936,7 @@ impl DataFrameGroupBy<'_> {
         // group size. Other funcs / non-Float64 / multi-col keys fall through.
         let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
             func_name,
-            "sum" | "mean" | "count" | "min" | "max" | "var" | "std" | "first" | "last"
+            "sum" | "mean" | "count" | "min" | "max" | "var" | "std" | "first" | "last" | "prod"
         ) && !self.by.is_empty()
         {
             // Gather all-valid Int64 key slices + per-column (min, span). Bail
@@ -43115,6 +43115,14 @@ impl DataFrameGroupBy<'_> {
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(cur[g])));
                     }
+                    "prod" => {
+                        // nanprod = row-order left-fold product seeded 1.0.
+                        let mut acc = vec![1.0_f64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            acc[gid_per_row[row]] *= v;
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
+                    }
                     _ => {
                         // mean
                         let mut acc = vec![0.0_f64; ng];
@@ -43142,7 +43150,16 @@ impl DataFrameGroupBy<'_> {
             if let Some((go_gid, gid_per_row, ngroups)) = &dense
                 && matches!(
                     func_name,
-                    "min" | "max" | "count" | "var" | "std" | "sum" | "mean" | "first" | "last"
+                    "min"
+                        | "max"
+                        | "count"
+                        | "var"
+                        | "std"
+                        | "sum"
+                        | "mean"
+                        | "first"
+                        | "last"
+                        | "prod"
                 )
                 && let Some(vals) = col.as_i64_slice()
             {
@@ -43211,6 +43228,15 @@ impl DataFrameGroupBy<'_> {
                             }
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
+                    }
+                    "prod" => {
+                        // nanprod coerces Int64→f64 then row-order product (1.0
+                        // seed) → Float64, exactly the Float64 path.
+                        let mut acc = vec![1.0_f64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            acc[gid_per_row[row]] *= v as f64;
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
                     }
                     _ => {
                         // var/std: nanvar coerces Int64 to f64 (collect_finite),
@@ -116031,6 +116057,14 @@ mod test_select_columns_perf_76e1fd {
             }
             for (g, w) in f64_of(&gb.last().unwrap()).iter().zip(&want_last) {
                 assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} last");
+            }
+            // prod: row-order left-fold product seeded 1.0, bit-exact.
+            let want_prod: Vec<f64> = distinct
+                .iter()
+                .map(|&g| group_f64(g).iter().fold(1.0_f64, |a, &b| a * b))
+                .collect();
+            for (g, w) in f64_of(&gb.prod().unwrap()).iter().zip(&want_prod) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} prod");
             }
         }
     }

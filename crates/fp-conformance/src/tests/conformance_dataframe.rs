@@ -415,3 +415,56 @@ fn dataframe_corr_cov_constant_and_singlerow_edges_match_pandas() {
     assert!(corr1.column("a").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
     assert!(corr1.column("b").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
 }
+
+#[test]
+fn dataframe_corr_cov_pairwise_nan_deletion_matches_pandas() {
+    // pandas corr/cov use PAIRWISE complete-observation deletion, NOT listwise:
+    // the off-diagonal cov(a,b) drops rows where EITHER is NaN, but the diagonal
+    // cov(a,a) uses a's OWN non-NaN rows. A gram-matrix perf rewrite that shares
+    // one listwise mask across all cells would diverge. Verified vs pandas 2.2.3
+    // for df = {a:[1,2,NaN,4], b:[2,NaN,6,8]}:
+    //   cov(a,a)=2.333333 (var of [1,2,4]), NOT 4.5 (var of listwise [1,4]);
+    //   cov(b,b)=9.333333 (var of [2,6,8]); cov(a,b)=9.0 (pairwise rows 0,3);
+    //   corr is 1.0 everywhere (the pairwise-complete pairs are collinear).
+    use fp_frame::DataFrame;
+    use fp_types::{NullKind, Scalar};
+
+    let n = |_: ()| Scalar::Null(NullKind::NaN);
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0), n(()), Scalar::Float64(4.0)],
+            ),
+            (
+                "b",
+                vec![Scalar::Float64(2.0), n(()), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+            ),
+        ],
+    )
+    .expect("frame");
+
+    let cov = df.cov().expect("cov");
+    let kov = |col: &str, i: usize| cov.column(col).unwrap().values()[i].to_f64().unwrap();
+    assert!(
+        (kov("a", 0) - 2.333_333_333_333_333).abs() < 1e-9,
+        "cov(a,a) must use a's own non-NaN rows (var[1,2,4]=2.333), got {}",
+        kov("a", 0)
+    );
+    assert!(
+        (kov("b", 1) - 9.333_333_333_333_334).abs() < 1e-9,
+        "cov(b,b) must be var[2,6,8]=9.333, got {}",
+        kov("b", 1)
+    );
+    assert!(
+        (kov("b", 0) - 9.0).abs() < 1e-9,
+        "cov(a,b) must use pairwise rows 0,3 -> 9.0, got {}",
+        kov("b", 0)
+    );
+
+    let corr = df.corr().expect("corr");
+    let cval = |col: &str, i: usize| corr.column(col).unwrap().values()[i].to_f64().unwrap();
+    assert!((cval("a", 0) - 1.0).abs() < 1e-9);
+    assert!((cval("b", 0) - 1.0).abs() < 1e-9, "pairwise corr(a,b) must be 1.0");
+}

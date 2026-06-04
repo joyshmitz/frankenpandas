@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 fp-types = { path = "../fp-types" }
+rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
 

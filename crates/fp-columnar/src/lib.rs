@@ -63,6 +63,7 @@ use fp_types::{
     nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
     nanvar,
 };
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1123,6 +1124,130 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
             if ascending { ord } else { ord.reverse() }
         }
     }
+}
+
+/// `keep=` policy for `duplicated`/`drop_duplicates`.
+#[derive(Clone, Copy)]
+enum DupPolicy {
+    First,
+    Last,
+    None,
+}
+
+/// Per-element duplicate flags over a contiguous slice of `Copy + Hash + Eq`
+/// keys, using a fast (`FxHashSet`) hasher — the typed counterpart to the
+/// `Scalar`-enum + SipHash path. Semantics are identical: `First` flags every
+/// occurrence after the first; `Last` flags every occurrence before the last;
+/// `None` flags every occurrence of any key that appears more than once.
+fn duplicated_flags_typed<T>(keys: &[T], policy: DupPolicy) -> Vec<bool>
+where
+    T: std::hash::Hash + Eq + Copy,
+{
+    let n = keys.len();
+    let mut flags = vec![false; n];
+    match policy {
+        DupPolicy::First => {
+            let mut seen: FxHashSet<T> = FxHashSet::with_capacity_and_hasher(n, Default::default());
+            for (idx, &k) in keys.iter().enumerate() {
+                flags[idx] = !seen.insert(k);
+            }
+        }
+        DupPolicy::Last => {
+            let mut seen: FxHashSet<T> = FxHashSet::with_capacity_and_hasher(n, Default::default());
+            for (idx, &k) in keys.iter().enumerate().rev() {
+                flags[idx] = !seen.insert(k);
+            }
+        }
+        DupPolicy::None => {
+            let mut seen_once: FxHashSet<T> =
+                FxHashSet::with_capacity_and_hasher(n, Default::default());
+            let mut seen_multiple: FxHashSet<T> = FxHashSet::default();
+            for &k in keys {
+                if !seen_once.insert(k) {
+                    seen_multiple.insert(k);
+                }
+            }
+            for (idx, &k) in keys.iter().enumerate() {
+                flags[idx] = seen_multiple.contains(&k);
+            }
+        }
+    }
+    flags
+}
+
+/// Largest direct-address table we will allocate for integer dedup (entries).
+/// At 16M entries the `seen`/`count` table is ~16MB — L3-resident on a typical
+/// server — and dedup becomes a hash-free O(n) scan. Beyond this the table
+/// stops being cache-friendly and we fall back to the FxHash set.
+const DUP_DIRECT_ADDRESS_CAP: u128 = 1 << 24;
+
+/// Min and table size for a direct-address integer dedup, or `None` when the
+/// value span is too wide (sparse) to be worth a dense table. We also require
+/// the table to be at most ~16x the row count so a handful of widely-separated
+/// values don't trigger a giant allocation.
+fn i64_direct_address_range(data: &[i64]) -> Option<(i64, usize)> {
+    let mut min = data.first().copied()?;
+    let mut max = min;
+    for &v in &data[1..] {
+        if v < min {
+            min = v;
+        } else if v > max {
+            max = v;
+        }
+    }
+    let range = (max as i128 - min as i128 + 1) as u128;
+    if range <= DUP_DIRECT_ADDRESS_CAP && range <= (data.len() as u128).saturating_mul(16) {
+        Some((min, range as usize))
+    } else {
+        None
+    }
+}
+
+/// Hash-free duplicate flags for a bounded-range `i64` slice via a dense
+/// direct-address table (no per-element hashing or `Scalar` enum). Identical
+/// semantics to [`duplicated_flags_typed`]. `min`/`range` come from
+/// [`i64_direct_address_range`], so `(v - min)` is always in `0..range`.
+fn duplicated_flags_i64_direct(
+    data: &[i64],
+    min: i64,
+    range: usize,
+    policy: DupPolicy,
+) -> Vec<bool> {
+    let n = data.len();
+    let mut flags = vec![false; n];
+    let slot = |v: i64| (v as i128 - min as i128) as usize;
+    match policy {
+        DupPolicy::First => {
+            let mut seen = vec![false; range];
+            for (idx, &v) in data.iter().enumerate() {
+                let s = slot(v);
+                flags[idx] = seen[s];
+                seen[s] = true;
+            }
+        }
+        DupPolicy::Last => {
+            let mut seen = vec![false; range];
+            for (idx, &v) in data.iter().enumerate().rev() {
+                let s = slot(v);
+                flags[idx] = seen[s];
+                seen[s] = true;
+            }
+        }
+        DupPolicy::None => {
+            // Saturating occupancy count (we only care about 1 vs >1).
+            let mut count = vec![0u8; range];
+            for &v in data {
+                let s = slot(v);
+                if count[s] < 2 {
+                    count[s] += 1;
+                }
+            }
+            for (idx, &v) in data.iter().enumerate() {
+                flags[idx] = count[slot(v)] > 1;
+            }
+        }
+    }
+    flags
 }
 
 /// Map an `i64` to an order-preserving `u64` radix key (flip the sign bit so
@@ -6546,12 +6671,6 @@ impl Column {
     /// are `"first"`, `"last"`, and `"false"` / `"none"` for pandas
     /// `keep=False`.
     pub fn duplicated_keep(&self, keep: &str) -> Result<Self, ColumnError> {
-        use std::collections::HashSet;
-        enum Keep {
-            First,
-            Last,
-            None,
-        }
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Null,
@@ -6588,9 +6707,9 @@ impl Column {
         }
 
         let policy = match keep {
-            "first" => Keep::First,
-            "last" => Keep::Last,
-            "false" | "False" | "none" => Keep::None,
+            "first" => DupPolicy::First,
+            "last" => DupPolicy::Last,
+            "false" | "False" | "none" => DupPolicy::None,
             other => {
                 return Err(ColumnError::Type(TypeError::NonNumericValue {
                     value: other.to_string(),
@@ -6599,23 +6718,48 @@ impl Column {
             }
         };
 
+        // Typed fast paths: all-valid Int64/Float64 hash their contiguous
+        // buffer directly with FxHash, skipping the per-value `Key` enum and
+        // SipHash. `as_*_slice` only yields all-valid buffers, so the `Null`
+        // bucket never arises; Float64 normalizes -0.0→+0.0 before `to_bits`
+        // exactly as `key_of` does, keeping dedup semantics bit-identical.
+        if let Some(data) = self.as_i64_slice() {
+            // Bounded value span → hash-free direct-address table (O(n), no
+            // probing); otherwise the FxHash typed set.
+            if let Some((min, range)) = i64_direct_address_range(data) {
+                return Ok(Self::from_bool_values(duplicated_flags_i64_direct(
+                    data, min, range, policy,
+                )));
+            }
+            return Ok(Self::from_bool_values(duplicated_flags_typed(data, policy)));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            let keys: Vec<u64> = data
+                .iter()
+                .map(|&f| (if f == 0.0 { 0.0 } else { f }).to_bits())
+                .collect();
+            return Ok(Self::from_bool_values(duplicated_flags_typed(
+                &keys, policy,
+            )));
+        }
+
         let mut flags = vec![false; self.values.len()];
         match policy {
-            Keep::First => {
-                let mut seen: HashSet<Key<'_>> = HashSet::new();
+            DupPolicy::First => {
+                let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
                 for (idx, value) in self.values.iter().enumerate() {
                     flags[idx] = !seen.insert(key_of(value));
                 }
             }
-            Keep::Last => {
-                let mut seen: HashSet<Key<'_>> = HashSet::new();
+            DupPolicy::Last => {
+                let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
                 for (idx, value) in self.values.iter().enumerate().rev() {
                     flags[idx] = !seen.insert(key_of(value));
                 }
             }
-            Keep::None => {
-                let mut seen_once: HashSet<Key<'_>> = HashSet::new();
-                let mut seen_multiple: HashSet<Key<'_>> = HashSet::new();
+            DupPolicy::None => {
+                let mut seen_once: FxHashSet<Key<'_>> = FxHashSet::default();
+                let mut seen_multiple: FxHashSet<Key<'_>> = FxHashSet::default();
                 for value in &self.values {
                     let key = key_of(value);
                     if !seen_once.insert(key_of(value)) {
@@ -11792,6 +11936,136 @@ mod tests {
                         "{label} trial {trial} argsort mismatch"
                     );
                 }
+            }
+        }
+
+        #[test]
+        fn duplicated_typed_matches_bruteforce_reference() {
+            // Independent O(n^2) reference: for keep=first a value is a dup iff
+            // an equal value occurs earlier; last iff later; none iff any other
+            // position is equal. Float keys compare on normalized to_bits (so
+            // -0.0==+0.0) — matching key_of. Proves the typed FxHash fast path
+            // is bit-identical for all-valid Int64/Float64 columns.
+            let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let fbits = |f: f64| (if f == 0.0 { 0.0 } else { f }).to_bits();
+            for trial in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                // Narrow value range → many duplicates / ties.
+                let raw: Vec<i64> = (0..n).map(|_| (next() % 9) as i64 - 4).collect();
+                let i64_vals: Vec<Scalar> = raw.iter().map(|&v| Scalar::Int64(v)).collect();
+                let f64_vals: Vec<Scalar> = raw
+                    .iter()
+                    .map(|&v| Scalar::Float64(v as f64 / 2.0))
+                    .collect();
+                let i64_keys: Vec<i64> = raw.clone();
+                let f64_keys: Vec<u64> = raw.iter().map(|&v| fbits(v as f64 / 2.0)).collect();
+
+                for keep in ["first", "last", "false"] {
+                    // Brute-force references over both key representations.
+                    let bf = |eq_keys: &dyn Fn(usize, usize) -> bool| -> Vec<bool> {
+                        (0..n)
+                            .map(|i| match keep {
+                                "first" => (0..i).any(|j| eq_keys(i, j)),
+                                "last" => (i + 1..n).any(|j| eq_keys(i, j)),
+                                _ => (0..n).any(|j| j != i && eq_keys(i, j)),
+                            })
+                            .collect()
+                    };
+                    let want_i = bf(&|a, b| i64_keys[a] == i64_keys[b]);
+                    let want_f = bf(&|a, b| f64_keys[a] == f64_keys[b]);
+
+                    let col_i = Column::from_values(i64_vals.clone()).expect("i64 col");
+                    let got_i: Vec<bool> = col_i
+                        .duplicated_keep(keep)
+                        .expect("dup i64")
+                        .values()
+                        .iter()
+                        .map(|v| matches!(v, Scalar::Bool(true)))
+                        .collect();
+                    assert_eq!(got_i, want_i, "i64 trial {trial} keep={keep}");
+
+                    let col_f = Column::from_values(f64_vals.clone()).expect("f64 col");
+                    let got_f: Vec<bool> = col_f
+                        .duplicated_keep(keep)
+                        .expect("dup f64")
+                        .values()
+                        .iter()
+                        .map(|v| matches!(v, Scalar::Bool(true)))
+                        .collect();
+                    assert_eq!(got_f, want_f, "f64 trial {trial} keep={keep}");
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+        fn duplicated_typed_timing_vs_scalar() {
+            use std::{collections::HashSet, time::Instant};
+            let n = 5_000_000usize;
+            let iters = 10;
+            // Faithful replica of the OLD path: build the per-value Key enum
+            // over &[Scalar] and insert into a std (SipHash) HashSet.
+            #[derive(Hash, PartialEq, Eq)]
+            enum OldKey {
+                Int64(i64),
+                Null,
+            }
+            for cardinality in [1_000u64, 2_000_000u64] {
+                let mut state: u64 = 0x0FED_CBA9_8765_4321 ^ cardinality;
+                let mut next = || {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    state
+                };
+                let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
+
+                let col = Column::from_i64_values(data.clone());
+                let t0 = Instant::now();
+                let mut chk = 0usize;
+                for _ in 0..iters {
+                    let d = col.duplicated_keep("first").expect("typed");
+                    chk ^= d
+                        .values()
+                        .iter()
+                        .filter(|v| matches!(v, Scalar::Bool(true)))
+                        .count();
+                }
+                let typed = t0.elapsed();
+
+                let scalar_col =
+                    Column::from_values(data.iter().map(|&v| Scalar::Int64(v)).collect())
+                        .expect("col");
+                let t1 = Instant::now();
+                let mut chk2 = 0usize;
+                for _ in 0..iters {
+                    let mut seen: HashSet<OldKey> = HashSet::new();
+                    let mut count = 0usize;
+                    for v in scalar_col.values() {
+                        let key = if v.is_missing() {
+                            OldKey::Null
+                        } else if let Scalar::Int64(i) = v {
+                            OldKey::Int64(*i)
+                        } else {
+                            OldKey::Null
+                        };
+                        if !seen.insert(key) {
+                            count += 1;
+                        }
+                    }
+                    chk2 ^= count;
+                }
+                let scalar = t1.elapsed();
+                eprintln!(
+                    "duplicated 5M i64 card={cardinality} x{iters}: typed={typed:?} old_keyenum_siphash={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+                    scalar.as_secs_f64() / typed.as_secs_f64()
+                );
             }
         }
 

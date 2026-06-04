@@ -33580,51 +33580,163 @@ impl DataFrame {
         min_periods: usize,
     ) -> Result<BTreeMap<String, Column>, FrameError> {
         let n = numeric_cols.len();
+        let len = col_data.first().map_or(0, |c| c.len());
 
         let mut mat = vec![0.0_f64; n * n];
-        for j in 0..n {
-            for i in 0..=j {
-                let mut sum_x = 0.0_f64;
-                let mut sum_y = 0.0_f64;
-                let mut sum_xy = 0.0_f64;
-                let mut sum_x2 = 0.0_f64;
-                let mut sum_y2 = 0.0_f64;
-                let mut count = 0_usize;
-                for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
-                    if x.is_nan() || y.is_nan() {
-                        continue;
-                    }
-                    sum_x += x;
-                    sum_y += y;
-                    sum_xy += x * y;
-                    sum_x2 += x * x;
-                    sum_y2 += y * y;
-                    count += 1;
+
+        // Complete-columns fast path. When no column has a NaN, the per-pair
+        // NaN-skip never fires, so for EVERY pair count == len, and the five
+        // moments separate:
+        //   - sum_x / sum_x2 depend only on column i (not the partner j), so
+        //     they are computed ONCE per column instead of N times.
+        //   - sum_xy is the Gram matrix G = Xᵀ·X. Its upper triangle is built
+        //     with the register-blocked, packed-panel micro-kernel (same lever
+        //     as DataFrame::dot): a 4×4 tile of INDEPENDENT accumulators, each
+        //     folding r = 0..len left-to-right exactly as the scalar
+        //     `sum_xy += x*y` loop did — no reassociation, just interleaved
+        //     chains hiding FP-add latency, with the dj FMAs vectorized.
+        // G is symmetric to the bit (x*y == y*x, same fold order), so the
+        // single computed G[i][j] feeds BOTH the (i,j) and (j,i) finalize calls
+        // — identical to the old code reusing one `sum_xy` for the mirror cell.
+        // Any NaN anywhere falls through to the exact per-pair path below.
+        let complete = len > 0 && col_data.iter().all(|c| !c.iter().any(|x| x.is_nan()));
+        if complete {
+            let mut sum = vec![0.0_f64; n];
+            let mut sum2 = vec![0.0_f64; n];
+            for (idx, col) in col_data.iter().enumerate() {
+                let mut s = 0.0_f64;
+                let mut s2 = 0.0_f64;
+                for &x in col {
+                    s += x;
+                    s2 += x * x;
                 }
-                // Cell (i, j): col i is "x", col j is "y" — exactly as before.
-                mat[i * n + j] = Self::finalize_pairwise_stat(
-                    stat,
-                    min_periods,
-                    count,
-                    sum_x,
-                    sum_y,
-                    sum_xy,
-                    sum_x2,
-                    sum_y2,
-                );
-                if i != j {
-                    // Cell (j, i): col j is "x", col i is "y" — swap marginals so
-                    // the (n * mean_x * mean_y) association matches the old pass.
-                    mat[j * n + i] = Self::finalize_pairwise_stat(
+                sum[idx] = s;
+                sum2[idx] = s2;
+            }
+
+            // Upper-triangle Gram via blocked kernel; gram[i*n+j] for i <= j.
+            let mut gram = vec![0.0_f64; n * n];
+            const BT: usize = 4;
+            let mut panel = vec![0.0_f64; len * BT];
+            let mut tj = 0;
+            while tj < n {
+                let bj = BT.min(n - tj);
+                for dj in 0..bj {
+                    let cj = &col_data[tj + dj];
+                    for r in 0..len {
+                        panel[r * BT + dj] = cj[r];
+                    }
+                }
+                let mut ti = 0;
+                while ti <= tj {
+                    let bi = BT.min(n - ti);
+                    let mut acc = [[0.0_f64; BT]; BT];
+                    if bi == BT && bj == BT {
+                        for r in 0..len {
+                            let pr = &panel[r * BT..r * BT + BT];
+                            for (di, acc_row) in acc.iter_mut().enumerate() {
+                                let av = col_data[ti + di][r];
+                                for dj in 0..BT {
+                                    acc_row[dj] += av * pr[dj];
+                                }
+                            }
+                        }
+                    } else {
+                        for r in 0..len {
+                            for (di, acc_row) in acc.iter_mut().enumerate().take(bi) {
+                                let av = col_data[ti + di][r];
+                                for (dj, slot) in acc_row.iter_mut().enumerate().take(bj) {
+                                    *slot += av * panel[r * BT + dj];
+                                }
+                            }
+                        }
+                    }
+                    for (di, acc_row) in acc.iter().enumerate().take(bi) {
+                        let gi = ti + di;
+                        for (dj, slot) in acc_row.iter().enumerate().take(bj) {
+                            let gj = tj + dj;
+                            if gi <= gj {
+                                gram[gi * n + gj] = *slot;
+                            }
+                        }
+                    }
+                    ti += BT;
+                }
+                tj += BT;
+            }
+
+            for j in 0..n {
+                for i in 0..=j {
+                    let g = gram[i * n + j];
+                    mat[i * n + j] = Self::finalize_pairwise_stat(
+                        stat,
+                        min_periods,
+                        len,
+                        sum[i],
+                        sum[j],
+                        g,
+                        sum2[i],
+                        sum2[j],
+                    );
+                    if i != j {
+                        mat[j * n + i] = Self::finalize_pairwise_stat(
+                            stat,
+                            min_periods,
+                            len,
+                            sum[j],
+                            sum[i],
+                            g,
+                            sum2[j],
+                            sum2[i],
+                        );
+                    }
+                }
+            }
+        } else {
+            for j in 0..n {
+                for i in 0..=j {
+                    let mut sum_x = 0.0_f64;
+                    let mut sum_y = 0.0_f64;
+                    let mut sum_xy = 0.0_f64;
+                    let mut sum_x2 = 0.0_f64;
+                    let mut sum_y2 = 0.0_f64;
+                    let mut count = 0_usize;
+                    for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
+                        if x.is_nan() || y.is_nan() {
+                            continue;
+                        }
+                        sum_x += x;
+                        sum_y += y;
+                        sum_xy += x * y;
+                        sum_x2 += x * x;
+                        sum_y2 += y * y;
+                        count += 1;
+                    }
+                    // Cell (i, j): col i is "x", col j is "y" — exactly as before.
+                    mat[i * n + j] = Self::finalize_pairwise_stat(
                         stat,
                         min_periods,
                         count,
-                        sum_y,
                         sum_x,
+                        sum_y,
                         sum_xy,
-                        sum_y2,
                         sum_x2,
+                        sum_y2,
                     );
+                    if i != j {
+                        // Cell (j, i): col j is "x", col i is "y" — swap marginals so
+                        // the (n * mean_x * mean_y) association matches the old pass.
+                        mat[j * n + i] = Self::finalize_pairwise_stat(
+                            stat,
+                            min_periods,
+                            count,
+                            sum_y,
+                            sum_x,
+                            sum_xy,
+                            sum_y2,
+                            sum_x2,
+                        );
+                    }
                 }
             }
         }

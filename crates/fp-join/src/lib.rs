@@ -918,9 +918,23 @@ fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> b
         return false;
     }
 
-    left_key.values().iter().zip(right_key.values()).all(
-        |(left, right)| matches!((left, right), (Scalar::Int64(left), Scalar::Int64(right)) if left.cmp(right).is_eq()),
-    )
+    // The identity fast path emits a 1:1 positional merge, which is only correct
+    // when keys are UNIQUE. With duplicate keys pandas multiplies cardinality
+    // (each duplicate on the left cross-joins every duplicate on the right), so
+    // identical-but-duplicated keys must fall through to the general cartesian
+    // path. (br-frankenpandas-jdupk)
+    let mut seen = FxHashSet::<i64>::with_capacity_and_hasher(left_key.len(), Default::default());
+    for (left, right) in left_key.values().iter().zip(right_key.values()) {
+        match (left, right) {
+            (Scalar::Int64(left), Scalar::Int64(right)) if left == right => {
+                if !seen.insert(*left) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn strictly_increasing_int64_key_values(column: &Column) -> Option<&[Scalar]> {
@@ -5444,6 +5458,49 @@ mod tests {
         let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
         // 2 left × 2 right = 4 rows
         assert_eq!(merged.columns.get("id").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn merge_identical_duplicate_keys_cross_join_values_jdupk() {
+        // Identical left/right key columns that contain duplicates must NOT take
+        // the identity 1:1 fast path: pandas cross-joins each duplicate, so a=10
+        // and a=20 each pair with b=100 and b=200. (br-frankenpandas-jdupk)
+        let left = DataFrame::from_dict(
+            &["id", "a"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "b"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+        assert_eq!(
+            merged.columns.get("a").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("b").unwrap().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(200),
+                Scalar::Int64(100),
+                Scalar::Int64(200)
+            ]
+        );
     }
 
     #[test]

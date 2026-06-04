@@ -7021,6 +7021,22 @@ impl Column {
     /// dtype; Utf8 inputs return `ColumnError::Type` because pandas raises
     /// TypeError on non-numeric .abs().
     pub fn abs(&self) -> Result<Self, ColumnError> {
+        // Typed fast path: all-valid Int64/Float64 take abs over the contiguous
+        // buffer and re-ingest typed (same dtype preserved), skipping the lazy
+        // Scalar materialization and the 32B-per-cell Vec<Scalar>. Bit-identical
+        // to the loop below (Int64 wrapping_abs incl i64::MIN; Float64 .abs()
+        // incl -0.0→0.0; all-valid ⇒ no missing branch).
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_i64_values(
+                data.iter().map(|&x| x.wrapping_abs()).collect(),
+            ));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter().map(|&x| x.abs()).collect(),
+            ));
+        }
+
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -11974,6 +11990,124 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[test]
+        fn abs_typed_matches_scalar_reference() {
+            // The typed abs fast path must be bit-identical to the Scalar loop
+            // for all-valid Int64/Float64, incl i64::MIN (wrapping_abs) and
+            // -0.0/large floats.
+            let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                let i64_vals: Vec<Scalar> = (0..n)
+                    .map(|_| {
+                        let r = next();
+                        if r % 50 == 0 {
+                            Scalar::Int64(i64::MIN)
+                        } else {
+                            Scalar::Int64((r % 2000) as i64 - 1000)
+                        }
+                    })
+                    .collect();
+                let f64_vals: Vec<Scalar> = i64_vals
+                    .iter()
+                    .map(|s| match s {
+                        Scalar::Int64(v) => {
+                            let f = if *v == i64::MIN {
+                                -0.0
+                            } else {
+                                *v as f64 / 4.0
+                            };
+                            Scalar::Float64(f)
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                for vals in [&i64_vals, &f64_vals] {
+                    let col = Column::from_values(vals.clone()).expect("col");
+                    let got = col.abs().expect("abs").values().to_vec();
+                    let want: Vec<Scalar> = vals
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(x) => Scalar::Int64(x.wrapping_abs()),
+                            Scalar::Float64(x) => Scalar::Float64(x.abs()),
+                            other => other.clone(),
+                        })
+                        .collect();
+                    // Float abs of -0.0 → 0.0; compare by bits for floats.
+                    for (g, w) in got.iter().zip(&want) {
+                        match (g, w) {
+                            (Scalar::Float64(a), Scalar::Float64(b)) => {
+                                assert_eq!(a.to_bits(), b.to_bits(), "trial {trial} float abs")
+                            }
+                            _ => assert_eq!(g, w, "trial {trial} abs"),
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+        fn abs_typed_timing_vs_scalar() {
+            use std::time::Instant;
+            let n = 5_000_000usize;
+            let iters = 10;
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let data: Vec<f64> = (0..n)
+                .map(|_| (next() % 2_000_000) as f64 - 1_000_000.0)
+                .collect();
+            let mk = || Column::from_f64_values(data.clone());
+
+            let t0 = Instant::now();
+            let mut chk = 0usize;
+            for _ in 0..iters {
+                chk ^= mk().abs().unwrap().len();
+            }
+            let typed = t0.elapsed();
+
+            let t1 = Instant::now();
+            let mut chk2 = 0usize;
+            for _ in 0..iters {
+                let col = mk();
+                let out: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => Scalar::Float64(x.abs()),
+                        other => other.clone(),
+                    })
+                    .collect();
+                chk2 ^= Column::new(DType::Float64, out).unwrap().len();
+            }
+            let scalar = t1.elapsed();
+            let t2 = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..iters {
+                sink ^= mk().len();
+            }
+            let build = t2.elapsed();
+            let typed_op = typed.saturating_sub(build).as_secs_f64();
+            let scalar_op = scalar.saturating_sub(build).as_secs_f64();
+            eprintln!(
+                "abs 5M f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} \
+                 op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+                scalar_op / typed_op,
+                scalar.as_secs_f64() / typed.as_secs_f64()
+            );
         }
 
         #[test]

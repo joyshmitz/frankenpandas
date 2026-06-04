@@ -20111,7 +20111,7 @@ fn live_oracle_series_str_split_get_index_1() {
         .str()
         .split_get(
             fixture.str_split_pat.as_deref().expect("str_split_pat"),
-            fixture.str_split_n.expect("str_split_n"),
+            fixture.str_split_n.expect("str_split_n") as i64,
         )
         .expect("str split_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
@@ -20215,7 +20215,7 @@ fn live_oracle_series_str_rsplit_get_index_0() {
         .str()
         .rsplit_get(
             fixture.str_split_pat.as_deref().expect("str_split_pat"),
-            fixture.str_split_n.expect("str_split_n"),
+            fixture.str_split_n.expect("str_split_n") as i64,
         )
         .expect("str rsplit_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
@@ -20318,7 +20318,7 @@ fn live_oracle_series_str_split_regex_get_first() {
         .str()
         .split_regex_get(
             fixture.regex_pattern.as_deref().expect("regex_pattern"),
-            fixture.str_split_n.expect("str_split_n"),
+            fixture.str_split_n.expect("str_split_n") as i64,
         )
         .expect("str split_regex_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");

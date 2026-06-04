@@ -5371,25 +5371,32 @@ fn readme_ioerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
 /// specific TypeError variants.
 #[test]
 fn readme_typeerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
-    // ── LossyFloatToInt: 3.5 → Int64 must error ─────────────────
-    let lossy = cast_scalar(&Scalar::Float64(3.5), DType::Int64);
+    // ── LossyFloatToInt: ±inf → Int64 must error ─────────────────
+    // (A finite non-integer float like 3.5 now TRUNCATES toward zero to
+    // match pandas — see br-frankenpandas-qcutc; only non-finite raises.)
+    let lossy = cast_scalar(&Scalar::Float64(f64::INFINITY), DType::Int64);
     assert!(matches!(
         lossy,
-        Err(TypeError::LossyFloatToInt { value }) if (value - 3.5).abs() < 1e-9
+        Err(TypeError::LossyFloatToInt { value }) if value.is_infinite()
+    ));
+    // Finite non-integer truncates rather than erroring.
+    assert!(matches!(
+        cast_scalar(&Scalar::Float64(3.5), DType::Int64),
+        Ok(Scalar::Int64(3))
     ));
 
-    // ── InvalidBoolInt: 2 → Bool must error (only 0/1 allowed) ──
-    let bad_bool_int = cast_scalar(&Scalar::Int64(2), DType::Bool);
+    // ── astype(bool) truthiness: any nonzero int/float → True ───
+    // (Per br-frankenpandas-cyi4h, astype(bool) follows numpy/pandas
+    // truthiness — bool(2) is True, bool(0.5) is True — rather than
+    // restricting to 0/1. The InvalidBoolInt/InvalidBoolFloat variants
+    // are retained for legacy strict callers but no longer fire here.)
     assert!(matches!(
-        bad_bool_int,
-        Err(TypeError::InvalidBoolInt { value: 2 })
+        cast_scalar(&Scalar::Int64(2), DType::Bool),
+        Ok(Scalar::Bool(true))
     ));
-
-    // ── InvalidBoolFloat: 0.5 → Bool must error ─────────────────
-    let bad_bool_float = cast_scalar(&Scalar::Float64(0.5), DType::Bool);
     assert!(matches!(
-        bad_bool_float,
-        Err(TypeError::InvalidBoolFloat { value }) if (value - 0.5).abs() < 1e-9
+        cast_scalar(&Scalar::Float64(0.5), DType::Bool),
+        Ok(Scalar::Bool(true))
     ));
 
     // ── IncompatibleDtypes via common_dtype: Utf8 vs Bool ───────

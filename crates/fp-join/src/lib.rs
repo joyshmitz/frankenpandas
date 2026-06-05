@@ -2985,8 +2985,10 @@ pub fn merge_dataframes_on_with_options(
     }
 
     let all_positions_present = matches!(join_type, JoinType::Inner)
-        || (matches!(join_type, JoinType::Outer)
-            && left_positions.iter().all(Option::is_some)
+        || (matches!(
+            join_type,
+            JoinType::Left | JoinType::Right | JoinType::Outer
+        ) && left_positions.iter().all(Option::is_some)
             && right_positions.iter().all(Option::is_some));
     let all_present_take_positions = all_positions_present.then(|| {
         let left = left_positions
@@ -5728,6 +5730,84 @@ mod tests {
         assert_eq!(right_values[3], Scalar::Int64(201));
         assert_eq!(right_values[4], Scalar::Int64(300));
         assert_eq!(right_values[5], Scalar::Int64(400));
+    }
+
+    #[test]
+    fn merge_left_right_all_matched_dense_int64_duplicates_match_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(21),
+                        Scalar::Int64(11),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        for join_type in [JoinType::Left, JoinType::Right] {
+            let fast = merge_dataframes(&left, &right, "id", join_type).unwrap();
+            let generic = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["id"],
+                &["id"],
+                join_type,
+                MergeExecutionOptions {
+                    validate_mode: Some(MergeValidateMode::ManyToMany),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(fast.index, generic.index);
+            assert_eq!(fast.column_order, generic.column_order);
+            assert_eq!(fast.columns, generic.columns);
+            assert!(
+                generic
+                    .columns
+                    .values()
+                    .all(|column| column.as_i64_slice().is_some())
+            );
+        }
     }
 
     #[test]

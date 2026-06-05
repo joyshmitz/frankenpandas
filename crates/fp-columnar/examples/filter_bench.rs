@@ -75,6 +75,17 @@ fn run_ntake(col: &Column) -> Column {
     col.take_positions(&pos)
 }
 
+fn build_int_column(n: usize) -> Column {
+    let values: Vec<Scalar> = (0..n as i64)
+        .map(|i| Scalar::Int64(i.wrapping_mul(2_654_435_761) % 1_000_003))
+        .collect();
+    Column::new(DType::Int64, values).expect("i64 column")
+}
+
+fn run_astype(col: &Column) -> Column {
+    col.astype(DType::Float64).expect("astype")
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -178,6 +189,37 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "ntake_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_astype") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let out = run_astype(&build_int_column(n));
+        println!(
+            "astype_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("astype") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_int_column(n);
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_astype(&col);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "astype_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

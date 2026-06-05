@@ -6737,6 +6737,28 @@ impl Column {
         if self.dtype == target {
             return Ok(self.clone());
         }
+        // Typed fast paths for the two ubiquitous all-valid numeric casts:
+        //   Int64 -> Float64 is exactly `x as f64` (the cast_scalar branch), and
+        //   Float64 -> Int64 truncates a finite in-range float toward zero via
+        //   `v as i64`. NaN floats mark the column invalid so as_f64_slice
+        //   declines; an out-of-range float makes cast_scalar error, so we only
+        //   take the typed path when every value is in range (otherwise the
+        //   Scalar path below reproduces that exact error). Bit-identical.
+        if target == DType::Float64
+            && let Some(data) = self.as_i64_slice()
+        {
+            let out: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+            return Ok(Self::from_f64_values(out));
+        }
+        if target == DType::Int64
+            && let Some(data) = self.as_f64_slice()
+            && data
+                .iter()
+                .all(|&v| v >= i64::MIN as f64 && v < 9_223_372_036_854_775_808.0)
+        {
+            let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
+            return Ok(Self::from_i64_values(out));
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()

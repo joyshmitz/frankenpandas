@@ -167,3 +167,8 @@ artifacts/pandas_api_listing.json
 
 # br-frankenpandas-k05t: generated scale fixtures (regenerate via oracle/generate_scale_fixtures.py)
 crates/fp-conformance/fixtures/packets_scale/
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+claude-upgrade-progress.json

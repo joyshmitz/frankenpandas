@@ -1027,6 +1027,126 @@ pub enum AggFunc {
 ///
 /// For Sum, the optimized `groupby_sum()` with dense Int64 and arena paths
 /// is preferred; this function uses the generic HashMap path for all ops.
+/// Dense direct-address streaming `groupby_agg` for bounded all-valid `Int64`
+/// keys and numeric (`Int64`/`Float64`) values, for the aggregations whose
+/// result is a single-pass fold over each group's in-order non-missing values:
+/// `Mean`, `Count`, `Size`, `First`, `Last`.
+///
+/// Replaces the generic path's `FxHashMap<GroupKeyRef, (usize, Vec<Scalar>,
+/// usize)>` — which hashes every row AND clones every value into a per-group
+/// `Vec<Scalar>` — with a key-`min` indexed bucket table plus streaming scalar
+/// accumulators (no value collection, no hashing).
+///
+/// Bit-identical to the generic path: rows are scanned in input order so each
+/// bucket folds the same values in the same order the group `Vec` would hold,
+/// and `nanmean`/`nancount` are themselves in-order folds of the non-missing
+/// `to_f64()` values (`mean = Σ/​count`, `count` = non-missing count). `Size`
+/// counts all rows; `First`/`Last` take the first/last non-missing value
+/// (dtype preserved). Group order is first-seen, or ascending key under `sort`
+/// (matching `compare_group_labels` on non-missing `Int64` labels). Returns
+/// `None` (caller uses the generic path) for any non-`Int64` key, a wide key
+/// span, non-numeric values, or an unsupported aggregation.
+#[allow(clippy::too_many_arguments)]
+fn try_groupby_agg_dense_int64(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(
+        func,
+        AggFunc::Mean | AggFunc::Count | AggFunc::Size | AggFunc::First | AggFunc::Last
+    ) {
+        return None;
+    }
+
+    let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
+    if !saw_int_key {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+    let bucket_len = usize::try_from(span).ok()?;
+
+    let needs_mean = matches!(func, AggFunc::Mean);
+    let needs_value = matches!(func, AggFunc::First | AggFunc::Last);
+
+    let mut sum = vec![0.0_f64; bucket_len];
+    let mut non_missing = vec![0_i64; bucket_len];
+    let mut total = vec![0_i64; bucket_len];
+    let mut value_slot: Vec<Option<Scalar>> = if needs_value {
+        vec![None; bucket_len]
+    } else {
+        Vec::new()
+    };
+    let mut first_seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let key = match key {
+            Scalar::Int64(v) => *v,
+            Scalar::Null(_) if dropna => continue,
+            _ => return None,
+        };
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if !first_seen[bucket] {
+            first_seen[bucket] = true;
+            ordering.push(key);
+        }
+        total[bucket] += 1;
+        if value.is_missing() {
+            continue;
+        }
+        non_missing[bucket] += 1;
+        if needs_mean {
+            // Bail to the generic path on any non-numeric value (nanmean has a
+            // separate Timedelta accumulator we would not reproduce here).
+            let x = value.to_f64().ok()?;
+            sum[bucket] += x;
+        }
+        if needs_value {
+            match func {
+                AggFunc::First if value_slot[bucket].is_none() => {
+                    value_slot[bucket] = Some(value.clone());
+                }
+                AggFunc::Last => value_slot[bucket] = Some(value.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    if sort {
+        ordering.sort_unstable();
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for &key in &ordering {
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        out_index.push(IndexLabel::Int64(key));
+        let agg = match func {
+            AggFunc::Mean => {
+                if non_missing[bucket] == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(sum[bucket] / non_missing[bucket] as f64)
+                }
+            }
+            AggFunc::Count => Scalar::Int64(non_missing[bucket]),
+            AggFunc::Size => Scalar::Int64(total[bucket]),
+            AggFunc::First | AggFunc::Last => value_slot[bucket]
+                .take()
+                .unwrap_or(Scalar::Null(NullKind::NaN)),
+            _ => unreachable!("dense path gated to Mean/Count/Size/First/Last"),
+        };
+        out_values.push(agg);
+    }
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1057,6 +1177,31 @@ pub fn groupby_agg(
     // Record an admission decision for policy observability without altering
     // the current groupby output behavior.
     let _ = policy.decide_join_admission(key_vals.len(), ledger);
+
+    let agg_name = match func {
+        AggFunc::Sum => "sum",
+        AggFunc::Mean => "mean",
+        AggFunc::Count => "count",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+        AggFunc::First => "first",
+        AggFunc::Last => "last",
+        AggFunc::Std => "std",
+        AggFunc::Var => "var",
+        AggFunc::Median => "median",
+        AggFunc::Nunique => "nunique",
+        AggFunc::Prod => "prod",
+        AggFunc::Size => "size",
+    };
+
+    // Dense direct-address streaming fast path for bounded Int64 keys (folds
+    // each group's values without hashing or collecting a per-group Vec).
+    if let Some((out_index, out_values)) =
+        try_groupby_agg_dense_int64(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
 
     // Collect groups: key_ref -> (source_idx, non-null values, total count).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
@@ -1089,21 +1234,6 @@ pub fn groupby_agg(
     }
 
     // Apply aggregation function to each group.
-    let agg_name = match func {
-        AggFunc::Sum => "sum",
-        AggFunc::Mean => "mean",
-        AggFunc::Count => "count",
-        AggFunc::Min => "min",
-        AggFunc::Max => "max",
-        AggFunc::First => "first",
-        AggFunc::Last => "last",
-        AggFunc::Std => "std",
-        AggFunc::Var => "var",
-        AggFunc::Median => "median",
-        AggFunc::Nunique => "nunique",
-        AggFunc::Prod => "prod",
-        AggFunc::Size => "size",
-    };
 
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());

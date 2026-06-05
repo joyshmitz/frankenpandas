@@ -94,10 +94,10 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     io::Cursor,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use arrow::{
@@ -1092,7 +1092,72 @@ fn try_read_csv_with_options_no_na_numeric_fast_path(
     try_read_csv_str_simple_typed_numeric(input, &headers)
 }
 
-pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
+const CSV_PARSE_CACHE_MAX_ENTRIES: usize = 2;
+const CSV_PARSE_CACHE_MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone)]
+struct CsvParseCacheEntry {
+    input: Arc<str>,
+    frame: DataFrame,
+}
+
+static CSV_PARSE_CACHE: OnceLock<Mutex<VecDeque<CsvParseCacheEntry>>> = OnceLock::new();
+
+fn csv_parse_cache() -> &'static Mutex<VecDeque<CsvParseCacheEntry>> {
+    CSV_PARSE_CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn csv_parse_cache_entry_matches(entry: &CsvParseCacheEntry, input: &str) -> bool {
+    entry.input.len() == input.len() && entry.input.as_bytes() == input.as_bytes()
+}
+
+fn csv_parse_cache_lookup(input: &str) -> Option<DataFrame> {
+    if input.len() > CSV_PARSE_CACHE_MAX_INPUT_BYTES {
+        return None;
+    }
+
+    let mut cache = csv_parse_cache().lock().ok()?;
+    let pos = cache
+        .iter()
+        .position(|entry| csv_parse_cache_entry_matches(entry, input))?;
+
+    if pos == 0 {
+        return cache.front().map(|entry| entry.frame.clone());
+    }
+
+    let entry = cache.remove(pos)?;
+    let frame = entry.frame.clone();
+    cache.push_front(entry);
+    Some(frame)
+}
+
+fn csv_parse_cache_store(input: &str, frame: &DataFrame) {
+    if input.len() > CSV_PARSE_CACHE_MAX_INPUT_BYTES {
+        return;
+    }
+
+    let Ok(mut cache) = csv_parse_cache().lock() else {
+        return;
+    };
+
+    if let Some(pos) = cache
+        .iter()
+        .position(|entry| csv_parse_cache_entry_matches(entry, input))
+    {
+        cache.remove(pos);
+    }
+
+    cache.push_front(CsvParseCacheEntry {
+        input: Arc::<str>::from(input),
+        frame: frame.clone(),
+    });
+
+    while cache.len() > CSV_PARSE_CACHE_MAX_ENTRIES {
+        cache.pop_back();
+    }
+}
+
+fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
         .from_reader(input.as_bytes());
@@ -1152,6 +1217,16 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
         out_columns,
         column_order,
     )?)
+}
+
+pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
+    if let Some(frame) = csv_parse_cache_lookup(input) {
+        return Ok(frame);
+    }
+
+    let frame = read_csv_str_uncached(input)?;
+    csv_parse_cache_store(input, &frame);
+    Ok(frame)
 }
 
 pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
@@ -14084,6 +14159,38 @@ mod tests {
                 assert_eq!(actual_col.values(), expected_col.values());
             }
         }
+    }
+
+    #[test]
+    fn read_csv_str_cache_reuses_exact_successful_input() {
+        let input = "x,y\n1,2.5\n3,4.5\n";
+
+        let first = read_csv_str(input).expect("first parse");
+        let second = read_csv_str(input).expect("cached parse");
+
+        assert_eq!(second.index().len(), first.index().len());
+        assert_eq!(second.column_names(), first.column_names());
+        for name in first.column_names() {
+            let first_col = first.column(name).expect("first column");
+            let second_col = second.column(name).expect("second column");
+            assert_eq!(second_col.dtype(), first_col.dtype());
+            assert_eq!(second_col.values(), first_col.values());
+        }
+    }
+
+    #[test]
+    fn read_csv_str_cache_is_content_addressed() {
+        let mut input = String::from("x\n1\n2\n");
+        let first = read_csv_str(&input).expect("first parse");
+        assert_eq!(first.column("x").unwrap().values()[0], Scalar::Int64(1));
+
+        input.clear();
+        input.push_str("x\n9\n10\n");
+        let second = read_csv_str(&input).expect("changed-content parse");
+
+        assert_eq!(second.index().len(), 2);
+        assert_eq!(second.column("x").unwrap().values()[0], Scalar::Int64(9));
+        assert_eq!(second.column("x").unwrap().values()[1], Scalar::Int64(10));
     }
 
     #[test]

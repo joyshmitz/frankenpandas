@@ -2573,6 +2573,14 @@ impl Column {
                 let (result_data, result_validity) =
                     vectorized_binary_f64(l, r, &left_nan_aware, &right_nan_aware, op);
 
+                // All inputs valid: preserve the typed result buffer directly
+                // instead of rebuilding Vec<Scalar> and rescanning validity.
+                // Operation-produced NaN is still marked missing by
+                // from_f64_values, exactly like the Scalar::Float64(NaN) path.
+                if result_validity.all() {
+                    return Some(Ok(Self::from_f64_values(result_data)));
+                }
+
                 // Build output scalars respecting NaN propagation: if either
                 // input was NaN (not just Null), mark output as Null(NaN).
                 let values: Vec<Scalar> = result_data
@@ -2607,6 +2615,12 @@ impl Column {
 
                 let (result_data, result_validity) =
                     vectorized_binary_i64(l, r, &self.validity, &right.validity, op)?;
+
+                // All inputs valid: keep the typed i64 result buffer as the
+                // column source of truth and skip Scalar materialization.
+                if result_validity.all() {
+                    return Some(Ok(Self::from_i64_values(result_data)));
+                }
 
                 let values: Vec<Scalar> = result_data
                     .iter()
@@ -2656,6 +2670,29 @@ impl Column {
         let rvalid = right.nan_aware_validity();
 
         let apply = binary_f64_apply(op);
+
+        // Common same-index/all-valid alignment: gather into a typed output
+        // buffer and skip Scalar materialization. If any alignment gap or
+        // missing/NaN input appears, fall through to the existing Scalar path
+        // so per-slot Null(NaN) semantics stay byte-for-byte unchanged.
+        let mut data = Vec::with_capacity(out_len);
+        let mut all_valid = true;
+        for (k, left_slot) in left_positions.iter().enumerate() {
+            if let Some(i) = *left_slot
+                && let Some(j) = right_positions.get(k).copied().flatten()
+                && lvalid.get(i)
+                && rvalid.get(j)
+            {
+                data.push(apply(lsrc[i], rsrc[j]));
+            } else {
+                all_valid = false;
+                break;
+            }
+        }
+        if all_valid {
+            return Ok(Self::from_f64_values(data));
+        }
+
         let mut values = Vec::with_capacity(out_len);
         for (k, left_slot) in left_positions.iter().enumerate() {
             let Some(i) = *left_slot else {
@@ -9972,6 +10009,32 @@ mod tests {
     }
 
     #[test]
+    fn vectorized_binary_all_valid_keeps_typed_output_lazy() {
+        let left = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0]);
+
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
+
+        assert!(result.validity().all());
+        assert_eq!(result.as_f64_slice(), Some([11.0, 22.0, 33.0].as_slice()));
+        assert!(matches!(
+            &result.values,
+            ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+        ));
+    }
+
+    #[test]
+    fn vectorized_binary_operation_nan_matches_scalar_validity() {
+        let left = Column::from_f64_values(vec![f64::INFINITY]);
+        let right = Column::from_f64_values(vec![f64::INFINITY]);
+
+        let result = left.binary_numeric(&right, ArithmeticOp::Sub).expect("sub");
+
+        assert!(!result.validity().get(0));
+        assert!(matches!(result.values()[0], Scalar::Float64(v) if v.is_nan()));
+    }
+
+    #[test]
     fn vectorized_f64_with_nulls_propagates_missing() {
         let left = Column::from_values(vec![
             Scalar::Float64(1.0),
@@ -10034,6 +10097,25 @@ mod tests {
         for idx in 0..actual.len() {
             assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
         }
+    }
+
+    #[test]
+    fn aligned_binary_f64_all_valid_keeps_typed_output_lazy() {
+        let left = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0]);
+        let left_positions = [Some(0), Some(1), Some(2)];
+        let right_positions = [Some(0), Some(1), Some(2)];
+
+        let actual = left
+            .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
+            .expect("aligned add");
+
+        assert!(actual.validity().all());
+        assert_eq!(actual.as_f64_slice(), Some([11.0, 22.0, 33.0].as_slice()));
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+        ));
     }
 
     #[test]
@@ -12255,19 +12337,21 @@ mod tests {
                     let got_codes: Vec<i64> = code_col
                         .values()
                         .iter()
-                        .map(|v| match v {
-                            Scalar::Int64(c) => *c,
-                            _ => panic!("non-int code"),
+                        .filter_map(|v| match v {
+                            Scalar::Int64(c) => Some(*c),
+                            _ => None,
                         })
                         .collect();
                     let got_uniques: Vec<i64> = uniq_col
                         .values()
                         .iter()
-                        .map(|v| match v {
-                            Scalar::Int64(c) => *c,
-                            _ => panic!("non-int unique"),
+                        .filter_map(|v| match v {
+                            Scalar::Int64(c) => Some(*c),
+                            _ => None,
                         })
                         .collect();
+                    assert_eq!(got_codes.len(), code_col.len(), "non-int code");
+                    assert_eq!(got_uniques.len(), uniq_col.len(), "non-int unique");
                     assert_eq!(got_codes, codes, "trial {trial} sort={sort} codes");
                     assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
                 }

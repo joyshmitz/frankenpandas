@@ -11,7 +11,7 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
+//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_same, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
 
 use std::{collections::BTreeMap, time::Instant};
 
@@ -33,6 +33,18 @@ fn build_series_pair(n: usize) -> (Series, Series) {
     let right_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 2.0)).collect();
     let left = Series::from_values("l", left_labels, left_vals).expect("left series");
     let right = Series::from_values("r", right_labels, right_vals).expect("right series");
+    (left, right)
+}
+
+fn build_series_pair_same(n: usize) -> (Series, Series) {
+    // Identical indexes => alignment is gap-free and all-valid, exercising the
+    // typed-output fast path in Column::aligned_binary_f64 (the common
+    // `df['a'] + df['b']` shape where both columns share the frame index).
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let left_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64)).collect();
+    let right_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 2.0)).collect();
+    let left = Series::from_values("l", labels.clone(), left_vals).expect("left series");
+    let right = Series::from_values("r", labels, right_vals).expect("right series");
     (left, right)
 }
 
@@ -225,6 +237,11 @@ fn run_golden(scenario: &str, n: usize) {
             let out = left.add(&right).expect("series add");
             return print!("{}", golden_dump_series(&out));
         }
+        "series_add_same" => {
+            let (left, right) = build_series_pair_same(n);
+            let out = left.add(&right).expect("series add same");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_add_align" => {
             let (left, right) = build_series_pair(n);
             let policy = RuntimePolicy::strict();
@@ -356,6 +373,13 @@ fn main() {
             let (left, right) = build_series_pair(n);
             for _ in 0..iters {
                 let out = left.add(&right).expect("series add");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "series_add_same" => {
+            let (left, right) = build_series_pair_same(n);
+            for _ in 0..iters {
+                let out = left.add(&right).expect("series add same");
                 sink = sink.wrapping_add(out.len());
             }
         }

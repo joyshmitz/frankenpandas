@@ -3226,6 +3226,9 @@ impl Column {
                 right: right.len(),
             });
         }
+        if let Some(out) = self.typed_float_binary(right, |b, e| b.powf(e)) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (base, exp) in self.values.iter().zip(&right.values) {
             if base.is_missing() || exp.is_missing() {
@@ -3263,6 +3266,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_float_binary(other, |y, x| y.atan2(x)) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (y, x) in self.values.iter().zip(&other.values) {
             if y.is_missing() || x.is_missing() {
@@ -3283,6 +3289,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_float_binary(other, |a, b| a.hypot(b)) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -3305,6 +3314,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_float_binary(other, |a, b| a % b) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -3325,6 +3337,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_float_binary(other, |m, s| m.copysign(s)) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (mag, sign) in self.values.iter().zip(&other.values) {
@@ -3752,6 +3767,11 @@ impl Column {
                 right: other.len(),
             });
         }
+        // all-valid ⇒ no NaN (NaN floats mark the column invalid), so the scalar
+        // loop's is_nan branch never fires and the result is af.max(bf).
+        if let Some(out) = self.typed_float_binary(other, f64::max) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -3776,6 +3796,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_float_binary(other, f64::min) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -3802,6 +3825,11 @@ impl Column {
                 right: other.len(),
             });
         }
+        // all-valid numeric ⇒ both to_f64().ok() are Some(non-NaN), so the result
+        // is x.max(y) — same as `maximum` on this domain.
+        if let Some(out) = self.typed_float_binary(other, f64::max) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             let af = a.to_f64().ok();
@@ -3826,6 +3854,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_float_binary(other, f64::min) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -8317,6 +8348,34 @@ impl Column {
             ));
         }
         None
+    }
+
+    /// All-valid numeric column → an owned `f64` view (Float64 copied, Int64 cast
+    /// `x as f64`), exactly as `Scalar::to_f64` would. `None` for nullable /
+    /// non-numeric columns (so binary ufuncs fall back to the scalar loop).
+    fn all_valid_as_f64(&self) -> Option<Vec<f64>> {
+        if let Some(s) = self.as_f64_slice() {
+            return Some(s.to_vec());
+        }
+        if let Some(s) = self.as_i64_slice() {
+            return Some(s.iter().map(|&x| x as f64).collect());
+        }
+        None
+    }
+
+    /// Typed fast path for a Float64-output binary ufunc: when both columns are
+    /// all-valid numeric, map `f` over the two contiguous buffers and re-ingest
+    /// via `from_f64_values`, skipping per-element Scalar dispatch/clone on both
+    /// sides. Caller must have validated equal length. Bit-identical: all-valid
+    /// ⇒ no missing→NaN branch; `f(a,b)` is the scalar loop's `f(a.to_f64(),
+    /// b.to_f64())`; from_f64_values re-marks any NaN result missing as Self::new
+    /// would. Returns `None` to fall back when either side is nullable/non-numeric.
+    fn typed_float_binary(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
+        let a = self.all_valid_as_f64()?;
+        let b = other.all_valid_as_f64()?;
+        Some(Self::from_f64_values(
+            a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect(),
+        ))
     }
 
     pub fn floor(&self) -> Result<Self, ColumnError> {

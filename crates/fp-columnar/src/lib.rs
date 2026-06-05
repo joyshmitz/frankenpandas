@@ -5090,6 +5090,21 @@ impl Column {
     /// Matches `pd.Series.var(ddof=1)`.
     #[must_use]
     pub fn var(&self, ddof: usize) -> Scalar {
+        // Typed two-pass reduction: an all-valid Float64 column computes the
+        // mean then the sum of squared deviations straight over its contiguous
+        // buffer, skipping the Vec<Scalar> materialization. Bit-identical to
+        // nanvar's numeric arm — the exact same `Iterator::sum::<f64>()`
+        // constructs over the same values in the same order (so seed/ordering
+        // match), `Null(NaN)` when count <= ddof.
+        if let Some(data) = self.as_f64_slice() {
+            let n = data.len();
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean: f64 = data.iter().sum::<f64>() / n as f64;
+            let sum_sq: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>();
+            return Scalar::Float64(sum_sq / (n - ddof) as f64);
+        }
         nanvar(&self.values, ddof)
     }
 
@@ -5098,6 +5113,15 @@ impl Column {
     /// Matches `pd.Series.std(ddof=1)`.
     #[must_use]
     pub fn std(&self, ddof: usize) -> Scalar {
+        // For an all-valid Float64 column nanstd is sqrt(nanvar) (Float64 arm);
+        // reuse the typed var. Non-Float64 (e.g. Timedelta) keep nanstd, which
+        // has its own dtype-preserving path.
+        if self.as_f64_slice().is_some() {
+            return match self.var(ddof) {
+                Scalar::Float64(v) => Scalar::Float64(v.sqrt()),
+                other => other,
+            };
+        }
         nanstd(&self.values, ddof)
     }
 

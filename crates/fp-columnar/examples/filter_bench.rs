@@ -105,6 +105,14 @@ fn run_min(int_col: &Column) -> f64 {
     }
 }
 
+fn run_var(int_col: &Column) -> f64 {
+    let f = int_col.astype(DType::Float64).expect("astype");
+    match f.var(1) {
+        Scalar::Float64(s) => s,
+        _ => f64::NAN,
+    }
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -302,6 +310,32 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "min_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_var") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let s = run_var(&build_int_column(n));
+        println!("var_golden n={n} digest={:016x}", s.to_bits());
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("var") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_int_column(n);
+        let start = Instant::now();
+        let mut sink = 0.0f64;
+        for _ in 0..iters {
+            sink += run_var(&col);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "var_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

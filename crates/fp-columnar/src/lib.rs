@@ -852,6 +852,11 @@ enum ScalarValues {
         data: Vec<f64>,
         values: OnceLock<Vec<Scalar>>,
     },
+    LazyNullableFloat64 {
+        data: Vec<f64>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidBool {
         data: Vec<bool>,
         values: OnceLock<Vec<Scalar>>,
@@ -877,6 +882,14 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_nullable_float64(data: Vec<f64>, validity: ValidityMask) -> Self {
+        Self::LazyNullableFloat64 {
+            data,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
     fn lazy_all_valid_bool(data: Vec<bool>) -> Self {
         Self::LazyAllValidBool {
             data,
@@ -893,6 +906,24 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
+            Self::LazyNullableFloat64 {
+                data,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(idx, value)| {
+                            if validity.get(idx) || value.is_nan() {
+                                Scalar::Float64(*value)
+                            } else {
+                                Scalar::Null(NullKind::NaN)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyAllValidBool { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
@@ -904,6 +935,7 @@ impl ScalarValues {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
+            Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
         }
     }
@@ -919,6 +951,9 @@ impl Clone for ScalarValues {
             Self::Eager(values) => Self::Eager(values.clone()),
             Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64(data.clone()),
             Self::LazyAllValidFloat64 { data, .. } => Self::lazy_all_valid_float64(data.clone()),
+            Self::LazyNullableFloat64 { data, validity, .. } => {
+                Self::lazy_nullable_float64(data.clone(), validity.clone())
+            }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
         }
     }
@@ -1678,6 +1713,19 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64(data),
+            validity,
+            data: None,
+        }
+    }
+
+    fn from_f64_values_with_validity(data: Vec<f64>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self::from_f64_values(data);
+        }
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
             validity,
             data: None,
         }
@@ -2671,11 +2719,8 @@ impl Column {
 
         let apply = binary_f64_apply(op);
 
-        // Common same-index/all-valid alignment: gather into a typed output
-        // buffer and skip Scalar materialization. If any alignment gap or
-        // missing/NaN input appears, fall through to the existing Scalar path
-        // so per-slot Null(NaN) semantics stay byte-for-byte unchanged.
         let mut data = Vec::with_capacity(out_len);
+        let mut words = vec![0_u64; out_len.div_ceil(64)];
         let mut all_valid = true;
         for (k, left_slot) in left_positions.iter().enumerate() {
             if let Some(i) = *left_slot
@@ -2683,34 +2728,28 @@ impl Column {
                 && lvalid.get(i)
                 && rvalid.get(j)
             {
-                data.push(apply(lsrc[i], rsrc[j]));
+                let value = apply(lsrc[i], rsrc[j]);
+                data.push(value);
+                if value.is_nan() {
+                    all_valid = false;
+                } else {
+                    words[k / 64] |= 1_u64 << (k % 64);
+                }
             } else {
+                data.push(0.0);
                 all_valid = false;
-                break;
             }
         }
         if all_valid {
             return Ok(Self::from_f64_values(data));
         }
-
-        let mut values = Vec::with_capacity(out_len);
-        for (k, left_slot) in left_positions.iter().enumerate() {
-            let Some(i) = *left_slot else {
-                values.push(Scalar::Null(NullKind::NaN));
-                continue;
-            };
-            let Some(j) = right_positions.get(k).copied().flatten() else {
-                values.push(Scalar::Null(NullKind::NaN));
-                continue;
-            };
-
-            if lvalid.get(i) && rvalid.get(j) {
-                values.push(Scalar::Float64(apply(lsrc[i], rsrc[j])));
-            } else {
-                values.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-        Self::new(DType::Float64, values)
+        Ok(Self::from_f64_values_with_validity(
+            data,
+            ValidityMask {
+                words,
+                len: out_len,
+            },
+        ))
     }
 
     /// Same-index Float64 arithmetic fast path.
@@ -2767,6 +2806,9 @@ impl Column {
 
         match &self.values {
             ScalarValues::LazyAllValidFloat64 { data, .. } if data.len() == self.validity.len() => {
+                Some(data.as_slice())
+            }
+            ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_slice())
             }
             _ => None,
@@ -10160,6 +10202,53 @@ mod tests {
             &actual.values,
             ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
         ));
+    }
+
+    #[test]
+    fn aligned_binary_f64_nullable_gaps_keep_typed_output_lazy() {
+        let left = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0]);
+        let left_positions = [Some(0), Some(1), Some(2), None];
+        let right_positions = [None, Some(0), Some(1), Some(2)];
+
+        let expected_left = left
+            .reindex_by_positions(&left_positions)
+            .expect("left reindex");
+        let expected_right = right
+            .reindex_by_positions(&right_positions)
+            .expect("right reindex");
+        let expected = expected_left
+            .binary_numeric(&expected_right, ArithmeticOp::Add)
+            .expect("generic add");
+        let actual = left
+            .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
+            .expect("aligned add");
+
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert_eq!(actual.validity(), expected.validity());
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
+        ));
+        assert_eq!(actual.values(), expected.values());
+    }
+
+    #[test]
+    fn aligned_binary_f64_operation_nan_keeps_float_nan_materialization() {
+        let left = Column::from_f64_values(vec![f64::INFINITY]);
+        let right = Column::from_f64_values(vec![f64::INFINITY]);
+        let positions = [Some(0)];
+
+        let actual = left
+            .aligned_binary_f64(&right, &positions, &positions, ArithmeticOp::Sub)
+            .expect("aligned sub");
+
+        assert!(!actual.validity().get(0));
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
+        ));
+        assert!(matches!(actual.values()[0], Scalar::Float64(value) if value.is_nan()));
     }
 
     #[test]

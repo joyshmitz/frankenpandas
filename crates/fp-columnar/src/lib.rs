@@ -4489,24 +4489,82 @@ impl Column {
     /// Float64 (matching the numeric accumulator type used in
     /// nancumsum).
     pub fn cumsum(&self) -> Result<Self, ColumnError> {
+        // Typed prefix scan: an all-valid Float64 column scans its contiguous
+        // buffer, no Scalar materialization in or out. Bit-identical to
+        // nancumsum's Float64 arm — the same `running += x` left-fold seeded at
+        // 0.0 in the same order; an operation-produced NaN (inf - inf) is flagged
+        // missing by from_f64_values, exactly as Self::new(Float64, ...) does.
+        if let Some(data) = self.as_f64_slice() {
+            let mut running = 0.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&x| {
+                    running += x;
+                    running
+                })
+                .collect();
+            return Ok(Self::from_f64_values(out));
+        }
         let out = nancumsum(&self.values);
         Self::new(DType::Float64, out)
     }
 
     /// Cumulative product, null-propagating per fp-types::nancumprod.
     pub fn cumprod(&self) -> Result<Self, ColumnError> {
+        // Typed prefix scan (see cumsum): nancumprod seeds `running` at 1.0.
+        if let Some(data) = self.as_f64_slice() {
+            let mut running = 1.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&x| {
+                    running *= x;
+                    running
+                })
+                .collect();
+            return Ok(Self::from_f64_values(out));
+        }
         let out = nancumprod(&self.values);
         Self::new(DType::Float64, out)
     }
 
     /// Cumulative maximum, null-propagating per fp-types::nancummax.
     pub fn cummax(&self) -> Result<Self, ColumnError> {
+        // Typed running maximum: nancummax takes the first non-missing value
+        // then `prev.max(x)` (std f64::max semantics) — reproduced over the
+        // contiguous buffer for an all-valid Float64 column.
+        if let Some(data) = self.as_f64_slice() {
+            if let Some((&first, rest)) = data.split_first() {
+                let mut running = first;
+                let mut out = Vec::with_capacity(data.len());
+                out.push(running);
+                for &x in rest {
+                    running = running.max(x);
+                    out.push(running);
+                }
+                return Ok(Self::from_f64_values(out));
+            }
+            return Ok(Self::from_f64_values(Vec::new()));
+        }
         let out = nancummax(&self.values);
         Self::new(DType::Float64, out)
     }
 
     /// Cumulative minimum, null-propagating per fp-types::nancummin.
     pub fn cummin(&self) -> Result<Self, ColumnError> {
+        // Typed running minimum (see cummax).
+        if let Some(data) = self.as_f64_slice() {
+            if let Some((&first, rest)) = data.split_first() {
+                let mut running = first;
+                let mut out = Vec::with_capacity(data.len());
+                out.push(running);
+                for &x in rest {
+                    running = running.min(x);
+                    out.push(running);
+                }
+                return Ok(Self::from_f64_values(out));
+            }
+            return Ok(Self::from_f64_values(Vec::new()));
+        }
         let out = nancummin(&self.values);
         Self::new(DType::Float64, out)
     }

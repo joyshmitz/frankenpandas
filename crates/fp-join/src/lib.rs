@@ -2078,6 +2078,80 @@ fn build_single_key_ordered_identity_inner_merge_output(
     })
 }
 
+/// Hash-free inner-join position build for two all-valid, bounded-range Int64
+/// key columns. Replaces the `FxHashMap<&JoinKeyComponent, _>` build+probe with
+/// a counting-sort / CSR direct-address table indexed by `key - min`.
+///
+/// Bit-identical to the hash path's emitted `(left_pos, right_pos)` pairs: the
+/// hash path buckets right positions in *insertion* order (ascending position),
+/// and this CSR fill also writes right positions in ascending-position order,
+/// so for every left row the matched right rows are emitted in the same order;
+/// left rows are still probed in ascending order. All-valid Int64 keys map to
+/// `Present(IndexLabel::Int64(v))` in the hash path, whose equality is plain
+/// `i64 ==`, so membership/equality semantics are identical. A left key outside
+/// the right key span matches nothing in either path. Returns `None` (caller
+/// falls back to the hash path) for non-Int64, any-missing, or wide-span keys.
+fn dense_int64_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    if right.is_empty() || left.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut min = right[0];
+    let mut max = right[0];
+    for &v in right {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    // Bounded-span gate (mirrors the fp-columnar direct-address tally gates):
+    // the dense table costs O(span) memory, so only take it when the span is
+    // small in absolute terms AND relative to the build (right) side.
+    let span = (max as i128) - (min as i128) + 1;
+    if span > (1i128 << 24) || span > 16 * (right.len() as i128) {
+        return None;
+    }
+    let range = span as usize;
+
+    // CSR build over the right side: counts -> exclusive-prefix offsets ->
+    // positions filled in ascending right-position order.
+    let mut offsets = vec![0usize; range + 1];
+    for &v in right {
+        offsets[(v - min) as usize + 1] += 1;
+    }
+    for i in 0..range {
+        offsets[i + 1] += offsets[i];
+    }
+    let mut positions = vec![0usize; right.len()];
+    let mut cursor = offsets.clone();
+    for (pos, &v) in right.iter().enumerate() {
+        let bucket = (v - min) as usize;
+        positions[cursor[bucket]] = pos;
+        cursor[bucket] += 1;
+    }
+
+    let mut left_positions = Vec::<usize>::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for (left_pos, &v) in left.iter().enumerate() {
+        if v < min || v > max {
+            continue;
+        }
+        let bucket = (v - min) as usize;
+        for &right_pos in &positions[offsets[bucket]..offsets[bucket + 1]] {
+            left_positions.push(left_pos);
+            right_positions.push(right_pos);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 fn merge_single_key_inner_unsorted(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -2099,6 +2173,22 @@ fn merge_single_key_inner_unsorted(
     }
     if let Some((left_positions, right_positions)) =
         ordered_unique_int64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+
+    // Hash-free dense direct-address build+probe for bounded all-valid Int64
+    // keys (the common low-cardinality join-key shape). Bit-identical pairs.
+    if let Some((left_positions, right_positions)) =
+        dense_int64_inner_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_inner_merge_output(
             left,

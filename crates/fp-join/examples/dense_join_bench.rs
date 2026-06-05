@@ -1,0 +1,112 @@
+//! Isolates the single-key inner-join build+probe on UNSORTED, near-unique,
+//! bounded-range Int64 keys — the shape where `dense_int64_inner_positions`
+//! (counting-sort/CSR direct-address) replaces the FxHashMap build+probe.
+//!
+//! The pre-existing `perf_profile inner_join` scenario uses cardinality-512
+//! keys, so its 100k×100k → ~19.5M-row cross product is output-materialization
+//! bound and hides the build/probe cost. Here the keys are a scrambled, mostly
+//! 1:1 mapping over `[0, ~1.6n)`, so the output is ≈ n rows and the build+probe
+//! dominates the timed work.
+//!
+//! Modes:
+//!   dense_join_bench golden <n>          -> deterministic output digest (sha proof)
+//!   dense_join_bench <n> <iters>         -> timed loop (hyperfine target)
+
+use std::time::Instant;
+
+use fp_frame::DataFrame;
+use fp_join::{JoinType, merge_dataframes};
+use fp_types::Scalar;
+
+/// Unsorted, near-unique key in `[0, span)` via a Fibonacci-hash scramble of the
+/// row index. span = next-power-of-two ≥ ~1.6n keeps the span bounded (the dense
+/// gate needs span ≤ 16·rows) while leaving a low collision rate (mostly 1:1).
+fn scramble(i: usize, span: u64) -> i64 {
+    let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    ((h >> 17) % span) as i64
+}
+
+fn build_frame(value_name: &str, n: usize, span: u64, salt: i64) -> DataFrame {
+    let keys: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(scramble(i, span))).collect();
+    let values: Vec<Scalar> = (0..n)
+        .map(|i| Scalar::Int64((i as i64).wrapping_mul(salt).wrapping_add(1)))
+        .collect();
+    DataFrame::from_dict(
+        &["id", value_name],
+        vec![("id", keys), (value_name, values)],
+    )
+    .expect("frame")
+}
+
+fn span_for(n: usize) -> u64 {
+    // ~1.6n rounded up to a power of two (≥ 8): both sides scatter over the same
+    // key space and share the same scramble, so the inner join is ~1:1 (output ≈
+    // n rows) rather than a cross-product explosion. This isolates the single-key
+    // build+probe (the part `dense_int64_inner_positions` replaces) instead of
+    // the output-materialization-bound low-cardinality shape in `perf_profile
+    // inner_join`.
+    ((n as u64) * 8 / 5).max(8).next_power_of_two()
+}
+
+fn golden(n: usize) {
+    let span = span_for(n);
+    let left = build_frame("lv", n, span, 7);
+    let right = build_frame("rv", n, span, 13);
+    let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+    let out = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .expect("rebuild merged frame");
+
+    // Order-sensitive digest of the merged output: fold every cell of every
+    // column (in column-order, row-order) into a rolling FNV-1a hash so any
+    // change in row order, row count, or values flips the digest.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| {
+        h ^= x;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(out.len() as u64);
+    for name in out.column_names() {
+        for s in name.bytes() {
+            mix(u64::from(s));
+        }
+        let col = out.column(name).expect("col");
+        for v in col.values().iter() {
+            match v {
+                Scalar::Int64(i) => mix(*i as u64),
+                Scalar::Null(_) => mix(0xDEAD_BEEF),
+                other => mix(format!("{other:?}")
+                    .bytes()
+                    .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(u64::from(b)))),
+            }
+        }
+    }
+    println!("rows={} digest={:016x}", out.len(), h);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("golden") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        golden(n);
+        return;
+    }
+
+    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200_000);
+    let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let span = span_for(n);
+    let left = build_frame("lv", n, span, 7);
+    let right = build_frame("rv", n, span, 13);
+
+    let start = Instant::now();
+    let mut sink: usize = 0;
+    for _ in 0..iters {
+        let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+        sink = sink.wrapping_add(out.index.len());
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "dense_join_bench: n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / iters as f64,
+    );
+}

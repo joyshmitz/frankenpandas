@@ -172,3 +172,5 @@ crates/fp-conformance/fixtures/packets_scale/
 .skill-loop-progress.md
 .skill-loop-progress-*.md
 claude-upgrade-progress.json
+*.mcp.json
+.cargo-target-*/

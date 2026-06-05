@@ -1240,6 +1240,98 @@ fn try_groupby_agg_dense_int64(
     Some((out_index, out_values))
 }
 
+/// Dense `Nunique` for bounded all-valid `Int64` keys AND bounded `Int64`
+/// values: counts distinct non-missing values per group with a 2-D
+/// `[group × value]` seen-bitset instead of the generic path's per-group
+/// `FxHashSet`. Bit-identical — nunique is an order-independent distinct count,
+/// and for `Int64` values `nannunique`'s `ScalarKey::Int64` equality is plain
+/// `i64 ==`, so the dense cell `(key-min, value-vmin)` collides on exactly the
+/// same pairs. Returns `None` (caller uses the generic path) for any non-`Int64`
+/// key/value, a wide key span, or a `group × value` cell count over the gate.
+fn try_groupby_nunique_dense_int64(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
+    if !saw_int_key {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let key_span = i128::from(max_key) - i128::from(min_key) + 1;
+    if key_span <= 0 || key_span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+    let key_span = key_span as usize;
+
+    // Value range over non-missing values; bail on any non-Int64 value (Float64/
+    // string/etc. nunique stays on the generic FxHashSet path).
+    let mut v_min = i64::MAX;
+    let mut v_max = i64::MIN;
+    let mut saw_value = false;
+    for value in values {
+        match value {
+            Scalar::Int64(v) => {
+                saw_value = true;
+                v_min = v_min.min(*v);
+                v_max = v_max.max(*v);
+            }
+            other if other.is_missing() => {}
+            _ => return None,
+        }
+    }
+    // value_span is 1 (a dummy, unused) when every value is missing.
+    let value_span = if saw_value {
+        (i128::from(v_max) - i128::from(v_min) + 1) as usize
+    } else {
+        1
+    };
+    let cells = (key_span as i128) * (value_span as i128);
+    if cells > (1_i128 << 24) {
+        return None;
+    }
+
+    let mut seen = vec![false; cells as usize];
+    let mut nunique = vec![0_i64; key_span];
+    let mut first_seen = vec![false; key_span];
+    let mut ordering = Vec::<i64>::new();
+
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let key = match key {
+            Scalar::Int64(v) => *v,
+            Scalar::Null(_) if dropna => continue,
+            _ => return None,
+        };
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        if !first_seen[bucket] {
+            first_seen[bucket] = true;
+            ordering.push(key);
+        }
+        let v = match value {
+            Scalar::Int64(v) => *v,
+            other if other.is_missing() => continue,
+            _ => return None,
+        };
+        let cell = bucket * value_span + (i128::from(v) - i128::from(v_min)) as usize;
+        if !seen[cell] {
+            seen[cell] = true;
+            nunique[bucket] += 1;
+        }
+    }
+
+    if sort {
+        ordering.sort_unstable();
+    }
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for &key in &ordering {
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        out_index.push(IndexLabel::Int64(key));
+        out_values.push(Scalar::Int64(nunique[bucket]));
+    }
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1291,6 +1383,15 @@ pub fn groupby_agg(
     // each group's values without hashing or collecting a per-group Vec).
     if let Some((out_index, out_values)) =
         try_groupby_agg_dense_int64(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Dense 2-D seen-bitset distinct count for bounded Int64 keys+values.
+    if matches!(func, AggFunc::Nunique)
+        && let Some((out_index, out_values)) =
+            try_groupby_nunique_dense_int64(key_vals, val_vals, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);

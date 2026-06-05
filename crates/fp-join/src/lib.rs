@@ -806,6 +806,10 @@ fn validate_merge_cardinality(
     Ok(())
 }
 
+fn validate_mode_allows_fast_positions(validate_mode: Option<MergeValidateMode>) -> bool {
+    matches!(validate_mode, None | Some(MergeValidateMode::ManyToMany))
+}
+
 fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
     let existing = values.clone();
     values.clear();
@@ -2747,13 +2751,14 @@ pub fn merge_dataframes_on_with_options(
 
     let left_key_columns = collect_join_key_columns(left, left_on, "left")?;
     let right_key_columns = collect_join_key_columns(right, right_on, "right")?;
+    let validate_allows_fast_positions = validate_mode_allows_fast_positions(validate_mode);
 
     if matches!(join_type, JoinType::Inner)
         && left_on.len() == 1
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
     {
         return merge_single_key_inner_unsorted(
             left,
@@ -2770,7 +2775,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some(right_positions) =
             ordered_unique_int64_left_match_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2788,7 +2793,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_left_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2807,7 +2812,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some(left_positions) =
             ordered_unique_int64_right_match_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2825,7 +2830,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_right_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2844,7 +2849,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             ordered_unique_int64_outer_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2863,7 +2868,7 @@ pub fn merge_dataframes_on_with_options(
         && right_on.len() == 1
         && !sort
         && indicator_name.is_none()
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_outer_positions(left_key_columns[0], right_key_columns[0])
     {
@@ -2883,11 +2888,11 @@ pub fn merge_dataframes_on_with_options(
     // Hash-free fast path: a plain inner join on all-valid bounded-Int64 key
     // column(s) packs the composite key into one i64 and runs the dense CSR
     // core, skipping CompositeJoinKey materialization + FxHashMap build/probe.
-    // Gated to inner joins with no sort/indicator/validate, where the emitted
-    // (left,right) pairs are byte-for-byte identical to the hash path.
+    // Gated to inner joins with no sort/indicator/enforcing validate, where the
+    // emitted (left,right) pairs are byte-for-byte identical to the hash path.
     let packed_inner = if matches!(join_type, JoinType::Inner)
         && !sort
-        && validate_mode.is_none()
+        && validate_allows_fast_positions
         && indicator_name.is_none()
     {
         dense_packed_int64_inner_positions(&left_key_columns, &right_key_columns)

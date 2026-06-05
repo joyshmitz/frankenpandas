@@ -1332,6 +1332,111 @@ fn try_groupby_nunique_dense_int64(
     Some((out_index, out_values))
 }
 
+/// Dense `Median` for bounded all-valid `Int64` keys and numeric values via a
+/// CSR group layout: count non-missing per group, prefix-sum to offsets,
+/// scatter every non-missing `to_f64()` value into one flat array grouped by
+/// group, then sort each group's contiguous slice and take the middle. Replaces
+/// the generic path's per-row hashing + per-group `Vec<Scalar>` + per-group
+/// `collect_finite` `Vec<f64>` with two scans and a single flat allocation.
+///
+/// Bit-identical to `nanmedian`: `collect_finite` is the in-order non-missing
+/// `to_f64()` values, the per-group slice holds exactly those values, and
+/// `sort_by(partial_cmp)` yields the same ordering — so `nums[mid]` (odd) and
+/// `(nums[mid-1]+nums[mid])/2` (even) match element-for-element. Returns `None`
+/// (caller uses the generic path) for non-`Int64` keys, a wide key span, or any
+/// `Timedelta64`/non-`to_f64` value (which `nanmedian` routes elsewhere).
+fn try_groupby_median_dense_int64(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
+    if !saw_int_key {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let key_span = i128::from(max_key) - i128::from(min_key) + 1;
+    if key_span <= 0 || key_span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+    let key_span = key_span as usize;
+
+    // Pass 1: per-bucket non-missing count + first-seen group order.
+    let mut count = vec![0_usize; key_span];
+    let mut first_seen = vec![false; key_span];
+    let mut ordering = Vec::<i64>::new();
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let key = match key {
+            Scalar::Int64(v) => *v,
+            Scalar::Null(_) if dropna => continue,
+            _ => return None,
+        };
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        if !first_seen[bucket] {
+            first_seen[bucket] = true;
+            ordering.push(key);
+        }
+        if value.is_missing() {
+            continue;
+        }
+        // nanmedian has a separate Timedelta64 accumulator; leave those (and any
+        // non-f64-coercible value) to the generic path.
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        count[bucket] += 1;
+    }
+
+    // Exclusive prefix-sum -> per-bucket offset into the flat values array.
+    let mut offsets = vec![0_usize; key_span + 1];
+    for b in 0..key_span {
+        offsets[b + 1] = offsets[b] + count[b];
+    }
+    let total = offsets[key_span];
+
+    // Pass 2: scatter non-missing f64 values into the flat array, grouped.
+    let mut flat = vec![0.0_f64; total];
+    let mut cursor = offsets.clone();
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let key = match key {
+            Scalar::Int64(v) => *v,
+            Scalar::Null(_) if dropna => continue,
+            _ => return None,
+        };
+        if value.is_missing() {
+            continue;
+        }
+        let x = value.to_f64().ok()?;
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        flat[cursor[bucket]] = x;
+        cursor[bucket] += 1;
+    }
+
+    if sort {
+        ordering.sort_unstable();
+    }
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for &key in &ordering {
+        let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+        out_index.push(IndexLabel::Int64(key));
+        let slice = &mut flat[offsets[bucket]..offsets[bucket] + count[bucket]];
+        let agg = if slice.is_empty() {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = slice.len() / 2;
+            if slice.len().is_multiple_of(2) {
+                Scalar::Float64((slice[mid - 1] + slice[mid]) / 2.0)
+            } else {
+                Scalar::Float64(slice[mid])
+            }
+        };
+        out_values.push(agg);
+    }
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1392,6 +1497,15 @@ pub fn groupby_agg(
     if matches!(func, AggFunc::Nunique)
         && let Some((out_index, out_values)) =
             try_groupby_nunique_dense_int64(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Dense CSR group-and-sort median for bounded Int64 keys + numeric values.
+    if matches!(func, AggFunc::Median)
+        && let Some((out_index, out_values)) =
+            try_groupby_median_dense_int64(key_vals, val_vals, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);

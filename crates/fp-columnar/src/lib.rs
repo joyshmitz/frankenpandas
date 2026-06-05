@@ -9641,6 +9641,27 @@ impl Column {
     /// appearance and drops NaN/NA). Float NaN is deduplicated on bit
     /// pattern; +0.0 / -0.0 fold to the same key.
     pub fn unique(&self) -> Result<Self, ColumnError> {
+        // Dense direct-address fast path: an all-valid, bounded-range Int64
+        // column dedups via a seen-bitset indexed by `v - min` — hash-free, no
+        // per-element Scalar enum — preserving first-seen order. Bit-identical to
+        // the HashSet path below (all-valid ⇒ nothing missing to skip; output is
+        // the same first-seen distinct Int64 values). Same gate as isin/dense
+        // duplicated (`i64_direct_address_range`).
+        if let Some(data) = self.as_i64_slice()
+            && let Some((min, range)) = i64_direct_address_range(data)
+        {
+            let mut seen = vec![false; range];
+            let mut out: Vec<i64> = Vec::new();
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                if !seen[slot] {
+                    seen[slot] = true;
+                    out.push(v);
+                }
+            }
+            return Ok(Self::from_i64_values(out));
+        }
+
         use std::collections::HashSet;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {

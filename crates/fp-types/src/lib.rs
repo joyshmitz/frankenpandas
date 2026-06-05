@@ -3353,12 +3353,22 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
     }
-    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = nums.len() / 2;
-    if nums.len().is_multiple_of(2) {
-        Scalar::Float64((nums[mid - 1] + nums[mid]) / 2.0)
+    // O(n) selection instead of an O(n log n) full sort: select_nth_unstable_by
+    // places the `mid`-th smallest at index `mid` with all smaller elements
+    // (unordered) in the left partition. For even n the (mid-1)-th smallest is
+    // the MAX of that left partition. Bit-identical to the sort path: order
+    // statistics depend only on VALUES, and ties share a value, so the
+    // unstable partition yields the same nums[mid-1]/nums[mid] the sort did.
+    let n = nums.len();
+    let mid = n / 2;
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    let (left, mid_ref, _right) = nums.select_nth_unstable_by(mid, cmp);
+    let mid_val = *mid_ref;
+    if n.is_multiple_of(2) {
+        let lower = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Scalar::Float64((lower + mid_val) / 2.0)
     } else {
-        Scalar::Float64(nums[mid])
+        Scalar::Float64(mid_val)
     }
 }
 
@@ -3771,7 +3781,6 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
     }
-    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = nums.len();
     if n == 1 {
         return Scalar::Float64(nums[0]);
@@ -3779,11 +3788,19 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
     let pos = q * (n - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
+    // O(n) selection instead of a full sort: select the `lo`-th order statistic;
+    // when interpolation is needed (hi == lo+1) the (lo+1)-th smallest is the
+    // MIN of the right partition. Bit-identical to the sort path (same
+    // nums[lo]/nums[hi] values, since order statistics depend only on values).
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    let (_left, lo_ref, right) = nums.select_nth_unstable_by(lo, cmp);
+    let lo_val = *lo_ref;
     if lo == hi {
-        return Scalar::Float64(nums[lo]);
+        return Scalar::Float64(lo_val);
     }
+    let hi_val = right.iter().copied().fold(f64::INFINITY, f64::min);
     let weight = pos - lo as f64;
-    Scalar::Float64(nums[lo] + (nums[hi] - nums[lo]) * weight)
+    Scalar::Float64(lo_val + (hi_val - lo_val) * weight)
 }
 
 /// Position (in the original slice) of the non-missing maximum.

@@ -1562,6 +1562,11 @@ struct FusedInt64OutputColumn<'a> {
     values: &'a [i64],
 }
 
+struct FusedInt64MergeOptions<'a> {
+    suffixes: &'a ResolvedMergeSuffixes,
+    require_all_left_keys_matched: bool,
+}
+
 fn build_single_key_dense_i64_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -1569,7 +1574,7 @@ fn build_single_key_dense_i64_inner_merge_output(
     right_on: &[&str],
     left_key: &Column,
     right_key: &Column,
-    suffixes: &ResolvedMergeSuffixes,
+    options: FusedInt64MergeOptions<'_>,
 ) -> Result<Option<MergedDataFrame>, JoinError> {
     debug_assert_eq!(left_on.len(), 1);
     debug_assert_eq!(right_on.len(), 1);
@@ -1605,7 +1610,7 @@ fn build_single_key_dense_i64_inner_merge_output(
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
-            apply_merge_suffix(name, suffixes.left.as_deref())
+            apply_merge_suffix(name, options.suffixes.left.as_deref())
         } else {
             name.clone()
         };
@@ -1628,7 +1633,7 @@ fn build_single_key_dense_i64_inner_merge_output(
             return Ok(None);
         };
         let out_name = if left_col_names.contains(name) {
-            apply_merge_suffix(name, suffixes.right.as_deref())
+            apply_merge_suffix(name, options.suffixes.right.as_deref())
         } else {
             name.clone()
         };
@@ -1639,9 +1644,12 @@ fn build_single_key_dense_i64_inner_merge_output(
         });
     }
 
-    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, options.suffixes)?;
 
     if left_keys.is_empty() || right_keys.is_empty() {
+        if options.require_all_left_keys_matched && !left_keys.is_empty() {
+            return Ok(None);
+        }
         let mut columns = std::collections::BTreeMap::new();
         let mut column_order = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -1693,11 +1701,20 @@ fn build_single_key_dense_i64_inner_merge_output(
     let mut output_len = 0usize;
     for &v in left_keys {
         if v < min || v > max {
+            if options.require_all_left_keys_matched {
+                return Ok(None);
+            }
             continue;
         }
         let bucket = (v - min) as usize;
-        let Some(new_output_len) = output_len.checked_add(offsets[bucket + 1] - offsets[bucket])
-        else {
+        let bucket_len = offsets[bucket + 1] - offsets[bucket];
+        if bucket_len == 0 {
+            if options.require_all_left_keys_matched {
+                return Ok(None);
+            }
+            continue;
+        }
+        let Some(new_output_len) = output_len.checked_add(bucket_len) else {
             return Ok(None);
         };
         output_len = new_output_len;
@@ -1712,6 +1729,9 @@ fn build_single_key_dense_i64_inner_merge_output(
             continue;
         }
         let bucket = (v - min) as usize;
+        if offsets[bucket] == offsets[bucket + 1] {
+            continue;
+        }
         for &right_pos in &positions[offsets[bucket]..offsets[bucket + 1]] {
             for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
                 match spec.side {
@@ -2792,7 +2812,10 @@ fn merge_single_key_inner_unsorted(
         right_on,
         left_key_columns[0],
         right_key_columns[0],
-        suffixes,
+        FusedInt64MergeOptions {
+            suffixes,
+            require_all_left_keys_matched: false,
+        },
     )? {
         return Ok(merged);
     }
@@ -2981,6 +3004,27 @@ pub fn merge_dataframes_on_with_options(
             &right_positions,
             &suffixes,
         );
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_dense_i64_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            FusedInt64MergeOptions {
+                suffixes: &suffixes,
+                require_all_left_keys_matched: true,
+            },
+        )?
+    {
+        return Ok(merged);
     }
     if matches!(join_type, JoinType::Left)
         && left_on.len() == 1
@@ -5619,6 +5663,119 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Int64(400));
         assert!(right_values[5].is_missing());
         assert!(right_values[6].is_missing());
+    }
+
+    #[test]
+    fn merge_left_all_matched_dense_int64_fused_output_matches_sorted_generic_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(20),
+                        Scalar::Int64(21),
+                        Scalar::Int64(30),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(200),
+                        Scalar::Int64(300),
+                        Scalar::Int64(301),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Left,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("v").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(11),
+                Scalar::Int64(11),
+                Scalar::Int64(20),
+                Scalar::Int64(21),
+                Scalar::Int64(30),
+                Scalar::Int64(30),
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("w").unwrap().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(200),
+                Scalar::Int64(300),
+                Scalar::Int64(301),
+            ]
+        );
     }
 
     #[test]

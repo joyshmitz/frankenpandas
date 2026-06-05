@@ -3611,45 +3611,41 @@ fn merge_asof_grouped(
         right_groups.entry(key.clone()).or_default().push(idx);
     }
 
-    // For each left row, find match within its group
-    let mut right_matches: Vec<Option<usize>> = Vec::with_capacity(left_vals.len());
+    // Group LEFT rows by their `by` key (preserving the globally-sorted order
+    // within each group), then run the monotonic two-pointer asof sweep ONCE
+    // per group over all of the group's left values — instead of rebuilding the
+    // group's right-value vector and re-scanning it from scratch for every
+    // individual left row (the old O(L·R) per group). compute_asof_matches
+    // already drives a single left array with a monotonic cursor and handles
+    // NaN left keys (→ None, cursor unchanged); because every per-group left
+    // subsequence is sorted (the global `on` column is non-decreasing), the
+    // grouped sweep yields the identical match for each left row as the old
+    // fresh-per-row scan. Results are scattered by absolute left index, so the
+    // output order is independent of group-iteration order.
+    let mut left_groups: FxHashMap<&Vec<String>, Vec<usize>> = FxHashMap::default();
+    for (left_idx, key) in left_group_keys.iter().enumerate() {
+        left_groups.entry(key).or_default().push(left_idx);
+    }
 
-    for (left_idx, left_group_key) in left_group_keys.iter().enumerate() {
-        let lv = left_vals[left_idx];
-
-        if lv.is_nan() {
-            right_matches.push(None);
-            continue;
-        }
-
-        // Get right indices in same group
-        let group_indices = match right_groups.get(left_group_key) {
-            Some(indices) => indices,
-            None => {
-                right_matches.push(None);
-                continue;
-            }
+    let mut right_matches: Vec<Option<usize>> = vec![None; left_vals.len()];
+    for (group_key, left_positions) in &left_groups {
+        let Some(group_indices) = right_groups.get(*group_key) else {
+            continue; // no right rows for this group -> all matches stay None
         };
-
-        // Extract right values for this group
         let group_right_vals: Vec<f64> = group_indices.iter().map(|&i| right_vals[i]).collect();
+        let group_left_vals: Vec<f64> = left_positions.iter().map(|&i| left_vals[i]).collect();
 
-        // Compute match within group
         let group_matches = compute_asof_matches(
-            &[lv],
+            &group_left_vals,
             &group_right_vals,
             direction,
             options.allow_exact_matches,
             options.tolerance,
         );
 
-        // Map back to original right index
-        match group_matches.first() {
-            Some(Some(group_idx)) => {
-                right_matches.push(Some(group_indices[*group_idx]));
-            }
-            _ => {
-                right_matches.push(None);
+        for (k, &left_idx) in left_positions.iter().enumerate() {
+            if let Some(Some(group_idx)) = group_matches.get(k) {
+                right_matches[left_idx] = Some(group_indices[*group_idx]);
             }
         }
     }

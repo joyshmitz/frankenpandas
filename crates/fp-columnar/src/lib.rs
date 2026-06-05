@@ -9178,6 +9178,44 @@ impl Column {
             })
         }
 
+        // Typed dense-membership fast path: an all-valid Int64 column tested
+        // against bounded Int64 needles uses a direct-address presence bitset
+        // (indexed by `needle - min`) scanned over the contiguous i64 buffer,
+        // instead of a per-element HashSet probe over materialized Scalars.
+        // Bit-identical: an Int64 value's key is `Key::Int64`, which only ever
+        // matches an Int64 needle (a Float64 5.0 needle is `Key::FloatBits`, a
+        // distinct key), so the membership answer is exactly "is this i64 one of
+        // the Int64 needles". Falls back for non-Int64 self/needle spans.
+        if let Some(data) = self.as_i64_slice() {
+            let mut n_min = i64::MAX;
+            let mut n_max = i64::MIN;
+            let mut saw_int_needle = false;
+            for needle in needles {
+                if let Scalar::Int64(v) = needle {
+                    saw_int_needle = true;
+                    n_min = n_min.min(*v);
+                    n_max = n_max.max(*v);
+                }
+            }
+            if !saw_int_needle {
+                return Ok(Self::from_bool_values(vec![false; data.len()]));
+            }
+            let span = i128::from(n_max) - i128::from(n_min) + 1;
+            if span > 0 && span <= (1i128 << 24) {
+                let mut present = vec![false; span as usize];
+                for needle in needles {
+                    if let Scalar::Int64(v) = needle {
+                        present[(v - n_min) as usize] = true;
+                    }
+                }
+                let out: Vec<bool> = data
+                    .iter()
+                    .map(|&v| v >= n_min && v <= n_max && present[(v - n_min) as usize])
+                    .collect();
+                return Ok(Self::from_bool_values(out));
+            }
+        }
+
         let mut lookup: HashSet<Key<'_>> = HashSet::new();
         for n in needles {
             if let Some(k) = key_of(n) {

@@ -136,6 +136,17 @@ fn run_lt(int_a: &Column, int_b: &Column) -> Column {
     a.lt(&b).expect("lt")
 }
 
+fn isin_needles() -> Vec<Scalar> {
+    // 128 bounded Int64 needles in [0, 1_000_003) — a category-filter shape.
+    (0..128)
+        .map(|k| Scalar::Int64((k * 7919) % 1_000_003))
+        .collect()
+}
+
+fn run_isin(int_col: &Column, needles: &[Scalar]) -> Column {
+    int_col.isin(needles).expect("isin")
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -423,6 +434,38 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "lt_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_isin") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let out = run_isin(&build_int_column(n), &isin_needles());
+        println!(
+            "isin_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("isin") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_int_column(n);
+        let needles = isin_needles();
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_isin(&col, &needles);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "isin_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

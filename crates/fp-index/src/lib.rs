@@ -9230,9 +9230,26 @@ impl CategoricalIndex {
 
     /// Positions that would sort labels ascending, matching
     /// `pd.CategoricalIndex.argsort()`.
+    ///
+    /// pandas sorts a Categorical by its **category codes** — the position of
+    /// each label within `categories` — for both ordered and unordered
+    /// categoricals (`Categorical._values_for_argsort` returns `self.codes`),
+    /// NOT lexicographically by the label text. So categories `[b, a, c]` sort
+    /// before-`a` because `b` has code 0. The sort is stable, so equal-code
+    /// ties keep their original order. CategoricalIndex labels are non-null, so
+    /// every label resolves to a code. When the category order happens to be
+    /// lexicographic this is identical to the old text sort; only
+    /// non-lexicographic category orders are corrected.
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
-        self.to_index().argsort()
+        let map = self.category_index_map();
+        let mut positions: Vec<usize> = (0..self.labels.len()).collect();
+        positions.sort_by_key(|&i| {
+            map.get(self.labels[i].as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        positions
     }
 
     /// Concatenate with another CategoricalIndex, matching
@@ -17653,6 +17670,46 @@ mod tests {
         assert_eq!(cat_sorted_alias.labels(), cat_sorted.labels());
 
         Ok(())
+    }
+
+    #[test]
+    fn categorical_sort_values_by_category_code_not_lexicographic() {
+        // Non-lexicographic category order: codes b=0, a=1, c=2. pandas
+        // sort_values orders by code -> b, a, a, c (NOT lexicographic a,a,b,c).
+        // The old `to_index().argsort()` text sort returned a,a,b,c, which
+        // diverges from pandas; the existing 482qd test used lexicographic
+        // categories so it could not catch this.
+        let cat = super::CategoricalIndex::with_categories(
+            vec![
+                "a".to_owned(),
+                "c".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+            ],
+            vec!["b".to_owned(), "a".to_owned(), "c".to_owned()],
+            true,
+        )
+        .unwrap();
+        // labels [a,c,b,a] -> codes [1,2,0,1]; stable argsort by code:
+        // code0 -> pos2 (b); code1 -> pos0 (a), pos3 (a); code2 -> pos1 (c).
+        assert_eq!(cat.argsort(), vec![2, 0, 3, 1]);
+        assert_eq!(
+            cat.sort_values().labels(),
+            ["b".to_owned(), "a".to_owned(), "a".to_owned(), "c".to_owned()].as_slice()
+        );
+
+        // Unordered categoricals also sort by category code in pandas.
+        let cat_u = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned()],
+            vec!["b".to_owned(), "a".to_owned()],
+            false,
+        )
+        .unwrap();
+        // codes a=1, b=0 -> sorted by code: b, a.
+        assert_eq!(
+            cat_u.sort_values().labels(),
+            ["b".to_owned(), "a".to_owned()].as_slice()
+        );
     }
 
     #[test]

@@ -5002,9 +5002,10 @@ mod tests {
     use fp_frame::{DataFrame, FrameError};
 
     use super::{
-        JoinError, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
+        JoinError, MergeExecutionOptions, MergeValidateMode, MergedDataFrame,
+        build_single_key_dense_right_merge_output, dense_int64_right_positions, merge_dataframes,
         merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options,
-        ordered_identity_int64_keys_match,
+        ordered_identity_int64_keys_match, resolve_merge_suffixes,
     };
 
     fn make_left_df() -> DataFrame {

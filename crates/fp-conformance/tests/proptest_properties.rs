@@ -1211,6 +1211,14 @@ fn reconstruct_pct_change_scalar(delta: &Scalar, previous: &Scalar) -> Scalar {
 }
 
 fn reconstruct_pct_change_series(series: &Series, periods: usize) -> Series {
+    // pandas 2.2.3 (and FP) Series.pct_change defaults to fill_method="pad":
+    // missing values are forward-filled BEFORE diff/shift. The reconstruction
+    // must pad identically or it diverges on interior nulls (diff/shift over an
+    // unfilled null yields NaN where pct_change yields a real ratio against the
+    // carried-forward previous value).
+    let series = &series
+        .ffill(None)
+        .expect("Series::ffill() must succeed while reconstructing pct_change");
     let diff = series
         .diff(periods as i64)
         .expect("Series::diff() must succeed while reconstructing pct_change");
@@ -1232,6 +1240,11 @@ fn reconstruct_pct_change_series(series: &Series, periods: usize) -> Series {
 }
 
 fn reconstruct_pct_change_dataframe(df: &DataFrame, periods: usize) -> DataFrame {
+    // DataFrame.pct_change forward-fills each column (fill_method="pad") before
+    // diff/shift; pad the input the same way (see reconstruct_pct_change_series).
+    let df = &df
+        .ffill(None)
+        .expect("DataFrame::ffill() must succeed while reconstructing pct_change");
     let diff = df
         .diff(periods as i64)
         .expect("DataFrame::diff() must succeed while reconstructing pct_change");
@@ -1266,6 +1279,11 @@ fn reconstruct_pct_change_dataframe(df: &DataFrame, periods: usize) -> DataFrame
 }
 
 fn reconstruct_pct_change_axis1_dataframe(df: &DataFrame, periods: i64) -> DataFrame {
+    // pct_change(axis=1) forward-fills ACROSS columns per row (fill_method="pad")
+    // before diff/shift; pad the input the same way along axis 1.
+    let df = &df
+        .ffill_axis1(None)
+        .expect("DataFrame::ffill_axis1() must succeed while reconstructing pct_change");
     let diff = df
         .diff_axis1(periods)
         .expect("DataFrame::diff_axis1() must succeed while reconstructing pct_change");

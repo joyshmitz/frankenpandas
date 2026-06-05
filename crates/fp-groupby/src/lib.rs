@@ -1029,8 +1029,9 @@ pub enum AggFunc {
 /// is preferred; this function uses the generic HashMap path for all ops.
 /// Dense direct-address streaming `groupby_agg` for bounded all-valid `Int64`
 /// keys and numeric (`Int64`/`Float64`) values, for the aggregations whose
-/// result is a single-pass fold over each group's in-order non-missing values:
-/// `Mean`, `Count`, `Size`, `First`, `Last`, `Min`, `Max`, `Prod`.
+/// result is a fold over each group's in-order non-missing values:
+/// `Mean`, `Count`, `Size`, `First`, `Last`, `Min`, `Max`, `Prod` (single
+/// pass), plus `Var`/`Std` (a second pass for the squared deviations).
 ///
 /// Replaces the generic path's `FxHashMap<GroupKeyRef, (usize, Vec<Scalar>,
 /// usize)>` — which hashes every row AND clones every value into a per-group
@@ -1064,6 +1065,8 @@ fn try_groupby_agg_dense_int64(
             | AggFunc::Min
             | AggFunc::Max
             | AggFunc::Prod
+            | AggFunc::Var
+            | AggFunc::Std
     ) {
         return None;
     }
@@ -1078,7 +1081,9 @@ fn try_groupby_agg_dense_int64(
     }
     let bucket_len = usize::try_from(span).ok()?;
 
-    let needs_mean = matches!(func, AggFunc::Mean);
+    let needs_var = matches!(func, AggFunc::Var | AggFunc::Std);
+    // Var/Std need the per-bucket mean first, so they also accumulate `sum`.
+    let needs_mean = matches!(func, AggFunc::Mean) || needs_var;
     let needs_prod = matches!(func, AggFunc::Prod);
     // First/Last/Min/Max all retain a representative scalar per bucket.
     let needs_value = matches!(
@@ -1165,6 +1170,30 @@ fn try_groupby_agg_dense_int64(
         }
     }
 
+    // Second pass for Var/Std: nanvar is two-pass (mean, then Σ(x-mean)²). With
+    // the per-bucket mean known from pass 1, re-scan and accumulate squared
+    // deviations per bucket in input order — bit-identical to
+    // `nums.iter().map(|x| (x-mean).powi(2)).sum()` (same finite values, same
+    // order). No per-group Vec, just one extra O(n) scan.
+    let mut sum_sq = Vec::new();
+    if needs_var {
+        sum_sq = vec![0.0_f64; bucket_len];
+        for (key, value) in keys.iter().zip(values.iter()) {
+            let key = match key {
+                Scalar::Int64(v) => *v,
+                Scalar::Null(_) if dropna => continue,
+                _ => return None,
+            };
+            if value.is_missing() {
+                continue;
+            }
+            let bucket = (i128::from(key) - i128::from(min_key)) as usize;
+            let mean = sum[bucket] / non_missing[bucket] as f64;
+            let x = value.to_f64().ok()?;
+            sum_sq[bucket] += (x - mean).powi(2);
+        }
+    }
+
     if sort {
         ordering.sort_unstable();
     }
@@ -1189,6 +1218,21 @@ fn try_groupby_agg_dense_int64(
                 .unwrap_or(Scalar::Null(NullKind::NaN)),
             // nanprod over all-missing / empty group is the 1.0 identity.
             AggFunc::Prod => Scalar::Float64(prod[bucket]),
+            // nanvar/nanstd with ddof=1: Null(NaN) when n <= 1, else
+            // sum_sq/(n-1) (and its sqrt for Std).
+            AggFunc::Var | AggFunc::Std => {
+                let n = non_missing[bucket];
+                if n <= 1 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    let var = sum_sq[bucket] / (n - 1) as f64;
+                    Scalar::Float64(if matches!(func, AggFunc::Std) {
+                        var.sqrt()
+                    } else {
+                        var
+                    })
+                }
+            }
             _ => unreachable!("dense path gated to the supported aggregations"),
         };
         out_values.push(agg);

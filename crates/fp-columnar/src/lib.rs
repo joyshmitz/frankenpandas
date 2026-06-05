@@ -3341,6 +3341,24 @@ impl Column {
 
     /// Element-wise sign: -1, 0, or 1.
     pub fn sign(&self) -> Result<Self, ColumnError> {
+        // Typed, dtype-preserving fast path (all-valid only): Int64 -> Int64
+        // (-1/0/1), Float64 -> Float64. all-valid Float64 has no NaN so the
+        // is_nan branch never fires; -0.0 -> 0.0 (neither >0.0 nor <0.0), exactly
+        // as the scalar loop. Bit-identical.
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_i64_values(
+                data.iter()
+                    .map(|&x| if x > 0 { 1 } else if x < 0 { -1 } else { 0 })
+                    .collect(),
+            ));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter()
+                    .map(|&x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 })
+                    .collect(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -3389,6 +3407,17 @@ impl Column {
     ///
     /// Matches np.signbit(x). Returns True for negative values including -0.0.
     pub fn signbit(&self) -> Result<Self, ColumnError> {
+        // Typed fast path (all-valid only, output Bool): Int64 sign via x < 0,
+        // Float64 via is_sign_negative (so -0.0 -> true). Bit-identical; all-valid
+        // ⇒ the missing -> Bool(false) branch never applies.
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_bool_values(data.iter().map(|&x| x < 0).collect()));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_bool_values(
+                data.iter().map(|&x| x.is_sign_negative()).collect(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7736,6 +7765,17 @@ impl Column {
 
     /// Negate numeric values. Matches numpy's negative ufunc.
     pub fn neg(&self) -> Result<Self, ColumnError> {
+        // Typed, dtype-preserving fast path (all-valid only): Int64 negates over
+        // the i64 buffer (wrapping, incl i64::MIN) and stays Int64; Float64
+        // negates over the f64 buffer. Bit-identical to the scalar loop.
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_i64_values(
+                data.iter().map(|&x| x.wrapping_neg()).collect(),
+            ));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(data.iter().map(|&x| -x).collect()));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8403,6 +8443,11 @@ impl Column {
     /// Matches np.rint(x). Values exactly halfway between integers round to
     /// the nearest even integer.
     pub fn rint(&self) -> Result<Self, ColumnError> {
+        // round-half-to-even; for Int64 round_ties_even(x as f64) == x as f64
+        // (integral), matching the scalar Float64(x as f64) branch. Output Float64.
+        if let Some(out) = self.typed_float_unary(f64::round_ties_even) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8869,6 +8914,17 @@ impl Column {
     ///
     /// Matches np.exp2(x). Returns 2^x for each element.
     pub fn exp2(&self) -> Result<Self, ColumnError> {
+        // Typed fast path (all-valid only, output Float64). The Int64 branch must
+        // keep `2.0.powi(x as i32)` (NOT (x as f64).exp2()) to match the scalar
+        // loop's exact rounding; Float64 uses x.exp2(). Bit-identical.
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(data.iter().map(|&x| x.exp2()).collect()));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter().map(|&x| 2.0_f64.powi(x as i32)).collect(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -9137,6 +9193,15 @@ impl Column {
 
     /// Compute element-wise square (x^2).
     pub fn square(&self) -> Result<Self, ColumnError> {
+        // Typed, dtype-preserving fast path (all-valid only): Int64 stays Int64
+        // (`x * x`, same overflow behavior as the scalar loop); Float64 squares
+        // over the f64 buffer. Bit-identical.
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_i64_values(data.iter().map(|&x| x * x).collect()));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(data.iter().map(|&x| x * x).collect()));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {

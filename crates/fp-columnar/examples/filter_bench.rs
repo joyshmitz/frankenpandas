@@ -97,6 +97,14 @@ fn run_sum(int_col: &Column) -> f64 {
     }
 }
 
+fn run_min(int_col: &Column) -> f64 {
+    let f = int_col.astype(DType::Float64).expect("astype");
+    match f.min() {
+        Scalar::Float64(s) => s,
+        _ => 0.0,
+    }
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -257,6 +265,43 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "sum_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_min") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let f = build_int_column(n).astype(DType::Float64).expect("astype");
+        let lo = match f.min() {
+            Scalar::Float64(s) => s,
+            _ => f64::NAN,
+        };
+        let hi = match f.max() {
+            Scalar::Float64(s) => s,
+            _ => f64::NAN,
+        };
+        println!(
+            "minmax_golden n={n} digest={:016x}",
+            lo.to_bits() ^ hi.to_bits().rotate_left(1)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("min") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_int_column(n);
+        let start = Instant::now();
+        let mut sink = 0.0f64;
+        for _ in 0..iters {
+            sink += run_min(&col);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "min_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

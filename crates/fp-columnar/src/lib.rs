@@ -4536,6 +4536,33 @@ impl Column {
     /// for homogeneous inputs.
     #[must_use]
     pub fn min(&self) -> Scalar {
+        // Typed reduction: an all-valid numeric column folds the minimum straight
+        // over its contiguous buffer (an associative reduction the compiler can
+        // vectorize), skipping the Vec<Scalar> materialization. Bit-identical to
+        // nanmin: it keeps the first element on a tie via strict `<` (so -0.0 vs
+        // 0.0 ordering is preserved), and returns it dtype-preserved.
+        if let Some(data) = self.as_f64_slice()
+            && let Some((&first, rest)) = data.split_first()
+        {
+            let mut m = first;
+            for &x in rest {
+                if x < m {
+                    m = x;
+                }
+            }
+            return Scalar::Float64(m);
+        }
+        if let Some(data) = self.as_i64_slice()
+            && let Some((&first, rest)) = data.split_first()
+        {
+            let mut m = first;
+            for &x in rest {
+                if x < m {
+                    m = x;
+                }
+            }
+            return Scalar::Int64(m);
+        }
         nanmin(&self.values)
     }
 
@@ -4544,6 +4571,30 @@ impl Column {
     /// Matches `pd.Series.max()` via fp-types::nanmax.
     #[must_use]
     pub fn max(&self) -> Scalar {
+        // Typed reduction (see `min`); nanmax keeps the first element on a tie
+        // via strict `>`, dtype-preserved.
+        if let Some(data) = self.as_f64_slice()
+            && let Some((&first, rest)) = data.split_first()
+        {
+            let mut m = first;
+            for &x in rest {
+                if x > m {
+                    m = x;
+                }
+            }
+            return Scalar::Float64(m);
+        }
+        if let Some(data) = self.as_i64_slice()
+            && let Some((&first, rest)) = data.split_first()
+        {
+            let mut m = first;
+            for &x in rest {
+                if x > m {
+                    m = x;
+                }
+            }
+            return Scalar::Int64(m);
+        }
         nanmax(&self.values)
     }
 

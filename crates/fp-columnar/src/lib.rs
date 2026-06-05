@@ -6933,6 +6933,17 @@ impl Column {
         let n_bins = bin_edges.len() - 1;
         let mut counts = vec![0i64; n_bins];
 
+        // Fast path: strictly-increasing edges admit an O(log n_bins) binary
+        // search for each value's bin instead of the O(n_bins) linear scan
+        // below — O(N·log B) vs O(N·B). Bins are right-open [e_i, e_{i+1}) with
+        // an inclusive final right edge, so for x in [e_0, e_last] the bin is
+        // `partition_point(|e| e <= x) - 1` clamped to the last bin (so a value
+        // exactly at e_last lands in bin n_bins-1); values outside [e_0, e_last]
+        // are dropped — bit-identical to the linear scan. Non-strict (duplicate)
+        // edges create zero-width bins where the two scans can disagree, so they
+        // take the original linear path.
+        let strict = bin_edges.windows(2).all(|w| w[0] < w[1]);
+
         for v in &self.values {
             if v.is_missing() {
                 continue;
@@ -6941,8 +6952,15 @@ impl Column {
                 Ok(f) if f.is_finite() => f,
                 _ => continue,
             };
-            // Binary search for the appropriate bin
-            let mut found = false;
+            if strict {
+                if x < bin_edges[0] || x > bin_edges[n_bins] {
+                    continue;
+                }
+                let bin = (bin_edges.partition_point(|&e| e <= x) - 1).min(n_bins - 1);
+                counts[bin] += 1;
+                continue;
+            }
+            // Linear scan (non-strict edges fallback).
             for i in 0..n_bins {
                 let in_bin = if i == n_bins - 1 {
                     // Last bin is inclusive on right
@@ -6952,12 +6970,10 @@ impl Column {
                 };
                 if in_bin {
                     counts[i] += 1;
-                    found = true;
                     break;
                 }
             }
             // Values outside all bins are not counted (matches numpy)
-            let _ = found;
         }
 
         let out: Vec<Scalar> = counts.into_iter().map(Scalar::Int64).collect();

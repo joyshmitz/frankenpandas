@@ -1831,6 +1831,20 @@ impl Column {
                 };
             }
 
+            // Symmetric to the Float64 path: gather the contiguous i64 buffer and
+            // keep the output lazily typed instead of materializing a
+            // Vec<Scalar::Int64> (32 B/elem). Bit-identical — lazy_all_valid_int64
+            // materializes Scalar::Int64(data[i]) exactly as the primitive path
+            // would, with the same all-valid mask. (br-frankenpandas-uza04)
+            if let Some(data) = self.take_cached_all_valid_int64_positions(positions) {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_int64(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             let values = self
                 .take_all_valid_primitive_positions(positions)
                 .unwrap_or_else(|| {
@@ -1866,6 +1880,15 @@ impl Column {
 
     fn take_cached_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Vec<f64>> {
         let data = self.as_f64_slice()?;
+        let mut values = Vec::with_capacity(positions.len());
+        for &pos in positions {
+            values.push(data[pos]);
+        }
+        Some(values)
+    }
+
+    fn take_cached_all_valid_int64_positions(&self, positions: &[usize]) -> Option<Vec<i64>> {
+        let data = self.as_i64_slice()?;
         let mut values = Vec::with_capacity(positions.len());
         for &pos in positions {
             values.push(data[pos]);

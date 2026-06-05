@@ -8315,9 +8315,13 @@ pub struct CategoricalIndex {
 impl CategoricalIndex {
     #[must_use]
     pub fn from_values(labels: Vec<String>, ordered: bool) -> Self {
+        // First-seen dedup in O(n): a side hash set tracks membership while the
+        // categories Vec preserves insertion order, replacing the O(n·k)
+        // `categories.contains` linear rescan per label.
         let mut categories = Vec::<String>::new();
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
         for label in &labels {
-            if !categories.contains(label) {
+            if seen.insert(label.as_str()) {
                 categories.push(label.clone());
             }
         }
@@ -8334,8 +8338,11 @@ impl CategoricalIndex {
         categories: Vec<String>,
         ordered: bool,
     ) -> Result<Self, IndexError> {
+        // O(n+k) membership: hash the category set once, then validate each
+        // label in original order (first offending label still reported).
+        let category_set: FxHashSet<&str> = categories.iter().map(String::as_str).collect();
         for label in &labels {
-            if !categories.contains(label) {
+            if !category_set.contains(label.as_str()) {
                 return Err(IndexError::InvalidArgument(format!(
                     "CategoricalIndex label {label:?} is not present in categories"
                 )));
@@ -8758,8 +8765,12 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.add_categories(new)`. Rejects when any new
     /// category is already present.
     pub fn add_categories(&self, new: Vec<String>) -> Result<Self, IndexError> {
+        // O(k_existing + k_new): hash the existing categories once instead of a
+        // linear `categories.contains` scan per new entry. First clashing entry
+        // (in `new` order) is still the one reported.
+        let existing: FxHashSet<&str> = self.categories.iter().map(String::as_str).collect();
         for cat in &new {
-            if self.categories.contains(cat) {
+            if existing.contains(cat.as_str()) {
                 return Err(IndexError::InvalidArgument(format!(
                     "add_categories: {cat:?} is already a category"
                 )));
@@ -8780,13 +8791,20 @@ impl CategoricalIndex {
     /// removed category is still in use by a label (FrankenPandas does not
     /// yet carry NaN-labeled categoricals).
     pub fn remove_categories(&self, removals: &[String]) -> Result<Self, IndexError> {
+        // Hash both the category set and the (large) label set once so the
+        // per-removal validation is O(1) instead of two linear `contains`
+        // scans — the `self.labels.contains` rescan was O(removals · n_labels).
+        // Per-removal check order (not-a-category before in-use) is preserved,
+        // so the first offending removal and its message are unchanged.
+        let category_set: FxHashSet<&str> = self.categories.iter().map(String::as_str).collect();
+        let label_set: FxHashSet<&str> = self.labels.iter().map(String::as_str).collect();
         for cat in removals {
-            if !self.categories.contains(cat) {
+            if !category_set.contains(cat.as_str()) {
                 return Err(IndexError::InvalidArgument(format!(
                     "remove_categories: {cat:?} is not a category"
                 )));
             }
-            if self.labels.contains(cat) {
+            if label_set.contains(cat.as_str()) {
                 return Err(IndexError::InvalidArgument(format!(
                     "remove_categories: {cat:?} is still in use by labels"
                 )));
@@ -8830,8 +8848,12 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.set_categories(new_categories)`. Rejects when
     /// any current label is missing from the new categories list.
     pub fn set_categories(&self, new_categories: Vec<String>) -> Result<Self, IndexError> {
+        // O(n+k): hash the new category set once rather than scanning the new
+        // categories Vec for every label. First label missing from the new
+        // set (in label order) is still the one reported.
+        let new_set: FxHashSet<&str> = new_categories.iter().map(String::as_str).collect();
         for label in &self.labels {
-            if !new_categories.contains(label) {
+            if !new_set.contains(label.as_str()) {
                 return Err(IndexError::InvalidArgument(format!(
                     "set_categories: label {label:?} is not in the new categories"
                 )));

@@ -1095,8 +1095,15 @@ fn try_read_csv_with_options_no_na_numeric_fast_path(
 const CSV_PARSE_CACHE_MAX_ENTRIES: usize = 2;
 const CSV_PARSE_CACHE_MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CsvParseCacheMode {
+    Default,
+    NoNaNumeric,
+}
+
 #[derive(Clone)]
 struct CsvParseCacheEntry {
+    mode: CsvParseCacheMode,
     input: Arc<str>,
     frame: DataFrame,
 }
@@ -1107,11 +1114,17 @@ fn csv_parse_cache() -> &'static Mutex<VecDeque<CsvParseCacheEntry>> {
     CSV_PARSE_CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn csv_parse_cache_entry_matches(entry: &CsvParseCacheEntry, input: &str) -> bool {
-    entry.input.len() == input.len() && entry.input.as_bytes() == input.as_bytes()
+fn csv_parse_cache_entry_matches(
+    entry: &CsvParseCacheEntry,
+    mode: CsvParseCacheMode,
+    input: &str,
+) -> bool {
+    entry.mode == mode
+        && entry.input.len() == input.len()
+        && entry.input.as_bytes() == input.as_bytes()
 }
 
-fn csv_parse_cache_lookup(input: &str) -> Option<DataFrame> {
+fn csv_parse_cache_lookup(mode: CsvParseCacheMode, input: &str) -> Option<DataFrame> {
     if input.len() > CSV_PARSE_CACHE_MAX_INPUT_BYTES {
         return None;
     }
@@ -1119,7 +1132,7 @@ fn csv_parse_cache_lookup(input: &str) -> Option<DataFrame> {
     let mut cache = csv_parse_cache().lock().ok()?;
     let pos = cache
         .iter()
-        .position(|entry| csv_parse_cache_entry_matches(entry, input))?;
+        .position(|entry| csv_parse_cache_entry_matches(entry, mode, input))?;
 
     if pos == 0 {
         return cache.front().map(|entry| entry.frame.clone());
@@ -1131,7 +1144,7 @@ fn csv_parse_cache_lookup(input: &str) -> Option<DataFrame> {
     Some(frame)
 }
 
-fn csv_parse_cache_store(input: &str, frame: &DataFrame) {
+fn csv_parse_cache_store(mode: CsvParseCacheMode, input: &str, frame: &DataFrame) {
     if input.len() > CSV_PARSE_CACHE_MAX_INPUT_BYTES {
         return;
     }
@@ -1142,12 +1155,13 @@ fn csv_parse_cache_store(input: &str, frame: &DataFrame) {
 
     if let Some(pos) = cache
         .iter()
-        .position(|entry| csv_parse_cache_entry_matches(entry, input))
+        .position(|entry| csv_parse_cache_entry_matches(entry, mode, input))
     {
         cache.remove(pos);
     }
 
     cache.push_front(CsvParseCacheEntry {
+        mode,
         input: Arc::<str>::from(input),
         frame: frame.clone(),
     });
@@ -1220,12 +1234,12 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
-    if let Some(frame) = csv_parse_cache_lookup(input) {
+    if let Some(frame) = csv_parse_cache_lookup(CsvParseCacheMode::Default, input) {
         return Ok(frame);
     }
 
     let frame = read_csv_str_uncached(input)?;
-    csv_parse_cache_store(input, &frame);
+    csv_parse_cache_store(CsvParseCacheMode::Default, input, &frame);
     Ok(frame)
 }
 
@@ -3799,10 +3813,15 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         return read_csv_str(input);
     }
 
-    if csv_read_options_match_no_na_numeric_fast_path(options)
-        && let Some(frame) = try_read_csv_with_options_no_na_numeric_fast_path(input)?
-    {
-        return Ok(frame);
+    if csv_read_options_match_no_na_numeric_fast_path(options) {
+        if let Some(frame) = csv_parse_cache_lookup(CsvParseCacheMode::NoNaNumeric, input) {
+            return Ok(frame);
+        }
+
+        if let Some(frame) = try_read_csv_with_options_no_na_numeric_fast_path(input)? {
+            csv_parse_cache_store(CsvParseCacheMode::NoNaNumeric, input, &frame);
+            return Ok(frame);
+        }
     }
 
     let mut builder = ReaderBuilder::new();
@@ -14191,6 +14210,61 @@ mod tests {
         assert_eq!(second.index().len(), 2);
         assert_eq!(second.column("x").unwrap().values()[0], Scalar::Int64(9));
         assert_eq!(second.column("x").unwrap().values()[1], Scalar::Int64(10));
+    }
+
+    #[test]
+    fn read_csv_no_na_cache_reuses_exact_successful_input() {
+        let options = CsvReadOptions {
+            na_filter: false,
+            ..CsvReadOptions::default()
+        };
+        let input = "x,y\n1,2.5\n3,4.5\n";
+
+        let first = read_csv_with_options(input, &options).expect("first no-na parse");
+        let second = read_csv_with_options(input, &options).expect("cached no-na parse");
+
+        assert_eq!(second.index().len(), first.index().len());
+        assert_eq!(second.column_names(), first.column_names());
+        for name in first.column_names() {
+            let first_col = first.column(name).expect("first column");
+            let second_col = second.column(name).expect("second column");
+            assert_eq!(second_col.dtype(), first_col.dtype());
+            assert_eq!(second_col.values(), first_col.values());
+        }
+    }
+
+    #[test]
+    fn csv_parse_cache_keeps_default_and_no_na_modes_separate() {
+        let input = "mode_sep_a,mode_sep_b\n11,12.5\n13,14.5\n";
+        let no_na_options = CsvReadOptions {
+            na_filter: false,
+            ..CsvReadOptions::default()
+        };
+
+        let no_na_frame = read_csv_with_options(input, &no_na_options).expect("no-na parse");
+        assert!(super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input).is_none());
+        assert!(
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input).is_some()
+        );
+
+        let default_frame = read_csv_str(input).expect("default parse");
+        let default_cached =
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::Default, input)
+                .expect("default cache entry");
+        let no_na_cached =
+            super::csv_parse_cache_lookup(super::CsvParseCacheMode::NoNaNumeric, input)
+                .expect("no-na cache entry");
+
+        assert_eq!(default_cached.column_names(), default_frame.column_names());
+        assert_eq!(no_na_cached.column_names(), no_na_frame.column_names());
+        assert_eq!(
+            default_cached.column("mode_sep_b").unwrap().values(),
+            default_frame.column("mode_sep_b").unwrap().values()
+        );
+        assert_eq!(
+            no_na_cached.column("mode_sep_b").unwrap().values(),
+            no_na_frame.column("mode_sep_b").unwrap().values()
+        );
     }
 
     #[test]

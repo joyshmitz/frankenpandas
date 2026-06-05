@@ -705,6 +705,10 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     }
 }
 
+fn unit_range_len(start: i64, end: i64) -> Option<usize> {
+    usize::try_from(end.checked_sub(start)?.checked_add(1)?).ok()
+}
+
 fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
     if lhs.is_nan() || rhs.is_nan() {
         return f64::NAN;
@@ -2763,6 +2767,100 @@ impl Column {
                 all_valid = false;
             }
         }
+        if all_valid {
+            return Ok(Self::from_f64_values(data));
+        }
+        Ok(Self::from_f64_values_with_validity(
+            data,
+            ValidityMask {
+                words,
+                len: out_len,
+            },
+        ))
+    }
+
+    /// Fused Float64 arithmetic for two aligned contiguous `Int64` unit ranges.
+    ///
+    /// The caller has proven the left and right indexes are `[start, end]`
+    /// integer ranges and the output index is their contiguous union. This is
+    /// isomorphic to [`Self::aligned_binary_f64`] with arithmetic positions, but
+    /// it fills the overlapped span directly and leaves non-overlap slots
+    /// invalid, avoiding the two `Vec<Option<usize>>` alignment buffers.
+    pub fn aligned_binary_f64_int64_unit_ranges(
+        &self,
+        right: &Self,
+        left_range: (i64, i64),
+        right_range: (i64, i64),
+        union_range: (i64, i64),
+        op: ArithmeticOp,
+    ) -> Result<Self, ColumnError> {
+        if !matches!(self.dtype, DType::Float64) || !matches!(right.dtype, DType::Float64) {
+            return Err(ColumnError::DTypeMismatch {
+                left: self.dtype,
+                right: right.dtype,
+            });
+        }
+
+        let (left_start, left_end) = left_range;
+        let (right_start, right_end) = right_range;
+        let (union_start, union_end) = union_range;
+
+        let Some(left_len) = unit_range_len(left_start, left_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        let Some(right_len) = unit_range_len(right_start, right_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        let Some(out_len) = unit_range_len(union_start, union_end) else {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        };
+        if left_len != self.len() || right_len != right.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        }
+
+        let lsrc = self.float64_binary_data();
+        let rsrc = right.float64_binary_data();
+        let lvalid = self.nan_aware_validity();
+        let rvalid = right.nan_aware_validity();
+        let apply = binary_f64_apply(op);
+
+        let mut data = vec![0.0; out_len];
+        let mut words = vec![0_u64; out_len.div_ceil(64)];
+        let overlap_start = left_start.max(right_start);
+        let overlap_end = left_end.min(right_end);
+        let mut all_valid = overlap_start == union_start && overlap_end == union_end;
+
+        if overlap_start <= overlap_end {
+            for value in overlap_start..=overlap_end {
+                let out_idx = (value - union_start) as usize;
+                let left_idx = (value - left_start) as usize;
+                let right_idx = (value - right_start) as usize;
+                if lvalid.get(left_idx) && rvalid.get(right_idx) {
+                    let result = apply(lsrc[left_idx], rsrc[right_idx]);
+                    data[out_idx] = result;
+                    if result.is_nan() {
+                        all_valid = false;
+                    } else {
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                } else {
+                    all_valid = false;
+                }
+            }
+        }
+
         if all_valid {
             return Ok(Self::from_f64_values(data));
         }
@@ -10279,6 +10377,29 @@ mod tests {
         let actual = left
             .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
             .expect("aligned add");
+
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert_eq!(actual.validity(), expected.validity());
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
+        ));
+        assert_eq!(actual.values(), expected.values());
+    }
+
+    #[test]
+    fn aligned_binary_f64_int64_unit_ranges_matches_position_alignment() {
+        let left = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0]);
+        let left_positions = [Some(0), Some(1), Some(2), None];
+        let right_positions = [None, Some(0), Some(1), Some(2)];
+
+        let expected = left
+            .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
+            .expect("position aligned add");
+        let actual = left
+            .aligned_binary_f64_int64_unit_ranges(&right, (0, 2), (1, 3), (0, 3), ArithmeticOp::Add)
+            .expect("unit range aligned add");
 
         assert_eq!(actual.dtype(), expected.dtype());
         assert_eq!(actual.validity(), expected.validity());

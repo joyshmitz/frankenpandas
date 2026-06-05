@@ -953,7 +953,9 @@ fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> b
     let mut seen = FxHashSet::<i64>::with_capacity_and_hasher(left_key.len(), Default::default());
     for (left, right) in left_key.values().iter().zip(right_key.values()) {
         match (left, right) {
-            (Scalar::Int64(left), Scalar::Int64(right)) if left == right => {
+            (Scalar::Int64(left), Scalar::Int64(right))
+                if matches!(left.cmp(right), Ordering::Equal) =>
+            {
                 if !seen.insert(*left) {
                     return false;
                 }
@@ -2201,6 +2203,45 @@ fn dense_i64_inner_positions_slices(
     Some((left_positions, right_positions))
 }
 
+/// Hash inner-join position build for the remaining all-valid Int64 single-key
+/// shape after ordered/dense witnesses reject. This keeps the generic hash
+/// path's left-major probe order and right-bucket insertion order, but hashes
+/// raw `i64` keys instead of materializing `JoinKeyComponent::Present` wrappers.
+fn hash_int64_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    Some(hash_i64_inner_positions_slices(left, right))
+}
+
+fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, Vec<usize>) {
+    if right.is_empty() || left.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
+        right.len(),
+        Default::default(),
+    );
+    for (pos, &key) in right.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+
+    let mut left_positions = Vec::<usize>::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for (left_pos, &key) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(left_pos);
+                right_positions.push(right_pos);
+            }
+        }
+    }
+    (left_positions, right_positions)
+}
+
 /// Hash-free inner-join positions for a MULTI-column key whose every component
 /// is an all-valid, bounded-range Int64 column. Packs each row's composite key
 /// into a single `i64` via a mixed-radix code over the per-column spans
@@ -2321,6 +2362,19 @@ fn merge_single_key_inner_unsorted(
     // keys (the common low-cardinality join-key shape). Bit-identical pairs.
     if let Some((left_positions, right_positions)) =
         dense_int64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+    if let Some((left_positions, right_positions)) =
+        hash_int64_inner_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_inner_merge_output(
             left,
@@ -4420,6 +4474,107 @@ mod tests {
     }
 
     #[test]
+    fn merge_inner_wide_sparse_int64_hash_matches_generic_validated_route() {
+        let stride = 1_i64 << 30;
+        let left = DataFrame::from_dict(
+            &["id", "left_value"],
+            vec![
+                (
+                    "id",
+                    vec![3, 1, 3, 0, 2]
+                        .into_iter()
+                        .map(|v| Scalar::Int64(v * stride))
+                        .collect(),
+                ),
+                (
+                    "left_value",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "right_value"],
+            vec![
+                (
+                    "id",
+                    vec![3, 2, 3, 1]
+                        .into_iter()
+                        .map(|v| Scalar::Int64(v * stride))
+                        .collect(),
+                ),
+                (
+                    "right_value",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(102),
+                        Scalar::Int64(103),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(3 * stride),
+                Scalar::Int64(3 * stride),
+                Scalar::Int64(stride),
+                Scalar::Int64(3 * stride),
+                Scalar::Int64(3 * stride),
+                Scalar::Int64(2 * stride),
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("left_value").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(11),
+                Scalar::Int64(12),
+                Scalar::Int64(12),
+                Scalar::Int64(14),
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("right_value").unwrap().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(102),
+                Scalar::Int64(103),
+                Scalar::Int64(100),
+                Scalar::Int64(102),
+                Scalar::Int64(101),
+            ]
+        );
+    }
+
+    #[test]
     fn merge_inner_ordered_identity_matches_generic_validated_route() {
         let left = DataFrame::from_dict(
             &["id", "v"],
@@ -5844,9 +5999,9 @@ mod tests {
             // Naive reference: pandas inner merge is left-major, right-minor.
             let mut exp_a = Vec::new();
             let mut exp_b = Vec::new();
-            for i in 0..nl {
-                for j in 0..nr {
-                    if lk[i] == rk[j] {
+            for (i, &left_key) in lk.iter().enumerate() {
+                for (j, &right_key) in rk.iter().enumerate() {
+                    if left_key == right_key {
                         exp_a.push(Scalar::Int64(i as i64 + 1000));
                         exp_b.push(Scalar::Int64(j as i64 + 2000));
                     }
@@ -5866,8 +6021,8 @@ mod tests {
             // Cardinality guard for left/right/outer (dtype/order independent —
             // catches the row-loss class regardless of int->float promotion).
             let inner_pairs = exp_a.len();
-            let left_only = (0..nl).filter(|&i| !rk.contains(&lk[i])).count();
-            let right_only = (0..nr).filter(|&j| !lk.contains(&rk[j])).count();
+            let left_only = lk.iter().filter(|&key| !rk.contains(key)).count();
+            let right_only = rk.iter().filter(|&key| !lk.contains(key)).count();
             for (how, expected_rows) in [
                 (JoinType::Left, inner_pairs + left_only),
                 (JoinType::Right, inner_pairs + right_only),

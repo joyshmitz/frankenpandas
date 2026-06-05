@@ -100,6 +100,34 @@ fn build_ordered_unique_frame(
     Ok(frame)
 }
 
+fn build_wide_sparse_frame(
+    value_name: &str,
+    rows: usize,
+    multiplier: i64,
+    stride: i64,
+    rotate: bool,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let stride = stride.max(1);
+    let mut id_values = Vec::with_capacity(rows);
+    let mut payload_values = Vec::with_capacity(rows);
+
+    for i in 0..rows {
+        let logical_pos = if rotate && rows > 0 {
+            (i + rows / 2) % rows
+        } else {
+            rows.saturating_sub(1).saturating_sub(i)
+        };
+        id_values.push(Scalar::Int64((logical_pos as i64) * stride));
+        payload_values.push(Scalar::Int64(((i as i64 * multiplier + 11) % 10_007).abs()));
+    }
+
+    let frame = DataFrame::from_dict(
+        &["id", value_name],
+        vec![("id", id_values), (value_name, payload_values)],
+    )?;
+    Ok(frame)
+}
+
 fn merge_once(
     left: &DataFrame,
     right: &DataFrame,
@@ -147,12 +175,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_cardinality = parse_arg("key-cardinality", 1_024usize);
     let iters = parse_arg("iters", 20usize);
     let warmup = parse_arg("warmup", 3usize);
+    let stride = parse_arg("stride", 1_048_576i64);
     let join_type = parse_join_type(JoinType::Inner);
     let ordered_unique = has_flag("ordered-unique");
+    let wide_sparse = has_flag("wide-sparse");
     let force_generic = has_flag("force-generic");
     let golden = has_flag("golden");
 
-    let (left, right) = if ordered_unique {
+    let (left, right) = if wide_sparse {
+        (
+            build_wide_sparse_frame("left_value", rows, 7, stride, false)?,
+            build_wide_sparse_frame("right_value", right_rows, 13, stride, true)?,
+        )
+    } else if ordered_unique {
         (
             build_ordered_unique_frame("left_value", rows, 7, false)?,
             build_ordered_unique_frame("right_value", right_rows, 13, true)?,
@@ -225,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!(
-        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} ordered_unique={ordered_unique} force_generic={force_generic} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
+        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} ordered_unique={ordered_unique} wide_sparse={wide_sparse} stride={stride} force_generic={force_generic} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
     );
 
     Ok(())

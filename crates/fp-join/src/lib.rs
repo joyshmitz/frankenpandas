@@ -1742,6 +1742,200 @@ fn build_single_key_dense_i64_inner_merge_output(
     }))
 }
 
+fn build_single_key_dense_i64_outer_all_matched_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    let Some(left_keys) = left_key.as_i64_slice() else {
+        return Ok(None);
+    };
+    let Some(right_keys) = right_key.as_i64_slice() else {
+        return Ok(None);
+    };
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+
+    let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push(FusedInt64OutputColumn {
+            name: out_name,
+            side: FusedInt64Side::Left,
+            values,
+        });
+    }
+
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push(FusedInt64OutputColumn {
+            name: out_name,
+            side: FusedInt64Side::Right,
+            values,
+        });
+    }
+
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    if left_keys.is_empty() || right_keys.is_empty() {
+        if !left_keys.is_empty() || !right_keys.is_empty() {
+            return Ok(None);
+        }
+        let mut columns = std::collections::BTreeMap::new();
+        let mut column_order = Vec::with_capacity(specs.len());
+        for spec in specs {
+            insert_merged_output_column(
+                &mut columns,
+                &mut column_order,
+                spec.name,
+                Column::from_i64_values(Vec::new()),
+            )?;
+        }
+        return Ok(Some(MergedDataFrame {
+            index: Index::new(Vec::new()),
+            columns,
+            column_order,
+        }));
+    }
+
+    let mut min_key = left_keys[0];
+    let mut max_key = left_keys[0];
+    for &key in left_keys.iter().chain(right_keys.iter()) {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))
+        .and_then(|span| span.checked_add(1));
+    let Some(span) = span else {
+        return Ok(None);
+    };
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return Ok(None);
+    }
+    let Ok(span) = usize::try_from(span) else {
+        return Ok(None);
+    };
+
+    let mut left_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+    let mut right_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+    for (pos, &key) in left_keys.iter().enumerate() {
+        let Ok(bucket) = usize::try_from(i128::from(key) - i128::from(min_key)) else {
+            return Ok(None);
+        };
+        left_buckets[bucket].push(pos);
+    }
+    for (pos, &key) in right_keys.iter().enumerate() {
+        let Ok(bucket) = usize::try_from(i128::from(key) - i128::from(min_key)) else {
+            return Ok(None);
+        };
+        right_buckets[bucket].push(pos);
+    }
+
+    let mut output_len = 0usize;
+    for (left_bucket, right_bucket) in left_buckets.iter().zip(right_buckets.iter()) {
+        match (left_bucket.is_empty(), right_bucket.is_empty()) {
+            (false, false) => {
+                let Some(bucket_rows) = left_bucket.len().checked_mul(right_bucket.len()) else {
+                    return Ok(None);
+                };
+                let Some(new_output_len) = output_len.checked_add(bucket_rows) else {
+                    return Ok(None);
+                };
+                output_len = new_output_len;
+            }
+            (false, true) | (true, false) => return Ok(None),
+            (true, true) => {}
+        }
+    }
+
+    let mut output_data = specs
+        .iter()
+        .map(|_| Vec::<i64>::with_capacity(output_len))
+        .collect::<Vec<_>>();
+    for (left_bucket, right_bucket) in left_buckets.into_iter().zip(right_buckets) {
+        if left_bucket.is_empty() {
+            continue;
+        }
+        for left_pos in left_bucket {
+            for &right_pos in &right_bucket {
+                for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
+                    match spec.side {
+                        FusedInt64Side::Left => out.push(spec.values[left_pos]),
+                        FusedInt64Side::Right => out.push(spec.values[right_pos]),
+                    }
+                }
+            }
+        }
+    }
+
+    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for (spec, data) in specs.into_iter().zip(output_data) {
+        debug_assert_eq!(data.len(), output_len);
+        insert_merged_output_column(
+            &mut columns,
+            &mut column_order,
+            spec.name,
+            Column::from_i64_values(data),
+        )?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn build_single_key_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -2862,6 +3056,24 @@ pub fn merge_dataframes_on_with_options(
             &right_positions,
             &suffixes,
         );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_dense_i64_outer_all_matched_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
     }
     if matches!(join_type, JoinType::Outer)
         && left_on.len() == 1
@@ -5676,6 +5888,77 @@ mod tests {
                 .values()
                 .all(|column| column.as_i64_slice().is_some())
         );
+    }
+
+    #[test]
+    fn merge_outer_all_matched_dense_int64_fused_output_matches_sorted_generic_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(21),
+                        Scalar::Int64(11),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fused = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fused.index, generic.index);
+        assert_eq!(fused.column_order, generic.column_order);
+        assert_eq!(fused.columns, generic.columns);
     }
 
     #[test]

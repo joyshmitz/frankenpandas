@@ -1365,6 +1365,46 @@ fn interval_key(interval: &Interval) -> (u64, u64, IntervalClosed) {
     )
 }
 
+/// Hashable membership key for a non-missing scalar — the same equivalence
+/// `Column::unique` uses (Float64 ±0.0 normalized to one key). `None` for
+/// missing values. Lets the np set-ops (`setdiff1d`/`intersect1d`/`setxor1d`/
+/// `in1d`) replace an O(N·M) linear `semantic_eq` scan over the other operand
+/// with an O(1) hash-set probe. Because every operand is first passed through
+/// `unique()` (which dedups by this exact key) and missing/NaN values are
+/// filtered out, key equality matches the `semantic_eq` test on the values that
+/// actually flow through.
+#[derive(Hash, PartialEq, Eq)]
+enum SetMemberKey<'a> {
+    Bool(bool),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+    Timedelta64(i64),
+    Datetime64(i64),
+    Period(i64),
+    Interval(u64, u64, IntervalClosed),
+}
+
+fn set_member_key(v: &Scalar) -> Option<SetMemberKey<'_>> {
+    Some(match v {
+        Scalar::Bool(b) => SetMemberKey::Bool(*b),
+        Scalar::Int64(i) => SetMemberKey::Int64(*i),
+        Scalar::Float64(f) => {
+            let norm = if *f == 0.0 { 0.0 } else { *f };
+            SetMemberKey::FloatBits(norm.to_bits())
+        }
+        Scalar::Utf8(s) => SetMemberKey::Utf8(s.as_str()),
+        Scalar::Timedelta64(v) => SetMemberKey::Timedelta64(*v),
+        Scalar::Datetime64(v) => SetMemberKey::Datetime64(*v),
+        Scalar::Period(v) => SetMemberKey::Period(*v),
+        Scalar::Interval(v) => {
+            let (left, right, closed) = interval_key(v);
+            SetMemberKey::Interval(left, right, closed)
+        }
+        Scalar::Null(_) => return None,
+    })
+}
+
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
@@ -9649,13 +9689,17 @@ impl Column {
     /// Matches np.setdiff1d().
     pub fn setdiff1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let other_unique = other.unique()?;
+        // O(N+M): hash-set membership for `other`, plus a `seen` set replacing
+        // the O(N²) `out.any(...)` first-seen dedup.
+        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+            other_unique.values().iter().filter_map(set_member_key).collect();
+        let mut seen: std::collections::HashSet<SetMemberKey<'_>> = std::collections::HashSet::new();
         let mut out = Vec::new();
         for v in &self.values {
-            if v.is_missing() {
+            let Some(key) = set_member_key(v) else {
                 continue;
-            }
-            let in_other = other_unique.values().iter().any(|o| v.semantic_eq(o));
-            if !in_other && !out.iter().any(|o: &Scalar| v.semantic_eq(o)) {
+            };
+            if !other_set.contains(&key) && seen.insert(key) {
                 out.push(v.clone());
             }
         }
@@ -9668,12 +9712,14 @@ impl Column {
     pub fn intersect1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let self_unique = self.unique()?;
         let other_unique = other.unique()?;
+        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+            other_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::new();
         for v in self_unique.values() {
-            if v.is_missing() {
+            let Some(key) = set_member_key(v) else {
                 continue;
-            }
-            if other_unique.values().iter().any(|o| v.semantic_eq(o)) {
+            };
+            if other_set.contains(&key) {
                 out.push(v.clone());
             }
         }
@@ -9697,24 +9743,26 @@ impl Column {
     pub fn setxor1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let a_unique = self.unique()?;
         let b_unique = other.unique()?;
+        let a_set: std::collections::HashSet<SetMemberKey<'_>> =
+            a_unique.values().iter().filter_map(set_member_key).collect();
+        let b_set: std::collections::HashSet<SetMemberKey<'_>> =
+            b_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::new();
         // Values in a but not in b
         for v in a_unique.values() {
-            if v.is_missing() {
+            let Some(key) = set_member_key(v) else {
                 continue;
-            }
-            let in_b = b_unique.values().iter().any(|o| v.semantic_eq(o));
-            if !in_b {
+            };
+            if !b_set.contains(&key) {
                 out.push(v.clone());
             }
         }
         // Values in b but not in a
         for v in b_unique.values() {
-            if v.is_missing() {
+            let Some(key) = set_member_key(v) else {
                 continue;
-            }
-            let in_a = a_unique.values().iter().any(|o| v.semantic_eq(o));
-            if !in_a {
+            };
+            if !a_set.contains(&key) {
                 out.push(v.clone());
             }
         }
@@ -9726,13 +9774,14 @@ impl Column {
     /// Matches np.in1d(). Returns Bool column.
     pub fn in1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let other_unique = other.unique()?;
+        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+            other_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
-            if v.is_missing() {
-                out.push(Scalar::Bool(false));
-                continue;
-            }
-            let found = other_unique.values().iter().any(|o| v.semantic_eq(o));
+            let found = match set_member_key(v) {
+                Some(key) => other_set.contains(&key),
+                None => false, // missing is never "in" the set (matches the scan)
+            };
             out.push(Scalar::Bool(found));
         }
         Self::new(DType::Bool, out)

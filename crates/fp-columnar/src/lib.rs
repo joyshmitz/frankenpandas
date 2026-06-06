@@ -6835,6 +6835,54 @@ impl Column {
             return Self::new(DType::Float64, ranks);
         }
 
+        // Radix fast path: an all-valid, NaN-free Float64 column ranks in O(n)
+        // via the stable LSD radix permutation (the same one `sort_values`/
+        // `argsort` use) instead of the O(n log n) `Scalar` comparison sort
+        // below. Bit-identical: `f64_radix_key` normalizes `-0.0` to `0.0`
+        // (exactly as `compare_scalars_na_last`'s `partial_cmp` treats `-0.0 ==
+        // 0.0`), `radix_argsort_u64` is stable (ties keep original order, like
+        // the stable `sort_by`), and tie groups are detected with f64 `==`
+        // (which is `Equal` under `partial_cmp` for the same finite values). A
+        // NaN would diverge — `partial_cmp(NaN, _) -> Equal` collapses ties in
+        // the comparator path while the radix key sorts NaN to one end, and a
+        // NaN value is also `is_missing()` so the comparator path drops it — so
+        // any NaN routes to the unchanged comparator fallback. All-valid +
+        // NaN-free means every row is ranked (no nulls), so the output is built
+        // typed via `from_f64_values`.
+        if let Some(data) = self.as_f64_slice()
+            && !data.iter().any(|x| x.is_nan())
+        {
+            let perm = self
+                .typed_radix_perm(ascending)
+                .expect("f64 slice yields radix perm");
+            let n = perm.len();
+            let mut ranks = vec![0.0_f64; len];
+            let mut cursor = 0usize;
+            let mut dense_rank = 0f64;
+            while cursor < n {
+                let mut end = cursor + 1;
+                while end < n && data[perm[end]] == data[perm[cursor]] {
+                    end += 1;
+                }
+                let start_rank = cursor as f64 + 1.0;
+                let end_rank = end as f64;
+                dense_rank += 1.0;
+                for group_idx in cursor..end {
+                    let original = perm[group_idx];
+                    ranks[original] = match method {
+                        "average" => (start_rank + end_rank) / 2.0,
+                        "min" => start_rank,
+                        "max" => end_rank,
+                        "first" => group_idx as f64 + 1.0,
+                        "dense" => dense_rank,
+                        _ => unreachable!(),
+                    };
+                }
+                cursor = end;
+            }
+            return Ok(Self::from_f64_values(ranks));
+        }
+
         let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
         for (i, v) in self.values.iter().enumerate() {
             if !v.is_missing() {

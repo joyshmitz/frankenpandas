@@ -4,7 +4,7 @@
 # Total Passes: 6
 # Started: 2026-06-06T00:30:00Z
 
-## Status: IN PROGRESS - Pass 2 of 6
+## Status: IN PROGRESS - Pass 3 of 6
 
 ## Coordination Note
 Root `.skill-loop-progress.md` is exclusively reserved by RubyGoose, so this
@@ -34,6 +34,10 @@ is released.
    6.5 ms to 41.0 ms +/- 1.8 ms on `df_kendall 512 20`, a 1.5213x speedup
    and 34.26% mean reduction. Golden output sha256 stayed
    `dcce8a4e1f13d887361650ec24fcfee13c6c4c3954936fd124a1feb53cf125ce`.
+2. `br-frankenpandas-lxnar`: rejected packed row-pair bitsets for complete
+   no-tie Kendall matrices. Golden output stayed identical, but hyperfine
+   regressed from 41.8 ms +/- 1.7 ms to 143.0 ms +/- 5.5 ms on
+   `df_kendall 512 20`; the source hunk was removed.
 
 ## Pass 1 Evidence - Pre-Edit
 - Bead: br-frankenpandas-sad5y.
@@ -88,3 +92,33 @@ is released.
   counter keep.
 - Required next step: claim or create the next unowned perf bead for a measured
   Kendall residual, then baseline one structural lever before editing.
+
+## Pass 2 Evidence - Rejected Bit-Parallel Matrix
+- Bead: `br-frankenpandas-lxnar`.
+- Lever attempted: encode each complete no-tie column's row-pair ordering as
+  packed `u64` words, then compute discordant counts via XOR + popcount.
+- Graveyard/artifact match: succinct bitvectors/rank-select and bitwise
+  Hamming-distance primitives. The match was structurally different from the
+  Fenwick path, but the constants were wrong for the 512-row / 32-column
+  benchmark shape.
+- Behavior proof:
+  - Ordering: row-pair iteration used deterministic `(left, right)` row order.
+  - Tie-breaking: only the complete no-tie fast path was eligible; existing
+    tie/non-finite fallback remained.
+  - Floating point: final tau formula and integer discordant counts stayed
+    exact.
+  - RNG: unchanged / N/A.
+  - Golden sha256 before and after:
+    `dcce8a4e1f13d887361650ec24fcfee13c6c4c3954936fd124a1feb53cf125ce`.
+- RCH baseline: `df_kendall 512 20`, 41.8 ms +/- 1.7 ms.
+- RCH after: `df_kendall 512 20`, 143.0 ms +/- 5.5 ms.
+- Verdict: REJECTED. Score below threshold because the O(cols * rows^2) bitset
+  construction dominated this workload. Source hunk removed.
+
+## Pass 3 Target - Fenwick Scratch / Orchestration Residual
+- Profile-backed residual remains the complete no-tie Kendall matrix closure.
+- Next primitive: reuse per-worker Fenwick scratch/epoch state or otherwise
+  remove per-pair allocation/zeroing in the matrix closure, while keeping the
+  already-proven exact discordant-pair arithmetic.
+- Fallback trigger: reject if same-harness hyperfine does not beat the 41.8 ms
+  baseline by Score >= 2.0 or if golden sha256 changes.

@@ -114,6 +114,7 @@ fn build_corr_frame(n: usize, cols: usize) -> DataFrame {
 
 fn build_csv_string(n: usize, cols: usize) -> String {
     let mut csv = String::with_capacity(n * cols * 15);
+    let mut float_buffer = ryu::Buffer::new();
     for c in 0..cols {
         if c > 0 {
             csv.push(',');
@@ -127,7 +128,11 @@ fn build_csv_string(n: usize, cols: usize) -> String {
                 csv.push(',');
             }
             let value = (i * (c + 1)) as f64 * 0.1;
-            write!(&mut csv, "{value}").expect("writing to a String cannot fail");
+            if value.fract() == 0.0 {
+                write!(&mut csv, "{}", value as i64).expect("writing to a String cannot fail");
+            } else {
+                csv.push_str(float_buffer.format(value));
+            }
         }
         csv.push('\n');
     }

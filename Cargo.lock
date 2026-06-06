@@ -1235,6 +1235,7 @@ dependencies = [
  "proptest",
  "raptorq",
  "rusqlite",
+ "ryu",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -31,6 +31,7 @@ raptorq = { version = "2.0.1", features = ["serde_support"] }
 # rusqlite: referenced directly by fuzz_read_sql_bytes (pub fn, br-gpxk)
 # for an in-memory SQLite harness. Already indirectly pulled via fp-io.
 rusqlite = { workspace = true }
+ryu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34"

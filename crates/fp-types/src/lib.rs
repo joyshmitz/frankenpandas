@@ -3340,12 +3340,20 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
         if td.is_empty() {
             return Scalar::Timedelta64(Timedelta::NAT);
         }
-        td.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mid = td.len() / 2;
-        let median_ns = if td.len().is_multiple_of(2) {
-            (td[mid - 1] + td[mid]) / 2.0
+        // O(n) selection instead of a full sort (see the numeric arm below):
+        // collect_timedelta_ns_f64 yields finite ns (NaT excluded), so the
+        // comparator is a total order; order statistics depend only on values,
+        // so the unstable partition yields the same td[mid-1]/td[mid].
+        let n = td.len();
+        let mid = n / 2;
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        let (left, mid_ref, _right) = td.select_nth_unstable_by(mid, cmp);
+        let mid_val = *mid_ref;
+        let median_ns = if n.is_multiple_of(2) {
+            let lower = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (lower + mid_val) / 2.0
         } else {
-            td[mid]
+            mid_val
         };
         return float_ns_to_timedelta(median_ns);
     }
@@ -3761,7 +3769,6 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
         if td.is_empty() {
             return Scalar::Timedelta64(Timedelta::NAT);
         }
-        td.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = td.len();
         if n == 1 {
             return float_ns_to_timedelta(td[0]);
@@ -3769,11 +3776,18 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
         let pos = q * (n - 1) as f64;
         let lo = pos.floor() as usize;
         let hi = pos.ceil() as usize;
+        // O(n) selection instead of a full sort (see the numeric arm below):
+        // select the lo-th order statistic; the (lo+1)-th is the MIN of the
+        // right partition. Bit-identical (finite ns, values-only order stats).
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        let (_left, lo_ref, right) = td.select_nth_unstable_by(lo, cmp);
+        let lo_val = *lo_ref;
         let ns = if lo == hi {
-            td[lo]
+            lo_val
         } else {
+            let hi_val = right.iter().copied().fold(f64::INFINITY, f64::min);
             let weight = pos - lo as f64;
-            td[lo] + (td[hi] - td[lo]) * weight
+            lo_val + (hi_val - lo_val) * weight
         };
         return float_ns_to_timedelta(ns);
     }

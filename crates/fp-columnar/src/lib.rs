@@ -5066,6 +5066,26 @@ impl Column {
     /// all missing values contribute a single extra distinct bucket.
     #[must_use]
     pub fn nunique_with_dropna(&self, dropna: bool) -> Scalar {
+        // Dense direct-address fast path: an all-valid, bounded-range Int64
+        // column counts distinct values via a seen-bitset indexed by (v-min) —
+        // hash-free, no Scalar enum. All-valid ⇒ no missing, so dropna does not
+        // add a bucket; bit-identical to nannunique's distinct count. Same gate
+        // as unique/isin/duplicated.
+        if let Some(data) = self.as_i64_slice()
+            && let Some((min, range)) = i64_direct_address_range(data)
+        {
+            let mut seen = vec![false; range];
+            let mut distinct = 0i64;
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                if !seen[slot] {
+                    seen[slot] = true;
+                    distinct += 1;
+                }
+            }
+            return Scalar::Int64(distinct);
+        }
+
         let mut distinct = match nannunique(&self.values) {
             Scalar::Int64(count) => count,
             _ => 0,

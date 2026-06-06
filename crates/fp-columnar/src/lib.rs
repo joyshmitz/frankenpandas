@@ -9915,15 +9915,20 @@ impl Column {
             }
         }
 
-        let out: Vec<Scalar> = self
+        // Typed all-valid Bool output — every slot is a definite true/false
+        // (missing input maps to false, never to a missing output), so this is
+        // the same column `Self::new(DType::Bool, Vec<Scalar::Bool>)` builds,
+        // minus the 32 B/elem Scalar wrap and the validity scan (the Int64
+        // dense path above already emits this way).
+        let out: Vec<bool> = self
             .values
             .iter()
             .map(|v| match key_of(v) {
-                Some(k) => Scalar::Bool(lookup.contains(&k)),
-                None => Scalar::Bool(false),
+                Some(k) => lookup.contains(&k),
+                None => false,
             })
             .collect();
-        Self::new(DType::Bool, out)
+        Ok(Self::from_bool_values(out))
     }
 
     /// Unique values in first-seen order, missing values dropped.
@@ -10087,15 +10092,16 @@ impl Column {
         let other_unique = other.unique()?;
         let other_set: FxHashSet<SetMemberKey<'_>> =
             other_unique.values().iter().filter_map(set_member_key).collect();
+        // Typed all-valid Bool output — same equivalence as isin above.
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             let found = match set_member_key(v) {
                 Some(key) => other_set.contains(&key),
                 None => false, // missing is never "in" the set (matches the scan)
             };
-            out.push(Scalar::Bool(found));
+            out.push(found);
         }
-        Self::new(DType::Bool, out)
+        Ok(Self::from_bool_values(out))
     }
 
     /// Count occurrences of each distinct value.

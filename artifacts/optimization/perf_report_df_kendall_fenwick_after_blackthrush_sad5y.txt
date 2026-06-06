@@ -1,0 +1,587 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 808  of event 'cycles:P'
+# Event count (approx.): 174600594
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ...............................................................................................................................................................................................................................................................................................................  ....................
+#
+    37.85%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>                                                                                                                                       -      -            
+            |          
+             --37.59%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+                       |          
+                       |--3.80%--0x5a1e4d7fdb30
+                       |          
+                       |--3.69%--0x5a1e4d804c00
+                       |          
+                       |--3.50%--0x5a1e4d6b1da0
+                       |          
+                       |--3.08%--0x5a1e4d6c4230
+                       |          
+                       |--2.83%--0x5a1e4d80e150
+                       |          
+                       |--2.51%--0x5a1e4d6abe80
+                       |          
+                       |--2.06%--0x5a1e4d6c4240
+                       |          
+                       |--2.01%--0x5a1e4d6b1e10
+                       |          
+                       |--1.76%--0x5a1e4d6abb90
+                       |          
+                       |--1.76%--0x5a1e4d6b2a70
+                       |          
+                       |--1.68%--0x5a1e4d6c3d70
+                       |          
+                       |--1.47%--0x5a1e4d6c4010
+                       |          
+                       |--1.42%--0x5a1e4d80dc40
+                       |          
+                       |--1.36%--0x5a1e4d804af0
+                       |          
+                       |--1.33%--0x5a1e4d804cc0
+                       |          
+                       |--1.23%--0x5a1e4d6c3c90
+                       |          
+                       |--1.14%--0x5a1e4d7e4b70
+                       |          
+                        --0.66%--0x5a1e4d6b02c0
+
+     5.32%  [.] <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::string::String>, <fp_frame::DataFrame>::pairwise_rank_corr::{closure#0}>, core::result::Result<core::convert::Infallible, fp_frame::FrameError>> as core::iter::traits::iterator::Iterator>::next          -      -            
+            |          
+            |--3.79%--__memcmp_avx2_movbe
+            |          0x200
+            |          
+            |--0.98%--__memmove_avx_unaligned_erms
+            |          0x200
+            |          
+             --0.55%--<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<alloc::string::String>, <fp_frame::DataFrame>::pairwise_rank_corr::{closure#0}>, core::result::Result<core::convert::Infallible, fp_frame::FrameError>> as core::iter::traits::iterator::Iterator>::next
+                       0x200
+
+     5.06%  [.] core::slice::sort::stable::quicksort::quicksort::<usize, <[usize]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>                                                                                                                                                             -      -            
+            |          
+            |--2.84%--core::slice::sort::stable::quicksort::quicksort::<usize, <[usize]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+            |          
+             --2.22%--core::slice::sort::shared::smallsort::sort4_stable::<usize, <[usize]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>
+
+     4.62%  [k] 0xffffffff85072bcf                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff850795ae
+               0xffffffff85079ada
+               0xffffffff850bb612
+               0xffffffff85f0c8ea
+               0xffffffff850b6871
+               0xffffffff850bfde0
+               0xffffffff85ef4062
+               0xffffffff85fcbadd
+               0xffffffff85fce233
+               0xffffffff85fce44a
+               0xffffffff85b9928d
+               0xffffffff85b99a37
+               0xffffffff85016293
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     4.56%  [.] <fp_frame::DataFrame>::pairwise_rank_corr                                                                                                                                                                                                                                                                    -      -            
+            |          
+             --4.13%--<fp_frame::DataFrame>::pairwise_rank_corr
+                       |          
+                        --3.53%--0xc7f6400000015b84
+
+     3.60%  [k] 0xffffffff8530e0ee                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8530e17e
+               0xffffffff8530e2dc
+               0xffffffff8530e537
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     3.13%  [.] core::slice::sort::shared::smallsort::bidirectional_merge::<usize, <[usize]>::sort_by<<fp_frame::Series>::kendall_no_tie_order::{closure#1}>::{closure#0}>                                                                                                                                                   -      -            
+     3.12%  [k] 0xffffffff85452e3d                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8530e483
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     2.76%  [k] 0xffffffff853f1400                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85309bc7
+               0xffffffff8530dfea
+               0xffffffff8530e2dc
+               0xffffffff8530e537
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     2.49%  [k] 0xffffffff8530e182                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85309bc7
+               0xffffffff8530dfea
+               0xffffffff8530e2dc
+               0xffffffff8530e537
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     2.40%  [k] 0xffffffff85309cbc                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85309bc7
+               0xffffffff8530dfea
+               0xffffffff8530e2dc
+               0xffffffff8530e537
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     2.27%  [k] 0xffffffff84c001bd                                                                                                                                                                                                                                                                                           -      -            
+            |          
+             --1.85%--0xffffffff8569f9ca
+                       0xffffffff85480cdb
+                       0xffffffff85481670
+                       0xffffffff8547768e
+                       0xffffffff84f24b82
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __close_nocancel
+                       fclose@@GLIBC_2.2.5
+                       pthread_getattr_np@@GLIBC_2.32
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.91%  [k] 0xffffffff850cdaa0                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8623419e
+               0xffffffff862346a2
+               0xffffffff853cea92
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               <std::sys::thread::unix::Thread>::new::thread_start
+               start_thread
+               __GI___clone3
+
+     1.86%  [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                           -      -            
+            |          
+             --1.84%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541e609
+                       0xffffffff853ef1a3
+                       0xffffffff853ef91f
+                       0xffffffff853f12a3
+                       0xffffffff85015116
+                       0xffffffff85016836
+                       0xffffffff85016f97
+                       0xffffffff85017006
+                       0xffffffff84f2553c
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __GI___clone3
+                       create_thread
+                       pthread_create@GLIBC_2.2.5
+                       <std::sys::thread::unix::Thread>::new
+                       std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+                       0x1
+
+     1.82%  [k] 0xffffffff85452e38                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8622811f
+               0xffffffff84c00bb7
+               _int_malloc
+               __libc_malloc2
+               <alloc::vec::Vec<f64> as core::clone::Clone>::clone
+               0x200
+
+     1.70%  [k] 0xffffffff8620e202                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85492510
+               0xffffffff85496736
+               0xffffffff854969c4
+               0xffffffff85498e17
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __GI___libc_open
+               <std::sys::fs::unix::File>::open_c
+               std::thread::functions::available_parallelism
+               <fp_frame::DataFrame>::pairwise_rank_corr
+
+     1.60%  [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+            |          
+             --1.11%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                       <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#1}>::{closure#0}, !>
+                       0xc7f6400000015b84
+
+     1.59%  [k] 0xffffffff8538ceb0                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85160b8c
+               0xffffffff85160da9
+               0xffffffff85160ebb
+               0xffffffff8515c8e2
+               0xffffffff8515cff0
+               0xffffffff84f2570d
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __GI___futex_abstimed_wait_cancelable64
+               __pthread_clockjoin_ex
+               <std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, usize, f64)>>>::join
+               0x5a1e4d805080
+               0x1
+
+     1.32%  [k] 0xffffffff853dc6bc                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff85394780
+               0xffffffff8539f741
+               0xffffffff853a4d51
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               _dl_relocate_object_no_relro
+               _dl_relocate_object
+               dl_main
+               _dl_sysdep_start
+               _dl_start
+               _dl_start_user
+
+     1.29%  [k] 0xffffffff85304361                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8530e03f
+               0xffffffff8530e2dc
+               0xffffffff8530e537
+               0xffffffff85318b8a
+               0xffffffff8501581b
+               0xffffffff85016836
+               0xffffffff85016f97
+               0xffffffff85017006
+               0xffffffff84f2553c
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI___clone3
+               create_thread
+               pthread_create@GLIBC_2.2.5
+               <std::sys::thread::unix::Thread>::new
+               std::thread::scoped::scope::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}, core::option::Option<alloc::vec::Vec<alloc::vec::Vec<(usize, usize, f64)>>>>
+               0x1
+
+     0.87%  [k] 0xffffffff84d0410b                                                                                                                                                                                                                                                                                           -      -            
+     0.61%  [.] __memset_avx2_unaligned_erms                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --0.58%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+                       0x5a1e4d6abe80
+
+     0.55%  [k] 0xffffffff8507ebf5                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0x5a1e4d7fdb30
+
+     0.55%  [k] 0xffffffff8507b162                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---0xffffffff8510f710
+               0xffffffff8510fc9e
+               0xffffffff8502171f
+               0xffffffff85021a80
+               0xffffffff85021e6e
+               0xffffffff86227729
+               0xffffffff84c00f0b
+               std::sys::backtrace::__rust_begin_short_backtrace::<fp_frame::complete_kendall_no_tie_parallel_matrix::{closure#3}::{closure#0}, alloc::vec::Vec<(usize, usize, f64)>>
+               0x5a1e4d6b02c0
+
+     0.50%  [k] 0xffffffff850cdaab                                                                                                                                                                                                                                                                                           -      -            
+     0.46%  [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                                                                                                              -      -            
+     0.43%  [.] _int_free_maybe_consolidate                                                                                                                                                                                                                                                                                  -      -            
+     0.37%  [.] _int_free_merge_chunk                                                                                                                                                                                                                                                                                        -      -            
+     0.29%  [k] 0xffffffff850bc62d                                                                                                                                                                                                                                                                                           -      -            
+     0.26%  [k] 0xffffffff85394550                                                                                                                                                                                                                                                                                           -      -            
+     0.25%  [k] 0xffffffff86220569                                                                                                                                                                                                                                                                                           -      -            
+     0.25%  [k] 0xffffffff86220555                                                                                                                                                                                                                                                                                           -      -            
+     0.25%  [k] 0xffffffff850a70d8                                                                                                                                                                                                                                                                                           -      -            
+     0.23%  [k] 0xffffffff84fde875                                                                                                                                                                                                                                                                                           -      -            
+     0.22%  [k] 0xffffffff84d04109                                                                                                                                                                                                                                                                                           -      -            
+     0.22%  [k] 0xffffffff84f247b9                                                                                                                                                                                                                                                                                           -      -            
+     0.21%  [k] 0xffffffff85124d1e                                                                                                                                                                                                                                                                                           -      -            
+     0.20%  [.] core::ptr::drop_in_place::<fp_index::Index>                                                                                                                                                                                                                                                                  -      -            
+     0.19%  [k] 0xffffffff852ff393                                                                                                                                                                                                                                                                                           -      -            
+     0.17%  [k] 0xffffffff86229e6b                                                                                                                                                                                                                                                                                           -      -            
+     0.08%  [.] _int_malloc                                                                                                                                                                                                                                                                                                  -      -            
+     0.06%  [.] <fp_columnar::ColumnData>::from_scalars                                                                                                                                                                                                                                                                      -      -            
+     0.06%  [k] 0xffffffff85302a11                                                                                                                                                                                                                                                                                           -      -            
+     0.05%  [k] 0xffffffff861f1314                                                                                                                                                                                                                                                                                           -      -            
+     0.05%  [k] 0xffffffff85124d3c                                                                                                                                                                                                                                                                                           -      -            
+     0.05%  [.] get_free_list                                                                                                                                                                                                                                                                                                -      -            
+     0.05%  [k] 0xffffffff84f8c9d1                                                                                                                                                                                                                                                                                           -      -            
+     0.05%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                 -      -            
+     0.04%  [k] 0xffffffff85104b40                                                                                                                                                                                                                                                                                           -      -            
+     0.04%  [k] 0xffffffff861f4a82                                                                                                                                                                                                                                                                                           -      -            
+     0.04%  [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                           -      -            
+     0.04%  [k] 0xffffffff8507e400                                                                                                                                                                                                                                                                                           -      -            
+     0.04%  [k] 0xffffffff86220705                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff853aab6e                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [.] __printf_buffer                                                                                                                                                                                                                                                                                              -      -            
+     0.03%  [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                            -      -            
+     0.03%  [.] <std::sys::thread::unix::Thread>::new::thread_start                                                                                                                                                                                                                                                          -      -            
+     0.03%  [k] 0xffffffff861f3a7d                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff8623a6aa                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff8536aab8                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                                                                                                                                                                                                               -      -            
+     0.03%  [k] 0xffffffff861f8a73                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff854576b8                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff86203104                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff861f4a47                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff851965f2                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff862030a4                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff853cb87c                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff853cde85                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff853cbcc8                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [.] realloc                                                                                                                                                                                                                                                                                                      -      -            
+     0.03%  [k] 0xffffffff85698ff0                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff861f660b                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff861f14a9                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff85124a27                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff861f1464                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff85302a0f                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [k] 0xffffffff851a298b                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [.] unlink_chunk.isra.0                                                                                                                                                                                                                                                                                          -      -            
+     0.03%  [k] 0xffffffff86234660                                                                                                                                                                                                                                                                                           -      -            
+     0.03%  [.] __getauxval                                                                                                                                                                                                                                                                                                  -      -            
+     0.03%  [k] 0xffffffff851a2991                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff853ab669                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85160bb6                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff851a2a3c                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85454153                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84c00112                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff86203286                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8530e275                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85841821                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff851a2b38                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84c00080                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff862252e1                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff850b6150                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff850b6203                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] malloc                                                                                                                                                                                                                                                                                                       -      -            
+     0.02%  [k] 0xffffffff85080fa7                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] std::sys::pal::unix::stack_overflow::thread_info::set_current_info                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff86220708                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] std::sys::pal::unix::stack_overflow::imp::make_handler                                                                                                                                                                                                                                                       -      -            
+     0.02%  [k] 0xffffffff8508f229                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84c00005                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff850b6226                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff850a71c3                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8502edd5                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8546fb84                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8546fb9b                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85021985                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff853cbae8                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85036fc5                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff86208874                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff851965e1                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84c00f0b                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8519f4e3                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84c001c4                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] pthread_attr_setaffinity_np@@GLIBC_2.32                                                                                                                                                                                                                                                                      -      -            
+     0.02%  [k] 0xffffffff84fedab5                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] free@plt                                                                                                                                                                                                                                                                                                     -      -            
+     0.02%  [k] 0xffffffff8519f584                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85841824                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] std::sys::thread_local::guard::key::enable                                                                                                                                                                                                                                                                   -      -            
+     0.02%  [k] 0xffffffff8508129a                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff84d04104                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [.] tcache_malloc_init                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8502edd9                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff8510b2d6                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff85088549                                                                                                                                                                                                                                                                                           -      -            
+     0.02%  [k] 0xffffffff853aac7c                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [k] 0xffffffff8620c899                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [k] 0xffffffff8622777a                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [.] <std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, usize, f64)>>>::join                                                                                                                                                                                                                              -      -            
+     0.01%  [k] 0xffffffff8544e9d5                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [k] 0xffffffff8583c353                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [.] __GI___clone3                                                                                                                                                                                                                                                                                                -      -            
+     0.01%  [.] create_thread                                                                                                                                                                                                                                                                                                -      -            
+     0.01%  [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                                                           -      -            
+     0.01%  [.] __printf_buffer_write                                                                                                                                                                                                                                                                                        -      -            
+     0.01%  [k] 0xffffffff8530d393                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [.] _itoa_word                                                                                                                                                                                                                                                                                                   -      -            
+     0.00%  [.] start_thread                                                                                                                                                                                                                                                                                                 -      -            
+     0.00%  [k] 0xffffffff84c01248                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84c01884                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84c0188e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d285                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [.] __strchrnul_avx2                                                                                                                                                                                                                                                                                             -      -            
+     0.00%  [k] 0xffffffff8530d286                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85124106                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85124c0d                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8621c6a9                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff851a2aae                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f2330a                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f8a071                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84c01241                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff851a2235                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff853f08f4                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff857c02a6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85160ebe                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [.] __vsnprintf_internal                                                                                                                                                                                                                                                                                         -      -            
+     0.00%  [k] 0xffffffff84f8a083                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8548f9a6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff862095c7                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8508a42f                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff86239b8e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8583c3ea                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8519e505                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f8c9af                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84c01551                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85152482                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85138e4e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85180123                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85124d2a                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85124076                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8548f9a9                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f8c9c6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f89fed                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84c01182                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85456a7e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85021981                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f8a57f                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85078ee6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d289                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff857bfc40                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f8cae7                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8508ea15                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff857bfd48                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff854a664c                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85124151                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8519f3f2                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85453c5a                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff853ec7d0                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85456a16                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff86225225                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d280                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff854a664a                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff853ab7c6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f2b8d5                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff86227da0                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85453c8e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff86224c2a                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff854a664e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f34157                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84fdedcd                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d290                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d298                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f32f8e                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f337e5                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f337e9                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f34139                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85300b65                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85300b69                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85300b80                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2a7                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2b7                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2d7                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d398                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f32f97                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f33760                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f337e6                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f337ee                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85104b20                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85104b2d                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85104b41                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85104b43                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8510f1d0                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8510f1dd                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8510f1f0                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85300b60                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff85300b66                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d29c                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d29f                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2af                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2d4                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d2db                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8530d3a4                                                                                                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff862251d0                                                                                                                                                                                                                                                                                           -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

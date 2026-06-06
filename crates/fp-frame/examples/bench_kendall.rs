@@ -90,7 +90,7 @@ fn cross_check() -> (usize, usize) {
     let (mut ok, mut bad) = (0usize, 0usize);
     for _ in 0..4000 {
         let n = (next() % 30) as usize + 2;
-        let range = (next() % 6) as u64 + 1; // small range -> many ties
+        let range = next() % 6 + 1; // small range -> many ties
         let xs: Vec<f64> = (0..n).map(|_| (next() % range) as f64).collect();
         let ys: Vec<f64> = (0..n).map(|_| (next() % range) as f64).collect();
         let got = s_from(&xs).corr_kendall(&s_from(&ys)).unwrap();

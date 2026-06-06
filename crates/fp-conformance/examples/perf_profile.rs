@@ -13,7 +13,7 @@
 //! Args: <scenario> <n_rows> <iterations>
 //!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_same, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
 use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
@@ -114,14 +114,21 @@ fn build_corr_frame(n: usize, cols: usize) -> DataFrame {
 
 fn build_csv_string(n: usize, cols: usize) -> String {
     let mut csv = String::with_capacity(n * cols * 15);
-    let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
-    csv.push_str(&header.join(","));
+    for c in 0..cols {
+        if c > 0 {
+            csv.push(',');
+        }
+        write!(&mut csv, "c{c}").expect("writing to a String cannot fail");
+    }
     csv.push('\n');
     for i in 0..n {
-        let row: Vec<String> = (0..cols)
-            .map(|c| ((i * (c + 1)) as f64 * 0.1).to_string())
-            .collect();
-        csv.push_str(&row.join(","));
+        for c in 0..cols {
+            if c > 0 {
+                csv.push(',');
+            }
+            let value = (i * (c + 1)) as f64 * 0.1;
+            write!(&mut csv, "{value}").expect("writing to a String cannot fail");
+        }
         csv.push('\n');
     }
     csv

@@ -1424,12 +1424,45 @@ fn try_groupby_median_dense_int64(
         let agg = if slice.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
-            slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
             let mid = slice.len() / 2;
-            if slice.len().is_multiple_of(2) {
-                Scalar::Float64((slice[mid - 1] + slice[mid]) / 2.0)
+            // O(n) median via select_nth instead of a full O(n log n) sort.
+            // Bit-identical to the sort path when the slice is NaN-free: with a
+            // finite-float total order, `select_nth_unstable_by(mid)` places the
+            // exact mid-th order statistic at `slice[mid]` and partitions so
+            // every element in `slice[..mid]` is `<= slice[mid]`. For even
+            // lengths the low-middle order statistic (sorted `slice[mid-1]`) is
+            // therefore the maximum of `slice[..mid]`, and `(lo + hi) / 2.0`
+            // uses the identical operands in the identical order. NaN breaks the
+            // total order (`partial_cmp` -> `Equal` makes NaN compare equal to
+            // everything), so any NaN-bearing group falls back to the original
+            // full sort, which is left untouched. A `-0.0` is likewise routed to
+            // the sort fallback: `-0.0` and `+0.0` compare `Equal`, so the
+            // even-case max-of-left could pick a `+0.0` where the unstable sort
+            // left a `-0.0` at `slice[mid-1]`, and `(-0.0 + hi)` vs `(+0.0 + hi)`
+            // can differ in sign when `hi` is also a zero. Gating only on the
+            // (rare) negative zero keeps the fast path for all-positive-zero
+            // data, where `f64::max` and the sort agree bit-for-bit.
+            if slice
+                .iter()
+                .any(|x| x.is_nan() || (*x == 0.0 && x.is_sign_negative()))
+            {
+                slice.sort_by(cmp);
+                if slice.len().is_multiple_of(2) {
+                    Scalar::Float64((slice[mid - 1] + slice[mid]) / 2.0)
+                } else {
+                    Scalar::Float64(slice[mid])
+                }
+            } else if slice.len().is_multiple_of(2) {
+                let (lo_part, &mut hi, _) = slice.select_nth_unstable_by(mid, cmp);
+                let lo = lo_part
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                Scalar::Float64((lo + hi) / 2.0)
             } else {
-                Scalar::Float64(slice[mid])
+                let (_, &mut median, _) = slice.select_nth_unstable_by(mid, cmp);
+                Scalar::Float64(median)
             }
         };
         out_values.push(agg);

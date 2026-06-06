@@ -17933,7 +17933,13 @@ mod tests {
         assert_eq!(cat.argsort(), vec![2, 0, 3, 1]);
         assert_eq!(
             cat.sort_values().labels(),
-            ["b".to_owned(), "a".to_owned(), "a".to_owned(), "c".to_owned()].as_slice()
+            [
+                "b".to_owned(),
+                "a".to_owned(),
+                "a".to_owned(),
+                "c".to_owned()
+            ]
+            .as_slice()
         );
 
         // Unordered categoricals also sort by category code in pandas.

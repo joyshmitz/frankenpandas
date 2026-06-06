@@ -3498,14 +3498,30 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             return Ok(Self::from_i64_values(
                 data.iter()
-                    .map(|&x| if x > 0 { 1 } else if x < 0 { -1 } else { 0 })
+                    .map(|&x| {
+                        if x > 0 {
+                            1
+                        } else if x < 0 {
+                            -1
+                        } else {
+                            0
+                        }
+                    })
                     .collect(),
             ));
         }
         if let Some(data) = self.as_f64_slice() {
             return Ok(Self::from_f64_values(
                 data.iter()
-                    .map(|&x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 })
+                    .map(|&x| {
+                        if x > 0.0 {
+                            1.0
+                        } else if x < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        }
+                    })
                     .collect(),
             ));
         }
@@ -3561,7 +3577,9 @@ impl Column {
         // Float64 via is_sign_negative (so -0.0 -> true). Bit-identical; all-valid
         // ⇒ the missing -> Bool(false) branch never applies.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_bool_values(data.iter().map(|&x| x < 0).collect()));
+            return Ok(Self::from_bool_values(
+                data.iter().map(|&x| x < 0).collect(),
+            ));
         }
         if let Some(data) = self.as_f64_slice() {
             return Ok(Self::from_bool_values(
@@ -6960,6 +6978,7 @@ impl Column {
                 let start_rank = cursor as f64 + 1.0;
                 let end_rank = end as f64;
                 dense_rank += 1.0;
+                #[allow(clippy::needless_range_loop)] // group_idx is also the "first" rank value
                 for group_idx in cursor..end {
                     let original = perm[group_idx];
                     ranks[original] = match method {
@@ -9363,7 +9382,9 @@ impl Column {
         // keep `2.0.powi(x as i32)` (NOT (x as f64).exp2()) to match the scalar
         // loop's exact rounding; Float64 uses x.exp2(). Bit-identical.
         if let Some(data) = self.as_f64_slice() {
-            return Ok(Self::from_f64_values(data.iter().map(|&x| x.exp2()).collect()));
+            return Ok(Self::from_f64_values(
+                data.iter().map(|&x| x.exp2()).collect(),
+            ));
         }
         if let Some(data) = self.as_i64_slice() {
             return Ok(Self::from_f64_values(
@@ -10007,8 +10028,11 @@ impl Column {
         let other_unique = other.unique()?;
         // O(N+M): hash-set membership for `other`, plus a `seen` set replacing
         // the O(N²) `out.any(...)` first-seen dedup.
-        let other_set: FxHashSet<SetMemberKey<'_>> =
-            other_unique.values().iter().filter_map(set_member_key).collect();
+        let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
+            .values()
+            .iter()
+            .filter_map(set_member_key)
+            .collect();
         let mut seen: FxHashSet<SetMemberKey<'_>> = FxHashSet::default();
         let mut out = Vec::new();
         for v in &self.values {
@@ -10028,8 +10052,11 @@ impl Column {
     pub fn intersect1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let self_unique = self.unique()?;
         let other_unique = other.unique()?;
-        let other_set: FxHashSet<SetMemberKey<'_>> =
-            other_unique.values().iter().filter_map(set_member_key).collect();
+        let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
+            .values()
+            .iter()
+            .filter_map(set_member_key)
+            .collect();
         let mut out = Vec::new();
         for v in self_unique.values() {
             let Some(key) = set_member_key(v) else {
@@ -10059,10 +10086,16 @@ impl Column {
     pub fn setxor1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let a_unique = self.unique()?;
         let b_unique = other.unique()?;
-        let a_set: FxHashSet<SetMemberKey<'_>> =
-            a_unique.values().iter().filter_map(set_member_key).collect();
-        let b_set: FxHashSet<SetMemberKey<'_>> =
-            b_unique.values().iter().filter_map(set_member_key).collect();
+        let a_set: FxHashSet<SetMemberKey<'_>> = a_unique
+            .values()
+            .iter()
+            .filter_map(set_member_key)
+            .collect();
+        let b_set: FxHashSet<SetMemberKey<'_>> = b_unique
+            .values()
+            .iter()
+            .filter_map(set_member_key)
+            .collect();
         let mut out = Vec::new();
         // Values in a but not in b
         for v in a_unique.values() {
@@ -10090,8 +10123,11 @@ impl Column {
     /// Matches np.in1d(). Returns Bool column.
     pub fn in1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let other_unique = other.unique()?;
-        let other_set: FxHashSet<SetMemberKey<'_>> =
-            other_unique.values().iter().filter_map(set_member_key).collect();
+        let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
+            .values()
+            .iter()
+            .filter_map(set_member_key)
+            .collect();
         // Typed all-valid Bool output — same equivalence as isin above.
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {

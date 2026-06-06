@@ -1352,6 +1352,101 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     idx
 }
 
+/// Stable MSD byte-radix argsort over UTF-8 strings.
+///
+/// Produces the exact permutation of a stable `sort_by` with `String::cmp`
+/// (byte-lexicographic, shorter-prefix-first), comparison-free at scale:
+/// each level counting-sorts the bucket by the byte at `depth`, with a
+/// virtual end-of-string bucket ordered before every byte (ascending) /
+/// after every byte (descending) — exactly `cmp`'s prefix rule. Counting
+/// scatters preserve relative order and the small-bucket cutoff uses the
+/// stable `sort_by` on the (equal-prefix-stripped) suffix, so ties keep
+/// their original order at every level, matching the stable comparison
+/// sort bit-for-bit in both directions.
+fn utf8_msd_argsort(strs: &[&str], ascending: bool) -> Vec<usize> {
+    let n = strs.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    if n > 1 {
+        let mut aux: Vec<usize> = vec![0; n];
+        utf8_msd_sort_range(strs, &mut idx, &mut aux, 0, n, 0, ascending);
+    }
+    idx
+}
+
+fn utf8_msd_sort_range(
+    strs: &[&str],
+    idx: &mut [usize],
+    aux: &mut [usize],
+    lo: usize,
+    hi: usize,
+    depth: usize,
+    ascending: bool,
+) {
+    let n = hi - lo;
+    if n <= 1 {
+        return;
+    }
+    // Small buckets (and pathologically deep shared prefixes, which bound
+    // recursion depth) finish with the stable comparison sort on the suffix:
+    // every string in this bucket shares its first `depth` bytes, so suffix
+    // order equals full-string order.
+    const CUTOFF: usize = 48;
+    const MAX_DEPTH: usize = 1024;
+    if n <= CUTOFF || depth >= MAX_DEPTH {
+        idx[lo..hi].sort_by(|&a, &b| {
+            let ord = strs[a].as_bytes()[depth..].cmp(&strs[b].as_bytes()[depth..]);
+            if ascending { ord } else { ord.reverse() }
+        });
+        return;
+    }
+    // Bucket keys ordered so iterating 0..=256 visits buckets in output order:
+    // ascending — EOS first (0), then bytes 1..=256;
+    // descending — bytes reversed (255-b), then EOS last (256).
+    let key = |s: &str| -> usize {
+        let b = s.as_bytes();
+        if depth < b.len() {
+            if ascending {
+                b[depth] as usize + 1
+            } else {
+                255 - b[depth] as usize
+            }
+        } else if ascending {
+            0
+        } else {
+            256
+        }
+    };
+    let mut counts = [0usize; 258];
+    for &i in idx[lo..hi].iter() {
+        counts[key(strs[i]) + 1] += 1;
+    }
+    for k in 1..258 {
+        counts[k] += counts[k - 1];
+    }
+    // counts[k] = start offset of bucket k within [lo, hi).
+    let mut offsets = counts;
+    for &i in idx[lo..hi].iter() {
+        let k = key(strs[i]);
+        aux[lo + offsets[k]] = i;
+        offsets[k] += 1;
+    }
+    idx[lo..hi].copy_from_slice(&aux[lo..hi]);
+    // Recurse into byte buckets; the EOS bucket holds fully-equal strings
+    // (same first `depth` bytes and length == depth) already in original
+    // relative order — nothing to sort.
+    let eos_bucket = if ascending { 0 } else { 256 };
+    for k in 0..257 {
+        if k == eos_bucket {
+            continue;
+        }
+        let b_lo = lo + counts[k];
+        let b_hi = lo + counts[k + 1];
+        if b_hi - b_lo > 1 {
+            utf8_msd_sort_range(strs, idx, aux, b_lo, b_hi, depth + 1, ascending);
+        }
+    }
+}
+
 fn normalized_float_bits(value: f64) -> u64 {
     let normalized = if value == 0.0 { 0.0 } else { value };
     normalized.to_bits()
@@ -7384,6 +7479,23 @@ impl Column {
     /// `Scalar` comparator which alone reasons about na-last placement). The
     /// permutation is bit-identical to the stable comparator path: monotonic
     /// radix keys preserve `<` order and stable counting-sort preserves ties.
+    /// Borrowed `&str` view of an all-valid Utf8 column, `None` when the
+    /// column has any missing slot or any non-Utf8 scalar (those need the
+    /// na-last / mixed-dtype comparator).
+    fn as_all_valid_str_vec(&self) -> Option<Vec<&str>> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        let mut strs = Vec::with_capacity(self.len());
+        for v in self.values.iter() {
+            match v {
+                Scalar::Utf8(s) => strs.push(s.as_str()),
+                _ => return None,
+            }
+        }
+        Some(strs)
+    }
+
     fn typed_radix_perm(&self, ascending: bool) -> Option<Vec<usize>> {
         if let Some(data) = self.as_i64_slice() {
             let keys: Vec<u64> = if ascending {
@@ -7422,6 +7534,15 @@ impl Column {
             let sorted: Vec<f64> = perm.iter().map(|&i| data[i]).collect();
             return Ok(Self::from_f64_values(sorted));
         }
+        // All-valid Utf8: gather by the stable MSD radix permutation. The
+        // fallback below sorts (idx, &Scalar) pairs stably with the same
+        // ordering, so cloning in permutation order yields the identical
+        // value sequence.
+        if let Some(strs) = self.as_all_valid_str_vec() {
+            let perm = utf8_msd_argsort(&strs, ascending);
+            let sorted: Vec<Scalar> = perm.iter().map(|&i| self.values[i].clone()).collect();
+            return Self::new(self.dtype, sorted);
+        }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         let sorted: Vec<Scalar> = indexed.into_iter().map(|(_, v)| v.clone()).collect();
@@ -7446,6 +7567,13 @@ impl Column {
     pub fn argsort_with(&self, ascending: bool) -> Vec<usize> {
         if let Some(perm) = self.typed_radix_perm(ascending) {
             return perm;
+        }
+        // All-valid Utf8: stable MSD byte radix replaces the O(n log n)
+        // Scalar-comparator sort. Bit-identical — `String::cmp` is exactly
+        // byte order with shorter-prefix-first, no value is missing (so the
+        // na-last arms never fire), and both sorts are stable.
+        if let Some(strs) = self.as_all_valid_str_vec() {
+            return utf8_msd_argsort(&strs, ascending);
         }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));

@@ -992,6 +992,43 @@ fn parse_simple_numeric_csv_chunk(
     (row_count > 0).then_some((typed_columns, row_count))
 }
 
+/// Merges one output column from its per-chunk source vectors, in chunk
+/// order. Mirrors the original chunk-major merge arms exactly: Int64 sources
+/// append to an Int64 column or widen (`value as f64`) into a Float64 column;
+/// a Float64 source reaching an Int64 column is a contract violation (the
+/// promotion pre-scan forbids it) and rejects the merge.
+fn merge_one_simple_numeric_csv_column(
+    is_float: bool,
+    capacity: usize,
+    sources: Vec<CsvTypedColumnValues>,
+) -> Option<CsvTypedColumnValues> {
+    if is_float {
+        let mut out = Vec::with_capacity(capacity);
+        for src in sources {
+            match src {
+                CsvTypedColumnValues::Int64(src) => {
+                    out.extend(src.into_iter().map(|value| value as f64));
+                }
+                CsvTypedColumnValues::Float64(src) => out.extend(src),
+            }
+        }
+        Some(CsvTypedColumnValues::Float64(out))
+    } else {
+        let mut out = Vec::with_capacity(capacity);
+        for src in sources {
+            match src {
+                CsvTypedColumnValues::Int64(src) => out.extend(src),
+                CsvTypedColumnValues::Float64(_) => return None,
+            }
+        }
+        Some(CsvTypedColumnValues::Int64(out))
+    }
+}
+
+/// Minimum total value count before the chunk merge fans out to threads;
+/// below this the scoped-spawn overhead outweighs the copy it hides.
+const SIMPLE_NUMERIC_CSV_PARALLEL_MERGE_MIN_VALUES: usize = 1 << 16;
+
 fn merge_simple_numeric_csv_chunks(
     parsed_chunks: Vec<(Vec<CsvTypedColumnValues>, i64)>,
     header_count: usize,
@@ -1009,34 +1046,78 @@ fn merge_simple_numeric_csv_chunks(
     }
 
     let capacity = usize::try_from(row_count).ok()?;
-    let mut merged: Vec<CsvTypedColumnValues> = final_is_float
-        .into_iter()
-        .map(|is_float| {
-            if is_float {
-                CsvTypedColumnValues::Float64(Vec::with_capacity(capacity))
-            } else {
-                CsvTypedColumnValues::Int64(Vec::with_capacity(capacity))
-            }
-        })
-        .collect();
 
+    // Transpose chunk-major ownership to column-major: per_column[j] holds
+    // column j's source vector from every chunk, in chunk order. This moves
+    // only Vec headers — no value data is copied.
+    let mut per_column: Vec<Vec<CsvTypedColumnValues>> = (0..header_count)
+        .map(|_| Vec::with_capacity(parsed_chunks.len()))
+        .collect();
     for (columns, _) in parsed_chunks {
-        for (dst, src) in merged.iter_mut().zip(columns) {
-            match (dst, src) {
-                (CsvTypedColumnValues::Int64(dst), CsvTypedColumnValues::Int64(src)) => {
-                    dst.extend(src);
-                }
-                (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Int64(src)) => {
-                    dst.extend(src.into_iter().map(|value| value as f64));
-                }
-                (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Float64(src)) => {
-                    dst.extend(src);
-                }
-                (CsvTypedColumnValues::Int64(_), CsvTypedColumnValues::Float64(_)) => {
-                    return None;
-                }
-            }
+        for (slot, column) in per_column.iter_mut().zip(columns) {
+            slot.push(column);
         }
+    }
+
+    let parallel = header_count >= 2
+        && capacity
+            .checked_mul(header_count)
+            .is_some_and(|total| total >= SIMPLE_NUMERIC_CSV_PARALLEL_MERGE_MIN_VALUES);
+    if !parallel {
+        let mut merged = Vec::with_capacity(header_count);
+        for (is_float, sources) in final_is_float.iter().copied().zip(per_column) {
+            merged.push(merge_one_simple_numeric_csv_column(
+                is_float, capacity, sources,
+            )?);
+        }
+        return Some((merged, row_count));
+    }
+
+    // Fan the per-column merges out over contiguous column groups so output
+    // order is preserved by construction; each group thread runs the same
+    // sequential per-column merge.
+    let worker_count = header_count.min(SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS);
+    let group_size = header_count.div_ceil(worker_count);
+    let mut groups: Vec<(usize, Vec<Vec<CsvTypedColumnValues>>)> = Vec::new();
+    let mut group_start = 0usize;
+    let mut remaining = per_column;
+    while !remaining.is_empty() {
+        let take = group_size.min(remaining.len());
+        let rest = remaining.split_off(take);
+        groups.push((group_start, remaining));
+        group_start += take;
+        remaining = rest;
+    }
+
+    let final_is_float = &final_is_float;
+    let merged_groups = std::thread::scope(|scope| {
+        let handles: Vec<_> = groups
+            .into_iter()
+            .map(|(start, sources_group)| {
+                scope.spawn(move || {
+                    let mut merged_group = Vec::with_capacity(sources_group.len());
+                    for (offset, sources) in sources_group.into_iter().enumerate() {
+                        merged_group.push(merge_one_simple_numeric_csv_column(
+                            final_is_float[start + offset],
+                            capacity,
+                            sources,
+                        )?);
+                    }
+                    Some(merged_group)
+                })
+            })
+            .collect();
+
+        let mut merged_groups = Vec::with_capacity(handles.len());
+        for handle in handles {
+            merged_groups.push(handle.join().ok().flatten()?);
+        }
+        Some(merged_groups)
+    })?;
+
+    let mut merged = Vec::with_capacity(header_count);
+    for group in merged_groups {
+        merged.extend(group);
     }
 
     Some((merged, row_count))
@@ -28594,5 +28675,200 @@ mod fused_numeric_csv_field_tests {
             }
             CsvTypedColumnValues::Int64(_) => panic!("expected Float64 column"),
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_simple_numeric_csv_chunks_tests {
+    use super::{CsvTypedColumnValues, merge_simple_numeric_csv_chunks};
+
+    /// Verbatim copy of the pre-parallel chunk-major merge, kept as the
+    /// reference implementation for the differential test below.
+    fn reference_merge(
+        parsed_chunks: Vec<(Vec<CsvTypedColumnValues>, i64)>,
+        header_count: usize,
+    ) -> Option<(Vec<CsvTypedColumnValues>, i64)> {
+        let mut final_is_float = vec![false; header_count];
+        let mut row_count = 0i64;
+        for (columns, rows) in &parsed_chunks {
+            if columns.len() != header_count {
+                return None;
+            }
+            row_count = row_count.checked_add(*rows)?;
+            for (idx, column) in columns.iter().enumerate() {
+                final_is_float[idx] |= matches!(column, CsvTypedColumnValues::Float64(_));
+            }
+        }
+
+        let capacity = usize::try_from(row_count).ok()?;
+        let mut merged: Vec<CsvTypedColumnValues> = final_is_float
+            .into_iter()
+            .map(|is_float| {
+                if is_float {
+                    CsvTypedColumnValues::Float64(Vec::with_capacity(capacity))
+                } else {
+                    CsvTypedColumnValues::Int64(Vec::with_capacity(capacity))
+                }
+            })
+            .collect();
+
+        for (columns, _) in parsed_chunks {
+            for (dst, src) in merged.iter_mut().zip(columns) {
+                match (dst, src) {
+                    (CsvTypedColumnValues::Int64(dst), CsvTypedColumnValues::Int64(src)) => {
+                        dst.extend(src);
+                    }
+                    (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Int64(src)) => {
+                        dst.extend(src.into_iter().map(|value| value as f64));
+                    }
+                    (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Float64(src)) => {
+                        dst.extend(src);
+                    }
+                    (CsvTypedColumnValues::Int64(_), CsvTypedColumnValues::Float64(_)) => {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        Some((merged, row_count))
+    }
+
+    fn build_chunks(
+        chunk_count: usize,
+        rows_per_chunk: usize,
+        header_count: usize,
+        float_from_chunk_for_col: impl Fn(usize) -> usize,
+    ) -> Vec<(Vec<CsvTypedColumnValues>, i64)> {
+        (0..chunk_count)
+            .map(|chunk| {
+                let columns = (0..header_count)
+                    .map(|col| {
+                        if chunk >= float_from_chunk_for_col(col) {
+                            CsvTypedColumnValues::Float64(
+                                (0..rows_per_chunk)
+                                    .map(|row| {
+                                        (chunk * rows_per_chunk + row) as f64 * 0.5
+                                            + col as f64 * 1000.0
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            CsvTypedColumnValues::Int64(
+                                (0..rows_per_chunk)
+                                    .map(|row| {
+                                        (chunk * rows_per_chunk + row) as i64 + col as i64 * 1000
+                                    })
+                                    .collect(),
+                            )
+                        }
+                    })
+                    .collect();
+                (columns, rows_per_chunk as i64)
+            })
+            .collect()
+    }
+
+    fn assert_merge_matches_reference(
+        chunks: Vec<(Vec<CsvTypedColumnValues>, i64)>,
+        header_count: usize,
+    ) {
+        let reference_chunks: Vec<(Vec<CsvTypedColumnValues>, i64)> = chunks
+            .iter()
+            .map(|(columns, rows)| {
+                let cloned = columns
+                    .iter()
+                    .map(|column| match column {
+                        CsvTypedColumnValues::Int64(values) => {
+                            CsvTypedColumnValues::Int64(values.clone())
+                        }
+                        CsvTypedColumnValues::Float64(values) => {
+                            CsvTypedColumnValues::Float64(values.clone())
+                        }
+                    })
+                    .collect();
+                (cloned, *rows)
+            })
+            .collect();
+
+        let expected = reference_merge(reference_chunks, header_count);
+        let actual = merge_simple_numeric_csv_chunks(chunks, header_count);
+
+        match (expected, actual) {
+            (None, None) => {}
+            (Some((expected_columns, expected_rows)), Some((actual_columns, actual_rows))) => {
+                assert_eq!(expected_rows, actual_rows);
+                assert_eq!(expected_columns.len(), actual_columns.len());
+                for (idx, (lhs, rhs)) in expected_columns
+                    .iter()
+                    .zip(actual_columns.iter())
+                    .enumerate()
+                {
+                    match (lhs, rhs) {
+                        (CsvTypedColumnValues::Int64(lhs), CsvTypedColumnValues::Int64(rhs)) => {
+                            assert_eq!(lhs, rhs, "Int64 column {idx} diverged");
+                        }
+                        (
+                            CsvTypedColumnValues::Float64(lhs),
+                            CsvTypedColumnValues::Float64(rhs),
+                        ) => {
+                            let lhs_bits: Vec<u64> =
+                                lhs.iter().map(|value| value.to_bits()).collect();
+                            let rhs_bits: Vec<u64> =
+                                rhs.iter().map(|value| value.to_bits()).collect();
+                            assert_eq!(lhs_bits, rhs_bits, "Float64 column {idx} bits diverged");
+                        }
+                        _ => panic!("column {idx} dtype diverged"),
+                    }
+                }
+            }
+            (expected, actual) => panic!(
+                "merge outcome diverged: reference some={} actual some={}",
+                expected.is_some(),
+                actual.is_some()
+            ),
+        }
+    }
+
+    /// Big merge (crosses the parallel threshold): mixed promotion patterns —
+    /// some columns all-Int64, some all-Float64, some promoting mid-stream —
+    /// must match the chunk-major reference bit-for-bit, in column order.
+    #[test]
+    fn parallel_merge_matches_reference_with_mixed_promotion() {
+        // 8 chunks x 1000 rows x 12 columns = 96000 values > 65536 threshold.
+        let chunks = build_chunks(8, 1000, 12, |col| match col % 4 {
+            0 => usize::MAX, // never float: stays Int64
+            1 => 0,          // float from the first chunk
+            2 => 3,          // promotes mid-stream
+            _ => 7,          // promotes at the last chunk
+        });
+        assert_merge_matches_reference(chunks, 12);
+    }
+
+    /// Small merge (below the parallel threshold) takes the sequential path
+    /// and must also match.
+    #[test]
+    fn sequential_merge_matches_reference() {
+        let chunks = build_chunks(3, 4, 5, |col| if col % 2 == 0 { usize::MAX } else { 1 });
+        assert_merge_matches_reference(chunks, 5);
+    }
+
+    /// More worker groups than columns (header_count < MAX_WORKERS) and
+    /// header_count not divisible by the group size must keep column order.
+    #[test]
+    fn parallel_merge_handles_narrow_and_ragged_widths() {
+        for header_count in [2, 3, 7, 9, 17] {
+            let chunks = build_chunks(5, 2000, header_count, |col| col % 6);
+            assert_merge_matches_reference(chunks, header_count);
+        }
+    }
+
+    /// A chunk whose column count disagrees with the header must reject, as
+    /// before.
+    #[test]
+    fn merge_rejects_mismatched_chunk_width() {
+        let mut chunks = build_chunks(2, 10, 4, |_| usize::MAX);
+        chunks[1].0.pop();
+        assert!(merge_simple_numeric_csv_chunks(chunks, 4).is_none());
     }
 }

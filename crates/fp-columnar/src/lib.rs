@@ -63,7 +63,7 @@ use fp_types::{
     nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
     nanvar,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -4549,7 +4549,7 @@ impl Column {
     ///
     /// Matches np.delete(). Returns new column with values removed.
     pub fn delete(&self, indices: &[usize]) -> Result<Self, ColumnError> {
-        let mut to_delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut to_delete: FxHashSet<usize> = FxHashSet::default();
         for &i in indices {
             to_delete.insert(i);
         }
@@ -5636,7 +5636,6 @@ impl Column {
     /// Matches `pd.Series.has_duplicates`.
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
-        use std::collections::HashSet;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -5648,7 +5647,7 @@ impl Column {
             Period(i64),
             Interval(u64, u64, IntervalClosed),
         }
-        let mut seen: HashSet<Key<'_>> = HashSet::new();
+        let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
         for v in &self.values {
             if v.is_missing() {
                 continue;
@@ -6248,7 +6247,6 @@ impl Column {
             return Self::new(self.dtype, winners);
         }
 
-        use std::collections::HashMap;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -6283,7 +6281,7 @@ impl Column {
             })
         }
 
-        let mut counts: HashMap<Key<'_>, (usize, &Scalar)> = HashMap::new();
+        let mut counts: FxHashMap<Key<'_>, (usize, &Scalar)> = FxHashMap::default();
         for v in &self.values {
             if let Some(k) = key_of(v) {
                 counts
@@ -7951,7 +7949,6 @@ impl Column {
         // use_na_sentinel=false branch separately so multiple null
         // kinds collapse to the same code (matches the existing
         // is_missing-based check).
-        use std::collections::HashMap;
         #[derive(Hash, PartialEq, Eq, Clone, Copy)]
         enum LocalKey<'a> {
             Bool(bool),
@@ -8032,7 +8029,7 @@ impl Column {
             (codes, uniques)
         } else {
             let mut uniques: Vec<Scalar> = Vec::new();
-            let mut idx_map: HashMap<LocalKey<'_>, i64> = HashMap::new();
+            let mut idx_map: FxHashMap<LocalKey<'_>, i64> = FxHashMap::default();
             let mut missing_position: Option<i64> = None;
             let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
 
@@ -9839,7 +9836,6 @@ impl Column {
     /// column the same length as `self`. Missing input positions map
     /// to `false` (pandas convention — NaN is never "in" a set).
     pub fn isin(&self, needles: &[Scalar]) -> Result<Self, ColumnError> {
-        use std::collections::HashSet;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -9912,7 +9908,7 @@ impl Column {
             }
         }
 
-        let mut lookup: HashSet<Key<'_>> = HashSet::new();
+        let mut lookup: FxHashSet<Key<'_>> = FxHashSet::default();
         for n in needles {
             if let Some(k) = key_of(n) {
                 lookup.insert(k);
@@ -9957,7 +9953,6 @@ impl Column {
             return Ok(Self::from_i64_values(out));
         }
 
-        use std::collections::HashSet;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -9970,7 +9965,7 @@ impl Column {
             Interval(u64, u64, IntervalClosed),
         }
 
-        let mut seen: HashSet<Key<'_>> = HashSet::new();
+        let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
         let mut out = Vec::new();
         for v in &self.values {
             if v.is_missing() {
@@ -10007,9 +10002,9 @@ impl Column {
         let other_unique = other.unique()?;
         // O(N+M): hash-set membership for `other`, plus a `seen` set replacing
         // the O(N²) `out.any(...)` first-seen dedup.
-        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+        let other_set: FxHashSet<SetMemberKey<'_>> =
             other_unique.values().iter().filter_map(set_member_key).collect();
-        let mut seen: std::collections::HashSet<SetMemberKey<'_>> = std::collections::HashSet::new();
+        let mut seen: FxHashSet<SetMemberKey<'_>> = FxHashSet::default();
         let mut out = Vec::new();
         for v in &self.values {
             let Some(key) = set_member_key(v) else {
@@ -10028,7 +10023,7 @@ impl Column {
     pub fn intersect1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let self_unique = self.unique()?;
         let other_unique = other.unique()?;
-        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+        let other_set: FxHashSet<SetMemberKey<'_>> =
             other_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::new();
         for v in self_unique.values() {
@@ -10059,9 +10054,9 @@ impl Column {
     pub fn setxor1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let a_unique = self.unique()?;
         let b_unique = other.unique()?;
-        let a_set: std::collections::HashSet<SetMemberKey<'_>> =
+        let a_set: FxHashSet<SetMemberKey<'_>> =
             a_unique.values().iter().filter_map(set_member_key).collect();
-        let b_set: std::collections::HashSet<SetMemberKey<'_>> =
+        let b_set: FxHashSet<SetMemberKey<'_>> =
             b_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::new();
         // Values in a but not in b
@@ -10090,7 +10085,7 @@ impl Column {
     /// Matches np.in1d(). Returns Bool column.
     pub fn in1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let other_unique = other.unique()?;
-        let other_set: std::collections::HashSet<SetMemberKey<'_>> =
+        let other_set: FxHashSet<SetMemberKey<'_>> =
             other_unique.values().iter().filter_map(set_member_key).collect();
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {

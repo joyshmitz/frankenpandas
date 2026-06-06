@@ -122,3 +122,21 @@ is released.
   already-proven exact discordant-pair arithmetic.
 - Fallback trigger: reject if same-harness hyperfine does not beat the 41.8 ms
   baseline by Score >= 2.0 or if golden sha256 changes.
+
+## Pass 3 Result - Fenwick Scratch Reuse Rejection
+- Bead: `br-frankenpandas-izmsk`.
+- Trial lever: reused one worker-local Fenwick `ranks_seen` buffer inside
+  `complete_kendall_no_tie_parallel_matrix` and threaded it into the ordered
+  rank inversion helper.
+- RCH candidate build: `CARGO_TARGET_DIR=/data/projects/.scratch/cargo-target-blackthrush-izmsk-after rch exec -- cargo build -p fp-conformance --profile release-perf --example perf_profile`, worker `ts1`, exit 0.
+- Saved before baseline: `df_kendall 512 20`, 41.1 ms +/- 1.7 ms.
+- Paired A/B: before 43.2 ms +/- 2.6 ms, candidate 45.6 ms +/- 1.9 ms,
+  so the before binary was 1.05x +/- 0.08 faster.
+- Golden correction: the originally saved before golden was stale. Rerunning
+  the saved before binary produced
+  `46a26659e27d862c5de8a9b030c422028e42f5f58c0d977eb7153898f4a5818d`,
+  matching the candidate byte-for-byte.
+- Isomorphism: row/column ordering, tie/non-finite fallback, integer
+  discordant-pair arithmetic, final tau formula, and RNG behavior were
+  unchanged in the trial, but the performance gate failed.
+- Verdict: REJECTED. Source hunk removed; artifacts retained for audit.

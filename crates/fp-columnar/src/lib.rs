@@ -6736,6 +6736,77 @@ impl Column {
         }
 
         let len = self.values.len();
+
+        // Counting-sort fast path: an all-valid, bounded-range Int64 column ranks
+        // in O(n) via a value histogram + prefix sums instead of the O(n log n)
+        // sort below. Bit-identical: compare_scalars_na_last compares Int64 with
+        // exact `i64::cmp` (no f64 coercion), so grouping by exact value matches
+        // the sort's tie groups; the stable sort's within-tie order ("first")
+        // is the original order, reproduced by a per-value occurrence counter
+        // walked in original order. The rank f64 expressions mirror the sort
+        // path's exactly (start_rank/end_rank), so every method/direction agrees.
+        if let Some(data) = self.as_i64_slice()
+            && let Some((min, range)) = i64_direct_address_range(data)
+        {
+            let total = data.len() as i64;
+            let mut count = vec![0i64; range];
+            for &v in data {
+                count[(v as i128 - min as i128) as usize] += 1;
+            }
+            // c_less[s] = # values < value-at-slot-s; dense_asc[s] = 1-based
+            // ascending ordinal among present distinct values.
+            let mut c_less = vec![0i64; range];
+            let mut dense_asc = vec![0i64; range];
+            let mut acc = 0i64;
+            let mut ord = 0i64;
+            for s in 0..range {
+                c_less[s] = acc;
+                if count[s] > 0 {
+                    ord += 1;
+                    dense_asc[s] = ord;
+                }
+                acc += count[s];
+            }
+            let n_distinct = ord;
+            let mut occ = vec![0i64; range];
+            let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
+            for (i, &v) in data.iter().enumerate() {
+                let s = (v as i128 - min as i128) as usize;
+                let c = count[s];
+                // `before` = sorted-position offset of this value's tie group
+                // (values that sort before it): `c_less` ascending, the
+                // complement `total - c_less - c` descending.
+                let before = if ascending {
+                    c_less[s]
+                } else {
+                    total - c_less[s] - c
+                };
+                let start_rank = before as f64 + 1.0;
+                let end_rank = (before + c) as f64;
+                let value = match method {
+                    "average" => (start_rank + end_rank) / 2.0,
+                    "min" => start_rank,
+                    "max" => end_rank,
+                    "first" => {
+                        let k = occ[s];
+                        occ[s] += 1;
+                        (before + k) as f64 + 1.0
+                    }
+                    "dense" => {
+                        let d = if ascending {
+                            dense_asc[s]
+                        } else {
+                            n_distinct - dense_asc[s] + 1
+                        };
+                        d as f64
+                    }
+                    _ => unreachable!(),
+                };
+                ranks[i] = Scalar::Float64(value);
+            }
+            return Self::new(DType::Float64, ranks);
+        }
+
         let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
         for (i, v) in self.values.iter().enumerate() {
             if !v.is_missing() {

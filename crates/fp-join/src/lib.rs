@@ -1551,6 +1551,7 @@ fn take_positions_typed(column: &Column, positions: &[usize]) -> Column {
     column.take_positions(positions)
 }
 
+#[derive(Clone, Copy)]
 enum FusedInt64Side {
     Left,
     Right,
@@ -1565,6 +1566,113 @@ struct FusedInt64OutputColumn<'a> {
 struct FusedInt64MergeOptions<'a> {
     suffixes: &'a ResolvedMergeSuffixes,
     require_all_left_keys_matched: bool,
+}
+
+#[cfg(not(test))]
+const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1 << 18;
+#[cfg(test)]
+const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1;
+const DENSE_I64_INNER_PARALLEL_MAX_COLUMNS: usize = 8;
+
+struct DenseI64InnerOutputPlan<'a> {
+    left_keys: &'a [i64],
+    min: i64,
+    max: i64,
+    offsets: &'a [usize],
+    positions: &'a [usize],
+    output_len: usize,
+}
+
+fn build_dense_i64_inner_output_column(
+    spec: &FusedInt64OutputColumn<'_>,
+    plan: &DenseI64InnerOutputPlan<'_>,
+) -> Vec<i64> {
+    let mut out = Vec::<i64>::with_capacity(plan.output_len);
+    match spec.side {
+        FusedInt64Side::Left => {
+            for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+                if v < plan.min || v > plan.max {
+                    continue;
+                }
+                let bucket = (v - plan.min) as usize;
+                if bucket + 1 >= plan.offsets.len() {
+                    continue;
+                }
+                let bucket_len = plan.offsets[bucket + 1] - plan.offsets[bucket];
+                if bucket_len == 0 {
+                    continue;
+                }
+                let value = spec.values[left_pos];
+                out.resize(out.len() + bucket_len, value);
+            }
+        }
+        FusedInt64Side::Right => {
+            for &v in plan.left_keys {
+                if v < plan.min || v > plan.max {
+                    continue;
+                }
+                let bucket = (v - plan.min) as usize;
+                if bucket + 1 >= plan.offsets.len() {
+                    continue;
+                }
+                for &right_pos in &plan.positions[plan.offsets[bucket]..plan.offsets[bucket + 1]] {
+                    out.push(spec.values[right_pos]);
+                }
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), plan.output_len);
+    out
+}
+
+fn build_dense_i64_inner_output_data(
+    specs: &[FusedInt64OutputColumn<'_>],
+    plan: &DenseI64InnerOutputPlan<'_>,
+) -> Vec<Vec<i64>> {
+    if specs.len() > 1
+        && specs.len() <= DENSE_I64_INNER_PARALLEL_MAX_COLUMNS
+        && plan.output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES
+        && std::thread::available_parallelism().map_or(1, usize::from) > 1
+    {
+        return std::thread::scope(|scope| {
+            let handles = specs
+                .iter()
+                .map(|spec| scope.spawn(move || build_dense_i64_inner_output_column(spec, plan)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("dense i64 output worker must not panic")
+                })
+                .collect()
+        });
+    }
+
+    let mut output_data = specs
+        .iter()
+        .map(|_| Vec::<i64>::with_capacity(plan.output_len))
+        .collect::<Vec<_>>();
+    for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+        if v < plan.min || v > plan.max {
+            continue;
+        }
+        let bucket = (v - plan.min) as usize;
+        if bucket + 1 >= plan.offsets.len() || plan.offsets[bucket] == plan.offsets[bucket + 1] {
+            continue;
+        }
+        for &right_pos in &plan.positions[plan.offsets[bucket]..plan.offsets[bucket + 1]] {
+            for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
+                match spec.side {
+                    FusedInt64Side::Left => out.push(spec.values[left_pos]),
+                    FusedInt64Side::Right => out.push(spec.values[right_pos]),
+                }
+            }
+        }
+    }
+    debug_assert!(output_data.iter().all(|data| data.len() == plan.output_len));
+    output_data
 }
 
 fn build_single_key_dense_i64_inner_merge_output(
@@ -1720,27 +1828,15 @@ fn build_single_key_dense_i64_inner_merge_output(
         output_len = new_output_len;
     }
 
-    let mut output_data = specs
-        .iter()
-        .map(|_| Vec::<i64>::with_capacity(output_len))
-        .collect::<Vec<_>>();
-    for (left_pos, &v) in left_keys.iter().enumerate() {
-        if v < min || v > max {
-            continue;
-        }
-        let bucket = (v - min) as usize;
-        if offsets[bucket] == offsets[bucket + 1] {
-            continue;
-        }
-        for &right_pos in &positions[offsets[bucket]..offsets[bucket + 1]] {
-            for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
-                match spec.side {
-                    FusedInt64Side::Left => out.push(spec.values[left_pos]),
-                    FusedInt64Side::Right => out.push(spec.values[right_pos]),
-                }
-            }
-        }
-    }
+    let output_plan = DenseI64InnerOutputPlan {
+        left_keys,
+        min,
+        max,
+        offsets: &offsets,
+        positions: &positions,
+        output_len,
+    };
+    let output_data = build_dense_i64_inner_output_data(&specs, &output_plan);
 
     // Lazy unit-range output index: identical labels (0..output_len as
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
@@ -4684,8 +4780,9 @@ mod tests {
     use fp_types::{NullKind, Scalar};
 
     use super::{
-        DataFrameMergeExt, JoinExecutionOptions, JoinType, join_series, join_series_with_options,
-        join_series_with_trace,
+        DataFrameMergeExt, DenseI64InnerOutputPlan, FusedInt64OutputColumn, FusedInt64Side,
+        JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data, join_series,
+        join_series_with_options, join_series_with_trace,
     };
 
     #[test]
@@ -5430,6 +5527,42 @@ mod tests {
                 Scalar::Int64(101),
             ]
         );
+    }
+
+    #[test]
+    fn dense_i64_inner_parallel_output_data_preserves_row_major_order() {
+        let left_keys = vec![-1, 2, 1, 2, 3, 9];
+        let min = 1;
+        let max = 3;
+        let offsets = vec![0, 2, 3, 5];
+        let positions = vec![1usize, 4, 0, 2, 3];
+        let left_values = vec![10, 20, 30, 40, 50, 60];
+        let right_values = vec![100, 101, 102, 103, 104];
+        let specs = vec![
+            FusedInt64OutputColumn {
+                name: "left".to_string(),
+                side: FusedInt64Side::Left,
+                values: &left_values,
+            },
+            FusedInt64OutputColumn {
+                name: "right".to_string(),
+                side: FusedInt64Side::Right,
+                values: &right_values,
+            },
+        ];
+
+        let plan = DenseI64InnerOutputPlan {
+            left_keys: &left_keys,
+            min,
+            max,
+            offsets: &offsets,
+            positions: &positions,
+            output_len: 6,
+        };
+        let actual = build_dense_i64_inner_output_data(&specs, &plan);
+
+        assert_eq!(actual[0], vec![20, 30, 30, 40, 50, 50]);
+        assert_eq!(actual[1], vec![100, 101, 104, 100, 102, 103]);
     }
 
     #[test]

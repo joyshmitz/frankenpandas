@@ -91,7 +91,7 @@ use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 // Rust) replaces the std SipHasher on these hot membership maps; public-return
 // maps (position_map_first, groupby) keep std HashMap to avoid an API change.
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -278,9 +278,178 @@ fn next_index_label_identity() -> u64 {
     INDEX_LABEL_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Int64UnitRangeLabels {
+    start: i64,
+    len: usize,
+}
+
+impl Int64UnitRangeLabels {
+    fn new(start: i64, len: usize) -> Option<Self> {
+        if len > 0 {
+            let last_offset = i64::try_from(len.checked_sub(1)?).ok()?;
+            start.checked_add(last_offset)?;
+        }
+        Some(Self { start, len })
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        let mut labels = Vec::with_capacity(self.len);
+        for offset in 0..self.len {
+            let offset = i64::try_from(offset).expect("validated Int64 unit range length");
+            labels.push(IndexLabel::Int64(
+                self.start
+                    .checked_add(offset)
+                    .expect("validated Int64 unit range end"),
+            ));
+        }
+        labels
+    }
+
+    fn position(self, target: i64) -> Option<usize> {
+        let offset = target.checked_sub(self.start)?;
+        let offset = usize::try_from(offset).ok()?;
+        (offset < self.len).then_some(offset)
+    }
+
+    fn equals_slice(self, labels: &[IndexLabel]) -> bool {
+        labels.len() == self.len
+            && labels.iter().enumerate().all(|(offset, label)| {
+                let Ok(offset) = i64::try_from(offset) else {
+                    return false;
+                };
+                matches!(
+                    label,
+                    IndexLabel::Int64(value)
+                        if self.start.checked_add(offset).is_some_and(|expected| *value == expected)
+                )
+            })
+    }
+}
+
+struct IndexLabels {
+    materialized: OnceLock<Vec<IndexLabel>>,
+    int64_unit_range: Option<Int64UnitRangeLabels>,
+}
+
+impl IndexLabels {
+    fn new(labels: Vec<IndexLabel>) -> Self {
+        let materialized = OnceLock::new();
+        let _ = materialized.set(labels);
+        Self {
+            materialized,
+            int64_unit_range: None,
+        }
+    }
+
+    fn new_int64_unit_range(start: i64, len: usize) -> Option<Self> {
+        Some(Self {
+            materialized: OnceLock::new(),
+            int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
+        })
+    }
+
+    fn as_slice(&self) -> &[IndexLabel] {
+        self.materialized
+            .get_or_init(|| {
+                self.int64_unit_range
+                    .expect("lazy index labels require a backing range")
+                    .materialize()
+            })
+            .as_slice()
+    }
+
+    fn len(&self) -> usize {
+        self.int64_unit_range
+            .map_or_else(|| self.as_slice().len(), |range| range.len)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
+        self.int64_unit_range
+    }
+}
+
+impl Clone for IndexLabels {
+    fn clone(&self) -> Self {
+        let materialized = OnceLock::new();
+        if let Some(labels) = self.materialized.get() {
+            let _ = materialized.set(labels.clone());
+        }
+        Self {
+            materialized,
+            int64_unit_range: self.int64_unit_range,
+        }
+    }
+}
+
+impl Default for IndexLabels {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl fmt::Debug for IndexLabels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl PartialEq for IndexLabels {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.int64_unit_range, other.int64_unit_range) {
+            (Some(left), Some(right)) => left == right,
+            (Some(range), None) => range.equals_slice(other.as_slice()),
+            (None, Some(range)) => range.equals_slice(self.as_slice()),
+            (None, None) => self.as_slice() == other.as_slice(),
+        }
+    }
+}
+
+impl Eq for IndexLabels {}
+
+impl std::ops::Deref for IndexLabels {
+    type Target = [IndexLabel];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a IndexLabels {
+    type Item = &'a IndexLabel;
+    type IntoIter = std::slice::Iter<'a, IndexLabel>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl Serialize for IndexLabels {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IndexLabels {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<IndexLabel>::deserialize(deserializer).map(Self::new)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
-    labels: Vec<IndexLabel>,
+    #[serde(default)]
+    labels: IndexLabels,
     /// Optional name for the index (matches pandas `Index.name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -327,7 +496,7 @@ impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
         Self {
-            labels,
+            labels: IndexLabels::new(labels),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
@@ -374,6 +543,27 @@ impl Index {
         index
     }
 
+    /// Construct an index whose labels are the dense unit range
+    /// `start..start+len`, without allocating the label vector until a caller
+    /// asks for label materialization.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn new_known_unique_int64_unit_range(start: i64, len: usize) -> Self {
+        let labels = IndexLabels::new_int64_unit_range(start, len)
+            .expect("validated Int64 unit range bounds");
+        let index = Self {
+            labels,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        };
+        let _ = index.duplicate_cache.set(false);
+        let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
+        index
+    }
+
     #[must_use]
     pub fn from_i64(values: Vec<i64>) -> Self {
         Self::new(values.into_iter().map(IndexLabel::from).collect())
@@ -406,7 +596,15 @@ impl Index {
 
     #[must_use]
     pub fn labels(&self) -> &[IndexLabel] {
-        &self.labels
+        self.labels.as_slice()
+    }
+
+    #[must_use]
+    #[doc(hidden)]
+    pub fn int64_unit_range_labels(&self) -> Option<(i64, usize)> {
+        self.labels
+            .int64_unit_range()
+            .map(|range| (range.start, range.len))
     }
 
     #[must_use]
@@ -415,7 +613,7 @@ impl Index {
         F: FnOnce(&[IndexLabel]) -> String,
     {
         self.semantic_fingerprint_cache
-            .get_or_init(|| compute(&self.labels))
+            .get_or_init(|| compute(self.labels()))
             .clone()
     }
 
@@ -495,9 +693,12 @@ impl Index {
 
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
+        if self.labels.int64_unit_range().is_some() {
+            return false;
+        }
         *self
             .duplicate_cache
-            .get_or_init(|| detect_duplicates(&self.labels))
+            .get_or_init(|| detect_duplicates(self.labels()))
     }
 
     /// Whether all index labels are unique.
@@ -519,9 +720,12 @@ impl Index {
     /// AG-13: Lazily detect and cache the sort order of this index.
     #[must_use]
     fn sort_order(&self) -> SortOrder {
+        if self.labels.int64_unit_range().is_some() {
+            return SortOrder::AscendingInt64;
+        }
         *self
             .sort_order_cache
-            .get_or_init(|| detect_sort_order(&self.labels))
+            .get_or_init(|| detect_sort_order(self.labels()))
     }
 
     /// Returns `true` if this index is sorted (strictly ascending, no duplicates).
@@ -536,6 +740,9 @@ impl Index {
     /// For unsorted indexes, falls back to linear scan (O(n)).
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
+        if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_unit_range(), needle) {
+            return range.position(*target);
+        }
         match self.sort_order() {
             SortOrder::AscendingInt64 => {
                 if let IndexLabel::Int64(target) = needle {
@@ -1256,7 +1463,7 @@ impl Index {
     /// that need ownership without manually cloning via `labels()`.
     #[must_use]
     pub fn to_list(&self) -> Vec<IndexLabel> {
-        self.labels.clone()
+        self.labels().to_vec()
     }
 
     /// Stringify each label using its `Display` impl.
@@ -1337,7 +1544,7 @@ impl Index {
                 length: self.labels.len(),
             });
         }
-        let mut labels = self.labels.clone();
+        let mut labels = self.labels().to_vec();
         labels.insert(loc, item);
         Ok(self.propagate_name(Self::new(labels)))
     }
@@ -1353,7 +1560,7 @@ impl Index {
                 length: self.labels.len(),
             });
         }
-        let mut labels = self.labels.clone();
+        let mut labels = self.labels().to_vec();
         labels.remove(loc);
         Ok(self.propagate_name(Self::new(labels)))
     }
@@ -1365,7 +1572,7 @@ impl Index {
     /// `self`.
     #[must_use]
     pub fn append(&self, other: &Self) -> Self {
-        let mut labels = self.labels.clone();
+        let mut labels = self.labels().to_vec();
         labels.extend(other.labels.iter().cloned());
         self.propagate_name(Self::new(labels))
     }
@@ -13083,6 +13290,26 @@ mod tests {
         assert_eq!(first, "labels:3");
         assert_eq!(second, "labels:3");
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn int64_unit_range_index_preserves_materialized_surface() {
+        let index = Index::new_known_unique_int64_unit_range(-2, 4).rename_index(Some("idx"));
+        let reference = Index::new(vec![
+            IndexLabel::Int64(-2),
+            IndexLabel::Int64(-1),
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+        ])
+        .rename_index(Some("idx"));
+
+        assert_eq!(index.len(), 4);
+        assert!(!index.has_duplicates());
+        assert!(index.is_sorted());
+        assert_eq!(index.position(&IndexLabel::Int64(0)), Some(2));
+        assert_eq!(index.position(&IndexLabel::Int64(2)), None);
+        assert_eq!(index.labels(), reference.labels());
+        assert_eq!(index, reference);
     }
 
     #[test]

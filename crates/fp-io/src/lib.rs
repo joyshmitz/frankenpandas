@@ -738,6 +738,11 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
     }
 }
 
+fn csv_default_unit_range_index(row_count: i64) -> Index {
+    let row_len = usize::try_from(row_count).expect("CSV row count must be non-negative");
+    Index::new_known_unique_int64_unit_range(0, row_len)
+}
+
 fn build_typed_numeric_csv_frame(
     headers: &[String],
     typed_columns: Vec<CsvTypedColumnValues>,
@@ -754,7 +759,7 @@ fn build_typed_numeric_csv_frame(
         column_order.push(name);
     }
 
-    let index = Index::from_i64((0..row_count).collect());
+    let index = csv_default_unit_range_index(row_count);
     DataFrame::new_with_column_order(index, out_columns, column_order).map_err(IoError::from)
 }
 
@@ -1225,7 +1230,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         column_order.push(name);
     }
 
-    let index = Index::from_i64((0..row_count).collect());
+    let index = csv_default_unit_range_index(row_count);
     Ok(DataFrame::new_with_column_order(
         index,
         out_columns,
@@ -4104,7 +4109,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             out_columns.insert(name.clone(), column);
             column_order.push(name);
         }
-        let index = Index::from_i64((0..row_count).collect());
+        let index = csv_default_unit_range_index(row_count);
         Ok(DataFrame::new_with_column_order(
             index,
             out_columns,
@@ -13766,6 +13771,7 @@ mod tests {
                 .is_none()
         );
         let object_frame = read_csv_str(object_input).expect("fallback read");
+        assert_eq!(object_frame.index().int64_unit_range_labels(), Some((0, 2)));
         assert_eq!(
             write_csv_string(&object_frame).expect("fallback write"),
             object_input
@@ -13783,6 +13789,7 @@ mod tests {
 
         assert_eq!(fast.column("i").expect("i").dtype(), DType::Int64);
         assert_eq!(fast.column("f").expect("f").dtype(), DType::Float64);
+        assert_eq!(fast.index().int64_unit_range_labels(), Some((0, 3)));
         assert_eq!(fast.index().labels()[2], IndexLabel::Int64(2));
         assert_eq!(fast.column("i").expect("i").values()[2], Scalar::Int64(3));
         assert_eq!(
@@ -14025,6 +14032,7 @@ mod tests {
             ..Default::default()
         };
         let frame = read_csv_with_options("c\ntrue\nfalse\nmaybe\n", &tsv).expect("read");
+        assert_eq!(frame.index().int64_unit_range_labels(), Some((0, 3)));
         let out = write_csv_string(&frame).expect("write");
         assert_eq!(out, "c\ntrue\nfalse\nmaybe\n");
 

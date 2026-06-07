@@ -6259,11 +6259,16 @@ mod tests {
         ])
         .unwrap();
 
+        // Verified vs live pandas 2.2.3 (br-frankenpandas-k75hq):
+        // pd.eval('-2 ** 2') -> -4 (int) and pd.eval('(-2) ** 2') -> 4 (int).
+        // int ** int stays integer (numpy/pandas semantics); the old Float64
+        // expectations codified FP's pre-typed-pow behavior. The precedence
+        // property under test is unchanged: unary minus binds LOOSER than **.
         let result = super::eval_str("-2 ** 2", &frame, &policy, &mut ledger).unwrap();
-        assert_eq!(result.values()[0], Scalar::Float64(-4.0));
+        assert_eq!(result.values()[0], Scalar::Int64(-4));
 
         let result = super::eval_str("(-2) ** 2", &frame, &policy, &mut ledger).unwrap();
-        assert_eq!(result.values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.values()[0], Scalar::Int64(4));
     }
 
     #[test]

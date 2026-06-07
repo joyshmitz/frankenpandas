@@ -4908,16 +4908,21 @@ fn readme_scalar_inspection_methods() -> Result<(), Box<dyn std::error::Error>> 
 /// uncovered.
 #[test]
 fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // Canonical aliases are the pandas 2.x freqstr forms
+    // (br-frankenpandas-thxl7, verified live pandas 2.2.3: Period freqstr
+    // for Y/Q/M/W/D/B/h/min/s is exactly this list). parse() still accepts
+    // the legacy A/Q/W/H/T/S spellings (checked below), but alias()
+    // round-trips the canonical form.
     let cases: [(PeriodFreq, &str); 9] = [
-        (PeriodFreq::Annual, "A"),
-        (PeriodFreq::Quarterly, "Q"),
+        (PeriodFreq::Annual, "Y-DEC"),
+        (PeriodFreq::Quarterly, "Q-DEC"),
         (PeriodFreq::Monthly, "M"),
-        (PeriodFreq::Weekly, "W"),
+        (PeriodFreq::Weekly, "W-SUN"),
         (PeriodFreq::Daily, "D"),
         (PeriodFreq::Business, "B"),
-        (PeriodFreq::Hourly, "H"),
-        (PeriodFreq::Minutely, "T"),
-        (PeriodFreq::Secondly, "S"),
+        (PeriodFreq::Hourly, "h"),
+        (PeriodFreq::Minutely, "min"),
+        (PeriodFreq::Secondly, "s"),
     ];
 
     // Each variant's alias() returns the canonical pandas alias char.
@@ -4934,12 +4939,20 @@ fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::
         assert_eq!(parsed_lower, freq);
     }
 
-    // Long-form aliases also parse.
+    // Long-form and LEGACY aliases also parse (pandas accepts the
+    // deprecated A/H/T/S spellings on input even though freqstr emits the
+    // canonical forms above).
     assert_eq!(PeriodFreq::parse("ANNUAL"), Some(PeriodFreq::Annual));
     assert_eq!(PeriodFreq::parse("YEARLY"), Some(PeriodFreq::Annual));
     assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
+    assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
     assert_eq!(PeriodFreq::parse("MONTHLY"), Some(PeriodFreq::Monthly));
     assert_eq!(PeriodFreq::parse("MIN"), Some(PeriodFreq::Minutely));
+    assert_eq!(PeriodFreq::parse("T"), Some(PeriodFreq::Minutely));
+    assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
+    assert_eq!(PeriodFreq::parse("S"), Some(PeriodFreq::Secondly));
+    assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
+    assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
 
     // Garbage input returns None.
     assert_eq!(PeriodFreq::parse("garbage"), None);
@@ -4955,7 +4968,10 @@ fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::
 #[test]
 fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
     // ── Scalar Display ──────────────────────────────────────────
-    assert_eq!(format!("{}", Scalar::Bool(true)), "true");
+    // Python-style booleans (br-frankenpandas-thxl7): pandas renders
+    // True/False, not Rust's lowercase forms. Verified pandas 2.2.3.
+    assert_eq!(format!("{}", Scalar::Bool(true)), "True");
+    assert_eq!(format!("{}", Scalar::Bool(false)), "False");
     assert_eq!(format!("{}", Scalar::Int64(42)), "42");
     assert_eq!(format!("{}", Scalar::Utf8("hi".into())), "hi");
     assert_eq!(format!("{}", Scalar::Null(NullKind::NaN)), "NaN");

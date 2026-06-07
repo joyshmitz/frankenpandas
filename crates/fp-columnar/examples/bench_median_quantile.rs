@@ -6,9 +6,10 @@
 //! middle order-statistic(s) are needed, so select_nth_unstable is O(n).
 //! Bit-identical (order statistics depend only on values).
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -40,7 +41,10 @@ fn golden() -> String {
     out.push_str(&format!("median_neg:{}\n", ds(&neg.median())));
     out.push_str(&format!("median_one:{}\n", ds(&fcol(vec![7.5]).median())));
     out.push_str(&format!("median_empty:{}\n", ds(&fcol(vec![]).median())));
-    out.push_str(&format!("median_int:{}\n", ds(&icol(vec![5, 1, 3, 2, 4]).median())));
+    out.push_str(&format!(
+        "median_int:{}\n",
+        ds(&icol(vec![5, 1, 3, 2, 4]).median())
+    ));
 
     // quantiles across q
     for &q in &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 0.333] {
@@ -51,7 +55,12 @@ fn golden() -> String {
     // quantile with nulls (scalar collect path), out-of-range, empty
     let nf = Column::new(
         DType::Float64,
-        vec![Scalar::Float64(10.0), Scalar::Null(NullKind::NaN), Scalar::Float64(20.0), Scalar::Float64(30.0)],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+        ],
     )
     .unwrap();
     out.push_str(&format!("q_null:{}\n", ds(&nf.quantile(0.5))));
@@ -68,7 +77,9 @@ fn main() {
     let mut x: u64 = 0x1234_5678_9abc_def0;
     let data: Vec<f64> = (0..n)
         .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((x >> 11) as f64) / (1u64 << 53) as f64
         })
         .collect();

@@ -7,9 +7,10 @@
 //! histogram tallies in O(n) with no hashing, and the winners come out already
 //! ascending (slot order) — no sort. Bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::Scalar;
-use std::time::Instant;
 
 /// splitmix64 — deterministic, no rand dependency.
 struct Rng(u64);
@@ -49,14 +50,19 @@ fn dump(col: &Column) -> String {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
 
     if mode == "golden" {
         // A spread of sizes/ranges, including ties, to certify equivalence.
         let mut out = String::new();
         for (n, range) in [(1000usize, 17i64), (5000, 251), (20000, 1024)] {
             let col = build(n, range);
-            out.push_str(&format!("n={n},range={range}:{}\n", dump(&col.mode().unwrap())));
+            out.push_str(&format!(
+                "n={n},range={range}:{}\n",
+                dump(&col.mode().unwrap())
+            ));
         }
         print!("{out}");
         return;

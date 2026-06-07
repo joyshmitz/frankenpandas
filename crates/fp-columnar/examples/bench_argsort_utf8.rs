@@ -11,9 +11,10 @@
 //! counting passes are stable so equal strings keep original order, matching the
 //! stable `sort_by`.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, Scalar};
-use std::time::Instant;
 
 fn scol(v: Vec<&str>) -> Column {
     Column::new(
@@ -43,20 +44,48 @@ fn golden() -> String {
     // prefixes, ties (dup strings), empty string, multi-byte UTF-8, lengths
     // straddling the prefix boundary — exercises EOS bucket order + stability.
     let a = scol(vec![
-        "banana", "apple", "app", "", "apple", "cherry", "äpfel", "app", "apricot", "b",
-        "applesauce", "Zebra", "zebra", "apple\u{0}x", "apple",
+        "banana",
+        "apple",
+        "app",
+        "",
+        "apple",
+        "cherry",
+        "äpfel",
+        "app",
+        "apricot",
+        "b",
+        "applesauce",
+        "Zebra",
+        "zebra",
+        "apple\u{0}x",
+        "apple",
     ]);
     out.push_str(&format!("asc:{}\n", dump_perm(&a.argsort_with(true))));
     out.push_str(&format!("desc:{}\n", dump_perm(&a.argsort_with(false))));
-    out.push_str(&format!("sv_asc:{}\n", dump_col(&a.sort_values(true).unwrap())));
-    out.push_str(&format!("sv_desc:{}\n", dump_col(&a.sort_values(false).unwrap())));
+    out.push_str(&format!(
+        "sv_asc:{}\n",
+        dump_col(&a.sort_values(true).unwrap())
+    ));
+    out.push_str(&format!(
+        "sv_desc:{}\n",
+        dump_col(&a.sort_values(false).unwrap())
+    ));
     // all-equal: pure stability check
     let e = scol(vec!["x", "x", "x", "x"]);
     out.push_str(&format!("same_asc:{}\n", dump_perm(&e.argsort_with(true))));
-    out.push_str(&format!("same_desc:{}\n", dump_perm(&e.argsort_with(false))));
+    out.push_str(&format!(
+        "same_desc:{}\n",
+        dump_perm(&e.argsort_with(false))
+    ));
     // single + empty
-    out.push_str(&format!("single:{}\n", dump_perm(&scol(vec!["q"]).argsort_with(true))));
-    out.push_str(&format!("empty:{}\n", dump_perm(&scol(vec![]).argsort_with(true))));
+    out.push_str(&format!(
+        "single:{}\n",
+        dump_perm(&scol(vec!["q"]).argsort_with(true))
+    ));
+    out.push_str(&format!(
+        "empty:{}\n",
+        dump_perm(&scol(vec![]).argsort_with(true))
+    ));
     // missing values -> fallback path (na last either direction)
     let m = Column::new(
         DType::Utf8,
@@ -86,7 +115,9 @@ impl Rng {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
 
     if mode == "golden" {
         print!("{}", golden());

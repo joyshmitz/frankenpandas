@@ -7,9 +7,12 @@
 //! and re-ingests typed (mirror of abs/round/floor). NaN results (sqrt(-1),
 //! log(-1), asin(2), ...) are re-marked missing exactly as the scalar path did.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
+
+type ColumnOp = fn(&Column) -> Result<Column, fp_columnar::ColumnError>;
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -32,7 +35,16 @@ fn golden() -> String {
     // Edge inputs: negatives (domain errors -> NaN), 0, -0.0, >1 (asin/acos),
     // <1 (acosh), large, fractional.
     let f = fcol(vec![
-        0.5, 1.5, -1.0, -0.5, 0.0, -0.0, 2.0, 100.0, 0.25, 3.14159,
+        0.5,
+        1.5,
+        -1.0,
+        -0.5,
+        0.0,
+        -0.0,
+        2.0,
+        100.0,
+        0.25,
+        std::f64::consts::PI,
     ]);
     let i = Column::new(
         DType::Int64,
@@ -55,7 +67,7 @@ fn golden() -> String {
     )
     .unwrap();
 
-    let ops: Vec<(&str, fn(&Column) -> Result<Column, fp_columnar::ColumnError>)> = vec![
+    let ops: Vec<(&str, ColumnOp)> = vec![
         ("sqrt", Column::sqrt),
         ("exp", Column::exp),
         ("log", Column::log),

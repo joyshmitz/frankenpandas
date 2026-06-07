@@ -6,9 +6,10 @@
 //! dedups via a seen-bitset indexed by (v - min), hash-free, first-seen order
 //! preserved. Non-bounded / non-Int64 / nullable columns keep the HashSet path.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn icol(v: Vec<i64>) -> Column {
     Column::new(DType::Int64, v.into_iter().map(Scalar::Int64).collect()).unwrap()
@@ -31,22 +32,42 @@ fn dump(c: &Column) -> String {
 fn golden() -> String {
     let mut out = String::new();
     // bounded int with dups + negatives (dense path), first-seen order.
-    out.push_str(&format!("dense:{}\n", dump(&icol(vec![3, 1, 3, -2, 1, 5, -2, 3]).unique().unwrap())));
-    out.push_str(&format!("single:{}\n", dump(&icol(vec![7, 7, 7]).unique().unwrap())));
-    out.push_str(&format!("empty:{}\n", dump(&icol(vec![]).unique().unwrap())));
+    out.push_str(&format!(
+        "dense:{}\n",
+        dump(&icol(vec![3, 1, 3, -2, 1, 5, -2, 3]).unique().unwrap())
+    ));
+    out.push_str(&format!(
+        "single:{}\n",
+        dump(&icol(vec![7, 7, 7]).unique().unwrap())
+    ));
+    out.push_str(&format!(
+        "empty:{}\n",
+        dump(&icol(vec![]).unique().unwrap())
+    ));
     // huge-range int (range > cap) -> HashSet fallback
-    out.push_str(&format!("wide:{}\n", dump(&icol(vec![0, 1_000_000_000, 0, 5]).unique().unwrap())));
+    out.push_str(&format!(
+        "wide:{}\n",
+        dump(&icol(vec![0, 1_000_000_000, 0, 5]).unique().unwrap())
+    ));
     // nullable int -> HashSet path (missing skipped)
     let ni = Column::new(
         DType::Int64,
-        vec![Scalar::Int64(2), Scalar::Null(NullKind::NaN), Scalar::Int64(2), Scalar::Int64(9)],
+        vec![
+            Scalar::Int64(2),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(2),
+            Scalar::Int64(9),
+        ],
     )
     .unwrap();
     out.push_str(&format!("nullable:{}\n", dump(&ni.unique().unwrap())));
     // strings -> HashSet path
     let s = Column::new(
         DType::Utf8,
-        ["b", "a", "b", "c", "a"].iter().map(|x| Scalar::Utf8((*x).into())).collect(),
+        ["b", "a", "b", "c", "a"]
+            .iter()
+            .map(|x| Scalar::Utf8((*x).into()))
+            .collect(),
     )
     .unwrap();
     out.push_str(&format!("utf8:{}\n", dump(&s.unique().unwrap())));
@@ -59,13 +80,17 @@ fn main() {
 
     // Bounded Int64, low cardinality but large n (heavy dedup work).
     let n: usize = 2_000_000;
-    let mut x: u64 = 0xbead_5;
-    let col = icol((0..n)
-        .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (x >> 40) as i64 % 100_000
-        })
-        .collect());
+    let mut x: u64 = 0x000b_ead5;
+    let col = icol(
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 40) as i64 % 100_000
+            })
+            .collect(),
+    );
 
     let _ = col.unique().unwrap(); // warmup
 

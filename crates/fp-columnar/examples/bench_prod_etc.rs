@@ -7,9 +7,10 @@
 //! (prod mirrors sum; nan_to_num replaces ±Inf; sinc via typed_float_unary).
 //! Bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -46,14 +47,27 @@ fn golden() -> String {
 
     // prod: all-valid f64 (incl -0.0, large -> overflow to Inf), Int64, empty,
     // nullable.
-    out.push_str(&format!("prod_f:{}\n", dumps(&fcol(vec![1.5, 2.0, -3.0, 0.5]).prod())));
-    out.push_str(&format!("prod_zero:{}\n", dumps(&fcol(vec![2.0, -0.0, 3.0]).prod())));
+    out.push_str(&format!(
+        "prod_f:{}\n",
+        dumps(&fcol(vec![1.5, 2.0, -3.0, 0.5]).prod())
+    ));
+    out.push_str(&format!(
+        "prod_zero:{}\n",
+        dumps(&fcol(vec![2.0, -0.0, 3.0]).prod())
+    ));
     out.push_str(&format!("prod_empty:{}\n", dumps(&fcol(vec![]).prod())));
-    out.push_str(&format!("prod_big:{}\n", dumps(&fcol(vec![1e300, 1e300]).prod())));
+    out.push_str(&format!(
+        "prod_big:{}\n",
+        dumps(&fcol(vec![1e300, 1e300]).prod())
+    ));
     out.push_str(&format!("prod_i:{}\n", dumps(&icol(vec![2, 3, 4]).prod())));
     let nf = Column::new(
         DType::Float64,
-        vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(4.0)],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+        ],
     )
     .unwrap();
     out.push_str(&format!("prod_nf:{}\n", dumps(&nf.prod())));
@@ -61,13 +75,19 @@ fn golden() -> String {
     // nan_to_num: all-valid f64 with ±Inf, Int64, nullable (scalar path).
     let inf = fcol(vec![1.0, f64::INFINITY, -2.0, f64::NEG_INFINITY, 0.5]);
     out.push_str(&format!("ntn_f:{}\n", dumpcol(&inf.nan_to_num().unwrap())));
-    out.push_str(&format!("ntn_i:{}\n", dumpcol(&icol(vec![5, -7]).nan_to_num().unwrap())));
+    out.push_str(&format!(
+        "ntn_i:{}\n",
+        dumpcol(&icol(vec![5, -7]).nan_to_num().unwrap())
+    ));
     out.push_str(&format!("ntn_nf:{}\n", dumpcol(&nf.nan_to_num().unwrap())));
 
     // sinc: 0/-0.0/values, Int64, nullable.
     let sc = fcol(vec![0.0, -0.0, 0.5, 1.0, -1.0, 2.5]);
     out.push_str(&format!("sinc_f:{}\n", dumpcol(&sc.sinc().unwrap())));
-    out.push_str(&format!("sinc_i:{}\n", dumpcol(&icol(vec![0, 1, 2]).sinc().unwrap())));
+    out.push_str(&format!(
+        "sinc_i:{}\n",
+        dumpcol(&icol(vec![0, 1, 2]).sinc().unwrap())
+    ));
     out.push_str(&format!("sinc_nf:{}\n", dumpcol(&nf.sinc().unwrap())));
     out
 }

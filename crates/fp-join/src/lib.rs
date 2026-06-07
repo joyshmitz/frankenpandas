@@ -1606,6 +1606,12 @@ enum DenseI64LaneData {
     /// memory, expanded lazily by `Column::from_i64_repeat_runs` consumers
     /// (br-frankenpandas-3ad4n).
     RepeatRuns(Vec<(i64, usize)>),
+    /// Right lane carried as repeated slices of one bucket-order value tape —
+    /// O(right + matched) memory until a consumer forces a contiguous view.
+    RepeatedSlices {
+        data: Vec<i64>,
+        segments: Vec<(usize, usize)>,
+    },
     /// Fully materialized contiguous values.
     Full(Vec<i64>),
 }
@@ -1653,7 +1659,10 @@ fn build_dense_i64_inner_output_data(
         matched.push((left_pos, start, run_len));
     }
     debug_assert_eq!(
-        matched.iter().map(|&(_, _, run_len)| run_len).sum::<usize>(),
+        matched
+            .iter()
+            .map(|&(_, _, run_len)| run_len)
+            .sum::<usize>(),
         plan.output_len
     );
 
@@ -1661,10 +1670,15 @@ fn build_dense_i64_inner_output_data(
     // only pay when the average fanout is >= 2 (1:1 joins stay materialized).
     let use_repeat_runs = plan.output_len >= matched.len().saturating_mul(2);
 
+    let use_repeated_slices = use_repeat_runs;
+
     let full_specs: Vec<usize> = specs
         .iter()
         .enumerate()
-        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Left)))
+        .filter(|(_, spec)| {
+            !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Left))
+                && !(use_repeated_slices && matches!(spec.side, FusedInt64Side::Right))
+        })
         .map(|(idx, _)| idx)
         .collect();
 
@@ -1741,9 +1755,8 @@ fn build_dense_i64_inner_output_data(
                 handles.push(scope.spawn(move || {
                     let mut cursor = 0usize;
                     for &(left_pos, start, run_len) in &matched[matched_start..matched_end] {
-                        for (slice, (&spec_idx, tape)) in bundle
-                            .iter_mut()
-                            .zip(full_specs.iter().zip(tapes.iter()))
+                        for (slice, (&spec_idx, tape)) in
+                            bundle.iter_mut().zip(full_specs.iter().zip(tapes.iter()))
                         {
                             match specs[spec_idx].side {
                                 FusedInt64Side::Left => {
@@ -1752,9 +1765,7 @@ fn build_dense_i64_inner_output_data(
                                 }
                                 FusedInt64Side::Right => {
                                     slice[cursor..cursor + run_len].copy_from_slice(
-                                        &tape
-                                            .as_ref()
-                                            .expect("right spec must have a bucket tape")
+                                        &tape.as_ref().expect("right spec must have a bucket tape")
                                             [start..start + run_len],
                                     );
                                 }
@@ -1807,6 +1818,18 @@ fn build_dense_i64_inner_output_data(
                         .map(|&(left_pos, _, run_len)| (spec.values[left_pos], run_len))
                         .collect(),
                 )
+            } else if use_repeated_slices && matches!(spec.side, FusedInt64Side::Right) {
+                DenseI64LaneData::RepeatedSlices {
+                    data: plan
+                        .positions
+                        .iter()
+                        .map(|&right_pos| spec.values[right_pos])
+                        .collect(),
+                    segments: matched
+                        .iter()
+                        .map(|&(_, start, run_len)| (start, run_len))
+                        .collect(),
+                }
             } else {
                 DenseI64LaneData::Full(
                     full_iter
@@ -1990,6 +2013,9 @@ fn build_single_key_dense_i64_inner_merge_output(
     for (spec, lane) in specs.into_iter().zip(output_data) {
         let column = match lane {
             DenseI64LaneData::RepeatRuns(runs) => Column::from_i64_repeat_runs(runs),
+            DenseI64LaneData::RepeatedSlices { data, segments } => {
+                Column::from_i64_repeated_slices(data, segments)
+            }
             DenseI64LaneData::Full(data) => Column::from_i64_values(data),
         };
         debug_assert_eq!(column.len(), output_len);
@@ -2245,10 +2271,8 @@ fn build_single_key_dense_i64_left_merge_output(
             boundaries.push((plan.len(), output_len));
             let chunk_count = boundaries.len() - 1;
 
-            let mut column_bufs: Vec<Vec<i64>> = full_specs
-                .iter()
-                .map(|_| vec![0i64; output_len])
-                .collect();
+            let mut column_bufs: Vec<Vec<i64>> =
+                full_specs.iter().map(|_| vec![0i64; output_len]).collect();
             let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
                 .map(|_| Vec::with_capacity(full_specs.len()))
                 .collect();
@@ -2312,10 +2336,7 @@ fn build_single_key_dense_i64_left_merge_output(
             });
             full_data = column_bufs;
         } else {
-            full_data = full_specs
-                .iter()
-                .map(|_| vec![0i64; output_len])
-                .collect();
+            full_data = full_specs.iter().map(|_| vec![0i64; output_len]).collect();
             let mut cursor = 0usize;
             for &(left_pos, start, run_len) in &plan {
                 for (buf, (&spec_idx, tape)) in full_data
@@ -2329,9 +2350,7 @@ fn build_single_key_dense_i64_left_merge_output(
                         FusedInt64Side::Right => {
                             if start != UNMATCHED {
                                 buf[cursor..cursor + run_len].copy_from_slice(
-                                    &tape
-                                        .as_ref()
-                                        .expect("right spec must have a bucket tape")
+                                    &tape.as_ref().expect("right spec must have a bucket tape")
                                         [start..start + run_len],
                                 );
                             }
@@ -2594,10 +2613,8 @@ fn build_single_key_dense_i64_right_merge_output(
             boundaries.push((plan.len(), output_len));
             let chunk_count = boundaries.len() - 1;
 
-            let mut column_bufs: Vec<Vec<i64>> = full_specs
-                .iter()
-                .map(|_| vec![0i64; output_len])
-                .collect();
+            let mut column_bufs: Vec<Vec<i64>> =
+                full_specs.iter().map(|_| vec![0i64; output_len]).collect();
             let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
                 .map(|_| Vec::with_capacity(full_specs.len()))
                 .collect();
@@ -2658,10 +2675,7 @@ fn build_single_key_dense_i64_right_merge_output(
             });
             full_data = column_bufs;
         } else {
-            full_data = full_specs
-                .iter()
-                .map(|_| vec![0i64; output_len])
-                .collect();
+            full_data = full_specs.iter().map(|_| vec![0i64; output_len]).collect();
             let mut cursor = 0usize;
             for &(right_pos, start, run_len) in &plan {
                 for (buf, (&spec_idx, tape)) in full_data
@@ -2675,9 +2689,7 @@ fn build_single_key_dense_i64_right_merge_output(
                         FusedInt64Side::Left => {
                             if start != UNMATCHED {
                                 buf[cursor..cursor + run_len].copy_from_slice(
-                                    &tape
-                                        .as_ref()
-                                        .expect("left spec must have a bucket tape")
+                                    &tape.as_ref().expect("left spec must have a bucket tape")
                                         [start..start + run_len],
                                 );
                             }
@@ -6954,7 +6966,10 @@ mod tests {
         // 4 matched left rows -> 6 output rows: avg fanout < 2, so the left
         // lane stays fully materialized alongside the right lane.
         assert_eq!(lane_expanded(&actual[0]), vec![20, 30, 30, 40, 50, 50]);
-        assert_eq!(lane_expanded(&actual[1]), vec![100, 101, 104, 100, 102, 103]);
+        assert_eq!(
+            lane_expanded(&actual[1]),
+            vec![100, 101, 104, 100, 102, 103]
+        );
         assert!(matches!(actual[0], DenseI64LaneData::Full(_)));
         assert!(matches!(actual[1], DenseI64LaneData::Full(_)));
     }
@@ -6968,6 +6983,13 @@ mod tests {
                 }
                 out
             }
+            DenseI64LaneData::RepeatedSlices { data, segments } => {
+                let mut out = Vec::new();
+                for &(start, len) in segments {
+                    out.extend_from_slice(&data[start..start + len]);
+                }
+                out
+            }
             DenseI64LaneData::Full(data) => data.clone(),
         }
     }
@@ -6975,8 +6997,8 @@ mod tests {
     #[test]
     fn dense_i64_inner_high_fanout_emits_repeat_run_left_lanes() {
         // 2 matched left rows, each matching 3 right rows -> avg fanout 3:
-        // left lane must come back as repeat runs whose expansion equals the
-        // full fill, right lane stays materialized.
+        // left lane must come back as repeat runs and the right lane as
+        // repeated slices. Their expansion equals the old full fill.
         let left_keys = vec![1, 7, 2];
         let min = 1;
         let max = 2;
@@ -7008,9 +7030,12 @@ mod tests {
         let actual = build_dense_i64_inner_output_data(&specs, &plan);
 
         assert!(matches!(actual[0], DenseI64LaneData::RepeatRuns(_)));
-        assert!(matches!(actual[1], DenseI64LaneData::Full(_)));
+        assert!(matches!(actual[1], DenseI64LaneData::RepeatedSlices { .. }));
         assert_eq!(lane_expanded(&actual[0]), vec![10, 10, 10, 30, 30, 30]);
-        assert_eq!(lane_expanded(&actual[1]), vec![100, 102, 104, 101, 103, 105]);
+        assert_eq!(
+            lane_expanded(&actual[1]),
+            vec![100, 102, 104, 101, 103, 105]
+        );
 
         // The lazy Column built from the runs is indistinguishable from the
         // eagerly materialized one (values, slice view, length, equality).

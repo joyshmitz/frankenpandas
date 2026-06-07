@@ -8,9 +8,12 @@
 //! and re-ingests via from_f64_values. Bit-identical (incl NaN-producing cases:
 //! from_f64_values re-marks NaN missing exactly as Self::new does).
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
+
+type BinaryColumnOp = fn(&Column, &Column) -> Result<Column, fp_columnar::ColumnError>;
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -42,16 +45,24 @@ fn golden() -> String {
     let bi = icol(vec![2, 4, -3, 0, 5]);
     let na = Column::new(
         DType::Float64,
-        vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(2.0),
+        ],
     )
     .unwrap();
     let nb = Column::new(
         DType::Float64,
-        vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Null(NullKind::NaN)],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+        ],
     )
     .unwrap();
 
-    let ops: Vec<(&str, fn(&Column, &Column) -> Result<Column, fp_columnar::ColumnError>)> = vec![
+    let ops: Vec<(&str, BinaryColumnOp)> = vec![
         ("atan2", Column::atan2),
         ("hypot", Column::hypot),
         ("copysign", Column::copysign),

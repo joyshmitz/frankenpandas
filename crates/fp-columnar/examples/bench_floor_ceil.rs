@@ -6,9 +6,10 @@
 //! the op over its contiguous buffer and re-ingests typed (mirror of abs/round).
 //! Output is bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn golden() -> String {
     let mut out = String::new();

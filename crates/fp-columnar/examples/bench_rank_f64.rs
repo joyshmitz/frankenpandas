@@ -9,9 +9,10 @@
 //! -0.0==0.0) and the radix is stable (ties keep original order). NaN routes to
 //! the unchanged comparator fallback.
 
-use fp_columnar::Column;
-use fp_types::{DType, NullKind, Scalar};
 use std::time::Instant;
+
+use fp_columnar::Column;
+use fp_types::{DType, Scalar};
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -39,9 +40,18 @@ fn golden() -> String {
         out.push_str(&format!("{m}_asc:{}\n", dump(&a.rank(m, true).unwrap())));
         out.push_str(&format!("{m}_desc:{}\n", dump(&a.rank(m, false).unwrap())));
     }
-    out.push_str(&format!("same:{}\n", dump(&fcol(vec![5.0, 5.0, 5.0]).rank("average", true).unwrap())));
-    out.push_str(&format!("single:{}\n", dump(&fcol(vec![9.0]).rank("min", true).unwrap())));
-    out.push_str(&format!("empty:{}\n", dump(&fcol(vec![]).rank("max", true).unwrap())));
+    out.push_str(&format!(
+        "same:{}\n",
+        dump(&fcol(vec![5.0, 5.0, 5.0]).rank("average", true).unwrap())
+    ));
+    out.push_str(&format!(
+        "single:{}\n",
+        dump(&fcol(vec![9.0]).rank("min", true).unwrap())
+    ));
+    out.push_str(&format!(
+        "empty:{}\n",
+        dump(&fcol(vec![]).rank("max", true).unwrap())
+    ));
     // NaN -> comparator fallback (NaN is missing, ranked NaN).
     let nan_col = Column::new(
         DType::Float64,
@@ -53,7 +63,10 @@ fn golden() -> String {
         ],
     )
     .unwrap();
-    out.push_str(&format!("nan_avg:{}\n", dump(&nan_col.rank("average", true).unwrap())));
+    out.push_str(&format!(
+        "nan_avg:{}\n",
+        dump(&nan_col.rank("average", true).unwrap())
+    ));
     out
 }
 
@@ -70,7 +83,9 @@ impl Rng {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
 
     if mode == "golden" {
         print!("{}", golden());

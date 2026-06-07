@@ -6,9 +6,10 @@
 //! column ranks via a value histogram + prefix sums (O(n)), bit-identical
 //! across all 5 methods x asc/desc (Int64 compares exactly, no f64 gate).
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn icol(v: Vec<i64>) -> Column {
     Column::new(DType::Int64, v.into_iter().map(Scalar::Int64).collect()).unwrap()
@@ -36,18 +37,42 @@ fn golden() -> String {
         out.push_str(&format!("{m}_desc:{}\n", dump(&a.rank(m, false).unwrap())));
     }
     // all-same, single, empty
-    out.push_str(&format!("same_avg:{}\n", dump(&icol(vec![5, 5, 5, 5]).rank("average", true).unwrap())));
-    out.push_str(&format!("single:{}\n", dump(&icol(vec![9]).rank("min", true).unwrap())));
-    out.push_str(&format!("empty:{}\n", dump(&icol(vec![]).rank("max", true).unwrap())));
+    out.push_str(&format!(
+        "same_avg:{}\n",
+        dump(&icol(vec![5, 5, 5, 5]).rank("average", true).unwrap())
+    ));
+    out.push_str(&format!(
+        "single:{}\n",
+        dump(&icol(vec![9]).rank("min", true).unwrap())
+    ));
+    out.push_str(&format!(
+        "empty:{}\n",
+        dump(&icol(vec![]).rank("max", true).unwrap())
+    ));
     // wide-range -> sort fallback
-    out.push_str(&format!("wide:{}\n", dump(&icol(vec![0, 1_000_000_000, 0, 5]).rank("min", true).unwrap())));
+    out.push_str(&format!(
+        "wide:{}\n",
+        dump(
+            &icol(vec![0, 1_000_000_000, 0, 5])
+                .rank("min", true)
+                .unwrap()
+        )
+    ));
     // nullable -> sort fallback (missing stays NaN)
     let ni = Column::new(
         DType::Int64,
-        vec![Scalar::Int64(2), Scalar::Null(NullKind::NaN), Scalar::Int64(1), Scalar::Int64(2)],
+        vec![
+            Scalar::Int64(2),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+        ],
     )
     .unwrap();
-    out.push_str(&format!("null_avg:{}\n", dump(&ni.rank("average", true).unwrap())));
+    out.push_str(&format!(
+        "null_avg:{}\n",
+        dump(&ni.rank("average", true).unwrap())
+    ));
     out
 }
 
@@ -57,12 +82,16 @@ fn main() {
 
     let n: usize = 2_000_000;
     let mut x: u64 = 0x4a14;
-    let col = icol((0..n)
-        .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (x >> 42) as i64 % 50_000
-        })
-        .collect());
+    let col = icol(
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 42) as i64 % 50_000
+            })
+            .collect(),
+    );
 
     let _ = col.rank("average", true).unwrap(); // warmup
 

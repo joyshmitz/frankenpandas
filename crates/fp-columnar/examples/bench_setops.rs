@@ -6,9 +6,10 @@
 //! — O(N·M) (setdiff1d also O(N²) for its first-seen dedup). A hash-set built
 //! once makes them O(N+M). Output order/dedup preserved exactly.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn icol(v: Vec<i64>) -> Column {
     Column::new(DType::Int64, v.into_iter().map(Scalar::Int64).collect()).unwrap()
@@ -17,7 +18,11 @@ fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
 }
 fn scol(v: &[&str]) -> Column {
-    Column::new(DType::Utf8, v.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap()
+    Column::new(
+        DType::Utf8,
+        v.iter().map(|s| Scalar::Utf8((*s).to_string())).collect(),
+    )
+    .unwrap()
 }
 
 fn dump(c: &Column) -> String {
@@ -61,7 +66,11 @@ fn golden() -> String {
     // with missing
     let na = Column::new(
         DType::Int64,
-        vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(2)],
+        vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(2),
+        ],
     )
     .unwrap();
     out.push_str(&format!("in_na:{}\n", dump(&na.in1d(&b).unwrap())));

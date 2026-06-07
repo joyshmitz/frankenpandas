@@ -6,12 +6,17 @@
 //! middle order-statistic(s) are needed, so select_nth_unstable is O(n).
 //! Bit-identical (order statistics depend only on values).
 
-use fp_columnar::Column;
-use fp_types::{DType, NullKind, Scalar};
 use std::time::Instant;
 
+use fp_columnar::Column;
+use fp_types::{DType, NullKind, Scalar};
+
 fn tdcol(v: Vec<i64>) -> Column {
-    Column::new(DType::Timedelta64, v.into_iter().map(Scalar::Timedelta64).collect()).unwrap()
+    Column::new(
+        DType::Timedelta64,
+        v.into_iter().map(Scalar::Timedelta64).collect(),
+    )
+    .unwrap()
 }
 
 fn ds(s: &Scalar) -> String {
@@ -60,13 +65,17 @@ fn main() {
     print!("GOLDEN_BEGIN\n{g}GOLDEN_END\n");
 
     let n: usize = 2_000_000;
-    let mut x: u64 = 0x7d4ed;
-    let col = tdcol((0..n)
-        .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (x >> 20) as i64 % 1_000_000_000
-        })
-        .collect());
+    let mut x: u64 = 0x0007_d4ed;
+    let col = tdcol(
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 20) as i64 % 1_000_000_000
+            })
+            .collect(),
+    );
 
     let _ = col.median(); // warmup
 

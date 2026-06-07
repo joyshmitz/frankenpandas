@@ -8,9 +8,10 @@
 //! order from a side Vec / the values iteration, or a full sort after
 //! collection (mode) — so swapping the hasher is bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
 
 fn scol(v: Vec<String>) -> Column {
     Column::new(DType::Utf8, v.into_iter().map(Scalar::Utf8).collect()).unwrap()
@@ -79,11 +80,12 @@ fn golden() -> String {
     )
     .unwrap();
     out.push_str(&format!("mode_f:{}\n", dump(&f.mode().unwrap())));
-    let b = scol(
-        ["c", "e", "a", "e"].iter().map(|s| s.to_string()).collect(),
-    );
+    let b = scol(["c", "e", "a", "e"].iter().map(|s| s.to_string()).collect());
     out.push_str(&format!("setdiff:{}\n", dump(&a.setdiff1d(&b).unwrap())));
-    out.push_str(&format!("intersect:{}\n", dump(&a.intersect1d(&b).unwrap())));
+    out.push_str(&format!(
+        "intersect:{}\n",
+        dump(&a.intersect1d(&b).unwrap())
+    ));
     out.push_str(&format!("setxor:{}\n", dump(&a.setxor1d(&b).unwrap())));
     out.push_str(&format!("in1d:{}\n", dump(&a.in1d(&b).unwrap())));
     out.push_str(&format!(
@@ -106,7 +108,9 @@ impl Rng {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
 
     if mode == "golden" {
         print!("{}", golden());

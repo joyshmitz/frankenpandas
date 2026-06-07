@@ -6,9 +6,10 @@
 //! and re-validated in Column::new. An all-valid Float64 column now rounds over
 //! its contiguous buffer and re-ingests typed (mirror of `abs`). Bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, Scalar};
-use std::time::Instant;
 
 fn golden() -> String {
     let mut out = String::new();

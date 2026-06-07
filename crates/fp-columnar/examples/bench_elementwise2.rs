@@ -6,9 +6,12 @@
 //! contiguous Int64/Float64 buffer and re-ingests typed (dtype-preserving for
 //! neg/square/sign; Bool for signbit; Float64 for rint/exp2). Bit-identical.
 
+use std::time::Instant;
+
 use fp_columnar::Column;
 use fp_types::{DType, NullKind, Scalar};
-use std::time::Instant;
+
+type ColumnOp = fn(&Column) -> Result<Column, fp_columnar::ColumnError>;
 
 fn fcol(v: Vec<f64>) -> Column {
     Column::from_f64_values(v)
@@ -54,7 +57,7 @@ fn golden() -> String {
     )
     .unwrap();
 
-    let ops: Vec<(&str, fn(&Column) -> Result<Column, fp_columnar::ColumnError>)> = vec![
+    let ops: Vec<(&str, ColumnOp)> = vec![
         ("rint", Column::rint),
         ("neg", Column::neg),
         ("square", Column::square),

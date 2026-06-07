@@ -6,9 +6,10 @@
 //! (O(N·distinct)); a key-hashmap makes it O(N). First-seen order preserved so
 //! the stable count-sort breaks ties identically. Bit-identical.
 
-use fp_columnar::Column;
-use fp_types::{DType, NullKind, Scalar};
 use std::time::Instant;
+
+use fp_columnar::Column;
+use fp_types::{DType, Scalar};
 
 fn icol(v: Vec<i64>) -> Column {
     Column::new(DType::Int64, v.into_iter().map(Scalar::Int64).collect()).unwrap()
@@ -42,15 +43,51 @@ fn golden() -> String {
     let mut out = String::new();
     // ties + first-seen order: 3 appears first among the count-2 group.
     let a = icol(vec![3, 1, 3, 2, 1, 4, 2, 3]); // 3:3, 1:2, 2:2, 4:1
-    out.push_str(&format!("desc:{}\n", dump(&a.value_counts_with_options(false, true, false, true).unwrap())));
-    out.push_str(&format!("asc:{}\n", dump(&a.value_counts_with_options(false, true, true, true).unwrap())));
-    out.push_str(&format!("nosort:{}\n", dump(&a.value_counts_with_options(false, false, false, true).unwrap())));
-    out.push_str(&format!("norm:{}\n", dump(&a.value_counts_with_options(true, true, false, true).unwrap())));
+    out.push_str(&format!(
+        "desc:{}\n",
+        dump(
+            &a.value_counts_with_options(false, true, false, true)
+                .unwrap()
+        )
+    ));
+    out.push_str(&format!(
+        "asc:{}\n",
+        dump(
+            &a.value_counts_with_options(false, true, true, true)
+                .unwrap()
+        )
+    ));
+    out.push_str(&format!(
+        "nosort:{}\n",
+        dump(
+            &a.value_counts_with_options(false, false, false, true)
+                .unwrap()
+        )
+    ));
+    out.push_str(&format!(
+        "norm:{}\n",
+        dump(
+            &a.value_counts_with_options(true, true, false, true)
+                .unwrap()
+        )
+    ));
 
     // with missing, dropna false (NaN bucket appended before sort)
     let nf = fcol(vec![1.0, f64::NAN, 1.0, 2.0, f64::NAN, f64::NAN, -0.0, 0.0]);
-    out.push_str(&format!("nan_keep:{}\n", dump(&nf.value_counts_with_options(false, true, false, false).unwrap())));
-    out.push_str(&format!("nan_drop:{}\n", dump(&nf.value_counts_with_options(false, true, false, true).unwrap())));
+    out.push_str(&format!(
+        "nan_keep:{}\n",
+        dump(
+            &nf.value_counts_with_options(false, true, false, false)
+                .unwrap()
+        )
+    ));
+    out.push_str(&format!(
+        "nan_drop:{}\n",
+        dump(
+            &nf.value_counts_with_options(false, true, false, true)
+                .unwrap()
+        )
+    ));
     out
 }
 
@@ -62,10 +99,14 @@ fn main() {
     let n: usize = 60_000;
     let col = icol((0..n as i64).collect());
 
-    let _ = col.value_counts_with_options(false, true, false, true).unwrap(); // warmup
+    let _ = col
+        .value_counts_with_options(false, true, false, true)
+        .unwrap(); // warmup
 
     let t = Instant::now();
-    let r = col.value_counts_with_options(false, true, false, true).unwrap();
+    let r = col
+        .value_counts_with_options(false, true, false, true)
+        .unwrap();
     let d = t.elapsed();
     std::hint::black_box(&r);
 

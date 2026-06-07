@@ -163,9 +163,11 @@ impl fmt::Display for IndexLabel {
             Self::Utf8(v) => write!(f, "{v}"),
             Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
-            // Matches pandas' repr of missing labels in an object index.
+            // Matches pandas' REPR of missing labels in an index (None / NaN /
+            // NaT — note uppercase NaN: the formatter surface, unlike
+            // str(nan)=='nan' which astype(str) uses). Verified pandas 2.2.3.
             Self::Null(fp_types::NullKind::Null) => write!(f, "None"),
-            Self::Null(fp_types::NullKind::NaN) => write!(f, "nan"),
+            Self::Null(fp_types::NullKind::NaN) => write!(f, "NaN"),
             Self::Null(fp_types::NullKind::NaT) => write!(f, "NaT"),
         }
     }
@@ -1335,8 +1337,17 @@ impl Index {
                     IndexLabel::Utf8(_) => l.clone(),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
-                    // str(None) == 'None', str(nan) == 'nan' (Display arm).
-                    IndexLabel::Null(_) => IndexLabel::Utf8(l.to_string()),
+                    // astype(str) uses Python str() forms: str(None)=='None',
+                    // str(nan)=='nan' (LOWERCASE, unlike the repr surface),
+                    // str(NaT)=='NaT'. Verified pandas 2.2.3.
+                    IndexLabel::Null(kind) => IndexLabel::Utf8(
+                        match kind {
+                            fp_types::NullKind::Null => "None",
+                            fp_types::NullKind::NaN => "nan",
+                            fp_types::NullKind::NaT => "NaT",
+                        }
+                        .to_owned(),
+                    ),
                 })
                 .collect(),
         ))

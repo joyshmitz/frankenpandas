@@ -1572,7 +1572,7 @@ struct FusedInt64MergeOptions<'a> {
 const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1 << 18;
 #[cfg(test)]
 const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1;
-const DENSE_I64_INNER_PARALLEL_MAX_COLUMNS: usize = 8;
+const DENSE_I64_INNER_PARALLEL_MAX_CHUNKS: usize = 16;
 
 struct DenseI64InnerOutputPlan<'a> {
     left_keys: &'a [i64],
@@ -1583,76 +1583,149 @@ struct DenseI64InnerOutputPlan<'a> {
     output_len: usize,
 }
 
-fn build_dense_i64_inner_output_column(
-    spec: &FusedInt64OutputColumn<'_>,
-    plan: &DenseI64InnerOutputPlan<'_>,
-) -> Vec<i64> {
-    let mut out = Vec::<i64>::with_capacity(plan.output_len);
-    match spec.side {
-        FusedInt64Side::Left => {
-            for (left_pos, &v) in plan.left_keys.iter().enumerate() {
-                if v < plan.min || v > plan.max {
-                    continue;
-                }
-                let bucket = (v - plan.min) as usize;
-                if bucket + 1 >= plan.offsets.len() {
-                    continue;
-                }
-                let bucket_len = plan.offsets[bucket + 1] - plan.offsets[bucket];
-                if bucket_len == 0 {
-                    continue;
-                }
-                let value = spec.values[left_pos];
-                out.resize(out.len() + bucket_len, value);
-            }
-        }
-        FusedInt64Side::Right => {
-            let positioned_values = plan
-                .positions
-                .iter()
-                .map(|&right_pos| spec.values[right_pos])
-                .collect::<Vec<_>>();
-            for &v in plan.left_keys {
-                if v < plan.min || v > plan.max {
-                    continue;
-                }
-                let bucket = (v - plan.min) as usize;
-                if bucket + 1 >= plan.offsets.len() {
-                    continue;
-                }
-                out.extend_from_slice(
-                    &positioned_values[plan.offsets[bucket]..plan.offsets[bucket + 1]],
-                );
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), plan.output_len);
-    out
-}
-
+/// Row-chunked disjoint-write fill (br-frankenpandas-6bsw3).
+///
+/// The previous parallel arm spawned one worker PER COLUMN, so a 3-column
+/// join used 3 threads regardless of core count and every worker re-walked
+/// the full left probe (min/max check + bucket lookup per left key). Here the
+/// OUTPUT rows are split into up to [`DENSE_I64_INNER_PARALLEL_MAX_CHUNKS`]
+/// contiguous chunks balanced by output size (boundaries computed from the
+/// same probe walk that sized the output), and each worker fills its chunk's
+/// disjoint `&mut [i64]` slice of EVERY column: one probe walk per chunk
+/// instead of per column, page faults on the freshly zero-allocated output
+/// buffers distributed across all workers, and `split_at_mut` keeps the
+/// writes provably disjoint in safe Rust.
+///
+/// Bit-identical: chunks partition the left probe order, each matched left
+/// row writes the same repeat-run (left side) or bucket tape range (right
+/// side) at the same output offset as the single-threaded walk.
 fn build_dense_i64_inner_output_data(
     specs: &[FusedInt64OutputColumn<'_>],
     plan: &DenseI64InnerOutputPlan<'_>,
 ) -> Vec<Vec<i64>> {
-    if specs.len() > 1
-        && specs.len() <= DENSE_I64_INNER_PARALLEL_MAX_COLUMNS
+    let thread_count = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    if !specs.is_empty()
         && plan.output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES
-        && std::thread::available_parallelism().map_or(1, usize::from) > 1
+        && thread_count > 1
     {
-        return std::thread::scope(|scope| {
-            let handles = specs
-                .iter()
-                .map(|spec| scope.spawn(move || build_dense_i64_inner_output_column(spec, plan)))
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .expect("dense i64 output worker must not panic")
-                })
-                .collect()
+        // Replay buckets from a value tape per right-side column (one gather
+        // of right values into bucket order, per br-frankenpandas-muis1),
+        // shared read-only across all chunk workers.
+        let tapes: Vec<Option<Vec<i64>>> = specs
+            .iter()
+            .map(|spec| match spec.side {
+                FusedInt64Side::Left => None,
+                FusedInt64Side::Right => Some(
+                    plan.positions
+                        .iter()
+                        .map(|&right_pos| spec.values[right_pos])
+                        .collect(),
+                ),
+            })
+            .collect();
+
+        // Chunk boundaries (left_pos, out_pos), balanced by OUTPUT size so a
+        // few hot buckets cannot starve the other workers.
+        let target = plan.output_len.div_ceil(thread_count).max(1);
+        let mut boundaries = vec![(0usize, 0usize)];
+        let mut cumulative = 0usize;
+        let mut next_target = target;
+        for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+            if v < plan.min || v > plan.max {
+                continue;
+            }
+            let bucket = (v - plan.min) as usize;
+            if bucket + 1 >= plan.offsets.len() {
+                continue;
+            }
+            let bucket_len = plan.offsets[bucket + 1] - plan.offsets[bucket];
+            if bucket_len == 0 {
+                continue;
+            }
+            cumulative += bucket_len;
+            if cumulative >= next_target && left_pos + 1 < plan.left_keys.len() {
+                boundaries.push((left_pos + 1, cumulative));
+                next_target = cumulative.saturating_add(target);
+            }
+        }
+        debug_assert_eq!(cumulative, plan.output_len);
+        boundaries.push((plan.left_keys.len(), plan.output_len));
+        let chunk_count = boundaries.len() - 1;
+
+        // Pre-size every output column, then hand each chunk worker its
+        // disjoint slice of every column via progressive split_at_mut.
+        let mut column_bufs: Vec<Vec<i64>> = specs
+            .iter()
+            .map(|_| vec![0i64; plan.output_len])
+            .collect();
+        let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
+            .map(|_| Vec::with_capacity(specs.len()))
+            .collect();
+        for buf in &mut column_bufs {
+            let mut rest: &mut [i64] = buf.as_mut_slice();
+            let mut prev = 0usize;
+            for (chunk_idx, window) in boundaries.windows(2).enumerate() {
+                let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+                prev = window[1].1;
+                rest = tail;
+                bundles[chunk_idx].push(chunk_slice);
+            }
+        }
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk_count);
+            for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
+                let (left_start, out_start) = boundaries[chunk_idx];
+                let (left_end, out_end) = boundaries[chunk_idx + 1];
+                let tapes = &tapes;
+                handles.push(scope.spawn(move || {
+                    let mut cursor = 0usize;
+                    for left_pos in left_start..left_end {
+                        let v = plan.left_keys[left_pos];
+                        if v < plan.min || v > plan.max {
+                            continue;
+                        }
+                        let bucket = (v - plan.min) as usize;
+                        if bucket + 1 >= plan.offsets.len() {
+                            continue;
+                        }
+                        let start = plan.offsets[bucket];
+                        let len = plan.offsets[bucket + 1] - start;
+                        if len == 0 {
+                            continue;
+                        }
+                        for (slice, (spec, tape)) in bundle
+                            .iter_mut()
+                            .zip(specs.iter().zip(tapes.iter()))
+                        {
+                            match spec.side {
+                                FusedInt64Side::Left => {
+                                    slice[cursor..cursor + len].fill(spec.values[left_pos]);
+                                }
+                                FusedInt64Side::Right => {
+                                    slice[cursor..cursor + len].copy_from_slice(
+                                        &tape
+                                            .as_ref()
+                                            .expect("right spec must have a bucket tape")
+                                            [start..start + len],
+                                    );
+                                }
+                            }
+                        }
+                        cursor += len;
+                    }
+                    debug_assert_eq!(cursor, out_end - out_start);
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("dense i64 output worker must not panic");
+            }
         });
+        return column_bufs;
     }
 
     let mut output_data = specs

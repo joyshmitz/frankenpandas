@@ -14585,6 +14585,43 @@ mod tests {
         }
 
         #[test]
+        fn contiguous_utf8_argsort_matches_scalar_reference() {
+            let raw = ["bee", "alpha", "bee", "alphabet", "", "zulu"];
+            let scalars: Vec<Scalar> = raw
+                .iter()
+                .map(|value| Scalar::Utf8((*value).to_owned()))
+                .collect();
+            let scalar_col = Column::from_values(scalars.clone()).expect("scalar col");
+            let mut bytes = Vec::new();
+            let mut offsets = Vec::with_capacity(raw.len() + 1);
+            offsets.push(0);
+            for value in raw {
+                bytes.extend_from_slice(value.as_bytes());
+                offsets.push(bytes.len());
+            }
+            let contiguous_col = Column::from_utf8_contiguous(bytes, offsets);
+
+            assert_eq!(contiguous_col.argsort_with(true), vec![4, 1, 3, 0, 2, 5]);
+            assert_eq!(
+                contiguous_col.argsort_with(false),
+                vec![5, 0, 2, 3, 1, 4]
+            );
+            for ascending in [true, false] {
+                let got = contiguous_col
+                    .sort_values(ascending)
+                    .expect("contiguous sort")
+                    .values()
+                    .to_vec();
+                let want = scalar_col
+                    .sort_values(ascending)
+                    .expect("scalar sort")
+                    .values()
+                    .to_vec();
+                assert_eq!(got, want, "ascending={ascending}");
+            }
+        }
+
+        #[test]
         fn abs_typed_matches_scalar_reference() {
             // The typed abs fast path must be bit-identical to the Scalar loop
             // for all-valid Int64/Float64, incl i64::MIN (wrapping_abs) and

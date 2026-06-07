@@ -11,10 +11,11 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_same, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
+//!   scenario ∈ { drop_duplicates, sort_single, str_sort, str_groupby_sum, str_series_sort, str_sort_chain, filter_bool, inner_join, series_add, series_add_same, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
+use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_io::{CsvReadOptions, read_csv_str, read_csv_with_options};
@@ -80,6 +81,43 @@ fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
     columns.insert("v".to_string(), value_column);
     let column_order = vec!["k".to_string(), "v".to_string()];
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
+}
+
+/// String-keyed frame whose grouping/sort key is stored as one contiguous
+/// Utf8 byte buffer plus offsets. Keys are ~26 bytes, moderately repeated,
+/// and row order is deterministic but not sorted.
+fn build_str_key_frame(n: usize, key_cardinality: usize) -> DataFrame {
+    let cardinality = key_cardinality.max(1);
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+
+    let mut bytes = Vec::with_capacity(n * 26);
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0);
+    let mut key = String::with_capacity(32);
+    for row in 0..n {
+        let mixed = (row as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(17)
+            ^ (row as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let key_id = mixed % cardinality as u64;
+        key.clear();
+        write!(&mut key, "key_{mixed:016x}_{key_id:04x}").expect("writing to a String cannot fail");
+        bytes.extend_from_slice(key.as_bytes());
+        offsets.push(bytes.len());
+    }
+
+    let values: Vec<f64> = (0..n)
+        .map(|row| ((row as u64).wrapping_mul(37) % 10_003) as f64 * 0.25)
+        .collect();
+    let mut columns = BTreeMap::new();
+    columns.insert(
+        "k".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
+    columns.insert("v".to_string(), Column::from_f64_values(values));
+    let column_order = vec!["k".to_string(), "v".to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("str key frame")
 }
 
 fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
@@ -249,6 +287,14 @@ fn run_golden(scenario: &str, n: usize) {
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
+        "str_sort" => build_str_key_frame(n, 4096)
+            .sort_values("k", true)
+            .expect("str sort"),
+        "str_groupby_sum" => build_str_key_frame(n, 4096)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .sum()
+            .expect("str groupby sum"),
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
@@ -328,7 +374,7 @@ fn run_golden(scenario: &str, n: usize) {
             let out = lowered.str().startswith("prefix_0").expect("startswith");
             return print!("{}", golden_dump_series(&out));
         }
-        "str_sort" => {
+        "str_series_sort" => {
             // Plain sort over an Eager Utf8 column (control: as_utf8_contiguous
             // returns None, so this exercises the unchanged Scalar path).
             let s = build_str_series(n);
@@ -419,6 +465,24 @@ fn main() {
             let frame = build_numeric_frame(n, 4);
             for _ in 0..iters {
                 let out = frame.sort_values("c0", true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_sort" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame.sort_values("k", true).expect("str sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_sum" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .sum()
+                    .expect("str groupby sum");
                 sink = sink.wrapping_add(out.len());
             }
         }
@@ -538,7 +602,7 @@ fn main() {
                 sink = sink.wrapping_add(out.len());
             }
         }
-        "str_sort" => {
+        "str_series_sort" => {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.sort_values(true).expect("sort");

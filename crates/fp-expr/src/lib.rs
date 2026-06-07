@@ -419,6 +419,8 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
         IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
         IndexLabel::Datetime64(value) => Scalar::Datetime64(*value),
+        // Typed-null label round-trips to the same-kind missing scalar.
+        IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
 }
 

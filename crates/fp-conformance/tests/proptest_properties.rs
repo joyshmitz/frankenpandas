@@ -2895,10 +2895,16 @@ proptest! {
                     | IndexLabel::Utf8(_)
                     | IndexLabel::Timedelta64(_)
                     | IndexLabel::Datetime64(_) => {}
+                    // All labels must be non-null when dropna=true. This used
+                    // to be vacuous (IndexLabel had no null variant); since
+                    // br-frankenpandas-joeff added IndexLabel::Null it is a
+                    // real invariant.
+                    IndexLabel::Null(_) => prop_assert!(
+                        false,
+                        "dropna=true must drop null group keys, found null label at {}",
+                        i
+                    ),
                 }
-                // All labels should be valid (non-null) when dropna=true.
-                // IndexLabel doesn't have a null variant, so this is inherently satisfied
-                // by the type system. But we verify the result is well-formed.
                 prop_assert!(
                     result.values().len() > i,
                     "result should have value at index {}", i

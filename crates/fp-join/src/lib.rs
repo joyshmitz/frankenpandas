@@ -607,6 +607,15 @@ impl Ord for JoinKeyComponent {
             (Present(IndexLabel::Utf8(a)), Present(IndexLabel::Utf8(b))) => a.cmp(b),
             (Present(IndexLabel::Timedelta64(a)), Present(IndexLabel::Timedelta64(b))) => a.cmp(b),
             (Present(IndexLabel::Datetime64(a)), Present(IndexLabel::Datetime64(b))) => a.cmp(b),
+            // Typed-null labels sort after every concrete label (nulls-last,
+            // consistent with the derived IndexLabel Ord) but before Missing.
+            // Unreachable today: join key extraction maps missing to Missing,
+            // never Present(Null).
+            (Present(IndexLabel::Null(a)), Present(IndexLabel::Null(b))) => a.cmp(b),
+            (Present(IndexLabel::Null(_)), Present(_)) => Ordering::Greater,
+            (Present(_), Present(IndexLabel::Null(_))) => Ordering::Less,
+            (Present(IndexLabel::Null(_)), FloatBits(_)) => Ordering::Greater,
+            (FloatBits(_), Present(IndexLabel::Null(_))) => Ordering::Less,
             (Present(IndexLabel::Int64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
             (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Int64(_))) => {

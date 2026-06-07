@@ -101,6 +101,15 @@ pub enum IndexLabel {
     Utf8(String),
     Timedelta64(i64),
     Datetime64(i64),
+    /// Typed missing label (br-frankenpandas-joeff): lets value_counts
+    /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
+    /// buckets instead of collapsing them or colliding with genuine
+    /// "None"/"nan" strings. Appended LAST so the derived `Ord` sorts null
+    /// labels after every concrete label (pandas NaN-last sort order) without
+    /// disturbing the existing cross-variant order. `Eq`/`Hash` are
+    /// kind-SENSITIVE (None != nan != NaT), matching `ScalarKey::Null`
+    /// bucket identity.
+    Null(fp_types::NullKind),
 }
 
 impl From<i64> for IndexLabel {
@@ -128,6 +137,7 @@ impl IndexLabel {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
             Self::Int64(_) | Self::Utf8(_) => false,
+            Self::Null(_) => true,
         }
     }
 }
@@ -141,6 +151,8 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Utf8(s) => !s.is_empty(),
         IndexLabel::Timedelta64(v) => *v != 0,
         IndexLabel::Datetime64(v) => *v != 0,
+        // Unreachable: is_missing() returned true above for every Null.
+        IndexLabel::Null(_) => false,
     }
 }
 
@@ -151,6 +163,10 @@ impl fmt::Display for IndexLabel {
             Self::Utf8(v) => write!(f, "{v}"),
             Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
+            // Matches pandas' repr of missing labels in an object index.
+            Self::Null(fp_types::NullKind::Null) => write!(f, "None"),
+            Self::Null(fp_types::NullKind::NaN) => write!(f, "nan"),
+            Self::Null(fp_types::NullKind::NaT) => write!(f, "NaT"),
         }
     }
 }
@@ -192,6 +208,8 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
+            // Null labels never enable a typed binary-search backend.
+            Some(IndexLabel::Null(_)) => SortOrder::Unsorted,
         };
     }
 
@@ -1295,6 +1313,10 @@ impl Index {
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
                     IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
+                    // Missing labels have no integer form; preserved like
+                    // unparseable strings (pandas astype(int) raises on NaN —
+                    // callers reject before reaching here).
+                    IndexLabel::Null(_) => l.clone(),
                 })
                 .collect(),
         ))
@@ -1313,6 +1335,8 @@ impl Index {
                     IndexLabel::Utf8(_) => l.clone(),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
+                    // str(None) == 'None', str(nan) == 'nan' (Display arm).
+                    IndexLabel::Null(_) => IndexLabel::Utf8(l.to_string()),
                 })
                 .collect(),
         ))
@@ -1548,7 +1572,10 @@ impl Index {
         self.labels
             .iter()
             .map(|label| match label {
-                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+                IndexLabel::Int64(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => 8,
                 IndexLabel::Utf8(s) => {
                     if deep {
                         std::mem::size_of::<String>() + s.len()
@@ -1933,6 +1960,9 @@ impl Index {
             IndexLabel::Utf8(_) => "string",
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
+            // Unreachable: `first` comes from the non-missing iterator and
+            // every Null label is_missing.
+            IndexLabel::Null(_) => "mixed",
         }
     }
 
@@ -2302,9 +2332,10 @@ impl<'a> IndexStringAccessor<'a> {
             .iter()
             .map(|label| match label {
                 IndexLabel::Utf8(value) => Some(func(value)),
-                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => {
-                    None
-                }
+                IndexLabel::Int64(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => None,
             })
             .collect()
     }
@@ -2458,7 +2489,10 @@ where
         .iter()
         .map(|label| match label {
             IndexLabel::Datetime64(nanos) => datetime_from_nanos(*nanos).map(&func),
-            IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => None,
+            IndexLabel::Int64(_)
+            | IndexLabel::Utf8(_)
+            | IndexLabel::Timedelta64(_)
+            | IndexLabel::Null(_) => None,
         })
         .collect()
 }
@@ -2485,7 +2519,10 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
         IndexLabel::Datetime64(nanos) => {
             datetime_from_nanos(*nanos).map(|dt| time_to_nanos(dt.time()))
         }
-        IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => None,
+        IndexLabel::Int64(_)
+        | IndexLabel::Utf8(_)
+        | IndexLabel::Timedelta64(_)
+        | IndexLabel::Null(_) => None,
     }
 }
 
@@ -2520,7 +2557,8 @@ where
             IndexLabel::Int64(_)
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
-            | IndexLabel::Datetime64(_) => None,
+            | IndexLabel::Datetime64(_)
+            | IndexLabel::Null(_) => None,
         })
         .collect()
 }
@@ -3235,7 +3273,8 @@ impl DatetimeIndex {
                 IndexLabel::Int64(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_) => None,
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => None,
             })
             .collect()
     }
@@ -3274,7 +3313,10 @@ impl DatetimeIndex {
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) => *nanos,
-                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => i64::MIN,
+                IndexLabel::Int64(_)
+                | IndexLabel::Utf8(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Null(_) => i64::MIN,
             })
             .collect()
     }
@@ -5104,9 +5146,10 @@ impl TimedeltaIndex {
             .iter()
             .map(|label| match label {
                 IndexLabel::Timedelta64(nanos) => *nanos,
-                IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Datetime64(_) => {
-                    Timedelta::NAT
-                }
+                IndexLabel::Int64(_)
+                | IndexLabel::Utf8(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => Timedelta::NAT,
             })
             .collect()
     }
@@ -7826,9 +7869,10 @@ impl RangeIndex {
             .iter()
             .filter_map(|label| match label {
                 IndexLabel::Int64(value) => Some(*value),
-                IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => {
-                    None
-                }
+                IndexLabel::Utf8(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => None,
             })
             .collect()
     }
@@ -11232,6 +11276,9 @@ impl MultiIndex {
             Some(IndexLabel::Utf8(_)) => "str",
             Some(IndexLabel::Timedelta64(_)) => "Timedelta",
             Some(IndexLabel::Datetime64(_)) => "Timestamp",
+            Some(IndexLabel::Null(fp_types::NullKind::Null)) => "NoneType",
+            Some(IndexLabel::Null(fp_types::NullKind::NaN)) => "float",
+            Some(IndexLabel::Null(fp_types::NullKind::NaT)) => "NaTType",
             None => "object",
         }
     }
@@ -11559,7 +11606,10 @@ impl MultiIndex {
             .iter()
             .flatten()
             .map(|label| match label {
-                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+                IndexLabel::Int64(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => 8,
                 IndexLabel::Utf8(value) => {
                     if deep {
                         std::mem::size_of::<String>() + value.len()

@@ -2009,6 +2009,7 @@ fn html_index_label_string(
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        IndexLabel::Null(_) => label.to_string(),
     };
     Ok(html_text(&raw, escape))
 }
@@ -4755,6 +4756,8 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
         // (br-frankenpandas-lb0iu)
         IndexLabel::Timedelta64(ns) => serde_json::json!(*ns / 1_000_000),
         IndexLabel::Datetime64(ns) => serde_json::json!(*ns / 1_000_000),
+        // pandas to_json renders a missing label as JSON null.
+        IndexLabel::Null(_) => serde_json::Value::Null,
     }
 }
 
@@ -4777,6 +4780,8 @@ fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(v) => Scalar::Timedelta64(*v),
         IndexLabel::Datetime64(v) => Scalar::Utf8(format_datetime_ns(*v)),
+        // Typed-null label round-trips to the same-kind missing scalar.
+        IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
 }
 
@@ -6849,6 +6854,9 @@ fn write_excel_index_label(
                     .map_err(|e| IoError::Excel(format!("write index datetime: {e}")))?;
             }
         }
+        // Missing labels leave the cell blank, like NAT timedelta/datetime
+        // above (pandas writes an empty cell for a NaN index label).
+        IndexLabel::Null(_) => {}
     }
     Ok(())
 }
@@ -8239,6 +8247,8 @@ fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+        // Typed-null label round-trips to the same-kind missing scalar.
+        IndexLabel::Null(kind) => Scalar::Null(*kind),
         IndexLabel::Timedelta64(v) => {
             if *v == Timedelta::NAT {
                 Scalar::Null(NullKind::Null)

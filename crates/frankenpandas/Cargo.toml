@@ -35,16 +35,18 @@ rusqlite = { workspace = true, optional = true }
 # - SQL: forward fp-io's backend selection. Default is sql-sqlite.
 #   sql-postgresql / sql-mysql are placeholders today (fp-io exposes
 #   them but doesn't bind concrete backends yet — that's fd90 Phase 2).
-# - HDF5: forward fp-io's native HDF5 integration. Default is on for
-#   the umbrella crate to preserve the advertised IO surface; downstream
-#   crates can disable default features when they only need non-HDF5 IO.
+# - HDF5: forward fp-io's native HDF5 integration. OPT-IN, because
+#   hdf5-metno-sys needs a system HDF5 library/headers at build time
+#   (absent on CI and most machines), which would break `cargo build` /
+#   `cargo install frankenpandas`. Enable the `hdf5` feature explicitly
+#   to get native HDF5 IO (br-frankenpandas / issue #9).
 # - tracing: forward fp-frame's optional `tracing` spans on hot
 #   paths (groupby, rolling, resample, IO). Off by default so users
 #   without a tracing subscriber pay no dependency cost.
 # - asupersync: forward fp-runtime's optional asupersync runtime
 #   integration. Off by default.
 [features]
-default = ["sql-sqlite", "hdf5"]
+default = ["sql-sqlite"]
 hdf5 = ["fp-io/hdf5"]
 sql-sqlite = ["fp-io/sql-sqlite", "dep:rusqlite"]
 sql-postgresql = ["fp-io/sql-postgresql"]

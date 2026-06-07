@@ -890,6 +890,17 @@ enum ScalarValues {
         data: Vec<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Contiguous backing for all-valid Utf8 columns
+    /// (br-frankenpandas-2krr0): one rolling byte buffer + n+1 offsets (row
+    /// `i` = `bytes[offsets[i]..offsets[i+1]]`, always valid UTF-8 by
+    /// construction — only built from `&str` data). String-output ops write
+    /// here without a per-row heap `String`; the `Vec<Scalar::Utf8>` view
+    /// materializes once on demand.
+    LazyContiguousUtf8 {
+        bytes: Vec<u8>,
+        offsets: Vec<usize>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
     /// repeat runs (br-frankenpandas-3ad4n) — e.g. the left lanes of a dense
     /// inner join, where every matched left value repeats `bucket_len` times.
@@ -953,6 +964,16 @@ impl ScalarValues {
     fn lazy_all_valid_bool(data: Vec<bool>) -> Self {
         Self::LazyAllValidBool {
             data,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_contiguous_utf8(bytes: Vec<u8>, offsets: Vec<usize>) -> Self {
+        debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
+        debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
+        Self::LazyContiguousUtf8 {
+            bytes,
+            offsets,
             values: OnceLock::new(),
         }
     }
@@ -1197,6 +1218,24 @@ impl ScalarValues {
             Self::LazyAllValidBool { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
+            Self::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                values,
+            } => values
+                .get_or_init(|| {
+                    offsets
+                        .windows(2)
+                        .map(|w| {
+                            Scalar::Utf8(
+                                std::str::from_utf8(&bytes[w[0]..w[1]])
+                                    .expect("contiguous utf8 buffer is valid by construction")
+                                    .to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableInt64 {
                 data,
                 validity,
@@ -1253,6 +1292,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
+            Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
@@ -1274,6 +1314,9 @@ impl Clone for ScalarValues {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
+            Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Self::lazy_contiguous_utf8(bytes.clone(), offsets.clone())
+            }
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
             }
@@ -2151,6 +2194,25 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_all_valid_int64(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
+    /// Build an all-valid Utf8 column from a contiguous byte buffer + n+1
+    /// offsets (br-frankenpandas-2krr0). `bytes[offsets[i]..offsets[i+1]]`
+    /// must be valid UTF-8 for every row — string-output ops guarantee this
+    /// by writing only `&str` data. Semantically identical to
+    /// `Column::new(DType::Utf8, scalars)` over the same strings, but the
+    /// per-row `String`/`Scalar` boxing is deferred until a consumer reads
+    /// the Scalar view.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_utf8_contiguous(bytes: Vec<u8>, offsets: Vec<usize>) -> Self {
+        let len = offsets.len().saturating_sub(1);
+        Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_contiguous_utf8(bytes, offsets),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

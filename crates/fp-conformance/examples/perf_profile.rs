@@ -307,6 +307,11 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.str().len().expect("str len");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_lower" => {
+            let s = build_str_series(n);
+            let out = s.str().lower().expect("str lower");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -475,6 +480,13 @@ fn main() {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.str().len().expect("str len");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_lower" => {
+            let s = build_str_series(n);
+            for _ in 0..iters {
+                let out = s.str().lower().expect("str lower");
                 sink = sink.wrapping_add(out.len());
             }
         }

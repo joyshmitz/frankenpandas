@@ -312,6 +312,15 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.str().lower().expect("str lower");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_chain" => {
+            // lower -> strip -> contains: a 3-op pipeline whose intermediate
+            // columns can stay contiguous (zero Scalar materialization).
+            let s = build_str_series(n);
+            let lowered = s.str().lower().expect("lower");
+            let stripped = lowered.str().strip().expect("strip");
+            let out = stripped.str().contains("needle").expect("contains");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -487,6 +496,15 @@ fn main() {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.str().lower().expect("str lower");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_chain" => {
+            let s = build_str_series(n);
+            for _ in 0..iters {
+                let lowered = s.str().lower().expect("lower");
+                let stripped = lowered.str().strip().expect("strip");
+                let out = stripped.str().contains("needle").expect("contains");
                 sink = sink.wrapping_add(out.len());
             }
         }

@@ -2425,6 +2425,25 @@ impl Column {
         }
     }
 
+    /// Borrow the column's contiguous Utf8 backing — `(bytes, offsets)` with
+    /// row `i` = `bytes[offsets[i]..offsets[i+1]]`, always valid UTF-8 —
+    /// when this is an all-valid Utf8 column carrying the
+    /// `LazyContiguousUtf8` representation (br-frankenpandas-2krr0 rung 3).
+    /// Lets chained string ops read the previous op's output without ever
+    /// materializing its `Vec<Scalar>` view. Returns `None` for Scalar-backed
+    /// or nullable columns — callers fall back to `values()`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_utf8_contiguous(&self) -> Option<(&[u8], &[usize])> {
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } = &self.values
+        {
+            return Some((bytes.as_slice(), offsets.as_slice()));
+        }
+        None
+    }
+
     /// Borrow the column's contiguous `bool` buffer when this is an all-valid
     /// `Bool` column. See [`Column::as_f64_slice`].
     #[must_use]

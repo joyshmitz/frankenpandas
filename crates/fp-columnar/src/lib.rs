@@ -861,6 +861,16 @@ enum ScalarValues {
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Nullable Int64 mirror of `LazyNullableFloat64`
+    /// (br-frankenpandas-lt5qx): contiguous `i64` data + validity, where an
+    /// invalid slot materializes `Scalar::Null(NullKind::Null)` — exactly
+    /// `Scalar::missing_for_dtype(DType::Int64)`. Unlike Float64 there is no
+    /// NaN-as-missing ambiguity: missingness is the validity bit alone.
+    LazyNullableInt64 {
+        data: Vec<i64>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidBool {
         data: Vec<bool>,
         values: OnceLock<Vec<Scalar>>,
@@ -900,6 +910,14 @@ impl ScalarValues {
 
     fn lazy_nullable_float64(data: Vec<f64>, validity: ValidityMask) -> Self {
         Self::LazyNullableFloat64 {
+            data,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_int64(data: Vec<i64>, validity: ValidityMask) -> Self {
+        Self::LazyNullableInt64 {
             data,
             validity,
             values: OnceLock::new(),
@@ -1040,6 +1058,24 @@ impl ScalarValues {
             Self::LazyAllValidBool { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
+            Self::LazyNullableInt64 {
+                data,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(idx, value)| {
+                            if validity.get(idx) {
+                                Scalar::Int64(*value)
+                            } else {
+                                Scalar::Null(NullKind::Null)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyRepeatRunsInt64 {
                 runs,
                 total_len,
@@ -1064,6 +1100,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
+            Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
         }
     }
@@ -1083,6 +1120,9 @@ impl Clone for ScalarValues {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
+            Self::LazyNullableInt64 { data, validity, .. } => {
+                Self::lazy_nullable_int64(data.clone(), validity.clone())
+            }
             Self::LazyRepeatRunsInt64 {
                 runs, total_len, ..
             } => Self::lazy_repeat_runs_int64(runs.clone(), *total_len),
@@ -2009,6 +2049,23 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Nullable Int64 counterpart of `from_f64_values_with_validity`
+    /// (br-frankenpandas-lt5qx): invalid slots materialize
+    /// `Scalar::Null(NullKind::Null)` (= `missing_for_dtype(Int64)`), valid
+    /// slots `Scalar::Int64(data[i])`.
+    fn from_i64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self::from_i64_values(data);
+        }
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_nullable_int64(data, validity.clone()),
             validity,
             data: None,
         }
@@ -2959,6 +3016,48 @@ impl Column {
         }
         if all_present {
             return Ok(self.take_positions(&present_positions));
+        }
+
+        // Typed null-introducing gather (br-frankenpandas-lt5qx): an
+        // all-valid Int64/Float64 source skips the per-row Scalar clone +
+        // Column::new revalidation. Missing slots (None or out-of-range)
+        // produce exactly missing_for_dtype: Null(NullKind::Null) via the
+        // nullable-Int64 backing, Null(NullKind::NaN) via the 0.0-datum
+        // nullable-Float64 convention; valid slots clone the raw datum.
+        let n = positions.len();
+        if let Some(slice) = self.as_i64_slice() {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(0),
+                }
+            }
+            return Ok(Self::from_i64_values_with_validity(
+                data,
+                ValidityMask { words, len: n },
+            ));
+        }
+        if let Some(slice) = self.as_f64_slice() {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(0.0),
+                }
+            }
+            return Ok(Self::from_f64_values_with_validity(
+                data,
+                ValidityMask { words, len: n },
+            ));
         }
 
         let values = positions

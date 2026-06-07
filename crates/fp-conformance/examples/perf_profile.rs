@@ -36,6 +36,24 @@ fn build_series_pair(n: usize) -> (Series, Series) {
     (left, right)
 }
 
+/// Deterministic ~24-char Utf8 Series with ~10% rows containing "needle"
+/// mid-string — the canonical str.contains workload for the SIMD string-scan
+/// campaign (every row is a real heap String, exercising the AoS wall).
+fn build_str_series(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let values: Vec<Scalar> = (0..n)
+        .map(|i| {
+            let h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33;
+            if i % 10 == 3 {
+                Scalar::Utf8(format!("prefix_{h:08x}_needle_{:04}", i % 7919))
+            } else {
+                Scalar::Utf8(format!("prefix_{h:08x}_filler_{:04}", i % 7919))
+            }
+        })
+        .collect();
+    Series::from_values("s", labels, values).expect("str series")
+}
+
 fn build_series_pair_same(n: usize) -> (Series, Series) {
     // Identical indexes => alignment is gap-free and all-valid, exercising the
     // typed-output fast path in Column::aligned_binary_f64 (the common
@@ -279,6 +297,11 @@ fn run_golden(scenario: &str, n: usize) {
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
+        "str_contains" => {
+            let s = build_str_series(n);
+            let out = s.str().contains("needle").expect("str contains");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -434,6 +457,13 @@ fn main() {
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Right).expect("join");
                 sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "str_contains" => {
+            let s = build_str_series(n);
+            for _ in 0..iters {
+                let out = s.str().contains("needle").expect("str contains");
+                sink = sink.wrapping_add(out.len());
             }
         }
         "inner_join_read" => {

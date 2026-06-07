@@ -11,7 +11,12 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, str_sort, str_groupby_sum, str_series_sort, str_sort_chain, filter_bool, inner_join, series_add, series_add_same, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
+//!   scenario ∈ { drop_duplicates, sort_single, str_sort, str_groupby_sum,
+//!   str_groupby_mean, str_groupby_count, str_groupby_min, str_groupby_max,
+//!   str_groupby_var, str_groupby_std, str_groupby_first, str_groupby_last,
+//!   str_groupby_prod, str_groupby_median, str_series_sort, str_sort_chain,
+//!   filter_bool, inner_join, series_add, series_add_same, series_add_align,
+//!   csv_read, csv_read_options, csv_read_no_na_filter }
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
@@ -353,6 +358,36 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("str groupby")
             .max()
             .expect("str groupby max"),
+        "str_groupby_var" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .var()
+            .expect("str groupby var"),
+        "str_groupby_std" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .std()
+            .expect("str groupby std"),
+        "str_groupby_first" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .first()
+            .expect("str groupby first"),
+        "str_groupby_last" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .last()
+            .expect("str groupby last"),
+        "str_groupby_prod" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .prod()
+            .expect("str groupby prod"),
+        "str_groupby_median" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .median()
+            .expect("str groupby median"),
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
@@ -588,6 +623,72 @@ fn main() {
                 sink = sink.wrapping_add(out.len());
             }
         }
+        "str_groupby_var" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .var()
+                    .expect("str groupby var");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_std" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .std()
+                    .expect("str groupby std");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_first" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .first()
+                    .expect("str groupby first");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_last" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .last()
+                    .expect("str groupby last");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_prod" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .prod()
+                    .expect("str groupby prod");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_median" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .median()
+                    .expect("str groupby median");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
@@ -734,7 +835,9 @@ fn main() {
                     let slice = column.as_i64_slice().expect("dense join output is Int64");
                     acc = acc.wrapping_add(slice.iter().sum::<i64>());
                 }
-                sink = sink.wrapping_add(out.index.len()).wrapping_add(acc as usize);
+                sink = sink
+                    .wrapping_add(out.index.len())
+                    .wrapping_add(acc as usize);
             }
         }
         "join_1to1" => {

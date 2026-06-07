@@ -272,6 +272,13 @@ fn run_golden(scenario: &str, n: usize) {
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
+        "right_join" => {
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Right).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -416,6 +423,16 @@ fn main() {
             let right = build_join_frame_offset("right_value", n, 512, 13, 256);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "right_join" => {
+            // 50% key overlap: half the right rows match (fanout), half are
+            // unmatched (null-introduced left values, dtype preserved).
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Right).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
         }

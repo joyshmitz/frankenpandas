@@ -370,6 +370,24 @@ fn main() {
                 sink = sink.wrapping_add(out.index.len());
             }
         }
+        "inner_join_read" => {
+            // Same fanout join as inner_join, but every iteration also READS
+            // every output column (as_i64_slice sum), forcing any lazy output
+            // representation to fully materialize — the downstream-consumer
+            // gate for lazy join outputs (br-frankenpandas-3ad4n).
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame("right_value", n, 512, 13);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                let mut acc: i64 = 0;
+                for name in &out.column_order {
+                    let column = out.columns.get(name).expect("output column must exist");
+                    let slice = column.as_i64_slice().expect("dense join output is Int64");
+                    acc = acc.wrapping_add(slice.iter().sum::<i64>());
+                }
+                sink = sink.wrapping_add(out.index.len()).wrapping_add(acc as usize);
+            }
+        }
         "join_1to1" => {
             // Unique keys on both sides (cardinality = n) -> 1:1 join, output n
             // rows. Output gather is O(n); per-row composite-key extraction

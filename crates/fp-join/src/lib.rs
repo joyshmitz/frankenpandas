@@ -1583,85 +1583,124 @@ struct DenseI64InnerOutputPlan<'a> {
     output_len: usize,
 }
 
-/// Row-chunked disjoint-write fill (br-frankenpandas-6bsw3).
+/// One output lane of the dense i64 inner merge.
+enum DenseI64LaneData {
+    /// Left lane carried as `(value, run_len)` repeat runs — O(matched)
+    /// memory, expanded lazily by `Column::from_i64_repeat_runs` consumers
+    /// (br-frankenpandas-3ad4n).
+    RepeatRuns(Vec<(i64, usize)>),
+    /// Fully materialized contiguous values.
+    Full(Vec<i64>),
+}
+
+/// Row-chunked disjoint-write fill (br-frankenpandas-6bsw3) with lazy
+/// repeat-run left lanes (br-frankenpandas-3ad4n).
 ///
-/// The previous parallel arm spawned one worker PER COLUMN, so a 3-column
-/// join used 3 threads regardless of core count and every worker re-walked
-/// the full left probe (min/max check + bucket lookup per left key). Here the
-/// OUTPUT rows are split into up to [`DENSE_I64_INNER_PARALLEL_MAX_CHUNKS`]
-/// contiguous chunks balanced by output size (boundaries computed from the
-/// same probe walk that sized the output), and each worker fills its chunk's
-/// disjoint `&mut [i64]` slice of EVERY column: one probe walk per chunk
-/// instead of per column, page faults on the freshly zero-allocated output
-/// buffers distributed across all workers, and `split_at_mut` keeps the
-/// writes provably disjoint in safe Rust.
+/// One probe walk records every matched left row as `(left_pos,
+/// bucket_start, run_len)`. Left lanes are pure repeat runs (each left value
+/// repeated `run_len` times), so when the average fanout is >= 2 they are
+/// emitted as `(value, run_len)` pairs — O(matched) memory instead of
+/// O(output) — and expanded only if a downstream consumer reads the values.
+/// Remaining lanes (right lanes always; left lanes too on low-fanout joins
+/// where a 16 B run would exceed the expanded bytes) are materialized by the
+/// 6bsw3 scheme: up to [`DENSE_I64_INNER_PARALLEL_MAX_CHUNKS`] output-size-
+/// balanced chunks of the matched list, each worker filling its disjoint
+/// `split_at_mut` slice of every full lane (left repeat-runs via
+/// `slice::fill`, right bucket ranges via `copy_from_slice` from the shared
+/// muis1 value tapes).
 ///
-/// Bit-identical: chunks partition the left probe order, each matched left
-/// row writes the same repeat-run (left side) or bucket tape range (right
-/// side) at the same output offset as the single-threaded walk.
+/// Bit-identical: the matched list IS the left probe order; expanding a
+/// `RepeatRuns` lane reproduces exactly the values the `Full` fill writes,
+/// and chunks partition the matched list so concatenated output equals the
+/// single-threaded walk byte for byte.
 fn build_dense_i64_inner_output_data(
     specs: &[FusedInt64OutputColumn<'_>],
     plan: &DenseI64InnerOutputPlan<'_>,
-) -> Vec<Vec<i64>> {
+) -> Vec<DenseI64LaneData> {
+    // Single probe walk shared by every lane: matched left rows in probe
+    // order as (left_pos, bucket_start, run_len).
+    let mut matched: Vec<(usize, usize, usize)> = Vec::new();
+    for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+        if v < plan.min || v > plan.max {
+            continue;
+        }
+        let bucket = (v - plan.min) as usize;
+        if bucket + 1 >= plan.offsets.len() {
+            continue;
+        }
+        let start = plan.offsets[bucket];
+        let run_len = plan.offsets[bucket + 1] - start;
+        if run_len == 0 {
+            continue;
+        }
+        matched.push((left_pos, start, run_len));
+    }
+    debug_assert_eq!(
+        matched.iter().map(|&(_, _, run_len)| run_len).sum::<usize>(),
+        plan.output_len
+    );
+
+    // A (value, run_len) pair is 16 B vs 8 B x run_len expanded: repeat runs
+    // only pay when the average fanout is >= 2 (1:1 joins stay materialized).
+    let use_repeat_runs = plan.output_len >= matched.len().saturating_mul(2);
+
+    let full_specs: Vec<usize> = specs
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Left)))
+        .map(|(idx, _)| idx)
+        .collect();
+
+    // Fill the full lanes first (right lanes always; left lanes on
+    // low-fanout joins).
+    let mut full_data: Vec<Vec<i64>> = Vec::new();
     let thread_count = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
-    if !specs.is_empty()
+    if !full_specs.is_empty()
         && plan.output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES
         && thread_count > 1
     {
         // Replay buckets from a value tape per right-side column (one gather
         // of right values into bucket order, per br-frankenpandas-muis1),
         // shared read-only across all chunk workers.
-        let tapes: Vec<Option<Vec<i64>>> = specs
+        let tapes: Vec<Option<Vec<i64>>> = full_specs
             .iter()
-            .map(|spec| match spec.side {
+            .map(|&spec_idx| match specs[spec_idx].side {
                 FusedInt64Side::Left => None,
                 FusedInt64Side::Right => Some(
                     plan.positions
                         .iter()
-                        .map(|&right_pos| spec.values[right_pos])
+                        .map(|&right_pos| specs[spec_idx].values[right_pos])
                         .collect(),
                 ),
             })
             .collect();
 
-        // Chunk boundaries (left_pos, out_pos), balanced by OUTPUT size so a
-        // few hot buckets cannot starve the other workers.
+        // Chunk boundaries (matched_idx, out_pos), balanced by OUTPUT size
+        // so a few hot buckets cannot starve the other workers.
         let target = plan.output_len.div_ceil(thread_count).max(1);
         let mut boundaries = vec![(0usize, 0usize)];
         let mut cumulative = 0usize;
         let mut next_target = target;
-        for (left_pos, &v) in plan.left_keys.iter().enumerate() {
-            if v < plan.min || v > plan.max {
-                continue;
-            }
-            let bucket = (v - plan.min) as usize;
-            if bucket + 1 >= plan.offsets.len() {
-                continue;
-            }
-            let bucket_len = plan.offsets[bucket + 1] - plan.offsets[bucket];
-            if bucket_len == 0 {
-                continue;
-            }
-            cumulative += bucket_len;
-            if cumulative >= next_target && left_pos + 1 < plan.left_keys.len() {
-                boundaries.push((left_pos + 1, cumulative));
+        for (matched_idx, &(_, _, run_len)) in matched.iter().enumerate() {
+            cumulative += run_len;
+            if cumulative >= next_target && matched_idx + 1 < matched.len() {
+                boundaries.push((matched_idx + 1, cumulative));
                 next_target = cumulative.saturating_add(target);
             }
         }
-        debug_assert_eq!(cumulative, plan.output_len);
-        boundaries.push((plan.left_keys.len(), plan.output_len));
+        boundaries.push((matched.len(), plan.output_len));
         let chunk_count = boundaries.len() - 1;
 
-        // Pre-size every output column, then hand each chunk worker its
-        // disjoint slice of every column via progressive split_at_mut.
-        let mut column_bufs: Vec<Vec<i64>> = specs
+        // Pre-size every full lane, then hand each chunk worker its disjoint
+        // slice of every lane via progressive split_at_mut.
+        let mut column_bufs: Vec<Vec<i64>> = full_specs
             .iter()
             .map(|_| vec![0i64; plan.output_len])
             .collect();
         let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
-            .map(|_| Vec::with_capacity(specs.len()))
+            .map(|_| Vec::with_capacity(full_specs.len()))
             .collect();
         for buf in &mut column_bufs {
             let mut rest: &mut [i64] = buf.as_mut_slice();
@@ -1674,47 +1713,37 @@ fn build_dense_i64_inner_output_data(
             }
         }
 
+        let matched = &matched;
+        let full_specs = &full_specs;
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk_count);
             for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
-                let (left_start, out_start) = boundaries[chunk_idx];
-                let (left_end, out_end) = boundaries[chunk_idx + 1];
+                let (matched_start, out_start) = boundaries[chunk_idx];
+                let (matched_end, out_end) = boundaries[chunk_idx + 1];
                 let tapes = &tapes;
                 handles.push(scope.spawn(move || {
                     let mut cursor = 0usize;
-                    for left_pos in left_start..left_end {
-                        let v = plan.left_keys[left_pos];
-                        if v < plan.min || v > plan.max {
-                            continue;
-                        }
-                        let bucket = (v - plan.min) as usize;
-                        if bucket + 1 >= plan.offsets.len() {
-                            continue;
-                        }
-                        let start = plan.offsets[bucket];
-                        let len = plan.offsets[bucket + 1] - start;
-                        if len == 0 {
-                            continue;
-                        }
-                        for (slice, (spec, tape)) in bundle
+                    for &(left_pos, start, run_len) in &matched[matched_start..matched_end] {
+                        for (slice, (&spec_idx, tape)) in bundle
                             .iter_mut()
-                            .zip(specs.iter().zip(tapes.iter()))
+                            .zip(full_specs.iter().zip(tapes.iter()))
                         {
-                            match spec.side {
+                            match specs[spec_idx].side {
                                 FusedInt64Side::Left => {
-                                    slice[cursor..cursor + len].fill(spec.values[left_pos]);
+                                    slice[cursor..cursor + run_len]
+                                        .fill(specs[spec_idx].values[left_pos]);
                                 }
                                 FusedInt64Side::Right => {
-                                    slice[cursor..cursor + len].copy_from_slice(
+                                    slice[cursor..cursor + run_len].copy_from_slice(
                                         &tape
                                             .as_ref()
                                             .expect("right spec must have a bucket tape")
-                                            [start..start + len],
+                                            [start..start + run_len],
                                     );
                                 }
                             }
                         }
-                        cursor += len;
+                        cursor += run_len;
                     }
                     debug_assert_eq!(cursor, out_end - out_start);
                 }));
@@ -1725,32 +1754,51 @@ fn build_dense_i64_inner_output_data(
                     .expect("dense i64 output worker must not panic");
             }
         });
-        return column_bufs;
-    }
-
-    let mut output_data = specs
-        .iter()
-        .map(|_| Vec::<i64>::with_capacity(plan.output_len))
-        .collect::<Vec<_>>();
-    for (left_pos, &v) in plan.left_keys.iter().enumerate() {
-        if v < plan.min || v > plan.max {
-            continue;
-        }
-        let bucket = (v - plan.min) as usize;
-        if bucket + 1 >= plan.offsets.len() || plan.offsets[bucket] == plan.offsets[bucket + 1] {
-            continue;
-        }
-        for &right_pos in &plan.positions[plan.offsets[bucket]..plan.offsets[bucket + 1]] {
-            for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
-                match spec.side {
-                    FusedInt64Side::Left => out.push(spec.values[left_pos]),
-                    FusedInt64Side::Right => out.push(spec.values[right_pos]),
+        full_data = column_bufs;
+    } else if !full_specs.is_empty() {
+        full_data = full_specs
+            .iter()
+            .map(|_| Vec::<i64>::with_capacity(plan.output_len))
+            .collect();
+        for &(left_pos, start, run_len) in &matched {
+            for (out, &spec_idx) in full_data.iter_mut().zip(full_specs.iter()) {
+                match specs[spec_idx].side {
+                    FusedInt64Side::Left => {
+                        out.resize(out.len() + run_len, specs[spec_idx].values[left_pos]);
+                    }
+                    FusedInt64Side::Right => {
+                        for &right_pos in &plan.positions[start..start + run_len] {
+                            out.push(specs[spec_idx].values[right_pos]);
+                        }
+                    }
                 }
             }
         }
+        debug_assert!(full_data.iter().all(|data| data.len() == plan.output_len));
     }
-    debug_assert!(output_data.iter().all(|data| data.len() == plan.output_len));
-    output_data
+
+    // Assemble lanes in spec order: repeat runs for the lazy left lanes,
+    // filled buffers for everything else.
+    let mut full_iter = full_data.into_iter();
+    specs
+        .iter()
+        .map(|spec| {
+            if use_repeat_runs && matches!(spec.side, FusedInt64Side::Left) {
+                DenseI64LaneData::RepeatRuns(
+                    matched
+                        .iter()
+                        .map(|&(left_pos, _, run_len)| (spec.values[left_pos], run_len))
+                        .collect(),
+                )
+            } else {
+                DenseI64LaneData::Full(
+                    full_iter
+                        .next()
+                        .expect("full lane buffer must exist for every non-run spec"),
+                )
+            }
+        })
+        .collect()
 }
 
 fn build_single_key_dense_i64_inner_merge_output(
@@ -1922,14 +1970,13 @@ fn build_single_key_dense_i64_inner_merge_output(
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
-    for (spec, data) in specs.into_iter().zip(output_data) {
-        debug_assert_eq!(data.len(), output_len);
-        insert_merged_output_column(
-            &mut columns,
-            &mut column_order,
-            spec.name,
-            Column::from_i64_values(data),
-        )?;
+    for (spec, lane) in specs.into_iter().zip(output_data) {
+        let column = match lane {
+            DenseI64LaneData::RepeatRuns(runs) => Column::from_i64_repeat_runs(runs),
+            DenseI64LaneData::Full(data) => Column::from_i64_values(data),
+        };
+        debug_assert_eq!(column.len(), output_len);
+        insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
     }
 
     Ok(Some(MergedDataFrame {
@@ -4858,9 +4905,9 @@ mod tests {
     use fp_types::{NullKind, Scalar};
 
     use super::{
-        DataFrameMergeExt, DenseI64InnerOutputPlan, FusedInt64OutputColumn, FusedInt64Side,
-        JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data, join_series,
-        join_series_with_options, join_series_with_trace,
+        DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
+        FusedInt64Side, JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data,
+        join_series, join_series_with_options, join_series_with_trace,
     };
 
     #[test]
@@ -5639,8 +5686,75 @@ mod tests {
         };
         let actual = build_dense_i64_inner_output_data(&specs, &plan);
 
-        assert_eq!(actual[0], vec![20, 30, 30, 40, 50, 50]);
-        assert_eq!(actual[1], vec![100, 101, 104, 100, 102, 103]);
+        // 4 matched left rows -> 6 output rows: avg fanout < 2, so the left
+        // lane stays fully materialized alongside the right lane.
+        assert_eq!(lane_expanded(&actual[0]), vec![20, 30, 30, 40, 50, 50]);
+        assert_eq!(lane_expanded(&actual[1]), vec![100, 101, 104, 100, 102, 103]);
+        assert!(matches!(actual[0], DenseI64LaneData::Full(_)));
+        assert!(matches!(actual[1], DenseI64LaneData::Full(_)));
+    }
+
+    fn lane_expanded(lane: &DenseI64LaneData) -> Vec<i64> {
+        match lane {
+            DenseI64LaneData::RepeatRuns(runs) => {
+                let mut out = Vec::new();
+                for &(value, run_len) in runs {
+                    out.resize(out.len() + run_len, value);
+                }
+                out
+            }
+            DenseI64LaneData::Full(data) => data.clone(),
+        }
+    }
+
+    #[test]
+    fn dense_i64_inner_high_fanout_emits_repeat_run_left_lanes() {
+        // 2 matched left rows, each matching 3 right rows -> avg fanout 3:
+        // left lane must come back as repeat runs whose expansion equals the
+        // full fill, right lane stays materialized.
+        let left_keys = vec![1, 7, 2];
+        let min = 1;
+        let max = 2;
+        let offsets = vec![0, 3, 6];
+        let positions = vec![0usize, 2, 4, 1, 3, 5];
+        let left_values = vec![10, 20, 30];
+        let right_values = vec![100, 101, 102, 103, 104, 105];
+        let specs = vec![
+            FusedInt64OutputColumn {
+                name: "left".to_string(),
+                side: FusedInt64Side::Left,
+                values: &left_values,
+            },
+            FusedInt64OutputColumn {
+                name: "right".to_string(),
+                side: FusedInt64Side::Right,
+                values: &right_values,
+            },
+        ];
+
+        let plan = DenseI64InnerOutputPlan {
+            left_keys: &left_keys,
+            min,
+            max,
+            offsets: &offsets,
+            positions: &positions,
+            output_len: 6,
+        };
+        let actual = build_dense_i64_inner_output_data(&specs, &plan);
+
+        assert!(matches!(actual[0], DenseI64LaneData::RepeatRuns(_)));
+        assert!(matches!(actual[1], DenseI64LaneData::Full(_)));
+        assert_eq!(lane_expanded(&actual[0]), vec![10, 10, 10, 30, 30, 30]);
+        assert_eq!(lane_expanded(&actual[1]), vec![100, 102, 104, 101, 103, 105]);
+
+        // The lazy Column built from the runs is indistinguishable from the
+        // eagerly materialized one (values, slice view, length, equality).
+        let lazy = fp_columnar::Column::from_i64_repeat_runs(vec![(10, 3), (30, 3)]);
+        let eager = fp_columnar::Column::from_i64_values(vec![10, 10, 10, 30, 30, 30]);
+        assert_eq!(lazy.len(), eager.len());
+        assert_eq!(lazy.as_i64_slice(), eager.as_i64_slice());
+        assert_eq!(lazy.values(), eager.values());
+        assert_eq!(lazy, eager);
     }
 
     #[test]

@@ -865,6 +865,18 @@ enum ScalarValues {
         data: Vec<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Run-length backing for all-valid Int64 columns whose values arrive as
+    /// repeat runs (br-frankenpandas-3ad4n) — e.g. the left lanes of a dense
+    /// inner join, where every matched left value repeats `bucket_len` times.
+    /// Carries O(runs) memory until a consumer asks for the contiguous i64
+    /// buffer (`as_i64_slice`) or the Scalar view, each expanded once on
+    /// demand.
+    LazyRepeatRunsInt64 {
+        runs: Vec<(i64, usize)>,
+        total_len: usize,
+        data: OnceLock<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
 }
 
 impl ScalarValues {
@@ -901,6 +913,103 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_repeat_runs_int64(runs: Vec<(i64, usize)>, total_len: usize) -> Self {
+        debug_assert_eq!(runs.iter().map(|&(_, run_len)| run_len).sum::<usize>(), total_len);
+        Self::LazyRepeatRunsInt64 {
+            runs,
+            total_len,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    /// The expanded contiguous `i64` buffer of a repeat-run backing, built
+    /// once on first request. `None` for every other representation.
+    ///
+    /// Large expansions are row-chunked across scoped threads (disjoint
+    /// `split_at_mut` slices, same scheme as the dense join fill) so a
+    /// consumer that forces materialization pays the same parallel fill the
+    /// eager path would have, not a serial one.
+    fn repeat_runs_i64_data(&self) -> Option<&[i64]> {
+        const PARALLEL_MIN_VALUES: usize = 1 << 18;
+        const PARALLEL_MAX_CHUNKS: usize = 16;
+
+        if let Self::LazyRepeatRunsInt64 {
+            runs,
+            total_len,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| {
+                    let thread_count = std::thread::available_parallelism()
+                        .map_or(1, usize::from)
+                        .min(PARALLEL_MAX_CHUNKS);
+                    if *total_len < PARALLEL_MIN_VALUES || thread_count < 2 || runs.is_empty() {
+                        let mut out = Vec::with_capacity(*total_len);
+                        for &(value, run_len) in runs {
+                            out.resize(out.len() + run_len, value);
+                        }
+                        return out;
+                    }
+
+                    // Chunk boundaries (run_idx, out_pos) balanced by output
+                    // size; each worker fills its disjoint output slice.
+                    let target = total_len.div_ceil(thread_count).max(1);
+                    let mut boundaries = vec![(0usize, 0usize)];
+                    let mut cumulative = 0usize;
+                    let mut next_target = target;
+                    for (run_idx, &(_, run_len)) in runs.iter().enumerate() {
+                        cumulative += run_len;
+                        if cumulative >= next_target && run_idx + 1 < runs.len() {
+                            boundaries.push((run_idx + 1, cumulative));
+                            next_target = cumulative.saturating_add(target);
+                        }
+                    }
+                    debug_assert_eq!(cumulative, *total_len);
+                    boundaries.push((runs.len(), *total_len));
+
+                    let mut out = vec![0i64; *total_len];
+                    let mut chunk_slices = Vec::with_capacity(boundaries.len() - 1);
+                    let mut rest: &mut [i64] = out.as_mut_slice();
+                    let mut prev = 0usize;
+                    for window in boundaries.windows(2) {
+                        let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+                        prev = window[1].1;
+                        rest = tail;
+                        chunk_slices.push(chunk_slice);
+                    }
+
+                    std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(chunk_slices.len());
+                        for (chunk_idx, chunk_slice) in chunk_slices.into_iter().enumerate() {
+                            let (run_start, _) = boundaries[chunk_idx];
+                            let (run_end, _) = boundaries[chunk_idx + 1];
+                            let runs = &runs[run_start..run_end];
+                            handles.push(scope.spawn(move || {
+                                let mut cursor = 0usize;
+                                for &(value, run_len) in runs {
+                                    chunk_slice[cursor..cursor + run_len].fill(value);
+                                    cursor += run_len;
+                                }
+                                debug_assert_eq!(cursor, chunk_slice.len());
+                            }));
+                        }
+                        for handle in handles {
+                            handle
+                                .join()
+                                .expect("repeat-run expansion worker must not panic");
+                        }
+                    });
+                    out
+                })
+                .as_slice(),
+            );
+        }
+        None
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
@@ -931,6 +1040,20 @@ impl ScalarValues {
             Self::LazyAllValidBool { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
+            Self::LazyRepeatRunsInt64 {
+                runs,
+                total_len,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for &(value, run_len) in runs {
+                        out.resize(out.len() + run_len, Scalar::Int64(value));
+                    }
+                    out
+                })
+                .as_slice(),
         }
     }
 
@@ -941,6 +1064,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
+            Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
         }
     }
 
@@ -959,6 +1083,9 @@ impl Clone for ScalarValues {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
+            Self::LazyRepeatRunsInt64 {
+                runs, total_len, ..
+            } => Self::lazy_repeat_runs_int64(runs.clone(), *total_len),
         }
     }
 }
@@ -1829,6 +1956,23 @@ impl Column {
         }
     }
 
+    /// Build an all-valid Int64 column from `(value, run_len)` repeat runs
+    /// (br-frankenpandas-3ad4n). Semantically identical to
+    /// `from_i64_values(expanded)` where `expanded` repeats each `value`
+    /// `run_len` times, but carries only O(runs) memory until a consumer
+    /// forces the contiguous buffer or Scalar view.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_repeat_runs(runs: Vec<(i64, usize)>) -> Self {
+        let total_len = runs.iter().map(|&(_, run_len)| run_len).sum();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_repeat_runs_int64(runs, total_len),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid Float64 column from already-typed contiguous values.
     ///
     /// This is the typed ingestion counterpart to `Column::new(DType::Float64,
@@ -1899,6 +2043,9 @@ impl Column {
             }
             if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
                 return Some(data.as_slice());
+            }
+            if let Some(data) = self.values.repeat_runs_i64_data() {
+                return Some(data);
             }
         }
         None

@@ -2056,7 +2056,11 @@ impl Column {
         }
     }
 
-    fn from_f64_values_with_validity(data: Vec<f64>, validity: ValidityMask) -> Self {
+    /// Public (hidden) for fp-join's fused dense outer-merge builder
+    /// (br-frankenpandas-343ho); invalid slots carry the 0.0-datum convention
+    /// and materialize `Scalar::Null(NullKind::NaN)`.
+    #[doc(hidden)]
+    pub fn from_f64_values_with_validity(data: Vec<f64>, validity: ValidityMask) -> Self {
         debug_assert_eq!(data.len(), validity.len());
         if validity.all() {
             return Self::from_f64_values(data);

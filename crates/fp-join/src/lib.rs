@@ -2369,6 +2369,474 @@ fn build_single_key_dense_i64_left_merge_output(
     }))
 }
 
+/// Fused dense-i64 OUTER merge builder (br-frankenpandas-343ho).
+///
+/// `dense_int64_outer_positions` + the position-vector outer builder cost:
+/// per-bucket `Vec<Vec<usize>>` heap allocs, two `Vec<Option<usize>>` of
+/// output length, a per-row Scalar coalesce for the shared key column, and
+/// per-column reindex walks. Here the bucket walk (ascending key order —
+/// the dense outer output IS bucket order) emits a compact plan
+/// (`(left_pos | MAX, right_bucket_start | MAX, run_len)`), and:
+///
+/// - the SHARED KEY lane is synthesized as `(min_key + bucket, bucket_rows)`
+///   repeat runs — every row in a bucket has the bucket's key, whichever
+///   side it came from, so the coalesce is a closed form (all-valid Int64);
+/// - left lanes promote to nullable Float64 ONLY when right-only buckets
+///   exist, right lanes ONLY when left-only rows exist — matching
+///   `reindex_outer_join_column`'s per-positions `has_missing` check (a
+///   side with no missing rows keeps dtype Int64 via the all-present
+///   take_positions path);
+/// - per-side shared validity masks are word-filled once from the plan and
+///   cloned per lane;
+/// - lanes fill via the 6bsw3 row-chunked disjoint `split_at_mut` scheme
+///   (an i64 group and an f64 group, sharing plan/boundaries), with muis1
+///   right value tapes (i64, plus a once-cast f64 tape for promoted lanes).
+///
+/// Bit-identical: bucket walk order == `dense_int64_outer_positions`
+/// (cross products left-major, then left-only rows, then right-only rows,
+/// per ascending bucket); promoted slots use `v as f64` + the 0.0-datum
+/// gap (`Null(NaN)`), preserved slots `Null(NullKind::Null)` — the exact
+/// eager semantics per br-frankenpandas-1bvcl/lt5qx.
+fn build_single_key_dense_i64_outer_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    // The closed-form key lane needs the coalesced shared-key shape; the
+    // non-shared-name variant keeps the position-vector path.
+    if left_on[0] != right_on[0] {
+        return Ok(None);
+    }
+    let Some(left_keys) = left_key.as_i64_slice() else {
+        return Ok(None);
+    };
+    let Some(right_keys) = right_key.as_i64_slice() else {
+        return Ok(None);
+    };
+    if left_keys.is_empty() || right_keys.is_empty() {
+        return Ok(None);
+    }
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let key_name = left_on[0];
+    let shared_key_names = [key_name].into_iter().collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+
+    // Lane specs in output order: left columns (the key slot handled as the
+    // synthetic coalesced lane), then right non-key columns.
+    enum OuterLaneKind {
+        SharedKey,
+        Lane(FusedInt64Side),
+    }
+    let mut spec_names = Vec::<String>::new();
+    let mut spec_kinds = Vec::<OuterLaneKind>::new();
+    let mut spec_values = Vec::<&[i64]>::new();
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        if name.as_str() == key_name {
+            spec_names.push(name.clone());
+            spec_kinds.push(OuterLaneKind::SharedKey);
+            spec_values.push(values);
+            continue;
+        }
+        let out_name = if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Left));
+        spec_values.push(values);
+    }
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        if name.as_str() == key_name {
+            continue;
+        }
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Right));
+        spec_values.push(values);
+    }
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    // Dense span over BOTH key sets (same gate as dense_int64_outer_positions
+    // so fused/fallback routing matches).
+    let mut min_key = left_keys[0];
+    let mut max_key = left_keys[0];
+    for &key in left_keys.iter().chain(right_keys.iter()) {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+    let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return Ok(None);
+    }
+    let span = usize::try_from(span).expect("span bounded by max_dense_span");
+
+    // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
+    let build_csr = |keys: &[i64]| {
+        let mut offsets = vec![0usize; span + 1];
+        for &key in keys {
+            offsets[(key - min_key) as usize + 1] += 1;
+        }
+        for i in 0..span {
+            offsets[i + 1] += offsets[i];
+        }
+        let mut positions = vec![0usize; keys.len()];
+        let mut cursor = offsets[..span].to_vec();
+        for (pos, &key) in keys.iter().enumerate() {
+            let bucket = (key - min_key) as usize;
+            positions[cursor[bucket]] = pos;
+            cursor[bucket] += 1;
+        }
+        (offsets, positions)
+    };
+    let (left_offsets, left_positions_csr) = build_csr(left_keys);
+    let (right_offsets, right_positions_csr) = build_csr(right_keys);
+
+    // Bucket walk -> compact plan + closed-form key runs + output length.
+    const NONE_POS: usize = usize::MAX;
+    let mut plan = Vec::<(usize, usize, usize)>::new();
+    let mut key_runs = Vec::<(i64, usize)>::new();
+    let mut output_len = 0usize;
+    let mut has_left_missing = false; // right-only buckets exist
+    let mut has_right_missing = false; // left-only rows exist
+    for bucket in 0..span {
+        let ll = left_offsets[bucket + 1] - left_offsets[bucket];
+        let rl = right_offsets[bucket + 1] - right_offsets[bucket];
+        let bucket_rows = match (ll > 0, rl > 0) {
+            (true, true) => {
+                let Some(rows) = ll.checked_mul(rl) else {
+                    return Ok(None);
+                };
+                let rs = right_offsets[bucket];
+                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                    plan.push((lp, rs, rl));
+                }
+                rows
+            }
+            (true, false) => {
+                has_right_missing = true;
+                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                    plan.push((lp, NONE_POS, 1));
+                }
+                ll
+            }
+            (false, true) => {
+                has_left_missing = true;
+                plan.push((NONE_POS, right_offsets[bucket], rl));
+                rl
+            }
+            (false, false) => continue,
+        };
+        let Some(new_len) = output_len.checked_add(bucket_rows) else {
+            return Ok(None);
+        };
+        output_len = new_len;
+        key_runs.push((min_key + bucket as i64, bucket_rows));
+    }
+
+    // Per-side shared validity masks, word-filled from the plan.
+    let mut left_words = vec![0_u64; output_len.div_ceil(64)];
+    let mut right_words = vec![0_u64; output_len.div_ceil(64)];
+    {
+        let mut out_pos = 0usize;
+        for &(lp, rs, run_len) in &plan {
+            if lp != NONE_POS {
+                set_validity_bit_range(&mut left_words, out_pos, out_pos + run_len);
+            }
+            if rs != NONE_POS {
+                set_validity_bit_range(&mut right_words, out_pos, out_pos + run_len);
+            }
+            out_pos += run_len;
+        }
+        debug_assert_eq!(out_pos, output_len);
+    }
+    let left_validity = fp_columnar::ValidityMask::from_words(left_words, output_len);
+    let right_validity = fp_columnar::ValidityMask::from_words(right_words, output_len);
+
+    // Group lanes: promoted (nullable Float64) when that side has missing
+    // rows, preserved (all-valid Int64 gather semantics) otherwise.
+    let promoted = |side: FusedInt64Side| match side {
+        FusedInt64Side::Left => has_left_missing,
+        FusedInt64Side::Right => has_right_missing,
+    };
+    let mut i64_lanes = Vec::<usize>::new();
+    let mut f64_lanes = Vec::<usize>::new();
+    for (idx, kind) in spec_kinds.iter().enumerate() {
+        if let OuterLaneKind::Lane(side) = kind {
+            if promoted(*side) {
+                f64_lanes.push(idx);
+            } else {
+                i64_lanes.push(idx);
+            }
+        }
+    }
+
+    // Right value tapes in bucket order (muis1): i64 always, f64 once-cast
+    // for promoted right lanes.
+    let tape_i64 = |idx: usize| -> Vec<i64> {
+        right_positions_csr
+            .iter()
+            .map(|&pos| spec_values[idx][pos])
+            .collect()
+    };
+
+    // Output-balanced chunk boundaries over the plan (6bsw3), shared by both
+    // fill groups.
+    let thread_count = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let parallel = output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1;
+    let mut boundaries = vec![(0usize, 0usize)];
+    if parallel {
+        let target = output_len.div_ceil(thread_count).max(1);
+        let mut cumulative = 0usize;
+        let mut next_target = target;
+        for (plan_idx, &(_, _, run_len)) in plan.iter().enumerate() {
+            cumulative += run_len;
+            if cumulative >= next_target && plan_idx + 1 < plan.len() {
+                boundaries.push((plan_idx + 1, cumulative));
+                next_target = cumulative.saturating_add(target);
+            }
+        }
+    }
+    boundaries.push((plan.len(), output_len));
+    let chunk_count = boundaries.len() - 1;
+
+    // Fill the i64 group then the f64 group with the same chunked walk.
+    // (Macro-free duplication: the two loops differ only in element type and
+    // the `as f64` widening on left values.)
+    let fill_i64: Vec<Vec<i64>> = {
+        let tapes: Vec<Option<Vec<i64>>> = i64_lanes
+            .iter()
+            .map(|&idx| match &spec_kinds[idx] {
+                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(tape_i64(idx)),
+                _ => None,
+            })
+            .collect();
+        let mut bufs: Vec<Vec<i64>> = i64_lanes.iter().map(|_| vec![0i64; output_len]).collect();
+        if !i64_lanes.is_empty() {
+            let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
+                .map(|_| Vec::with_capacity(i64_lanes.len()))
+                .collect();
+            for buf in &mut bufs {
+                let mut rest: &mut [i64] = buf.as_mut_slice();
+                let mut prev = 0usize;
+                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
+                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+                    prev = window[1].1;
+                    rest = tail;
+                    bundles[chunk_idx].push(chunk_slice);
+                }
+            }
+            let plan = &plan;
+            let i64_lanes = &i64_lanes;
+            let spec_kinds = &spec_kinds;
+            let spec_values = &spec_values;
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(chunk_count);
+                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
+                    let (plan_start, out_start) = boundaries[chunk_idx];
+                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
+                    let tapes = &tapes;
+                    handles.push(scope.spawn(move || {
+                        let mut cursor = 0usize;
+                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
+                            for (slice, (&idx, tape)) in
+                                bundle.iter_mut().zip(i64_lanes.iter().zip(tapes.iter()))
+                            {
+                                match &spec_kinds[idx] {
+                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
+                                        if lp != NONE_POS {
+                                            slice[cursor..cursor + run_len]
+                                                .fill(spec_values[idx][lp]);
+                                        }
+                                    }
+                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
+                                        if rs != NONE_POS {
+                                            slice[cursor..cursor + run_len].copy_from_slice(
+                                                &tape
+                                                    .as_ref()
+                                                    .expect("right lane must have a tape")
+                                                    [rs..rs + run_len],
+                                            );
+                                        }
+                                    }
+                                    OuterLaneKind::SharedKey => {
+                                        unreachable!("key lane is synthesized, not filled")
+                                    }
+                                }
+                            }
+                            cursor += run_len;
+                        }
+                        debug_assert_eq!(cursor, out_end - out_start);
+                    }));
+                }
+                for handle in handles {
+                    handle
+                        .join()
+                        .expect("dense i64 outer output worker must not panic");
+                }
+            });
+        }
+        bufs
+    };
+    let fill_f64: Vec<Vec<f64>> = {
+        let tapes: Vec<Option<Vec<f64>>> = f64_lanes
+            .iter()
+            .map(|&idx| match &spec_kinds[idx] {
+                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(
+                    right_positions_csr
+                        .iter()
+                        .map(|&pos| spec_values[idx][pos] as f64)
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let mut bufs: Vec<Vec<f64>> = f64_lanes.iter().map(|_| vec![0f64; output_len]).collect();
+        if !f64_lanes.is_empty() {
+            let mut bundles: Vec<Vec<&mut [f64]>> = (0..chunk_count)
+                .map(|_| Vec::with_capacity(f64_lanes.len()))
+                .collect();
+            for buf in &mut bufs {
+                let mut rest: &mut [f64] = buf.as_mut_slice();
+                let mut prev = 0usize;
+                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
+                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+                    prev = window[1].1;
+                    rest = tail;
+                    bundles[chunk_idx].push(chunk_slice);
+                }
+            }
+            let plan = &plan;
+            let f64_lanes = &f64_lanes;
+            let spec_kinds = &spec_kinds;
+            let spec_values = &spec_values;
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(chunk_count);
+                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
+                    let (plan_start, out_start) = boundaries[chunk_idx];
+                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
+                    let tapes = &tapes;
+                    handles.push(scope.spawn(move || {
+                        let mut cursor = 0usize;
+                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
+                            for (slice, (&idx, tape)) in
+                                bundle.iter_mut().zip(f64_lanes.iter().zip(tapes.iter()))
+                            {
+                                match &spec_kinds[idx] {
+                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
+                                        if lp != NONE_POS {
+                                            slice[cursor..cursor + run_len]
+                                                .fill(spec_values[idx][lp] as f64);
+                                        }
+                                    }
+                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
+                                        if rs != NONE_POS {
+                                            slice[cursor..cursor + run_len].copy_from_slice(
+                                                &tape
+                                                    .as_ref()
+                                                    .expect("right lane must have a tape")
+                                                    [rs..rs + run_len],
+                                            );
+                                        }
+                                    }
+                                    OuterLaneKind::SharedKey => {
+                                        unreachable!("key lane is synthesized, not filled")
+                                    }
+                                }
+                            }
+                            cursor += run_len;
+                        }
+                        debug_assert_eq!(cursor, out_end - out_start);
+                    }));
+                }
+                for handle in handles {
+                    handle
+                        .join()
+                        .expect("dense f64 outer output worker must not panic");
+                }
+            });
+        }
+        bufs
+    };
+
+    // Assemble columns in spec order.
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(spec_names.len());
+    let mut i64_iter = fill_i64.into_iter();
+    let mut f64_iter = fill_f64.into_iter();
+    for (idx, (name, kind)) in spec_names.into_iter().zip(spec_kinds.iter()).enumerate() {
+        let column = match kind {
+            OuterLaneKind::SharedKey => {
+                // Closed-form coalesced key: all-valid, bucket key repeated
+                // bucket_rows times, in ascending bucket order.
+                if output_len >= key_runs.len().saturating_mul(2) {
+                    Column::from_i64_repeat_runs(key_runs.clone())
+                } else {
+                    let mut data = Vec::with_capacity(output_len);
+                    for &(key, run_len) in &key_runs {
+                        data.resize(data.len() + run_len, key);
+                    }
+                    Column::from_i64_values(data)
+                }
+            }
+            OuterLaneKind::Lane(side) => {
+                if promoted(*side) {
+                    let data = f64_iter.next().expect("promoted lane buffer must exist");
+                    let validity = match side {
+                        FusedInt64Side::Left => left_validity.clone(),
+                        FusedInt64Side::Right => right_validity.clone(),
+                    };
+                    Column::from_f64_values_with_validity(data, validity)
+                } else {
+                    let data = i64_iter.next().expect("preserved lane buffer must exist");
+                    Column::from_i64_values(data)
+                }
+            }
+        };
+        debug_assert_eq!(column.len(), output_len, "lane {idx} length");
+        insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn build_single_key_dense_i64_right_all_matched_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -3971,6 +4439,24 @@ pub fn merge_dataframes_on_with_options(
         && indicator_name.is_none()
         && validate_allows_fast_positions
         && let Some(merged) = build_single_key_dense_i64_outer_all_matched_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_dense_i64_outer_merge_output(
             left,
             right,
             left_on,

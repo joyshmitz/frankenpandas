@@ -1103,6 +1103,8 @@ enum ScalarValues {
     },
 }
 
+type Utf8ArcViewSource = (Arc<[u8]>, Arc<[usize]>, usize);
+
 impl ScalarValues {
     fn from_vec(values: Vec<Scalar>) -> Self {
         Self::Eager(values)
@@ -1192,7 +1194,7 @@ impl ScalarValues {
     /// O(1); the Scalar view materializes on demand.
     fn lazy_utf8_slice(bytes: Arc<[u8]>, offsets: Arc<[usize]>, start: usize, len: usize) -> Self {
         debug_assert!(
-            start + len + 1 <= offsets.len(),
+            start + len < offsets.len(),
             "view window must lie within the source offsets"
         );
         Self::LazyUtf8Slice {
@@ -3000,7 +3002,7 @@ impl Column {
     /// `LazyUtf8Slice` view (offset `start`). The two `Arc::clone`s are O(1) and
     /// let `take_positions` return a contiguous-range view without copying
     /// (br-frankenpandas-jbyuc.1.1.1).
-    fn utf8_arc_view_source(&self) -> Option<(Arc<[u8]>, Arc<[usize]>, usize)> {
+    fn utf8_arc_view_source(&self) -> Option<Utf8ArcViewSource> {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }

@@ -60,6 +60,22 @@ fn build_str_series(n: usize) -> Series {
     Series::from_values("s", labels, values).expect("str series")
 }
 
+/// Series of Float64 values with moderate cardinality (so rank tie-groups
+/// actually fire), for the radix-rank benchmark (br-frankenpandas-ruvoo).
+fn build_rank_series(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let values: Vec<Scalar> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(29)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            Scalar::Float64((mixed % 50_000) as f64 * 0.5)
+        })
+        .collect();
+    Series::from_values("s", labels, values).expect("rank series")
+}
+
 /// Series with a deterministically-shuffled all-Int64 index (with duplicate
 /// labels) — for the radix Series.sort_index benchmark (br-frankenpandas-d9joc).
 fn build_series_sortindex(n: usize) -> Series {
@@ -711,6 +727,16 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.sort_index(true).expect("series sort index");
             return print!("{}", golden_dump_series(&out));
         }
+        "rank_avg" => {
+            let s = build_rank_series(n);
+            let out = s.rank("average", true, "keep").expect("rank");
+            return print!("{}", golden_dump_series(&out));
+        }
+        "rank_first" => {
+            let s = build_rank_series(n);
+            let out = s.rank("first", true, "keep").expect("rank");
+            return print!("{}", golden_dump_series(&out));
+        }
         "str_sort_chain" => {
             // lower -> sort_values: the sort reads the contiguous buffer
             // (br-frankenpandas-vecff) instead of materializing 1M Scalars.
@@ -1107,6 +1133,13 @@ fn main() {
             let s = build_series_sortindex(n);
             for _ in 0..iters {
                 let out = s.sort_index(true).expect("series sort index");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "rank_avg" => {
+            let s = build_rank_series(n);
+            for _ in 0..iters {
+                let out = s.rank("average", true, "keep").expect("rank");
                 sink = sink.wrapping_add(out.len());
             }
         }

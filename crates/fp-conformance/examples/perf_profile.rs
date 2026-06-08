@@ -60,6 +60,22 @@ fn build_str_series(n: usize) -> Series {
     Series::from_values("s", labels, values).expect("str series")
 }
 
+/// Series with a deterministically-shuffled all-Int64 index (with duplicate
+/// labels) — for the radix Series.sort_index benchmark (br-frankenpandas-d9joc).
+fn build_series_sortindex(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(23)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            IndexLabel::Int64((mixed % (n as u64 * 4)) as i64)
+        })
+        .collect();
+    let values: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
+    Series::from_values("s", labels, values).expect("series sortindex")
+}
+
 fn build_series_pair_same(n: usize) -> (Series, Series) {
     // Identical indexes => alignment is gap-free and all-valid, exercising the
     // typed-output fast path in Column::aligned_binary_f64 (the common
@@ -690,6 +706,11 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.sort_values(true).expect("sort");
             return print!("{}", golden_dump_series(&out));
         }
+        "series_sort_index" => {
+            let s = build_series_sortindex(n);
+            let out = s.sort_index(true).expect("series sort index");
+            return print!("{}", golden_dump_series(&out));
+        }
         "str_sort_chain" => {
             // lower -> sort_values: the sort reads the contiguous buffer
             // (br-frankenpandas-vecff) instead of materializing 1M Scalars.
@@ -1079,6 +1100,13 @@ fn main() {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.sort_values(true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "series_sort_index" => {
+            let s = build_series_sortindex(n);
+            for _ in 0..iters {
+                let out = s.sort_index(true).expect("series sort index");
                 sink = sink.wrapping_add(out.len());
             }
         }

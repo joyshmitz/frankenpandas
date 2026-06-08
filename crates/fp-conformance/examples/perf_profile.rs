@@ -568,6 +568,26 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .transform("mean")
             .expect("transform"),
+        "groupby_transform_median" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("median")
+            .expect("transform"),
+        "groupby_transform_first" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("first")
+            .expect("transform"),
+        "groupby_transform_last" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("last")
+            .expect("transform"),
+        "groupby_transform_prod" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("prod")
+            .expect("transform"),
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
@@ -840,6 +860,17 @@ fn main() {
                 let out = frame
                     .drop_duplicates(None, DuplicateKeep::First, false)
                     .expect("dedup");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_transform_median" => {
+            let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .transform("median")
+                    .expect("transform");
                 sink = sink.wrapping_add(out.len());
             }
         }

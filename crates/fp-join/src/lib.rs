@@ -1058,6 +1058,64 @@ fn ordered_unique_int64_inner_positions(
     Some((left_positions, right_positions))
 }
 
+fn strictly_increasing_utf8_key_spans(column: &Column) -> Option<(&[u8], &[usize])> {
+    let (bytes, offsets) = column.as_utf8_contiguous()?;
+    let n = offsets.len().checked_sub(1)?;
+    if n < 2 {
+        return Some((bytes, offsets));
+    }
+
+    let mut previous = &bytes[offsets[0]..offsets[1]];
+    for pos in 1..n {
+        let current = &bytes[offsets[pos]..offsets[pos + 1]];
+        if previous >= current {
+            return None;
+        }
+        previous = current;
+    }
+    Some((bytes, offsets))
+}
+
+/// Hash-free ordered merge for all-valid, strictly increasing contiguous-Utf8
+/// keys. This is the string-key analogue of
+/// [`ordered_unique_int64_inner_positions`]: each side is unique and already in
+/// key order, so a two-cursor byte-span merge emits the exact same 1:1
+/// `(left_pos, right_pos)` pairs as the hash path while skipping hash table
+/// build/probe entirely. Duplicate or unsorted inputs fall back to the
+/// left-major byte-span hash path, preserving pandas row order.
+fn ordered_unique_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (left_bytes, left_offsets) = strictly_increasing_utf8_key_spans(left_key)?;
+    let (right_bytes, right_offsets) = strictly_increasing_utf8_key_spans(right_key)?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    let mut left_idx = 0usize;
+    let mut right_idx = 0usize;
+
+    while left_idx < left_n && right_idx < right_n {
+        let left_span = &left_bytes[left_offsets[left_idx]..left_offsets[left_idx + 1]];
+        let right_span = &right_bytes[right_offsets[right_idx]..right_offsets[right_idx + 1]];
+
+        match left_span.cmp(right_span) {
+            Ordering::Equal => {
+                left_positions.push(left_idx);
+                right_positions.push(right_idx);
+                left_idx += 1;
+                right_idx += 1;
+            }
+            Ordering::Less => left_idx += 1,
+            Ordering::Greater => right_idx += 1,
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn ordered_unique_int64_left_match_positions(
     left_key: &Column,
     right_key: &Column,
@@ -4624,6 +4682,20 @@ fn merge_single_key_inner_unsorted(
         );
     }
 
+    if let Some((left_positions, right_positions)) =
+        ordered_unique_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+
     // Byte-span build+probe for all-valid contiguous-Utf8 string keys
     // (br-frankenpandas-i388q): skips the per-row String clone + Scalar
     // materialization of the JoinKeyComponent path. Same pairing -> same output.
@@ -6343,15 +6415,48 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
 
 #[cfg(test)]
 mod tests {
+    use fp_columnar::Column;
     use fp_frame::Series;
-    use fp_index::IndexLabel;
+    use fp_index::{Index, IndexLabel};
     use fp_types::{NullKind, Scalar};
 
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
         FusedInt64Side, JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data,
         join_series, join_series_with_options, join_series_with_trace,
+        ordered_unique_utf8_inner_positions,
     };
+
+    fn contiguous_utf8_column(values: &[&str]) -> Column {
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(values.len() + 1);
+        offsets.push(0);
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        Column::from_utf8_contiguous(bytes, offsets)
+    }
+
+    fn utf8_key_merge_frame(keys: &[&str], value_name: &str, base: i64) -> DataFrame {
+        let index = Index::new(
+            (0..keys.len())
+                .map(|row| IndexLabel::Int64(row as i64))
+                .collect(),
+        );
+        let mut columns = std::collections::BTreeMap::new();
+        columns.insert("id".to_owned(), contiguous_utf8_column(keys));
+        columns.insert(
+            value_name.to_owned(),
+            Column::from_i64_values((0..keys.len()).map(|row| base + row as i64).collect()),
+        );
+        DataFrame::new_with_column_order(
+            index,
+            columns,
+            vec!["id".to_owned(), value_name.to_owned()],
+        )
+        .expect("utf8 key frame")
+    }
 
     #[test]
     fn inner_join_multiplies_cardinality_for_duplicates() {
@@ -9151,6 +9256,65 @@ mod tests {
                 Scalar::Int64(200),
                 Scalar::Int64(100),
                 Scalar::Int64(200)
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_inner_positions_match_left_major_hash_order_53lat() {
+        let left = contiguous_utf8_column(&["a", "b", "d", "f"]);
+        let right = contiguous_utf8_column(&["b", "c", "f"]);
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 2]);
+
+        let merged = merge_dataframes(
+            &utf8_key_merge_frame(&["a", "b", "d", "f"], "lv", 10),
+            &utf8_key_merge_frame(&["b", "c", "f"], "rv", 20),
+            "id",
+            JoinType::Inner,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[Scalar::Int64(11), Scalar::Int64(13)]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(22)]
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_rejects_unsorted_or_duplicate_keys_53lat() {
+        let unsorted_left = contiguous_utf8_column(&["b", "a", "b"]);
+        let duplicate_right = contiguous_utf8_column(&["b", "b", "a"]);
+        assert!(ordered_unique_utf8_inner_positions(&unsorted_left, &duplicate_right).is_none());
+
+        let left = utf8_key_merge_frame(&["b", "a", "b"], "lv", 10);
+        let right = utf8_key_merge_frame(&["b", "b", "a"], "rv", 20);
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(11),
+                Scalar::Int64(12),
+                Scalar::Int64(12)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[
+                Scalar::Int64(20),
+                Scalar::Int64(21),
+                Scalar::Int64(22),
+                Scalar::Int64(20),
+                Scalar::Int64(21)
             ]
         );
     }

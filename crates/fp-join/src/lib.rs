@@ -6476,6 +6476,36 @@ fn build_asof_output(
         match task {
             AsofOutputTask::LeftClone(col) => Ok((*col).clone()),
             AsofOutputTask::RightGather(right_col) => {
+                // Typed all-valid-Float64 gather (br-frankenpandas asof typed
+                // output): an `as_f64_slice` source is all-valid, so it carries
+                // NO NaN values (Float64 validity marks NaN invalid, and the
+                // slice is gated on `validity.all()`). Gather matched data into a
+                // contiguous f64 buffer + validity bitset instead of cloning a
+                // 32 B Scalar per row and re-validating in Column::new. Bit-
+                // identical to the Scalar path: a matched slot is a finite
+                // `Float64(src[j])` (valid bit), an unmatched slot is
+                // `Null(NullKind::NaN)` (cleared bit) — exactly what the Scalar
+                // gather + Column::new produce, with no matched-NaN ambiguity
+                // because the source has none.
+                if let Some(src) = right_col.as_f64_slice() {
+                    let mut data = Vec::with_capacity(n_out);
+                    let mut validity = fp_columnar::ValidityMask::all_valid(n_out);
+                    for (i, m) in right_matches.iter().enumerate() {
+                        match m {
+                            Some(j) if *j < right_n => data.push(src[*j]),
+                            _ => {
+                                // 0.0 datum + cleared bit is the gap convention:
+                                // LazyNullableFloat64 materializes Null(NaN) only
+                                // when the datum is NOT NaN, so an unmatched slot
+                                // must use 0.0 (a NaN datum would materialize a
+                                // present Float64(NaN) instead).
+                                data.push(0.0);
+                                validity.set(i, false);
+                            }
+                        }
+                    }
+                    return Ok(Column::from_f64_values_with_validity(data, validity));
+                }
                 let src = right_col.values();
                 let mut vals = Vec::with_capacity(n_out);
                 for m in right_matches {

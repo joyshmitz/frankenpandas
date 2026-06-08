@@ -226,6 +226,29 @@ fn build_str_key_frame_repeated(n: usize, cardinality: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("str key repeated frame")
 }
 
+/// Frame with a deterministically-shuffled all-Int64 index (so sort_index must
+/// actually reorder) + a couple Float64 value columns — for the radix
+/// sort_index benchmark (br-frankenpandas-y5s15).
+fn build_sortindex_frame(n: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(23)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            IndexLabel::Int64((mixed % (n as u64 * 4)) as i64)
+        })
+        .collect();
+    let index = Index::new(labels);
+    let mut columns = BTreeMap::new();
+    let v0: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
+    let v1: Vec<Scalar> = (0..n).map(|i| Scalar::Int64((i as i64).wrapping_mul(7))).collect();
+    columns.insert("v0".to_string(), fp_columnar::Column::from_values(v0).expect("v0"));
+    columns.insert("v1".to_string(), fp_columnar::Column::from_values(v1).expect("v1"));
+    let column_order = vec!["v0".to_string(), "v1".to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("sortindex frame")
+}
+
 fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
@@ -493,6 +516,7 @@ fn run_golden(scenario: &str, n: usize) {
         "sort_multi" => build_multisort_frame(n)
             .sort_values_multi(&["k0", "k1"], &[true, true], "last")
             .expect("sort multi"),
+        "sort_index" => build_sortindex_frame(n).sort_index(true).expect("sort index"),
         "str_sort" => build_str_key_frame(n, 4096)
             .sort_values("k", true)
             .expect("str sort"),
@@ -759,6 +783,13 @@ fn main() {
                 let out = frame
                     .sort_values_multi(&["k0", "k1"], &[true, true], "last")
                     .expect("sort multi");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "sort_index" => {
+            let frame = build_sortindex_frame(n);
+            for _ in 0..iters {
+                let out = frame.sort_index(true).expect("sort index");
                 sink = sink.wrapping_add(out.len());
             }
         }

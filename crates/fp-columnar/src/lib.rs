@@ -1984,6 +1984,23 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     idx
 }
 
+/// Stable LSD radix argsort of an `i64` slice (br-frankenpandas-y5s15): the
+/// permutation that orders `values` ascending (or descending), equal values
+/// keeping their original order. Bit-identical to a stable `sort_by(i64::cmp)`:
+/// `i64_radix_key` is order-preserving and the counting sort is stable;
+/// descending flips the key (`!key`) so equal values still keep original order
+/// (matching a reversed comparator whose `Equal` arm doesn't reorder). Reusable
+/// for any all-Int64 ordering (index labels, single columns).
+#[must_use]
+pub fn radix_argsort_i64(values: &[i64], ascending: bool) -> Vec<usize> {
+    let keys: Vec<u64> = if ascending {
+        values.iter().map(|&v| i64_radix_key(v)).collect()
+    } else {
+        values.iter().map(|&v| !i64_radix_key(v)).collect()
+    };
+    radix_argsort_u64(&keys)
+}
+
 /// Stable LSD radix lexsort over several `u64` key columns
 /// (br-frankenpandas-lnsu6). Returns the permutation that orders rows
 /// lexicographically by `keys_by_col[0]`, then `keys_by_col[1]`, …, with equal

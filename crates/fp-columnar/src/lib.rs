@@ -1984,6 +1984,48 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     idx
 }
 
+/// Stable LSD radix lexsort over several `u64` key columns
+/// (br-frankenpandas-lnsu6). Returns the permutation that orders rows
+/// lexicographically by `keys_by_col[0]`, then `keys_by_col[1]`, …, with equal
+/// rows keeping their original order — exactly a stable multi-key `sort_by`.
+/// The least-significant digit overall is the last column's low byte, so the
+/// columns are processed in reverse (each an 8-pass stable counting sort that
+/// threads the running permutation), making the *first* column the most
+/// significant. O(n·k) and comparison-free. All key vectors must have the same
+/// length; callers bake per-column ascending/descending into the keys.
+pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
+    let n = keys_by_col.first().map_or(0, Vec::len);
+    let mut idx: Vec<usize> = (0..n).collect();
+    if n < 2 || keys_by_col.is_empty() {
+        return idx;
+    }
+    let mut scratch: Vec<usize> = vec![0; n];
+    for keys in keys_by_col.iter().rev() {
+        for shift in (0..64).step_by(8) {
+            let mut count = [0usize; 256];
+            for &k in keys {
+                count[((k >> shift) & 0xff) as usize] += 1;
+            }
+            if count.contains(&n) {
+                continue;
+            }
+            let mut running = 0usize;
+            for slot in &mut count {
+                let c = *slot;
+                *slot = running;
+                running += c;
+            }
+            for &i in &idx {
+                let bucket = ((keys[i] >> shift) & 0xff) as usize;
+                scratch[count[bucket]] = i;
+                count[bucket] += 1;
+            }
+            std::mem::swap(&mut idx, &mut scratch);
+        }
+    }
+    idx
+}
+
 /// Stable MSD byte-radix argsort over UTF-8 strings.
 ///
 /// Produces the exact permutation of a stable `sort_by` with `String::cmp`
@@ -8436,6 +8478,37 @@ impl Column {
                 data.iter().map(|&v| !f64_radix_key(v)).collect()
             };
             return Some(radix_argsort_u64(&keys));
+        }
+        None
+    }
+
+    /// Order-preserving `u64` radix keys for this column (per-column ascending/
+    /// descending baked in), for the multi-key lexsort
+    /// (`radix_argsort_multi_u64`, br-frankenpandas-lnsu6). `Some` only for an
+    /// all-valid Int64 or all-valid **no-NaN** Float64 column — the cases where
+    /// the radix order is bit-identical to the stable comparator: Int64 `cmp`,
+    /// finite-Float64 `partial_cmp` (`-0.0` normalized to `+0.0`). A Float64
+    /// column with any NaN returns `None` so the caller keeps the `Scalar`
+    /// comparator (which, in the multi-key path, treats `NaN` as compare-Equal —
+    /// a semantics the monotonic radix key cannot reproduce).
+    #[must_use]
+    pub fn typed_radix_keys(&self, ascending: bool) -> Option<Vec<u64>> {
+        if let Some(data) = self.as_i64_slice() {
+            return Some(if ascending {
+                data.iter().map(|&v| i64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !i64_radix_key(v)).collect()
+            });
+        }
+        if let Some(data) = self.as_f64_slice() {
+            if data.iter().any(|x| x.is_nan()) {
+                return None;
+            }
+            return Some(if ascending {
+                data.iter().map(|&v| f64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !f64_radix_key(v)).collect()
+            });
         }
         None
     }

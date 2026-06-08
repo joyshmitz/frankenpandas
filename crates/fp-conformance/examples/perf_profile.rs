@@ -603,6 +603,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .transform("mean")
             .expect("transform"),
+        "str_transform_mean" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("mean")
+            .expect("transform"),
         "groupby_transform_median" => build_transform_frame(n, 100, 4)
             .groupby(&["k"])
             .expect("groupby")
@@ -948,6 +953,17 @@ fn main() {
         }
         "groupby_transform_mean" => {
             let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .transform("mean")
+                    .expect("transform");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_transform_mean" => {
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])

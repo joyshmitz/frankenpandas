@@ -3666,8 +3666,6 @@ fn build_single_key_inner_merge_output(
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
-    let mut columns = std::collections::BTreeMap::new();
-    let mut column_order: Vec<String> = Vec::new();
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
@@ -3686,44 +3684,77 @@ fn build_single_key_inner_merge_output(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
+    // Resolve output column specs in order (name/suffix resolution is cheap),
+    // then gather them. Each output column is an independent typed gather over
+    // the position vector, so wide/large outputs build every column in parallel
+    // (one column per worker) — the same disjoint-fill pattern as the dense-i64
+    // fused builder (br-frankenpandas-j3jnd). Bit-identical to the serial loop:
+    // identical per-column take_positions_typed result, inserted in spec order.
+    let mut specs: Vec<(String, &Column, &[usize])> = Vec::new();
     for name in left.column_names() {
         let col = left
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
-        if left_key_name_set.contains(name.as_str()) {
-            let key_column = take_positions_typed(col, left_positions);
-            insert_merged_output_column(&mut columns, &mut column_order, name.clone(), key_column)?;
-            continue;
-        }
-
-        let reindexed = take_positions_typed(col, left_positions);
-        let out_name = if right_col_names.contains(name) {
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        specs.push((out_name, col, left_positions));
     }
-
     for name in right.column_names() {
-        let col = right
-            .columns()
-            .get(name)
-            .expect("right column listed in column_names must exist");
         if right_key_name_set.contains(name.as_str())
             && shared_name_positions.contains_key(name.as_str())
         {
             continue;
         }
-
-        let reindexed = take_positions_typed(col, right_positions);
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        specs.push((out_name, col, right_positions));
+    }
+
+    let built: Vec<Column> = {
+        let thread_count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+        if specs.len() > 1 && n >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
+            let mut slots: Vec<Option<Column>> = (0..specs.len()).map(|_| None).collect();
+            let chunk = specs.len().div_ceil(thread_count).max(1);
+            std::thread::scope(|scope| {
+                for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+                    scope.spawn(move || {
+                        for ((_, col, positions), slot) in spec_chunk.iter().zip(slot_chunk) {
+                            *slot = Some(take_positions_typed(col, positions));
+                        }
+                    });
+                }
+            });
+            slots
+                .into_iter()
+                .map(|c| c.expect("every spec column must be built"))
+                .collect()
+        } else {
+            specs
+                .iter()
+                .map(|(_, col, positions)| take_positions_typed(col, positions))
+                .collect()
+        }
+    };
+
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order: Vec<String> = Vec::with_capacity(specs.len());
+    for ((out_name, _, _), column) in specs.into_iter().zip(built) {
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, column)?;
     }
 
     Ok(MergedDataFrame {

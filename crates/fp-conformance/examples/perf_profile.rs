@@ -318,6 +318,41 @@ fn build_join_frame_offset(
     .expect("join frame")
 }
 
+/// Join frame with an Int64 `id` key (bounded cardinality) plus `ncols`
+/// Float64 value columns. The Float64 values force `merge_dataframes` off the
+/// fused dense-i64 builder onto the position-based output path
+/// (`build_single_key_inner_merge_output`), and the multiple wide columns make
+/// per-column gather dominate — the shape br-frankenpandas-j3jnd parallelizes.
+fn build_join_frame_f64_wide(
+    value_prefix: &str,
+    n: usize,
+    key_cardinality: usize,
+    ncols: usize,
+) -> DataFrame {
+    let cardinality = key_cardinality.max(1);
+    let mut names: Vec<String> = Vec::with_capacity(ncols + 1);
+    names.push("id".to_string());
+    let mut cols: Vec<(String, Vec<Scalar>)> = Vec::with_capacity(ncols + 1);
+    let keys: Vec<Scalar> = (0..n)
+        .map(|row| Scalar::Int64((row % cardinality) as i64))
+        .collect();
+    cols.push(("id".to_string(), keys));
+    for c in 0..ncols {
+        let name = format!("{value_prefix}{c}");
+        let values: Vec<Scalar> = (0..n)
+            .map(|row| Scalar::Float64((row.wrapping_mul(c + 1) % 10_007) as f64 * 0.5))
+            .collect();
+        names.push(name.clone());
+        cols.push((name, values));
+    }
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let col_refs: Vec<(&str, Vec<Scalar>)> = cols
+        .into_iter()
+        .map(|(n, v)| (Box::leak(n.into_boxed_str()) as &str, v))
+        .collect();
+    DataFrame::from_dict(&name_refs, col_refs).expect("f64 wide join frame")
+}
+
 /// Deterministic serialization of a frame's observable state (index labels +
 /// per-column dtype and values in column order). Used for the isomorphism
 /// golden-output sha256 proof; it must be stable across the optimization.
@@ -442,6 +477,13 @@ fn run_golden(scenario: &str, n: usize) {
         "inner_join" => {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
+        "f64_inner_join" => {
+            let left = build_join_frame_f64_wide("lv", n, 512, 6);
+            let right = build_join_frame_f64_wide("rv", n, 512, 6);
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
@@ -777,6 +819,17 @@ fn main() {
             // ~n^2/cardinality rows, which is where the ~36x cost lives.
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "f64_inner_join" => {
+            // i64 key + 6 Float64 value columns per side: forces the position-
+            // based output builder (fused dense-i64 path bails on Float64), where
+            // per-column gather over the ~n^2/card output dominates (j3jnd).
+            let left = build_join_frame_f64_wide("lv", n, 512, 6);
+            let right = build_join_frame_f64_wide("rv", n, 512, 6);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());

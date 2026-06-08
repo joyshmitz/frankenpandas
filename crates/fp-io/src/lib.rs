@@ -1723,6 +1723,94 @@ impl Default for XmlReadOptions {
 /// for the in-memory string form. Null and NaN-like values are
 /// substituted with `options.na_rep`; all other scalars use the same
 /// stringification as the default `write_csv_string`.
+/// Fast path for `write_csv_string_with_options` when every column is an
+/// all-valid Int64/Float64 typed buffer and the index is not emitted. Returns
+/// `None` (caller uses the general `csv`-crate path) when any column is not a
+/// numeric typed slice, the index is requested, the delimiter is non-ASCII, or
+/// a header name would need quoting. The produced bytes are identical to the
+/// general writer (see the call-site note). (br-frankenpandas-qk2i9)
+fn try_write_csv_all_numeric(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
+    use std::fmt::Write as _;
+
+    if options.include_index {
+        return None;
+    }
+    let delim = options.delimiter;
+    if !delim.is_ascii() {
+        return None;
+    }
+    let delim_c = delim as char;
+    let needs_quote =
+        |s: &str| s.bytes().any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r');
+
+    let headers: Vec<&String> = frame.column_names().into_iter().collect();
+    if headers.iter().any(|h| needs_quote(h)) {
+        return None;
+    }
+
+    enum NumCol<'a> {
+        F(&'a [f64]),
+        I(&'a [i64]),
+    }
+    let n = frame.index().len();
+    let mut cols: Vec<NumCol<'_>> = Vec::with_capacity(headers.len());
+    for name in &headers {
+        let column = frame.column(name)?;
+        if let Some(s) = column.as_f64_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(NumCol::F(s));
+        } else if let Some(s) = column.as_i64_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(NumCol::I(s));
+        } else {
+            return None;
+        }
+    }
+
+    let mut out = String::with_capacity(n.saturating_mul(headers.len()).saturating_mul(8) + 64);
+    if options.header {
+        for (i, h) in headers.iter().enumerate() {
+            if i > 0 {
+                out.push(delim_c);
+            }
+            out.push_str(h);
+        }
+        out.push('\n');
+    }
+    for r in 0..n {
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(delim_c);
+            }
+            match col {
+                // Float64 uses format_pandas_float (Python str(float): keeps
+                // "1.0", signed 2-digit sci notation) — EXACTLY what
+                // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
+                // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
+                // NaN branch never fires; kept for defensive parity.
+                NumCol::F(s) => {
+                    let v = s[r];
+                    if v.is_nan() {
+                        out.push_str(&options.na_rep);
+                    } else {
+                        write_pandas_float(&mut out, v);
+                    }
+                }
+                // Int64 uses Rust Display, exactly scalar_to_csv's `v.to_string()`.
+                NumCol::I(s) => {
+                    let _ = write!(out, "{}", s[r]);
+                }
+            }
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
 pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
@@ -1733,6 +1821,19 @@ pub fn write_csv_string_with_options(
         nested_options.include_index = false;
         nested_options.index_label = None;
         return write_csv_string_with_options(&materialized, &nested_options);
+    }
+
+    // All-numeric fast path (br-frankenpandas-qk2i9): when every column is an
+    // all-valid Int64/Float64 typed slice (and the index is not written), format
+    // the cells straight from the contiguous typed buffers into the output —
+    // skipping the per-column `Vec<Scalar>` materialization (`column.value`'s
+    // OnceLock) and the per-cell `String` + `csv` record machinery. Byte-for-byte
+    // identical to the general writer below: numeric fields never need CSV
+    // quoting, `write!("{v}")` is exactly `v.to_string()` (the formatter
+    // `scalar_to_csv` uses), the record terminator is `\n`, and headers are only
+    // taken on this path when they need no quoting.
+    if let Some(out) = try_write_csv_all_numeric(frame, options) {
+        return Ok(out);
     }
 
     let mut writer = WriterBuilder::new()
@@ -3449,21 +3550,40 @@ fn parse_scalar(field: &str) -> Scalar {
 /// ("1e+16" / "1e-05") for very large / small magnitudes. Verified vs live
 /// pandas 2.2.3. NaN must be handled by the caller (it becomes na_rep).
 fn format_pandas_float(v: f64) -> String {
-    // Rust's Debug formatter gives the shortest round-trip representation and,
-    // unlike Display, keeps ".0" on whole numbers and switches to scientific
-    // notation at Python's repr boundaries. Only the exponent spelling differs
-    // (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so normalize that.
-    let s = format!("{v:?}");
-    match s.split_once('e') {
-        None => s,
-        Some((mantissa, exp)) => {
-            let (sign, digits) = match exp.strip_prefix('-') {
-                Some(d) => ('-', d),
-                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
-        }
+    let mut out = String::new();
+    write_pandas_float(&mut out, v);
+    out
+}
+
+/// Append the pandas `str(float)` rendering of `v` directly to `out`, without
+/// the per-call `String` allocation `format_pandas_float` makes — the hot path
+/// for the all-numeric CSV writer (br-frankenpandas-qk2i9).
+///
+/// Rust's Debug formatter gives the shortest round-trip representation and,
+/// unlike Display, keeps ".0" on whole numbers and switches to scientific
+/// notation at Python's repr boundaries. Only the exponent spelling differs
+/// (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so the rare sci-notation case
+/// is normalized in place. Byte-for-byte identical to `format_pandas_float`.
+fn write_pandas_float(out: &mut String, v: f64) {
+    use std::fmt::Write as _;
+    let start = out.len();
+    let _ = write!(out, "{v:?}");
+    // Common case (no scientific notation): `{v:?}` is already the pandas form.
+    let Some(rel_e) = out[start..].find('e') else {
+        return;
+    };
+    // Sci notation: normalize the exponent to Python's signed, >=2-digit form.
+    let e = start + rel_e;
+    let exp = out.split_off(e + 1); // everything after 'e'; `out` keeps "<mantissa>e"
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp.strip_prefix('+').unwrap_or(&exp)),
+    };
+    out.push(sign);
+    if digits.len() < 2 {
+        out.push('0');
     }
+    out.push_str(digits);
 }
 
 fn scalar_to_csv(scalar: &Scalar) -> String {

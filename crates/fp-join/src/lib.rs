@@ -1059,21 +1059,7 @@ fn ordered_unique_int64_inner_positions(
 }
 
 fn strictly_increasing_utf8_key_spans(column: &Column) -> Option<(&[u8], &[usize])> {
-    let (bytes, offsets) = column.as_utf8_contiguous()?;
-    let n = offsets.len().checked_sub(1)?;
-    if n < 2 {
-        return Some((bytes, offsets));
-    }
-
-    let mut previous = &bytes[offsets[0]..offsets[1]];
-    for pos in 1..n {
-        let current = &bytes[offsets[pos]..offsets[pos + 1]];
-        if previous >= current {
-            return None;
-        }
-        previous = current;
-    }
-    Some((bytes, offsets))
+    column.as_strictly_increasing_utf8_contiguous()
 }
 
 fn utf8_span<'a>(bytes: &'a [u8], offsets: &[usize], pos: usize) -> &'a [u8] {

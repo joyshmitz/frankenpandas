@@ -1014,6 +1014,7 @@ enum ScalarValues {
     LazyContiguousUtf8 {
         bytes: Vec<u8>,
         offsets: Vec<usize>,
+        strictly_increasing: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
@@ -1099,6 +1100,7 @@ impl ScalarValues {
         Self::LazyContiguousUtf8 {
             bytes,
             offsets,
+            strictly_increasing: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -1456,6 +1458,7 @@ impl ScalarValues {
                 bytes,
                 offsets,
                 values,
+                ..
             } => values
                 .get_or_init(|| {
                     offsets
@@ -1552,6 +1555,25 @@ impl ScalarValues {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+fn contiguous_utf8_offsets_are_strictly_increasing(bytes: &[u8], offsets: &[usize]) -> bool {
+    let Some(n) = offsets.len().checked_sub(1) else {
+        return false;
+    };
+    if n < 2 {
+        return true;
+    }
+
+    let mut previous = &bytes[offsets[0]..offsets[1]];
+    for pos in 1..n {
+        let current = &bytes[offsets[pos]..offsets[pos + 1]];
+        if previous >= current {
+            return false;
+        }
+        previous = current;
+    }
+    true
 }
 
 impl Clone for ScalarValues {
@@ -2795,6 +2817,28 @@ impl Column {
         if self.dtype == DType::Utf8
             && self.validity.all()
             && let ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } = &self.values
+        {
+            return Some((bytes.as_slice(), offsets.as_slice()));
+        }
+        None
+    }
+
+    /// Borrow the contiguous Utf8 backing only when its byte spans are already
+    /// strictly increasing. The witness is cached on the immutable contiguous
+    /// backing so repeated ordered joins do not rescan both key columns.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_strictly_increasing_utf8_contiguous(&self) -> Option<(&[u8], &[usize])> {
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let ScalarValues::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                strictly_increasing,
+                ..
+            } = &self.values
+            && *strictly_increasing
+                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
         {
             return Some((bytes.as_slice(), offsets.as_slice()));
         }
@@ -14733,6 +14777,57 @@ mod tests {
                     .to_vec();
                 assert_eq!(got, want, "ascending={ascending}");
             }
+        }
+
+        #[test]
+        fn contiguous_utf8_strict_witness_matches_byte_order_483i5() {
+            fn contiguous(values: &[&str]) -> Column {
+                let mut bytes = Vec::new();
+                let mut offsets = Vec::with_capacity(values.len() + 1);
+                offsets.push(0);
+                for value in values {
+                    bytes.extend_from_slice(value.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                Column::from_utf8_contiguous(bytes, offsets)
+            }
+
+            assert!(
+                contiguous(&["a", "b", "c"])
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_some()
+            );
+            assert!(
+                contiguous(&[])
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_some()
+            );
+            assert!(
+                contiguous(&["only"])
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_some()
+            );
+            assert!(
+                contiguous(&["a", "a"])
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_none()
+            );
+            assert!(
+                contiguous(&["b", "a"])
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_none()
+            );
+
+            let scalar_backed = Column::from_values(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ])
+            .expect("scalar-backed utf8");
+            assert!(
+                scalar_backed
+                    .as_strictly_increasing_utf8_contiguous()
+                    .is_none()
+            );
         }
 
         #[test]

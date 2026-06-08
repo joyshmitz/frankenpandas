@@ -12573,6 +12573,48 @@ impl MultiIndex {
         Some(keys)
     }
 
+    /// Pack each row's tuple into one mixed-radix `u64` using FIRST-SEEN per-level
+    /// codes (br-frankenpandas-midedup). Unlike [`Self::sorted_packed_keys`] this
+    /// skips the per-level distinct sort — dedup only needs the keys to be a
+    /// bijection on tuple identity, not lexicographically ordered. Lets
+    /// duplicated/unique/drop_duplicates hash one integer per row instead of
+    /// allocating (and Utf8-cloning) a `Vec<IndexLabel>` per row. `None` when
+    /// there are no levels or the combined code space overflows `u64`.
+    fn identity_packed_keys(&self) -> Option<Vec<u64>> {
+        let nlev = self.nlevels();
+        if nlev == 0 {
+            return None;
+        }
+        let n = self.len();
+        let mut keys = vec![0u64; n];
+        let mut combined: u128 = 1;
+        for level in 0..nlev {
+            let col = &self.levels[level];
+            let mut code: FxHashMap<&IndexLabel, u64> =
+                FxHashMap::with_capacity_and_hasher(col.len(), Default::default());
+            let mut next = 0u64;
+            let codes: Vec<u64> = col
+                .iter()
+                .map(|value| {
+                    *code.entry(value).or_insert_with(|| {
+                        let c = next;
+                        next += 1;
+                        c
+                    })
+                })
+                .collect();
+            let radix = next;
+            for (dst, &c) in keys.iter_mut().zip(&codes) {
+                *dst = dst.checked_mul(radix)?.checked_add(c)?;
+            }
+            combined = combined.checked_mul(radix as u128)?;
+            if combined > u64::MAX as u128 {
+                return None;
+            }
+        }
+        Some(keys)
+    }
+
     fn factorize_packed_keys(&self, target: &Self) -> Option<(Vec<u64>, Vec<u64>)> {
         let nlev = self.nlevels();
         if nlev == 0 || nlev != target.nlevels() {
@@ -12771,6 +12813,46 @@ impl MultiIndex {
         // (incl. a key.clone()) and then rebuilt the key again in the keep-mode
         // loop — 3-4 Vec<IndexLabel> allocations per row. Each mode now does the
         // minimal work; output is positional so marking order is irrelevant.
+        // Packed-key fast path (br-frankenpandas-midedup): one u64 per row keyed
+        // on tuple identity, so dedup hashes integers instead of allocating (and
+        // Utf8-cloning) a Vec<IndexLabel> per row. Bijective on identity ⇒ the
+        // dup mask is identical to the Vec-key path.
+        if let Some(keys) = self.identity_packed_keys() {
+            match keep {
+                DuplicateKeep::First => {
+                    let mut seen: FxHashSet<u64> =
+                        FxHashSet::with_capacity_and_hasher(len, Default::default());
+                    for (row, slot) in out.iter_mut().enumerate() {
+                        if !seen.insert(keys[row]) {
+                            *slot = true;
+                        }
+                    }
+                }
+                DuplicateKeep::Last => {
+                    let mut seen: FxHashSet<u64> =
+                        FxHashSet::with_capacity_and_hasher(len, Default::default());
+                    for row in (0..len).rev() {
+                        if !seen.insert(keys[row]) {
+                            out[row] = true;
+                        }
+                    }
+                }
+                DuplicateKeep::None => {
+                    let mut counts: FxHashMap<u64, usize> =
+                        FxHashMap::with_capacity_and_hasher(len, Default::default());
+                    for &key in &keys {
+                        *counts.entry(key).or_insert(0) += 1;
+                    }
+                    for (row, slot) in out.iter_mut().enumerate() {
+                        if counts[&keys[row]] > 1 {
+                            *slot = true;
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+
         let key_at = |row: usize| -> Vec<IndexLabel> {
             self.levels.iter().map(|level| level[row].clone()).collect()
         };
@@ -17125,6 +17207,69 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_duplicated_packed_matches_vec_reference_midedup() {
+        // The identity-packed-key duplicated path must equal an independent
+        // Vec<IndexLabel>-key reference for all keep modes (mixed Utf8+Int64
+        // levels with duplicate tuples).
+        let n = 400usize;
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut l0 = Vec::with_capacity(n);
+        let mut l1 = Vec::with_capacity(n);
+        for _ in 0..n {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            l0.push(IndexLabel::Utf8(format!("g{}", (state >> 40) % 6)));
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            l1.push(IndexLabel::Int64(((state >> 40) % 5) as i64));
+        }
+        let mi = MultiIndex::from_arrays(vec![l0, l1]).unwrap();
+        let rows = mi.to_list();
+
+        for keep in [DuplicateKeep::First, DuplicateKeep::Last, DuplicateKeep::None] {
+            let mut want = vec![false; n];
+            match keep {
+                DuplicateKeep::First => {
+                    let mut seen = std::collections::HashSet::new();
+                    for (r, w) in want.iter_mut().enumerate() {
+                        if !seen.insert(rows[r].clone()) {
+                            *w = true;
+                        }
+                    }
+                }
+                DuplicateKeep::Last => {
+                    let mut seen = std::collections::HashSet::new();
+                    for r in (0..n).rev() {
+                        if !seen.insert(rows[r].clone()) {
+                            want[r] = true;
+                        }
+                    }
+                }
+                DuplicateKeep::None => {
+                    let mut counts: std::collections::HashMap<Vec<IndexLabel>, usize> =
+                        Default::default();
+                    for r in &rows {
+                        *counts.entry(r.clone()).or_insert(0) += 1;
+                    }
+                    for (r, w) in want.iter_mut().enumerate() {
+                        if counts[&rows[r]] > 1 {
+                            *w = true;
+                        }
+                    }
+                }
+            }
+            assert_eq!(mi.duplicated(keep), want, "duplicated {keep:?}");
+        }
+        // drop_duplicates/unique derive from duplicated(First).
+        let mut seen = std::collections::HashSet::new();
+        let kept: Vec<Vec<IndexLabel>> = rows
+            .iter()
+            .filter(|r| seen.insert((*r).clone()))
+            .cloned()
+            .collect();
+        assert_eq!(mi.unique().to_list(), kept);
+        assert_eq!(mi.nunique(), kept.len());
     }
 
     #[test]

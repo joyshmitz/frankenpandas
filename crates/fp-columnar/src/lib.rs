@@ -835,6 +835,29 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     }
 }
 
+/// Apply a binary f64 op over two equal-length slices with the operation
+/// monomorphized into each arm (br-frankenpandas-f64simd). Unlike a
+/// `fn(f64,f64)->f64` pointer applied per element, the closed-form arms let LLVM
+/// autovectorize Add/Sub/Mul/Div to packed SIMD; Mod/Pow/FloorDiv keep their
+/// scalar helpers but still avoid the indirect call. Element-for-element
+/// identical to `binary_f64_apply(op)` applied in order.
+#[inline]
+fn apply_f64_slices(op: ArithmeticOp, a: &[f64], b: &[f64]) -> Vec<f64> {
+    match op {
+        ArithmeticOp::Add => a.iter().zip(b).map(|(x, y)| x + y).collect(),
+        ArithmeticOp::Sub => a.iter().zip(b).map(|(x, y)| x - y).collect(),
+        ArithmeticOp::Mul => a.iter().zip(b).map(|(x, y)| x * y).collect(),
+        ArithmeticOp::Div => a.iter().zip(b).map(|(x, y)| x / y).collect(),
+        ArithmeticOp::Mod => a.iter().zip(b).map(|(x, y)| python_mod_f64(*x, *y)).collect(),
+        ArithmeticOp::Pow => a.iter().zip(b).map(|(x, y)| x.powf(*y)).collect(),
+        ArithmeticOp::FloorDiv => a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| python_floor_div_f64(*x, *y))
+            .collect(),
+    }
+}
+
 fn unit_range_len(start: i64, end: i64) -> Option<usize> {
     usize::try_from(end.checked_sub(start)?.checked_add(1)?).ok()
 }
@@ -4061,6 +4084,21 @@ impl Column {
 
         let lsrc = self.float64_binary_data();
         let rsrc = right.float64_binary_data();
+
+        // Fully-valid fast path (br-frankenpandas-f64simd): when neither side has
+        // a null bit or a NaN, every output position is valid, so emit a single
+        // monomorphized (autovectorizing) slice op and skip both the per-element
+        // `nan_aware_validity` mask builds and the per-element fn-pointer/validity
+        // gating. Bit-identical to the general path under all-valid inputs: the
+        // arithmetic and the typed `from_f64_values` constructor are the same.
+        if self.validity.all()
+            && right.validity.all()
+            && !lsrc.iter().any(|x| x.is_nan())
+            && !rsrc.iter().any(|x| x.is_nan())
+        {
+            return Ok(Self::from_f64_values(apply_f64_slices(op, &lsrc, &rsrc)));
+        }
+
         let lvalid = self.nan_aware_validity();
         let rvalid = right.nan_aware_validity();
         let apply = binary_f64_apply(op);
@@ -12662,6 +12700,44 @@ mod tests {
             ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
         ));
         assert!(matches!(actual.values()[0], Scalar::Float64(value) if value.is_nan()));
+    }
+
+    #[test]
+    fn apply_f64_slices_matches_fn_pointer_per_element_f64simd() {
+        // The monomorphized slice op must be bit-for-bit identical to the
+        // per-element fn pointer across every op and tricky operand
+        // (NaN/inf/-0.0/zero divisor/negative base). Compared via raw bits so
+        // NaN payloads must also match.
+        let vals = [
+            0.0_f64, -0.0, 1.0, -1.0, 2.5, -3.0, 4.0, 0.5,
+            f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e-300,
+        ];
+        let a: Vec<f64> = vals.to_vec();
+        for op in [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+            ArithmeticOp::Mod,
+            ArithmeticOp::Pow,
+            ArithmeticOp::FloorDiv,
+        ] {
+            for shift in 0..vals.len() {
+                let b: Vec<f64> = (0..vals.len()).map(|i| vals[(i + shift) % vals.len()]).collect();
+                let got = super::apply_f64_slices(op, &a, &b);
+                let apply = super::binary_f64_apply(op);
+                let expected: Vec<f64> = a.iter().zip(&b).map(|(x, y)| apply(*x, *y)).collect();
+                for i in 0..a.len() {
+                    assert_eq!(
+                        got[i].to_bits(),
+                        expected[i].to_bits(),
+                        "op={op:?} a={} b={}",
+                        a[i],
+                        b[i]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

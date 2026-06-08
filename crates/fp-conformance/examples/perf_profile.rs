@@ -24,7 +24,7 @@ use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_io::{CsvReadOptions, read_csv_str, read_csv_with_options};
-use fp_join::{JoinType, merge_dataframes};
+use fp_join::{AsofDirection, JoinType, merge_asof, merge_dataframes};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 
@@ -353,6 +353,36 @@ fn build_join_frame_f64_wide(
     DataFrame::from_dict(&name_refs, col_refs).expect("f64 wide join frame")
 }
 
+/// Two sorted frames for `merge_asof` on an Int64 `on` key. Left has `n` rows
+/// (key 0..n) + `lcols` Float64 cols; right has ~n/2 rows (even keys) + `rcols`
+/// Float64 value cols. The wide Float64 right side makes the per-column output
+/// build dominate — the shape br-frankenpandas-fu8f5 parallelizes.
+fn build_asof_frames(n: usize, lcols: usize, rcols: usize) -> (DataFrame, DataFrame) {
+    let l_keys: Vec<Scalar> = (0..n as i64).map(Scalar::Int64).collect();
+    let mut l_names: Vec<&str> = vec!["on"];
+    let mut l_cols: Vec<(&str, Vec<Scalar>)> = vec![("on", l_keys)];
+    for c in 0..lcols {
+        let name: &str = Box::leak(format!("lv{c}").into_boxed_str());
+        let v: Vec<Scalar> = (0..n).map(|r| Scalar::Float64((r + c) as f64 * 0.25)).collect();
+        l_names.push(name);
+        l_cols.push((name, v));
+    }
+    let left = DataFrame::from_dict(&l_names, l_cols).expect("asof left");
+
+    let rn = n / 2;
+    let r_keys: Vec<Scalar> = (0..rn as i64).map(|i| Scalar::Int64(i * 2)).collect();
+    let mut r_names: Vec<&str> = vec!["on"];
+    let mut r_cols: Vec<(&str, Vec<Scalar>)> = vec![("on", r_keys)];
+    for c in 0..rcols {
+        let name: &str = Box::leak(format!("rv{c}").into_boxed_str());
+        let v: Vec<Scalar> = (0..rn).map(|r| Scalar::Float64((r * (c + 1) % 9973) as f64 * 0.5)).collect();
+        r_names.push(name);
+        r_cols.push((name, v));
+    }
+    let right = DataFrame::from_dict(&r_names, r_cols).expect("asof right");
+    (left, right)
+}
+
 /// Deterministic serialization of a frame's observable state (index labels +
 /// per-column dtype and values in column order). Used for the isomorphism
 /// golden-output sha256 proof; it must be stable across the optimization.
@@ -487,6 +517,12 @@ fn run_golden(scenario: &str, n: usize) {
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
+        }
+        "asof_join" => {
+            let (left, right) = build_asof_frames(n, 1, 8);
+            let out = merge_asof(&left, &right, "on", AsofDirection::Backward).expect("asof");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("asof golden frame")
         }
         "join_1to1" => {
             let left = build_join_frame("left_value", n, n, 7);
@@ -832,6 +868,15 @@ fn main() {
             let right = build_join_frame_f64_wide("rv", n, 512, 6);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "asof_join" => {
+            // merge_asof on a sorted i64 key, wide Float64 right side: output is
+            // left.len() rows x all cols, dominated by the per-column build (fu8f5).
+            let (left, right) = build_asof_frames(n, 1, 8);
+            for _ in 0..iters {
+                let out = merge_asof(&left, &right, "on", AsofDirection::Backward).expect("asof");
                 sink = sink.wrapping_add(out.index.len());
             }
         }

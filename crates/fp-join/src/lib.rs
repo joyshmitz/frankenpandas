@@ -6068,6 +6068,13 @@ fn compute_asof_matches(
 }
 
 /// Build the output DataFrame from computed matches.
+/// One output column of `build_asof_output`: left columns are present for every
+/// row (clone), right columns are gathered by the asof match positions.
+enum AsofOutputTask<'a> {
+    LeftClone(&'a Column),
+    RightGather(&'a Column),
+}
+
 fn build_asof_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -6113,7 +6120,15 @@ fn build_asof_output(
     let mut out_columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
-    // Left columns (all rows present)
+    // Resolve every output column (name + build task) in order, then build the
+    // columns — left columns clone all rows, right columns gather matched-or-null
+    // values. Each output column is independent, so wide/large outputs build all
+    // columns across a worker pool (br-frankenpandas-fu8f5; same disjoint-fill
+    // pattern as the dense-i64/inner-merge builders). Bit-identical to the serial
+    // loops: identical per-column result (left clone; right Scalar gather with
+    // Null(NullKind::NaN) on unmatched, then Column::new with the source dtype),
+    // inserted in the same order.
+    let mut specs: Vec<(String, AsofOutputTask<'_>)> = Vec::new();
     for col_name in &left_col_names {
         let col = left.columns().get(col_name).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
@@ -6125,15 +6140,8 @@ fn build_asof_output(
         } else {
             col_name.clone()
         };
-        insert_merged_output_column(
-            &mut out_columns,
-            &mut column_order,
-            output_name,
-            col.clone(),
-        )?;
+        specs.push((output_name, AsofOutputTask::LeftClone(col)));
     }
-
-    // Right columns (matched or null)
     for col_name in &right_col_names {
         let right_col = right.columns().get(col_name).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
@@ -6145,22 +6153,55 @@ fn build_asof_output(
         } else {
             col_name.clone()
         };
+        specs.push((output_name, AsofOutputTask::RightGather(right_col)));
+    }
 
-        let mut vals = Vec::with_capacity(n_out);
-        for m in right_matches {
-            match m {
-                Some(j) if *j < right_n => vals.push(right_col.values()[*j].clone()),
-                _ => {
-                    vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN));
+    let build_one = |task: &AsofOutputTask<'_>| -> Result<Column, ColumnError> {
+        match task {
+            AsofOutputTask::LeftClone(col) => Ok((*col).clone()),
+            AsofOutputTask::RightGather(right_col) => {
+                let src = right_col.values();
+                let mut vals = Vec::with_capacity(n_out);
+                for m in right_matches {
+                    match m {
+                        Some(j) if *j < right_n => vals.push(src[*j].clone()),
+                        _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
+                    }
                 }
+                Column::new(right_col.dtype(), vals)
             }
         }
-        insert_merged_output_column(
-            &mut out_columns,
-            &mut column_order,
-            output_name,
-            Column::new(right_col.dtype(), vals)?,
-        )?;
+    };
+
+    let built: Vec<Result<Column, ColumnError>> = {
+        let thread_count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+        if specs.len() > 1 && n_out >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
+            let mut slots: Vec<Option<Result<Column, ColumnError>>> =
+                (0..specs.len()).map(|_| None).collect();
+            let chunk = specs.len().div_ceil(thread_count).max(1);
+            let build_one = &build_one;
+            std::thread::scope(|scope| {
+                for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+                    scope.spawn(move || {
+                        for ((_, task), slot) in spec_chunk.iter().zip(slot_chunk) {
+                            *slot = Some(build_one(task));
+                        }
+                    });
+                }
+            });
+            slots
+                .into_iter()
+                .map(|c| c.expect("every asof output column must be built"))
+                .collect()
+        } else {
+            specs.iter().map(|(_, task)| build_one(task)).collect()
+        }
+    };
+
+    for ((output_name, _), column) in specs.into_iter().zip(built) {
+        insert_merged_output_column(&mut out_columns, &mut column_order, output_name, column?)?;
     }
 
     Ok(MergedDataFrame {

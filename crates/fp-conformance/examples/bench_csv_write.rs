@@ -43,6 +43,18 @@ fn build(n: usize) -> DataFrame {
         cols.insert(name.clone(), Column::from_i64_values(v));
         order.push(name);
     }
+    // One all-valid contiguous Utf8 column, with values that exercise CSV
+    // QUOTE_MINIMAL (plain, comma, embedded quote, newline) so the byte-identity
+    // check covers the quoting path.
+    let samples = ["plain", "a,b", "he said \"hi\"", "line1\nline2", "x"];
+    let mut bytes = Vec::<u8>::new();
+    let mut offsets = vec![0usize];
+    for i in 0..n {
+        bytes.extend_from_slice(samples[i % samples.len()].as_bytes());
+        offsets.push(bytes.len());
+    }
+    cols.insert("s".to_string(), Column::from_utf8_contiguous(bytes, offsets));
+    order.push("s".to_string());
     DataFrame::new_with_column_order(index, cols, order).expect("frame")
 }
 

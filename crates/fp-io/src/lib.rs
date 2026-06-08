@@ -1729,7 +1729,7 @@ impl Default for XmlReadOptions {
 /// numeric typed slice, the index is requested, the delimiter is non-ASCII, or
 /// a header name would need quoting. The produced bytes are identical to the
 /// general writer (see the call-site note). (br-frankenpandas-qk2i9)
-fn try_write_csv_all_numeric(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
+fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
     use std::fmt::Write as _;
 
     if options.include_index {
@@ -1748,24 +1748,32 @@ fn try_write_csv_all_numeric(frame: &DataFrame, options: &CsvWriteOptions) -> Op
         return None;
     }
 
-    enum NumCol<'a> {
+    enum FastCol<'a> {
         F(&'a [f64]),
         I(&'a [i64]),
+        // All-valid contiguous Utf8: (bytes, offsets) with row r =
+        // bytes[offsets[r]..offsets[r+1]].
+        U(&'a [u8], &'a [usize]),
     }
     let n = frame.index().len();
-    let mut cols: Vec<NumCol<'_>> = Vec::with_capacity(headers.len());
+    let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name)?;
         if let Some(s) = column.as_f64_slice() {
             if s.len() != n {
                 return None;
             }
-            cols.push(NumCol::F(s));
+            cols.push(FastCol::F(s));
         } else if let Some(s) = column.as_i64_slice() {
             if s.len() != n {
                 return None;
             }
-            cols.push(NumCol::I(s));
+            cols.push(FastCol::I(s));
+        } else if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+            if offsets.len() != n + 1 {
+                return None;
+            }
+            cols.push(FastCol::U(bytes, offsets));
         } else {
             return None;
         }
@@ -1792,7 +1800,7 @@ fn try_write_csv_all_numeric(frame: &DataFrame, options: &CsvWriteOptions) -> Op
                 // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
                 // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
                 // NaN branch never fires; kept for defensive parity.
-                NumCol::F(s) => {
+                FastCol::F(s) => {
                     let v = s[r];
                     if v.is_nan() {
                         out.push_str(&options.na_rep);
@@ -1801,8 +1809,32 @@ fn try_write_csv_all_numeric(frame: &DataFrame, options: &CsvWriteOptions) -> Op
                     }
                 }
                 // Int64 uses Rust Display, exactly scalar_to_csv's `v.to_string()`.
-                NumCol::I(s) => {
+                FastCol::I(s) => {
                     let _ = write!(out, "{}", s[r]);
+                }
+                // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
+                // CSV-quoted only when it contains the delimiter, a quote, CR, or
+                // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
+                FastCol::U(bytes, offsets) => {
+                    let field = &bytes[offsets[r]..offsets[r + 1]];
+                    if field
+                        .iter()
+                        .any(|&b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
+                    {
+                        out.push('"');
+                        // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+                        let s = std::str::from_utf8(field).unwrap_or("");
+                        for ch in s.chars() {
+                            if ch == '"' {
+                                out.push_str("\"\"");
+                            } else {
+                                out.push(ch);
+                            }
+                        }
+                        out.push('"');
+                    } else {
+                        out.push_str(std::str::from_utf8(field).unwrap_or(""));
+                    }
                 }
             }
         }
@@ -1823,16 +1855,15 @@ pub fn write_csv_string_with_options(
         return write_csv_string_with_options(&materialized, &nested_options);
     }
 
-    // All-numeric fast path (br-frankenpandas-qk2i9): when every column is an
-    // all-valid Int64/Float64 typed slice (and the index is not written), format
-    // the cells straight from the contiguous typed buffers into the output —
-    // skipping the per-column `Vec<Scalar>` materialization (`column.value`'s
-    // OnceLock) and the per-cell `String` + `csv` record machinery. Byte-for-byte
-    // identical to the general writer below: numeric fields never need CSV
-    // quoting, `write!("{v}")` is exactly `v.to_string()` (the formatter
-    // `scalar_to_csv` uses), the record terminator is `\n`, and headers are only
-    // taken on this path when they need no quoting.
-    if let Some(out) = try_write_csv_all_numeric(frame, options) {
+    // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
+    // Int64/Float64 typed slice or all-valid contiguous Utf8 (and the index is
+    // not written), format the cells straight from the contiguous typed buffers,
+    // skipping the per-column `Vec<Scalar>` materialization + per-cell `String` +
+    // `csv` record machinery. Byte-for-byte identical to the general writer:
+    // floats via write_pandas_float (= scalar_to_csv_with_na), Int64 Display
+    // (= scalar_to_csv), Utf8 QUOTE_MINIMAL with doubled quotes, terminator `\n`,
+    // and only taken when header names need no quoting.
+    if let Some(out) = try_write_csv_typed(frame, options) {
         return Ok(out);
     }
 

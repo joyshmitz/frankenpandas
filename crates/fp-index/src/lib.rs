@@ -834,9 +834,19 @@ impl Index {
         if self.labels.int64_unit_range().is_some() {
             return false;
         }
-        *self
-            .duplicate_cache
-            .get_or_init(|| detect_duplicates(self.labels()))
+        *self.duplicate_cache.get_or_init(|| {
+            // Every `SortOrder::Ascending*` variant is STRICTLY ascending
+            // (`detect_sort_order` rejects equal neighbours with `a < b`), so a
+            // recognized sort order proves uniqueness with zero hashing
+            // (br-frankenpandas-idxdup). `sort_order()` is a single linear pass
+            // (itself cached and reused by the binary-search backends), far
+            // cheaper than the FxHashMap insert-per-label below; only genuinely
+            // unsorted indexes fall through to it.
+            if !matches!(self.sort_order(), SortOrder::Unsorted) {
+                return false;
+            }
+            detect_duplicates(self.labels())
+        })
     }
 
     /// Whether all index labels are unique.
@@ -13413,6 +13423,33 @@ mod tests {
     fn duplicate_detection_matches_index_surface() {
         let index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert!(index.has_duplicates());
+    }
+
+    #[test]
+    fn has_duplicates_sort_fast_path_matches_hashmap_idxdup() {
+        // The strict-ascending fast path in has_duplicates must agree with the
+        // FxHashMap detect_duplicates for every shape: sorted-unique (fast path
+        // returns false), sorted-with-dups (not strictly ascending -> Unsorted
+        // -> hashmap), unsorted-unique, unsorted-dups, descending, single,
+        // empty, and Utf8.
+        let cases: Vec<Vec<IndexLabel>> = vec![
+            vec![],
+            vec![5_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()], // sorted unique
+            vec![1_i64.into(), 5_i64.into(), 9_i64.into()], // sorted unique, gapped
+            vec![1_i64.into(), 2_i64.into(), 2_i64.into()], // sorted with dup
+            vec![3_i64.into(), 1_i64.into(), 2_i64.into()], // unsorted unique
+            vec![3_i64.into(), 1_i64.into(), 3_i64.into()], // unsorted dup
+            vec![9_i64.into(), 5_i64.into(), 1_i64.into()], // descending unique
+            vec!["a".into(), "b".into(), "c".into()],       // sorted utf8 unique
+            vec!["a".into(), "a".into(), "b".into()],       // utf8 dup
+            vec!["c".into(), "a".into(), "b".into()],       // unsorted utf8 unique
+        ];
+        for labels in cases {
+            let expected = super::detect_duplicates(&labels);
+            let got = Index::new(labels.clone()).has_duplicates();
+            assert_eq!(got, expected, "mismatch for {labels:?}");
+        }
     }
 
     #[test]

@@ -7,10 +7,11 @@
 //! re-validated in Column::new; routing through Column::take_positions keeps
 //! the gather on the contiguous typed buffer. Output is bit-identical.
 
+use std::time::Instant;
+
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::{NullKind, Scalar};
-use std::time::Instant;
 
 fn s_i64(vals: Vec<i64>) -> Series {
     let idx: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
@@ -26,8 +27,14 @@ fn golden() -> String {
     let mut out = String::new();
     // Int64 ascending/descending with ties (stable).
     let s = s_i64(vec![3, 1, 2, 1, 3]);
-    out.push_str(&format!("i64_asc={:?}\n", s.sort_values(true).unwrap().values()));
-    out.push_str(&format!("i64_desc={:?}\n", s.sort_values(false).unwrap().values()));
+    out.push_str(&format!(
+        "i64_asc={:?}\n",
+        s.sort_values(true).unwrap().values()
+    ));
+    out.push_str(&format!(
+        "i64_desc={:?}\n",
+        s.sort_values(false).unwrap().values()
+    ));
 
     // Float64 with NaN (NaN sorts last under na_position='last').
     let f = s_scalars(vec![
@@ -36,7 +43,10 @@ fn golden() -> String {
         Scalar::Float64(-1.0),
         Scalar::Float64(2.5),
     ]);
-    out.push_str(&format!("f64_asc={:?}\n", f.sort_values(true).unwrap().values()));
+    out.push_str(&format!(
+        "f64_asc={:?}\n",
+        f.sort_values(true).unwrap().values()
+    ));
 
     // Nullable Int64 (Null mixed in) via na_position first/last.
     let ni = s_scalars(vec![
@@ -61,7 +71,10 @@ fn golden() -> String {
             .map(|x| Scalar::Utf8(x.to_string()))
             .collect(),
     );
-    out.push_str(&format!("utf8_asc={:?}\n", u.sort_values(true).unwrap().values()));
+    out.push_str(&format!(
+        "utf8_asc={:?}\n",
+        u.sort_values(true).unwrap().values()
+    ));
 
     // Bool.
     let b = s_scalars(vec![
@@ -69,7 +82,10 @@ fn golden() -> String {
         Scalar::Bool(false),
         Scalar::Bool(true),
     ]);
-    out.push_str(&format!("bool_asc={:?}\n", b.sort_values(true).unwrap().values()));
+    out.push_str(&format!(
+        "bool_asc={:?}\n",
+        b.sort_values(true).unwrap().values()
+    ));
     out
 }
 
@@ -81,7 +97,9 @@ fn main() {
     let mut x: u64 = 0x9e37_79b9;
     let vals: Vec<i64> = (0..n)
         .map(|_| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (x >> 16) as i64 % 1_000_000
         })
         .collect();

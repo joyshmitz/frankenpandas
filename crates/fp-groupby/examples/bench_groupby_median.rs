@@ -9,12 +9,13 @@
 //! external `sha256sum` can certify the result is bit-identical before/after a
 //! change. `bench` reports the min wall-time over repeated runs.
 
+use std::time::Instant;
+
 use fp_frame::Series;
+use fp_groupby::{AggFunc, GroupByOptions, groupby_agg};
 use fp_index::IndexLabel;
-use fp_groupby::{groupby_agg, AggFunc, GroupByOptions};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
-use std::time::Instant;
 
 /// Deterministic splitmix64 so the harness needs no rand dependency and is
 /// reproducible across before/after builds.
@@ -48,7 +49,9 @@ fn build_data(n: usize, num_groups: i64) -> (Series, Series) {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
     let n: usize = 2_000_000;
     let num_groups: i64 = 200;
     let (keys, vals) = build_data(n, num_groups);

@@ -114,7 +114,10 @@ fn build_str_join_frame(value_name: &str, n: usize, card: usize, key_start: usiz
         .map(|row| ((row as u64).wrapping_mul(37) % 10_003) as f64 * 0.25)
         .collect();
     let mut columns = BTreeMap::new();
-    columns.insert("id".to_string(), Column::from_utf8_contiguous(bytes, offsets));
+    columns.insert(
+        "id".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
     columns.insert(value_name.to_string(), Column::from_f64_values(values));
     let column_order = vec!["id".to_string(), value_name.to_string()];
     DataFrame::new_with_column_order(index, columns, column_order).expect("str join frame")
@@ -392,7 +395,9 @@ fn build_asof_frames(n: usize, lcols: usize, rcols: usize) -> (DataFrame, DataFr
     let mut l_cols: Vec<(&str, Vec<Scalar>)> = vec![("on", l_keys)];
     for c in 0..lcols {
         let name: &str = Box::leak(format!("lv{c}").into_boxed_str());
-        let v: Vec<Scalar> = (0..n).map(|r| Scalar::Float64((r + c) as f64 * 0.25)).collect();
+        let v: Vec<Scalar> = (0..n)
+            .map(|r| Scalar::Float64((r + c) as f64 * 0.25))
+            .collect();
         l_names.push(name);
         l_cols.push((name, v));
     }
@@ -404,7 +409,9 @@ fn build_asof_frames(n: usize, lcols: usize, rcols: usize) -> (DataFrame, DataFr
     let mut r_cols: Vec<(&str, Vec<Scalar>)> = vec![("on", r_keys)];
     for c in 0..rcols {
         let name: &str = Box::leak(format!("rv{c}").into_boxed_str());
-        let v: Vec<Scalar> = (0..rn).map(|r| Scalar::Float64((r * (c + 1) % 9973) as f64 * 0.5)).collect();
+        let v: Vec<Scalar> = (0..rn)
+            .map(|r| Scalar::Float64((r * (c + 1) % 9973) as f64 * 0.5))
+            .collect();
         r_names.push(name);
         r_cols.push((name, v));
     }

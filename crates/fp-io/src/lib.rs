@@ -12199,28 +12199,26 @@ mod tests {
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
+    use super::{
+        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HtmlReadOptions, HtmlWriteOptions,
+        IoError, JsonOrient, LatexWriteOptions, MarkdownWriteOptions, PickleProtocol,
+        PickleWriteOptions, StataWriteOptions, XmlReadOptions, XmlWriteOptions,
+        format_pandas_float, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
+        read_feather_bytes, read_html, read_html_str, read_html_str_with_options, read_json_str,
+        read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
+        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
+        write_csv_string_with_options, write_excel_bytes, write_html, write_html_string,
+        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
+        write_latex_string, write_latex_string_with_options, write_latex_with_options,
+        write_markdown, write_markdown_string, write_markdown_string_with_options,
+        write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
+        write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
+        write_xml_string, write_xml_string_with_options,
+    };
     #[cfg(feature = "hdf5")]
     use super::{
         HdfReadOptions, HdfWriteOptions, read_hdf, read_hdf_key, read_hdf_with_options, write_hdf,
         write_hdf_key, write_hdf_with_options,
-    };
-    use super::{
-        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions,
-        HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
-        MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
-        XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes,
-        read_html, read_html_str, read_html_str_with_options, read_json_str,
-        read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
-        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_excel_bytes,
-        write_html, write_html_string, write_html_string_with_options,
-        write_json_string, write_jsonl_string, write_latex, write_latex_string,
-        write_latex_string_with_options, write_latex_with_options, write_markdown,
-        write_markdown_string, write_markdown_string_with_options, write_markdown_with_options,
-        write_orc, write_orc_bytes, write_pickle, write_pickle_bytes, write_stata,
-        write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
-        write_xml_string_with_options,
     };
 
     #[test]

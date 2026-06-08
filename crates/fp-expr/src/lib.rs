@@ -6143,10 +6143,20 @@ mod tests {
         // (verified vs pandas 2.2.3: a//b == [0,1,1,2,2], a%b == [1,0,1,0,1])
         let fdiv = super::eval_str("a // b", &frame, &policy, &mut ledger).unwrap();
         let fv: Vec<_> = fdiv.values().to_vec();
-        assert_eq!(fv[3], Scalar::Int64(2), "4 // 2 should be Int64(2); got {:?}", fv[3]);
+        assert_eq!(
+            fv[3],
+            Scalar::Int64(2),
+            "4 // 2 should be Int64(2); got {:?}",
+            fv[3]
+        );
         let md = super::eval_str("a % b", &frame, &policy, &mut ledger).unwrap();
         let mv: Vec<_> = md.values().to_vec();
-        assert_eq!(mv[0], Scalar::Int64(1), "1 % 2 should be Int64(1); got {:?}", mv[0]);
+        assert_eq!(
+            mv[0],
+            Scalar::Int64(1),
+            "1 % 2 should be Int64(1); got {:?}",
+            mv[0]
+        );
 
         // NOTE: `a ** 2` (int**int) currently returns Float64 in FrankenPandas
         // (fp-columnar Pow kernel uses powf), diverging from pandas's int64.
@@ -6156,13 +6166,19 @@ mod tests {
     fn surviving_a(frame: &fp_frame::DataFrame, expr: &str) -> Result<Vec<i64>, String> {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
-        let r = super::query_str(expr, frame, &policy, &mut ledger).map_err(|e| format!("{e:?}"))?;
-        Ok(r
-            .column("a")
+        let r =
+            super::query_str(expr, frame, &policy, &mut ledger).map_err(|e| format!("{e:?}"))?;
+        Ok(r.column("a")
             .unwrap()
             .values()
             .iter()
-            .filter_map(|s| if let Scalar::Int64(v) = s { Some(*v) } else { None })
+            .filter_map(|s| {
+                if let Scalar::Int64(v) = s {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
             .collect())
     }
 
@@ -6178,24 +6194,59 @@ mod tests {
             fp_frame::Series::from_values(
                 "s",
                 (0..5).map(|i| (i as i64).into()).collect(),
-                ["x", "y", "x", "z", "y"].iter().map(|s| Scalar::Utf8((*s).into())).collect(),
+                ["x", "y", "x", "z", "y"]
+                    .iter()
+                    .map(|s| Scalar::Utf8((*s).into()))
+                    .collect(),
             )
             .unwrap(),
         ])
         .unwrap();
 
         // Each verified vs pandas 2.2.3 df.query(...)["a"].tolist().
-        assert_eq!(surviving_a(&frame, "a in [1, 3, 5]"), Ok(vec![1, 3, 5]), "a in list");
-        assert_eq!(surviving_a(&frame, "a not in [1, 3, 5]"), Ok(vec![2, 4]), "a not in list");
+        assert_eq!(
+            surviving_a(&frame, "a in [1, 3, 5]"),
+            Ok(vec![1, 3, 5]),
+            "a in list"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a not in [1, 3, 5]"),
+            Ok(vec![2, 4]),
+            "a not in list"
+        );
         assert_eq!(surviving_a(&frame, "s == 'x'"), Ok(vec![1, 3]), "str eq");
-        assert_eq!(surviving_a(&frame, "s in ['x', 'z']"), Ok(vec![1, 3, 4]), "str in list");
-        assert_eq!(surviving_a(&frame, "a > 1 and a < 4"), Ok(vec![2, 3]), "logical and");
-        assert_eq!(surviving_a(&frame, "not (a > 3)"), Ok(vec![1, 2, 3]), "unary not");
-        assert_eq!(surviving_a(&frame, "a + 1 > 3"), Ok(vec![3, 4, 5]), "arith precedence");
+        assert_eq!(
+            surviving_a(&frame, "s in ['x', 'z']"),
+            Ok(vec![1, 3, 4]),
+            "str in list"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a > 1 and a < 4"),
+            Ok(vec![2, 3]),
+            "logical and"
+        );
+        assert_eq!(
+            surviving_a(&frame, "not (a > 3)"),
+            Ok(vec![1, 2, 3]),
+            "unary not"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a + 1 > 3"),
+            Ok(vec![3, 4, 5]),
+            "arith precedence"
+        );
         // pandas treats &/| in query as element-wise and/or with
         // comparison-level precedence: `a > 1 & a < 4` == `(a>1) & (a<4)`.
-        assert_eq!(surviving_a(&frame, "a > 1 & a < 4"), Ok(vec![2, 3]), "bitwise &");
-        assert_eq!(surviving_a(&frame, "a == 1 | a == 5"), Ok(vec![1, 5]), "bitwise |");
+        assert_eq!(
+            surviving_a(&frame, "a > 1 & a < 4"),
+            Ok(vec![2, 3]),
+            "bitwise &"
+        );
+        assert_eq!(
+            surviving_a(&frame, "a == 1 | a == 5"),
+            Ok(vec![1, 5]),
+            "bitwise |"
+        );
     }
 
     #[test]

@@ -1475,10 +1475,7 @@ fn try_groupby_median_dense_int64(
                 }
             } else if slice.len().is_multiple_of(2) {
                 let (lo_part, &mut hi, _) = slice.select_nth_unstable_by(mid, cmp);
-                let lo = lo_part
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                let lo = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 Scalar::Float64((lo + hi) / 2.0)
             } else {
                 let (_, &mut median, _) = slice.select_nth_unstable_by(mid, cmp);

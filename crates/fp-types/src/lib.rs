@@ -5554,10 +5554,7 @@ mod tests {
             Timedelta::format(500), // 500ns
             "0 days 00:00:00.000000500"
         );
-        assert_eq!(
-            Timedelta::format(123_456_789),
-            "0 days 00:00:00.123456789"
-        );
+        assert_eq!(Timedelta::format(123_456_789), "0 days 00:00:00.123456789");
     }
 
     #[test]

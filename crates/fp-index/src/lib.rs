@@ -473,8 +473,8 @@ impl Clone for IndexLabels {
         let materialized = OnceLock::new();
         // A unit-range or typed Int64 backing can regenerate the label vector
         // on demand, so skip the O(n) Vec<IndexLabel> deep clone in that case.
-        let has_lazy_backing = self.int64_unit_range.is_some()
-            || matches!(int64_typed.get(), Some(Some(_)));
+        let has_lazy_backing =
+            self.int64_unit_range.is_some() || matches!(int64_typed.get(), Some(Some(_)));
         if !has_lazy_backing && let Some(labels) = self.materialized.get() {
             let _ = materialized.set(labels.clone());
         }

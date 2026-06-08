@@ -8,12 +8,12 @@
 //! Bit-identical: position_map_first records the FIRST occurrence, exactly
 //! what Index::position returns; unmatched rows are still dropped.
 
+use std::{collections::BTreeMap, time::Instant};
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-use std::collections::BTreeMap;
-use std::time::Instant;
 
 fn frame(labels: Vec<IndexLabel>, cols: Vec<(&str, Vec<f64>)>) -> DataFrame {
     let order: Vec<String> = cols.iter().map(|(n, _)| (*n).to_string()).collect();

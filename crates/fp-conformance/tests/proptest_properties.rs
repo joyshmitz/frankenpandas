@@ -11213,7 +11213,7 @@ proptest! {
     /// NaN since a lone missing value fails min_periods=1).
     #[test]
     fn prop_rolling_window1_is_identity(series in arb_numeric_series("roll1", 12)) {
-        if series.len() == 0 { return Ok(()); }
+        if series.is_empty() { return Ok(()); }
         let out = match series.rolling(1, Some(1)).sum() { Ok(s) => s, Err(_) => return Ok(()) };
         let iv = series.column().values();
         let ov = out.column().values();
@@ -11407,10 +11407,10 @@ proptest! {
         let vv = values.column().values();
         let mut expected: i128 = 0;
         for (k, v) in kv.iter().zip(vv.iter()) {
-            if !k.is_missing() {
-                if let Scalar::Int64(n) = v {
-                    expected += *n as i128;
-                }
+            if !k.is_missing()
+                && let Scalar::Int64(n) = v
+            {
+                expected += *n as i128;
             }
         }
         let mut total: i128 = 0;
@@ -11574,10 +11574,10 @@ proptest! {
             if let Some(o) = mm_f64(&out[i]) {
                 prop_assert!(o >= lo - tol && o <= hi + tol, "clip[{}]={} outside [{},{}]", i, o, lo, hi);
                 // Values already inside the band must be untouched.
-                if let Some(x) = mm_f64(&inp[i]) {
-                    if x >= lo && x <= hi {
-                        prop_assert!((o - x).abs() <= tol, "clip altered in-band value at {}: {} -> {}", i, x, o);
-                    }
+                if let Some(x) = mm_f64(&inp[i])
+                    && x >= lo && x <= hi
+                {
+                    prop_assert!((o - x).abs() <= tol, "clip altered in-band value at {}: {} -> {}", i, x, o);
                 }
             }
         }
@@ -11664,8 +11664,8 @@ proptest! {
                 ),
             }
         }
-        for i in (len - ku)..len {
-            prop_assert!(out[i].is_missing(), "shift round-trip tail {} should be missing", i);
+        for (i, value) in out.iter().enumerate().take(len).skip(len - ku) {
+            prop_assert!(value.is_missing(), "shift round-trip tail {} should be missing", i);
         }
     }
 }
@@ -11834,7 +11834,7 @@ proptest! {
             (Just(df), proptest::collection::vec(0_i64..n, 0..=12))
         })
     ) {
-        if df.index().len() == 0 {
+        if df.index().is_empty() {
             return Ok(());
         }
         let taken = match df.take(&positions, 0) {
@@ -11915,7 +11915,7 @@ proptest! {
     /// (the primitive-gather kernel, fi6zx typed-columnar work).
     #[test]
     fn prop_dataframe_sort_values_conserves_column_multisets(df in arb_numeric_dataframe(12)) {
-        if df.index().len() == 0 {
+        if df.index().is_empty() {
             return Ok(());
         }
         let names: Vec<String> = df.column_names().iter().map(|s| (*s).clone()).collect();

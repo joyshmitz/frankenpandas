@@ -629,7 +629,8 @@ fn series_rank_all_methods_na_options_pct_match_pandas() {
     let n = None;
     let f = Some;
 
-    let cases: &[(&str, bool, &str, bool, Vec<Option<f64>>)] = &[
+    type RankCase = (&'static str, bool, &'static str, bool, Vec<Option<f64>>);
+    let cases: &[RankCase] = &[
         (
             "average",
             true,

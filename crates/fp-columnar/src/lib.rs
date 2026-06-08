@@ -14629,10 +14629,7 @@ mod tests {
             let contiguous_col = Column::from_utf8_contiguous(bytes, offsets);
 
             assert_eq!(contiguous_col.argsort_with(true), vec![4, 1, 3, 0, 2, 5]);
-            assert_eq!(
-                contiguous_col.argsort_with(false),
-                vec![5, 0, 2, 3, 1, 4]
-            );
+            assert_eq!(contiguous_col.argsort_with(false), vec![5, 0, 2, 3, 1, 4]);
             for ascending in [true, false] {
                 let got = contiguous_col
                     .sort_values(ascending)

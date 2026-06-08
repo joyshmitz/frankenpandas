@@ -42,7 +42,7 @@ fn golden_dump(frame: &DataFrame) -> String {
             writeln!(&mut out, "L{i}={label:?}").unwrap();
         }
     }
-    for name in frame.column_order() {
+    for name in frame.column_names() {
         let col = frame.column(name).expect("col");
         let values = col.values();
         for (i, v) in values.iter().enumerate() {

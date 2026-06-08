@@ -993,6 +993,35 @@ impl Index {
 
     #[must_use]
     pub fn get_indexer(&self, target: &Index) -> Vec<Option<usize>> {
+        // When `self` is strictly ascending (any SortOrder::Ascending* ⟹
+        // globally IndexLabel::Ord-sorted and unique) we can resolve target
+        // positions without building the O(n) FxHashMap of `self`
+        // (br-frankenpandas-idxdup):
+        //   * target also sorted  ⇒ one two-pointer merge, O(n+m), no hashing;
+        //   * target unsorted     ⇒ binary-search each label, O(m log n).
+        // Both yield the same first-occurrence position the hash path returns
+        // (uniqueness makes "first" the only one); unsorted `self` keeps the
+        // hash path so a per-label scan never degrades to O(n·m).
+        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+            let labels = self.labels();
+            let targets = target.labels();
+            if !matches!(target.sort_order(), SortOrder::Unsorted) {
+                let mut out = Vec::with_capacity(targets.len());
+                let mut i = 0usize;
+                for label in targets {
+                    while i < labels.len() && labels[i] < *label {
+                        i += 1;
+                    }
+                    if i < labels.len() && labels[i] == *label {
+                        out.push(Some(i));
+                    } else {
+                        out.push(None);
+                    }
+                }
+                return out;
+            }
+            return targets.iter().map(|label| self.position(label)).collect();
+        }
         let map = self.position_map_first_ref();
         target
             .labels
@@ -13648,6 +13677,32 @@ mod tests {
                 assert_eq!(dt.get_loc(q).ok(), expected, "datetime nanos={nanos:?} q={q}");
                 assert_eq!(td.get_loc(q).ok(), expected, "timedelta nanos={nanos:?} q={q}");
             }
+        }
+    }
+
+    #[test]
+    fn get_indexer_sorted_fast_path_matches_reference_idxdup() {
+        // get_indexer's sorted merge / binary-search fast paths and the
+        // FxHashMap fallback must all equal a first-occurrence reference.
+        let s = |v: &[i64]| v.iter().map(|x| IndexLabel::Int64(*x)).collect::<Vec<_>>();
+        let cases: Vec<(Vec<IndexLabel>, Vec<IndexLabel>)> = vec![
+            (s(&[1, 2, 3, 4, 5]), s(&[2, 4, 6])),     // both sorted
+            (s(&[1, 2, 3, 4, 5]), s(&[5, 1, 3, 9])),  // self sorted, target unsorted
+            (s(&[3, 1, 5, 2]), s(&[1, 2, 3])),        // self unsorted -> hash path
+            (s(&[1, 2, 3]), vec![]),                  // empty target
+            (vec![], s(&[1, 2])),                     // empty self
+            (
+                vec!["a".into(), "c".into(), "e".into()],
+                vec!["c".into(), "z".into(), "a".into()],
+            ), // utf8, target unsorted
+            (s(&[1, 2, 3]), vec!["a".into()]), // mixed type sorted, no match
+        ];
+        for (a, b) in cases {
+            let ia = Index::new(a.clone());
+            let ib = Index::new(b.clone());
+            let ref_out: Vec<Option<usize>> =
+                b.iter().map(|t| a.iter().position(|x| x == t)).collect();
+            assert_eq!(ia.get_indexer(&ib), ref_out, "get_indexer {a:?} -> {b:?}");
         }
     }
 

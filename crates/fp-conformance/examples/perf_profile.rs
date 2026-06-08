@@ -243,6 +243,34 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Frame for the multi-column sort benchmark (br-frankenpandas-1tuf5): an Int64
+/// key with many ties (low cardinality) so the second sort key actually breaks
+/// ties, plus a Float64 second key + a Float64 payload. Sorting by `[k0, k1]`
+/// exercises both the Int64 and no-NaN-Float64 typed-comparison paths.
+fn build_multisort_frame(n: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let k0: Vec<Scalar> = (0..n)
+        .map(|i| {
+            let h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+            Scalar::Int64((h % 1000) as i64)
+        })
+        .collect();
+    let k1: Vec<Scalar> = (0..n)
+        .map(|i| {
+            let h = (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33;
+            Scalar::Float64((h % 100_000) as f64 * 0.5)
+        })
+        .collect();
+    let v: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.25)).collect();
+    let mut columns = BTreeMap::new();
+    columns.insert("k0".to_string(), fp_columnar::Column::from_values(k0).expect("k0"));
+    columns.insert("k1".to_string(), fp_columnar::Column::from_values(k1).expect("k1"));
+    columns.insert("v".to_string(), fp_columnar::Column::from_values(v).expect("v"));
+    let column_order = vec!["k0".to_string(), "k1".to_string(), "v".to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("multisort frame")
+}
+
 /// Build a many-column, all-finite, non-collinear numeric frame for the
 /// pairwise corr/cov kernel benchmark. Values come from a cheap deterministic
 /// hash so columns are linearly independent (corr != 1 off-diagonal) and
@@ -462,6 +490,9 @@ fn run_golden(scenario: &str, n: usize) {
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
+        "sort_multi" => build_multisort_frame(n)
+            .sort_values_multi(&["k0", "k1"], &[true, true], "last")
+            .expect("sort multi"),
         "str_sort" => build_str_key_frame(n, 4096)
             .sort_values("k", true)
             .expect("str sort"),
@@ -719,6 +750,15 @@ fn main() {
             let frame = build_numeric_frame(n, 4);
             for _ in 0..iters {
                 let out = frame.sort_values("c0", true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "sort_multi" => {
+            let frame = build_multisort_frame(n);
+            for _ in 0..iters {
+                let out = frame
+                    .sort_values_multi(&["k0", "k1"], &[true, true], "last")
+                    .expect("sort multi");
                 sink = sink.wrapping_add(out.len());
             }
         }

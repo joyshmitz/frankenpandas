@@ -1086,6 +1086,39 @@ fn ordered_unique_utf8_fixed_width(left_key: &Column, right_key: &Column) -> Opt
     (left_width == right_width && left_width > 0).then_some(left_width)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InnerPositionPlan {
+    Gather {
+        left_positions: Vec<usize>,
+        right_positions: Vec<usize>,
+    },
+    ContiguousRanges {
+        left_start: usize,
+        right_start: usize,
+        len: usize,
+    },
+}
+
+impl InnerPositionPlan {
+    #[cfg(test)]
+    fn into_positions(self) -> (Vec<usize>, Vec<usize>) {
+        match self {
+            Self::Gather {
+                left_positions,
+                right_positions,
+            } => (left_positions, right_positions),
+            Self::ContiguousRanges {
+                left_start,
+                right_start,
+                len,
+            } => (
+                (left_start..left_start + len).collect(),
+                (right_start..right_start + len).collect(),
+            ),
+        }
+    }
+}
+
 /// Hash-free ordered merge for all-valid, strictly increasing contiguous-Utf8
 /// keys. This is the string-key analogue of
 /// [`ordered_unique_int64_inner_positions`]: each side is unique and already in
@@ -1093,10 +1126,10 @@ fn ordered_unique_utf8_fixed_width(left_key: &Column, right_key: &Column) -> Opt
 /// `(left_pos, right_pos)` pairs as the hash path while skipping hash table
 /// build/probe entirely. Duplicate or unsorted inputs fall back to the
 /// left-major byte-span hash path, preserving pandas row order.
-fn ordered_unique_utf8_inner_positions(
+fn ordered_unique_utf8_inner_position_plan(
     left_key: &Column,
     right_key: &Column,
-) -> Option<(Vec<usize>, Vec<usize>)> {
+) -> Option<InnerPositionPlan> {
     let (left_bytes, left_offsets) = strictly_increasing_utf8_key_spans(left_key)?;
     let (right_bytes, right_offsets) = strictly_increasing_utf8_key_spans(right_key)?;
     let left_n = left_offsets.len() - 1;
@@ -1104,7 +1137,10 @@ fn ordered_unique_utf8_inner_positions(
     let fixed_width = ordered_unique_utf8_fixed_width(left_key, right_key);
 
     if left_n == 0 || right_n == 0 {
-        return Some((Vec::new(), Vec::new()));
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
     }
 
     let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
@@ -1115,7 +1151,10 @@ fn ordered_unique_utf8_inner_positions(
     let first_right = utf8_span(right_bytes, right_offsets, 0);
     let last_right = utf8_span(right_bytes, right_offsets, right_n - 1);
     if last_left < first_right || last_right < first_left {
-        return Some((left_positions, right_positions));
+        return Some(InnerPositionPlan::Gather {
+            left_positions,
+            right_positions,
+        });
     }
 
     let mut left_idx = utf8_span_lower_bound(left_bytes, left_offsets, first_right);
@@ -1153,6 +1192,13 @@ fn ordered_unique_utf8_inner_positions(
                             && left_bytes[left_start..left_end]
                                 == right_bytes[right_start..right_end]
                         {
+                            if left_positions.is_empty() {
+                                return Some(InnerPositionPlan::ContiguousRanges {
+                                    left_start: left_idx,
+                                    right_start: right_idx,
+                                    len: run_len,
+                                });
+                            }
                             left_positions.extend(left_idx..left_idx + run_len);
                             right_positions.extend(right_idx..right_idx + run_len);
                             left_idx += run_len;
@@ -1171,7 +1217,19 @@ fn ordered_unique_utf8_inner_positions(
         }
     }
 
-    Some((left_positions, right_positions))
+    Some(InnerPositionPlan::Gather {
+        left_positions,
+        right_positions,
+    })
+}
+
+#[cfg(test)]
+fn ordered_unique_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    ordered_unique_utf8_inner_position_plan(left_key, right_key)
+        .map(InnerPositionPlan::into_positions)
 }
 
 fn ordered_unique_int64_left_match_positions(
@@ -1683,6 +1741,30 @@ fn take_positions_typed(column: &Column, positions: &[usize]) -> Column {
         return Column::from_i64_values(data);
     }
     column.take_positions(positions)
+}
+
+#[derive(Clone, Copy)]
+enum PositionSelection<'a> {
+    Positions(&'a [usize]),
+    ContiguousRange { start: usize, len: usize },
+}
+
+impl PositionSelection<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Positions(positions) => positions.len(),
+            Self::ContiguousRange { len, .. } => len,
+        }
+    }
+}
+
+fn take_position_selection_typed(column: &Column, selection: PositionSelection<'_>) -> Column {
+    match selection {
+        PositionSelection::Positions(positions) => take_positions_typed(column, positions),
+        PositionSelection::ContiguousRange { start, len } => {
+            column.take_contiguous_range(start, len)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3775,6 +3857,26 @@ fn build_single_key_inner_merge_output(
     right_positions: &[usize],
     suffixes: &ResolvedMergeSuffixes,
 ) -> Result<MergedDataFrame, JoinError> {
+    build_single_key_inner_merge_output_with_selections(
+        left,
+        right,
+        left_on,
+        right_on,
+        PositionSelection::Positions(left_positions),
+        PositionSelection::Positions(right_positions),
+        suffixes,
+    )
+}
+
+fn build_single_key_inner_merge_output_with_selections(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_positions: PositionSelection<'_>,
+    right_positions: PositionSelection<'_>,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<MergedDataFrame, JoinError> {
     debug_assert_eq!(left_on.len(), 1);
     debug_assert_eq!(right_on.len(), 1);
     debug_assert_eq!(left_positions.len(), right_positions.len());
@@ -3806,7 +3908,7 @@ fn build_single_key_inner_merge_output(
     // (one column per worker) — the same disjoint-fill pattern as the dense-i64
     // fused builder (br-frankenpandas-j3jnd). Bit-identical to the serial loop:
     // identical per-column take_positions_typed result, inserted in spec order.
-    let mut specs: Vec<(String, &Column, &[usize])> = Vec::new();
+    let mut specs: Vec<(String, &Column, PositionSelection<'_>)> = Vec::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -3850,7 +3952,7 @@ fn build_single_key_inner_merge_output(
                 for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
                     scope.spawn(move || {
                         for ((_, col, positions), slot) in spec_chunk.iter().zip(slot_chunk) {
-                            *slot = Some(take_positions_typed(col, positions));
+                            *slot = Some(take_position_selection_typed(col, *positions));
                         }
                     });
                 }
@@ -3862,7 +3964,7 @@ fn build_single_key_inner_merge_output(
         } else {
             specs
                 .iter()
-                .map(|(_, col, positions)| take_positions_typed(col, positions))
+                .map(|(_, col, positions)| take_position_selection_typed(col, *positions))
                 .collect()
         }
     };
@@ -4740,18 +4842,42 @@ fn merge_single_key_inner_unsorted(
         );
     }
 
-    if let Some((left_positions, right_positions)) =
-        ordered_unique_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
+    if let Some(position_plan) =
+        ordered_unique_utf8_inner_position_plan(left_key_columns[0], right_key_columns[0])
     {
-        return build_single_key_inner_merge_output(
-            left,
-            right,
-            left_on,
-            right_on,
-            &left_positions,
-            &right_positions,
-            suffixes,
-        );
+        return match position_plan {
+            InnerPositionPlan::Gather {
+                left_positions,
+                right_positions,
+            } => build_single_key_inner_merge_output(
+                left,
+                right,
+                left_on,
+                right_on,
+                &left_positions,
+                &right_positions,
+                suffixes,
+            ),
+            InnerPositionPlan::ContiguousRanges {
+                left_start,
+                right_start,
+                len,
+            } => build_single_key_inner_merge_output_with_selections(
+                left,
+                right,
+                left_on,
+                right_on,
+                PositionSelection::ContiguousRange {
+                    start: left_start,
+                    len,
+                },
+                PositionSelection::ContiguousRange {
+                    start: right_start,
+                    len,
+                },
+                suffixes,
+            ),
+        };
     }
 
     // Byte-span build+probe for all-valid contiguous-Utf8 string keys
@@ -6480,8 +6606,9 @@ mod tests {
 
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
-        FusedInt64Side, JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data,
-        join_series, join_series_with_options, join_series_with_trace,
+        FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType,
+        build_dense_i64_inner_output_data, join_series, join_series_with_options,
+        join_series_with_trace, ordered_unique_utf8_inner_position_plan,
         ordered_unique_utf8_inner_positions, strictly_increasing_utf8_key_spans,
         utf8_span_lower_bound,
     };
@@ -9378,6 +9505,24 @@ mod tests {
             ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
         assert_eq!(left_positions, vec![2, 3, 4]);
         assert_eq!(right_positions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordered_unique_utf8_bulk_window_returns_range_plan_jbyuc11111() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k002", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k002", "k003", "k004", "k005"]);
+
+        let plan =
+            ordered_unique_utf8_inner_position_plan(&left, &right).expect("ordered utf8 plan");
+
+        assert_eq!(
+            plan,
+            InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 3
+            }
+        );
     }
 
     #[test]

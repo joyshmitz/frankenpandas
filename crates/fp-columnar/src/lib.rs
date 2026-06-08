@@ -3335,6 +3335,81 @@ impl Column {
         }
     }
 
+    /// Gather a contiguous row range without first materializing
+    /// `start..start + len` as a positions vector.
+    ///
+    /// # Panics
+    /// Panics if the requested range overflows or extends beyond this column.
+    #[must_use]
+    pub fn take_contiguous_range(&self, start: usize, len: usize) -> Self {
+        let end = start
+            .checked_add(len)
+            .expect("contiguous range end must not overflow");
+        assert!(
+            end <= self.len(),
+            "contiguous range end must be within column length"
+        );
+
+        if self.validity.all() {
+            if let Some((src_data, src_start)) = self.float64_arc_view_source()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= src_data.len())
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, len),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                };
+            }
+
+            if let Some(values) = self.as_f64_slice() {
+                return Self::from_f64_values(values[start..end].to_vec());
+            }
+
+            if let Some(values) = self.as_i64_slice() {
+                return Self::from_i64_values(values[start..end].to_vec());
+            }
+
+            if let Some((src_bytes, src_offsets, src_start)) = self.utf8_arc_view_source() {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_utf8_slice(
+                        src_bytes,
+                        src_offsets,
+                        src_start + start,
+                        len,
+                    ),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                };
+            }
+
+            if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+                let byte_start = offsets[start];
+                let byte_end = offsets[end];
+                let mut new_offsets = Vec::with_capacity(len + 1);
+                for &offset in &offsets[start..=end] {
+                    new_offsets.push(offset - byte_start);
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_contiguous_utf8(
+                        bytes[byte_start..byte_end].to_vec(),
+                        new_offsets,
+                    ),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                };
+            }
+        }
+
+        let positions: Vec<usize> = (start..end).collect();
+        self.take_positions(&positions)
+    }
+
     fn take_cached_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Vec<f64>> {
         let data = self.as_f64_slice()?;
         let mut values = Vec::with_capacity(positions.len());
@@ -12212,6 +12287,56 @@ mod tests {
         );
         assert_eq!(second.as_f64_slice(), expected.as_f64_slice());
         assert_eq!(second.values(), expected.values());
+    }
+
+    #[test]
+    fn take_contiguous_range_uses_typed_views_without_positions() {
+        let f64_data: Vec<f64> = (0..160)
+            .map(|i| if i == 72 { -0.0 } else { i as f64 * 0.5 })
+            .collect();
+        let f64_column = Column::from_f64_values(f64_data);
+        let f64_range = f64_column.take_contiguous_range(64, 80);
+        assert!(
+            matches!(
+                &f64_range.values,
+                ScalarValues::LazyAllValidFloat64Slice { .. }
+            ),
+            "Float64 range gather should be a zero-copy slice view"
+        );
+        assert_eq!(
+            f64_range.as_f64_slice().map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            }),
+            f64_column.as_f64_slice().map(|values| values[64..144]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>())
+        );
+
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(6);
+        offsets.push(0);
+        for value in ["k000", "k001", "k002", "k003", "k004"] {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let utf8_column = Column::from_utf8_contiguous(bytes, offsets);
+        let utf8_range = utf8_column.take_contiguous_range(1, 3);
+        assert!(
+            matches!(&utf8_range.values, ScalarValues::LazyUtf8Slice { .. }),
+            "Utf8 range gather should be a zero-copy slice view"
+        );
+        assert_eq!(
+            utf8_range.values(),
+            &[
+                Scalar::Utf8("k001".to_owned()),
+                Scalar::Utf8("k002".to_owned()),
+                Scalar::Utf8("k003".to_owned())
+            ]
+        );
     }
 
     #[test]

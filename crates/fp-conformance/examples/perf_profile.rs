@@ -629,6 +629,11 @@ fn run_golden(scenario: &str, n: usize) {
                 .expect("cumsum");
             return print!("{}", golden_dump_series(&out));
         }
+        "df_groupby_cumsum" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .cumsum()
+            .expect("cumsum"),
         "groupby_transform_mean" => build_transform_frame(n, 100, 4)
             .groupby(&["k"])
             .expect("groupby")
@@ -987,6 +992,17 @@ fn main() {
             for _ in 0..iters {
                 let out = value
                     .groupby(&key)
+                    .expect("groupby")
+                    .cumsum()
+                    .expect("cumsum");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_groupby_cumsum" => {
+            let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
                     .expect("groupby")
                     .cumsum()
                     .expect("cumsum");

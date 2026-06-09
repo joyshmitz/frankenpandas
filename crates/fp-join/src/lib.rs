@@ -2217,6 +2217,165 @@ fn build_dense_i64_inner_output_data(
         .collect()
 }
 
+/// Which typed lane an output column of the dense inner merge uses, recorded in
+/// column-encounter order so the i64 (lazy) and f64 (materialized) builds can be
+/// re-interleaved into the original column order (br-frankenpandas-jzrem).
+enum DenseInnerSpecKind {
+    I64,
+    F64,
+}
+
+/// One Float64 output lane of the dense inner merge (br-frankenpandas-jzrem).
+struct FusedF64OutputColumn<'a> {
+    name: String,
+    side: FusedInt64Side,
+    values: &'a [f64],
+}
+
+/// The matched-left-row list `(left_pos, bucket_start, run_len)` in probe order
+/// — identical to the walk inside [`build_dense_i64_inner_output_data`], so the
+/// Float64 lanes materialize in the exact same row order as the i64 lanes and
+/// the flat `take_positions` path.
+fn dense_inner_matched_runs(plan: &DenseI64InnerOutputPlan<'_>) -> Vec<(usize, usize, usize)> {
+    let mut matched = Vec::new();
+    for (left_pos, &v) in plan.left_keys.iter().enumerate() {
+        if v < plan.min || v > plan.max {
+            continue;
+        }
+        let bucket = (v - plan.min) as usize;
+        if bucket + 1 >= plan.offsets.len() {
+            continue;
+        }
+        let start = plan.offsets[bucket];
+        let run_len = plan.offsets[bucket + 1] - start;
+        if run_len == 0 {
+            continue;
+        }
+        matched.push((left_pos, start, run_len));
+    }
+    matched
+}
+
+/// Build one Float64 inner-merge output column as a LAZY representation
+/// (br-frankenpandas-jzrem) — O(matched + right_len), never the O(output_len)
+/// materialization:
+///   * a Left column becomes a repeat-values lane: one value per matched run
+///     (`values[left_pos]`) over the shared `run_lens` descriptor;
+///   * a Right column becomes a repeated-slices lane over the bucket-ordered
+///     value tape (`values` gathered by `positions`, one scattered pass) with
+///     the shared `segments` descriptor.
+/// Both materialize, only when a consumer reads them, to exactly the values
+/// `take_position_selection_typed` would produce on the flat `(left_positions,
+/// right_positions)` vectors — same values, same row order (matched-run probe
+/// order == flat position order). Mirrors the i64 lazy lanes the all-Int64 path
+/// already emits, so a join whose output is only sized (not consumed) stays
+/// near-free instead of writing the whole fanned-out column.
+fn build_dense_inner_f64_column(
+    side: FusedInt64Side,
+    values: &[f64],
+    matched: &[(usize, usize, usize)],
+    positions: &[usize],
+    run_lens: &Arc<[usize]>,
+    segments: &Arc<[(usize, usize)]>,
+    output_len: usize,
+) -> Column {
+    match side {
+        FusedInt64Side::Left => {
+            let run_values: Vec<f64> =
+                matched.iter().map(|&(left_pos, _, _)| values[left_pos]).collect();
+            Column::from_f64_repeat_values_run_lengths(run_values, Arc::clone(run_lens))
+        }
+        FusedInt64Side::Right => {
+            let tape: Vec<f64> = positions.iter().map(|&p| values[p]).collect();
+            Column::from_f64_repeated_slices_shared(tape, Arc::clone(segments), output_len)
+        }
+    }
+}
+
+/// Build every Float64 inner-merge output column, one worker per column when the
+/// pool is worth it (the fu8f5 column-parallel pattern). Returns `(name, column)`
+/// pairs in `specs` order. `run_lens`/`segments` are the shared lazy-lane
+/// descriptors derived from the matched-run list (one per matched run).
+fn build_dense_inner_f64_columns(
+    specs: Vec<FusedF64OutputColumn<'_>>,
+    matched: &[(usize, usize, usize)],
+    positions: &[usize],
+    output_len: usize,
+) -> Vec<(String, Column)> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let run_lens: Arc<[usize]> = matched.iter().map(|&(_, _, run_len)| run_len).collect();
+    let segments: Arc<[(usize, usize)]> = matched
+        .iter()
+        .map(|&(_, bucket_start, run_len)| (bucket_start, run_len))
+        .collect();
+
+    let worker_count = join_parallel_thread_count().min(specs.len());
+    if worker_count < 2 {
+        return specs
+            .into_iter()
+            .map(|s| {
+                (
+                    s.name,
+                    build_dense_inner_f64_column(
+                        s.side, s.values, matched, positions, &run_lens, &segments, output_len,
+                    ),
+                )
+            })
+            .collect();
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let specs_ref = &specs;
+    let run_lens_ref = &run_lens;
+    let segments_ref = &segments;
+    let built_by_worker = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let next = &next;
+            handles.push(scope.spawn(move || {
+                let mut local: Vec<(usize, Column)> = Vec::new();
+                loop {
+                    let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= specs_ref.len() {
+                        break;
+                    }
+                    let s = &specs_ref[idx];
+                    local.push((
+                        idx,
+                        build_dense_inner_f64_column(
+                            s.side,
+                            s.values,
+                            matched,
+                            positions,
+                            run_lens_ref,
+                            segments_ref,
+                            output_len,
+                        ),
+                    ));
+                }
+                local
+            }));
+        }
+        let mut all: Vec<(usize, Column)> = Vec::new();
+        for handle in handles {
+            all.extend(handle.join().expect("f64 inner-merge column worker panicked"));
+        }
+        all
+    });
+
+    let mut built: Vec<Option<Column>> = (0..specs.len()).map(|_| None).collect();
+    for (idx, column) in built_by_worker {
+        built[idx] = Some(column);
+    }
+    specs
+        .into_iter()
+        .zip(built)
+        .map(|(s, column)| (s.name, column.expect("every f64 column index is built once")))
+        .collect()
+}
+
 fn build_single_key_dense_i64_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -2248,15 +2407,22 @@ fn build_single_key_dense_i64_inner_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
 
-    let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    // Collect output specs in column-encounter order, accepting BOTH typed
+    // all-valid Int64 and typed all-valid Float64 columns (br-frankenpandas-jzrem).
+    // Int64 columns keep the lazy repeat-run / repeated-slice representation;
+    // Float64 columns are materialized cache-efficiently below. Any other dtype,
+    // a nullable column, or a NaN-bearing Float64 (as_f64_slice gates on
+    // validity.all()) declines the whole fast path (Ok(None)) and falls back to
+    // the flat gather, exactly as before.
+    let mut i64_specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut f64_specs = Vec::<FusedF64OutputColumn<'_>>::new();
+    let mut order_kinds = Vec::<DenseInnerSpecKind>::new();
+
     for name in left.column_names() {
         let col = left
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
-        let Some(values) = col.as_i64_slice() else {
-            return Ok(None);
-        };
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -2264,11 +2430,23 @@ fn build_single_key_dense_i64_inner_merge_output(
         } else {
             name.clone()
         };
-        specs.push(FusedInt64OutputColumn {
-            name: out_name,
-            side: FusedInt64Side::Left,
-            values,
-        });
+        if let Some(values) = col.as_i64_slice() {
+            i64_specs.push(FusedInt64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Left,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::I64);
+        } else if let Some(values) = col.as_f64_slice() {
+            f64_specs.push(FusedF64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Left,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::F64);
+        } else {
+            return Ok(None);
+        }
     }
 
     for name in right.column_names() {
@@ -2279,19 +2457,28 @@ fn build_single_key_dense_i64_inner_merge_output(
         if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
             continue;
         }
-        let Some(values) = col.as_i64_slice() else {
-            return Ok(None);
-        };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, options.suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        specs.push(FusedInt64OutputColumn {
-            name: out_name,
-            side: FusedInt64Side::Right,
-            values,
-        });
+        if let Some(values) = col.as_i64_slice() {
+            i64_specs.push(FusedInt64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Right,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::I64);
+        } else if let Some(values) = col.as_f64_slice() {
+            f64_specs.push(FusedF64OutputColumn {
+                name: out_name,
+                side: FusedInt64Side::Right,
+                values,
+            });
+            order_kinds.push(DenseInnerSpecKind::F64);
+        } else {
+            return Ok(None);
+        }
     }
 
     ensure_merge_suffixes_for_overlaps(&overlapping_names, options.suffixes)?;
@@ -2301,14 +2488,30 @@ fn build_single_key_dense_i64_inner_merge_output(
             return Ok(None);
         }
         let mut columns = std::collections::BTreeMap::new();
-        let mut column_order = Vec::with_capacity(specs.len());
-        for spec in specs {
-            insert_merged_output_column(
-                &mut columns,
-                &mut column_order,
-                spec.name,
-                Column::from_i64_values(Vec::new()),
-            )?;
+        let mut column_order = Vec::with_capacity(order_kinds.len());
+        let mut i64_it = i64_specs.into_iter();
+        let mut f64_it = f64_specs.into_iter();
+        for kind in &order_kinds {
+            match kind {
+                DenseInnerSpecKind::I64 => {
+                    let spec = i64_it.next().expect("i64 spec for each I64 kind");
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        Column::from_i64_values(Vec::new()),
+                    )?;
+                }
+                DenseInnerSpecKind::F64 => {
+                    let spec = f64_it.next().expect("f64 spec for each F64 kind");
+                    insert_merged_output_column(
+                        &mut columns,
+                        &mut column_order,
+                        spec.name,
+                        Column::from_f64_values(Vec::new()),
+                    )?;
+                }
+            }
         }
         return Ok(Some(MergedDataFrame {
             index: Index::new(Vec::new()),
@@ -2378,26 +2581,47 @@ fn build_single_key_dense_i64_inner_merge_output(
         positions: &positions,
         output_len,
     };
-    let output_data = build_dense_i64_inner_output_data(&specs, &output_plan);
+    let i64_lanes = build_dense_i64_inner_output_data(&i64_specs, &output_plan);
+    // Float64 lanes materialized cache-efficiently in the same probe row order
+    // (br-frankenpandas-jzrem); the matched-run walk is only needed when there
+    // are Float64 columns to build.
+    let matched = if f64_specs.is_empty() {
+        Vec::new()
+    } else {
+        dense_inner_matched_runs(&output_plan)
+    };
+    let f64_columns = build_dense_inner_f64_columns(f64_specs, &matched, &positions, output_len);
 
     // Lazy unit-range output index: identical labels (0..output_len as
     // IndexLabel::Int64, materialized on demand), pre-proven unique and
     // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
-    let mut column_order = Vec::with_capacity(specs.len());
-    for (spec, lane) in specs.into_iter().zip(output_data) {
-        let column = match lane {
-            DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
-                Column::from_i64_repeat_values_run_lengths(values, run_lens)
+    let mut column_order = Vec::with_capacity(order_kinds.len());
+    let mut i64_it = i64_specs.into_iter().zip(i64_lanes);
+    let mut f64_it = f64_columns.into_iter();
+    for kind in &order_kinds {
+        match kind {
+            DenseInnerSpecKind::I64 => {
+                let (spec, lane) = i64_it.next().expect("i64 lane for each I64 kind");
+                let column = match lane {
+                    DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
+                        Column::from_i64_repeat_values_run_lengths(values, run_lens)
+                    }
+                    DenseI64LaneData::RepeatedSlices { data, segments } => {
+                        Column::from_i64_repeated_slices_shared(data, segments, output_len)
+                    }
+                    DenseI64LaneData::Full(data) => Column::from_i64_values(data),
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
             }
-            DenseI64LaneData::RepeatedSlices { data, segments } => {
-                Column::from_i64_repeated_slices_shared(data, segments, output_len)
+            DenseInnerSpecKind::F64 => {
+                let (name, column) = f64_it.next().expect("f64 column for each F64 kind");
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
             }
-            DenseI64LaneData::Full(data) => Column::from_i64_values(data),
-        };
-        debug_assert_eq!(column.len(), output_len);
-        insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+        }
     }
 
     Ok(Some(MergedDataFrame {

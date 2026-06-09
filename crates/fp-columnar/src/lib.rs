@@ -1168,6 +1168,29 @@ enum ScalarValues {
         expanded: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Float64 counterpart of [`Self::LazyRepeatValuesInt64`]
+    /// (br-frankenpandas-jzrem): a dense-join LEFT lane carried as per-run f64
+    /// values + a shared run-length descriptor, expanded to `Scalar::Float64`
+    /// only when a consumer reads it. The source values are all-valid (the
+    /// builder gates on `as_f64_slice`, which requires `validity.all()` and
+    /// hence no NaN), so the materialized column is all-valid.
+    LazyRepeatValuesFloat64 {
+        run_values: Vec<f64>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Float64 counterpart of [`Self::LazyRepeatedSlicesInt64`]
+    /// (br-frankenpandas-jzrem): a dense-join RIGHT lane carried as repeated
+    /// `(start, len)` slices of one shared bucket-order value tape, expanded to
+    /// `Scalar::Float64` only on read. Segment order is the observable row
+    /// order; all-valid for the same reason as `LazyRepeatValuesFloat64`.
+    LazyRepeatedSlicesFloat64 {
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Zero-copy contiguous row-range VIEW over an `Arc`-shared contiguous-Utf8
     /// backing (br-frankenpandas-jbyuc.1.1.1). Row `i` (`0..len`) is
     /// `bytes[offsets[start + i] .. offsets[start + i + 1]]` — the same shared
@@ -1390,6 +1413,43 @@ impl ScalarValues {
             segments,
             total_len,
             expanded: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_repeat_values_float64(
+        run_values: Vec<f64>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(run_values.len(), run_lens.len());
+        debug_assert_eq!(run_lens.iter().sum::<usize>(), total_len);
+        Self::LazyRepeatValuesFloat64 {
+            run_values,
+            run_lens,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_repeated_slices_float64_shared(
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            segments.iter().map(|&(_, len)| len).sum::<usize>(),
+            total_len
+        );
+        debug_assert!(
+            segments
+                .iter()
+                .all(|&(start, len)| start.checked_add(len).is_some_and(|end| end <= data.len()))
+        );
+        Self::LazyRepeatedSlicesFloat64 {
+            data,
+            segments,
+            total_len,
             values: OnceLock::new(),
         }
     }
@@ -1846,6 +1906,36 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyRepeatValuesFloat64 {
+                run_values,
+                run_lens,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
+                        out.resize(out.len() + run_len, Scalar::Float64(value));
+                    }
+                    out
+                })
+                .as_slice(),
+            Self::LazyRepeatedSlicesFloat64 {
+                data,
+                segments,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for &(start, len) in segments.iter() {
+                        for &value in &data[start..start + len] {
+                            out.push(Scalar::Float64(value));
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
             Self::LazyUtf8Slice {
                 bytes,
                 offsets,
@@ -1885,6 +1975,8 @@ impl ScalarValues {
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
+            Self::LazyRepeatValuesFloat64 { total_len, .. } => *total_len,
+            Self::LazyRepeatedSlicesFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
     }
@@ -2057,6 +2149,26 @@ impl Clone for ScalarValues {
                 total_len,
                 ..
             } => Self::lazy_repeated_slices_int64_shared(
+                data.clone(),
+                Arc::clone(segments),
+                *total_len,
+            ),
+            Self::LazyRepeatValuesFloat64 {
+                run_values,
+                run_lens,
+                total_len,
+                ..
+            } => Self::lazy_repeat_values_float64(
+                run_values.clone(),
+                Arc::clone(run_lens),
+                *total_len,
+            ),
+            Self::LazyRepeatedSlicesFloat64 {
+                data,
+                segments,
+                total_len,
+                ..
+            } => Self::lazy_repeated_slices_float64_shared(
                 data.clone(),
                 Arc::clone(segments),
                 *total_len,
@@ -3267,6 +3379,45 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_repeated_slices_int64_shared(data, segments, total_len),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
+    /// Float64 counterpart of [`Column::from_i64_repeat_values_run_lengths`]
+    /// (br-frankenpandas-jzrem): an all-valid Float64 dense-join LEFT lane
+    /// carried as per-run values + a shared run-length descriptor, materialized
+    /// to `Scalar::Float64` only on read. `run_values` must be NaN-free (the
+    /// caller gathers them from an `as_f64_slice` source, which is all-valid).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_repeat_values_run_lengths(
+        run_values: Vec<f64>,
+        run_lens: Arc<[usize]>,
+    ) -> Self {
+        let total_len = run_lens.iter().sum();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_repeat_values_float64(run_values, run_lens, total_len),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
+    /// Float64 counterpart of [`Column::from_i64_repeated_slices_shared`]
+    /// (br-frankenpandas-jzrem): an all-valid Float64 dense-join RIGHT lane
+    /// carried as repeated slices of one shared bucket-order value tape,
+    /// materialized to `Scalar::Float64` only on read. `data` must be NaN-free.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_repeated_slices_shared(
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_repeated_slices_float64_shared(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
         }

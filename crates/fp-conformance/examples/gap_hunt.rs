@@ -113,6 +113,8 @@ fn main() {
         // nullable self over nullable other.
         print!("{}", golden_dump(&f.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
         print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
+        // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
+        print!("{}", golden_dump(&fnull.interpolate().unwrap()));
         return;
     }
     let n: usize = args

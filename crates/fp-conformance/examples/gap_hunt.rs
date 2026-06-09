@@ -185,6 +185,9 @@ fn main() {
             "{}",
             golden_dump(&fnull.nunique_with_dropna(false).unwrap().to_frame(Some("nu")).unwrap())
         );
+        // describe: count/mean/std/min/25%/50%/75%/max over all-valid + nullable.
+        print!("{}", golden_dump(&f.describe().unwrap()));
+        print!("{}", golden_dump(&fnull.describe().unwrap()));
         return;
     }
     let n: usize = args

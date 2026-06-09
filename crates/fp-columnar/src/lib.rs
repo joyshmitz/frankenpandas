@@ -67,6 +67,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
+
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Utf8LowerHexSequence {
@@ -5166,9 +5168,68 @@ impl Column {
         }
     }
 
-    fn take_strided_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Self> {
-        const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
+    /// Internal companion for callers that already proved `positions` are an
+    /// arithmetic progression while building the selection.
+    ///
+    /// The accepted Float64 path validates only `{start, step, len}` against
+    /// the column backing and does not rescan `positions`; all other cases
+    /// delegate to [`Self::take_positions`].
+    ///
+    /// # Panics
+    /// Panics if fallback gathering sees an out-of-bounds position, matching
+    /// [`Self::take_positions`].
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_positions_with_affine_certificate(
+        &self,
+        positions: &[usize],
+        start: usize,
+        step: usize,
+    ) -> Self {
+        if let Some(column) =
+            self.take_affine_all_valid_float64_positions(positions.len(), start, step)
+        {
+            return column;
+        }
+        self.take_positions(positions)
+    }
 
+    fn take_affine_all_valid_float64_positions(
+        &self,
+        len: usize,
+        start: usize,
+        step: usize,
+    ) -> Option<Self> {
+        if self.dtype != DType::Float64
+            || !self.validity.all()
+            || len < STRIDED_FLOAT64_MIN_LEN
+            || step == 0
+        {
+            return None;
+        }
+
+        let data = match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => Arc::clone(data),
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => Arc::clone(data),
+                _ => return None,
+            },
+        };
+
+        let last = start.checked_add(step.checked_mul(len - 1)?)?;
+        if last >= data.len() {
+            return None;
+        }
+
+        Some(Self {
+            dtype: self.dtype,
+            values: ScalarValues::lazy_strided_float64(data, start, step, len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        })
+    }
+
+    fn take_strided_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Self> {
         if self.dtype != DType::Float64 || positions.len() < STRIDED_FLOAT64_MIN_LEN {
             return None;
         }
@@ -14263,6 +14324,52 @@ mod tests {
         .expect("validated materialization");
         assert_eq!(gathered.values(), expected.values());
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn take_positions_with_affine_certificate_uses_lazy_strided_float64() {
+        let data: Vec<f64> = (0..4096)
+            .map(|i| match i {
+                8 => -0.0,
+                23 => f64::NEG_INFINITY,
+                _ => i as f64 * 0.5,
+            })
+            .collect();
+        let column = Column::from_f64_values(data.clone());
+        let positions: Vec<usize> = (0..1024).map(|i| 2 + i * 3).collect();
+
+        let gathered = column.take_positions_with_affine_certificate(&positions, 2, 3);
+
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyStridedFloat64 { .. }),
+            "certified wide regular Float64 gather should carry a strided view"
+        );
+        if let ScalarValues::LazyStridedFloat64 {
+            start,
+            step,
+            len,
+            expanded,
+            values,
+            ..
+        } = &gathered.values
+        {
+            assert_eq!((*start, *step, *len), (2, 3, positions.len()));
+            assert!(expanded.get().is_none());
+            assert!(values.get().is_none());
+        }
+
+        let expected_bits: Vec<u64> = positions.iter().map(|&pos| data[pos].to_bits()).collect();
+        let gathered_bits: Vec<u64> = gathered
+            .as_f64_slice()
+            .expect("certified strided Float64 view must expose typed data")
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        assert_eq!(gathered_bits, expected_bits);
+        assert_eq!(
+            gathered.validity(),
+            &ValidityMask::all_valid(positions.len())
+        );
     }
 
     #[test]

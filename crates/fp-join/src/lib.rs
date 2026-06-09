@@ -3934,6 +3934,89 @@ fn build_single_key_inner_merge_output(
     )
 }
 
+fn build_single_key_inner_contiguous_no_overlap_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_positions: PositionSelection<'_>,
+    right_positions: PositionSelection<'_>,
+) -> Option<MergedDataFrame> {
+    let (
+        PositionSelection::ContiguousRange {
+            start: left_start,
+            len,
+        },
+        PositionSelection::ContiguousRange {
+            start: right_start,
+            len: right_len,
+        },
+    ) = (left_positions, right_positions)
+    else {
+        return None;
+    };
+    if left_on[0] != right_on[0] || len != right_len {
+        return None;
+    }
+
+    let left_col_names = left.column_names();
+    let right_col_names = right.column_names();
+    if left_col_names.iter().any(|left_name| {
+        left_name.as_str() != left_on[0]
+            && right_col_names
+                .iter()
+                .any(|right_name| right_name.as_str() == left_name.as_str())
+    }) {
+        return None;
+    }
+
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order =
+        Vec::with_capacity(left_col_names.len() + right_col_names.len().saturating_sub(1));
+    let left_selection = PositionSelection::ContiguousRange {
+        start: left_start,
+        len,
+    };
+    let right_selection = PositionSelection::ContiguousRange {
+        start: right_start,
+        len,
+    };
+
+    for name in left_col_names.iter().copied() {
+        let column = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        column_order.push(name.clone());
+        let previous = columns.insert(
+            name.clone(),
+            take_position_selection_typed(column, left_selection),
+        );
+        debug_assert!(previous.is_none());
+    }
+    for name in right_col_names.iter().copied() {
+        if name.as_str() == right_on[0] {
+            continue;
+        }
+        let column = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        column_order.push(name.clone());
+        let previous = columns.insert(
+            name.clone(),
+            take_position_selection_typed(column, right_selection),
+        );
+        debug_assert!(previous.is_none());
+    }
+
+    Some(MergedDataFrame {
+        index: Index::new_known_unique_int64_unit_range(0, len),
+        columns,
+        column_order,
+    })
+}
+
 fn build_single_key_inner_merge_output_with_selections(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -3946,6 +4029,17 @@ fn build_single_key_inner_merge_output_with_selections(
     debug_assert_eq!(left_on.len(), 1);
     debug_assert_eq!(right_on.len(), 1);
     debug_assert_eq!(left_positions.len(), right_positions.len());
+
+    if let Some(merged) = build_single_key_inner_contiguous_no_overlap_output(
+        left,
+        right,
+        left_on,
+        right_on,
+        left_positions,
+        right_positions,
+    ) {
+        return Ok(merged);
+    }
 
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
@@ -6720,11 +6814,12 @@ mod tests {
 
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
-        FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType,
-        build_dense_i64_inner_output_data, join_series, join_series_with_options,
-        join_series_with_trace, ordered_unique_utf8_inner_position_plan,
-        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
-        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
+        FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
+        build_dense_i64_inner_output_data, build_single_key_inner_contiguous_no_overlap_output,
+        join_series, join_series_with_options, join_series_with_trace,
+        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
+        ordered_utf8_lower_hex_overlap_len, strictly_increasing_utf8_key_spans,
+        utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -9665,6 +9760,101 @@ mod tests {
                 len: 2
             }
         );
+    }
+
+    #[test]
+    fn ordered_utf8_contiguous_no_overlap_output_fast_path_jbyuc111111111() -> Result<(), String> {
+        let left = utf8_key_merge_frame(
+            &["id_00000000", "id_00000001", "id_00000002", "id_00000003"],
+            "lv",
+            10,
+        );
+        let right = utf8_key_merge_frame(&["id_00000002", "id_00000003", "id_00000004"], "rv", 100);
+        let plan = ordered_unique_utf8_inner_position_plan(
+            left.columns()
+                .get("id")
+                .ok_or_else(|| "left key column missing".to_owned())?,
+            right
+                .columns()
+                .get("id")
+                .ok_or_else(|| "right key column missing".to_owned())?,
+        )
+        .ok_or_else(|| "ordered utf8 plan unavailable".to_owned())?;
+        let InnerPositionPlan::ContiguousRanges {
+            left_start,
+            right_start,
+            len,
+        } = plan
+        else {
+            return Err("expected contiguous range plan".to_owned());
+        };
+
+        let merged = build_single_key_inner_contiguous_no_overlap_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            PositionSelection::ContiguousRange {
+                start: left_start,
+                len,
+            },
+            PositionSelection::ContiguousRange {
+                start: right_start,
+                len,
+            },
+        )
+        .ok_or_else(|| "no-overlap contiguous output fast path missed".to_owned())?;
+
+        assert_eq!(merged.column_order, ["id", "lv", "rv"]);
+        assert_eq!(
+            merged
+                .columns
+                .get("id")
+                .ok_or_else(|| "id output missing".to_owned())?
+                .values(),
+            &[
+                Scalar::Utf8("id_00000002".to_owned()),
+                Scalar::Utf8("id_00000003".to_owned())
+            ]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("lv")
+                .ok_or_else(|| "lv output missing".to_owned())?
+                .values(),
+            &[Scalar::Int64(12), Scalar::Int64(13)]
+        );
+        assert_eq!(
+            merged
+                .columns
+                .get("rv")
+                .ok_or_else(|| "rv output missing".to_owned())?
+                .values(),
+            &[Scalar::Int64(100), Scalar::Int64(101)]
+        );
+
+        let overlapping_right =
+            utf8_key_merge_frame(&["id_00000002", "id_00000003", "id_00000004"], "lv", 100);
+        assert!(
+            build_single_key_inner_contiguous_no_overlap_output(
+                &left,
+                &overlapping_right,
+                &["id"],
+                &["id"],
+                PositionSelection::ContiguousRange {
+                    start: left_start,
+                    len,
+                },
+                PositionSelection::ContiguousRange {
+                    start: right_start,
+                    len,
+                },
+            )
+            .is_none(),
+            "overlapping non-key columns must keep the suffix/error generic path"
+        );
+        Ok(())
     }
 
     #[test]

@@ -147,6 +147,13 @@ fn main() {
         print!("{}", golden_dump(&f.eq(&other_null).unwrap()));
         print!("{}", golden_dump(&f.ge(&f).unwrap()));
         print!("{}", golden_dump(&fnull.ne(&other_null).unwrap()));
+        // where_cond / mask: cond has nulls (from gt vs nullable); self all-valid
+        // and nullable; finite fill and the default (None) fill.
+        let cond = f.gt(&other_null).unwrap();
+        print!("{}", golden_dump(&f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap()));
+        print!("{}", golden_dump(&f.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap()));
+        print!("{}", golden_dump(&fnull.where_cond(&cond, Some(&Scalar::Float64(7.0))).unwrap()));
+        print!("{}", golden_dump(&f.where_cond(&cond, None).unwrap()));
         return;
     }
     let n: usize = args

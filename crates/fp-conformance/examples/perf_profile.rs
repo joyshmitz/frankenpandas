@@ -1043,6 +1043,12 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.drop_duplicates().expect("drop_duplicates");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_mode" => {
+            // Series.mode over contiguous-Utf8 — byte-span FxHash tally (vcstr).
+            let s = build_str_vc_series(n, 1000);
+            let out = s.mode().expect("mode");
+            return print!("{}", golden_dump_series(&out));
+        }
         "reindex_str" => {
             // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
             // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
@@ -1640,6 +1646,13 @@ fn main() {
             let s = build_str_vc_series(n, 1000);
             for _ in 0..iters {
                 let out = s.drop_duplicates().expect("drop_duplicates");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_mode" => {
+            let s = build_str_vc_series(n, 1000);
+            for _ in 0..iters {
+                let out = s.mode().expect("mode");
                 sink = sink.wrapping_add(out.len());
             }
         }

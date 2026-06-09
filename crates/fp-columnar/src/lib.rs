@@ -1146,6 +1146,23 @@ enum ScalarValues {
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred null-introducing Utf8 gather (br-frankenpandas-yiqv5): the
+    /// null path of `reindex_by_positions` over an all-valid `Eager` Utf8
+    /// source — e.g. the value lanes of a null-introducing string join. Shares
+    /// the source `Scalar` `Arc` (O(1)) and carries only the position plan
+    /// (`usize::MAX` marks a missing slot -> `missing_for_dtype(Utf8)`); the
+    /// gathered `Vec<Scalar>` materializes once on demand. Construction is
+    /// O(output) over the plan (8 bytes/row) plus an O(1) source share — it
+    /// never copies the gathered string bytes until a consumer reads the
+    /// column, so a join whose output value lanes are never read (only its
+    /// shape/index consulted) pays nothing for them. Materialized values are
+    /// byte-identical to the eager gather: present slots clone the source
+    /// Scalar, missing slots are `missing_for_dtype(Utf8)`.
+    LazyGatherUtf8 {
+        source: Arc<[Scalar]>,
+        positions: Arc<[usize]>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
     /// repeat runs (br-frankenpandas-3ad4n) — e.g. the left lanes of a dense
     /// inner join, where every matched left value repeats `bucket_len` times.
@@ -1383,6 +1400,27 @@ impl ScalarValues {
             offsets: Arc::from(offsets),
             validity,
             values: OnceLock::new(),
+        }
+    }
+
+    /// Build a `LazyGatherUtf8` (br-frankenpandas-yiqv5): a deferred gather of
+    /// an all-valid `Eager` Utf8 `source` by `positions` (`usize::MAX` marks a
+    /// missing slot). Shares `source` in O(1); the gathered Scalar view
+    /// materializes once on demand.
+    fn lazy_gather_utf8(source: Arc<[Scalar]>, positions: Arc<[usize]>) -> Self {
+        Self::LazyGatherUtf8 {
+            source,
+            positions,
+            values: OnceLock::new(),
+        }
+    }
+
+    /// Share the underlying `Eager` Scalar `Arc` in O(1), if this backing is
+    /// eager. Used by the deferred Utf8 gather to capture an immutable source.
+    fn eager_arc(&self) -> Option<&Arc<[Scalar]>> {
+        match self {
+            Self::Eager(values) => Some(values),
+            _ => None,
         }
     }
 
@@ -1944,6 +1982,28 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyGatherUtf8 {
+                source,
+                positions,
+                values,
+            } => values
+                .get_or_init(|| {
+                    positions
+                        .iter()
+                        .map(|&pos| {
+                            if pos == usize::MAX {
+                                // Missing slot == missing_for_dtype(Utf8) ==
+                                // Null(NullKind::Null), matching the eager
+                                // null-introducing gather and the
+                                // LazyNullableUtf8 sibling above.
+                                Scalar::Null(NullKind::Null)
+                            } else {
+                                source[pos].clone()
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableInt64 {
                 data,
                 validity,
@@ -2131,6 +2191,7 @@ impl ScalarValues {
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
+            Self::LazyGatherUtf8 { positions, .. } => positions.len(),
             Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
@@ -2292,6 +2353,9 @@ impl Clone for ScalarValues {
                 validity: validity.clone(),
                 values: OnceLock::new(),
             },
+            Self::LazyGatherUtf8 {
+                source, positions, ..
+            } => Self::lazy_gather_utf8(Arc::clone(source), Arc::clone(positions)),
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
             }
@@ -3808,6 +3872,27 @@ impl Column {
         }
     }
 
+    /// Deferred null-introducing Utf8 gather (br-frankenpandas-yiqv5): wrap an
+    /// all-valid `Eager` Utf8 `source` plus a `positions` plan (`usize::MAX` ==
+    /// missing) as a lazy column. The validity mask is built eagerly by the
+    /// caller (O(output) bits, cheap), but the gathered string `Scalar`s
+    /// materialize only when a consumer reads the values — so a join output
+    /// value lane whose bytes are never read costs O(output) plan + O(1) source
+    /// share and nothing more.
+    fn from_utf8_lazy_gather(
+        source: Arc<[Scalar]>,
+        positions: Arc<[usize]>,
+        validity: ValidityMask,
+    ) -> Self {
+        debug_assert_eq!(positions.len(), validity.len());
+        Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_gather_utf8(source, positions),
+            validity,
+            data: None,
+        }
+    }
+
     /// Null-introducing positional reindex with Float64 promotion
     /// (br-frankenpandas-1bvcl): gather an all-valid Int64/Float64 column by
     /// `Option<usize>` positions into a nullable Float64 column without the
@@ -5194,6 +5279,40 @@ impl Column {
             }
             return Ok(Self::from_f64_values_with_validity(
                 data,
+                ValidityMask { words, len: n },
+            ));
+        }
+
+        // Deferred null-introducing Utf8 gather (br-frankenpandas-yiqv5): when
+        // the all-valid source is `Eager` Scalar-backed (e.g. a `from_dict`
+        // string column feeding a null-introducing join), share its Scalar
+        // `Arc` and capture only the position plan (`usize::MAX` == missing) +
+        // an eager validity bitset. The gathered bytes never materialize until
+        // a consumer reads the column — so a join whose value lanes are only
+        // counted (index/shape consulted) skips the O(output) byte copy
+        // entirely. Materialized values are byte-identical to the eager cmxjz
+        // path below: present slots clone the source Scalar, missing slots are
+        // Null(NullKind::Null) == missing_for_dtype(Utf8). Gated on an all-valid
+        // Eager source; contiguous or nullable sources keep the eager paths.
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let Some(source) = self.values.eager_arc()
+        {
+            let source_len = source.len();
+            let mut plan = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < source_len => {
+                        plan.push(*idx);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => plan.push(usize::MAX),
+                }
+            }
+            return Ok(Self::from_utf8_lazy_gather(
+                Arc::clone(source),
+                plan.into(),
                 ValidityMask { words, len: n },
             ));
         }

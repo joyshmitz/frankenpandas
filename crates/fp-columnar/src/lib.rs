@@ -2292,6 +2292,22 @@ pub fn radix_argsort_i64(values: &[i64], ascending: bool) -> Vec<usize> {
     radix_argsort_u64(&keys)
 }
 
+/// Stable LSD radix argsort of an `f64` slice (br-frankenpandas-wgyn4): the
+/// permutation ordering `values` ascending (or descending), equal values keeping
+/// original order. `f64_radix_key` is order-preserving for finite/inf and the
+/// counting sort is stable. CALLER GUARANTEES no NaN (NaN has no radix order) and
+/// no `-0.0` when the consumer needs `total_cmp` ordering — `f64_radix_key`
+/// normalizes `-0.0`→`+0.0` (matching `partial_cmp`/`==`, NOT `total_cmp`).
+#[must_use]
+pub fn radix_argsort_f64(values: &[f64], ascending: bool) -> Vec<usize> {
+    let keys: Vec<u64> = if ascending {
+        values.iter().map(|&v| f64_radix_key(v)).collect()
+    } else {
+        values.iter().map(|&v| !f64_radix_key(v)).collect()
+    };
+    radix_argsort_u64(&keys)
+}
+
 /// Stable LSD radix lexsort over several `u64` key columns
 /// (br-frankenpandas-lnsu6). Returns the permutation that orders rows
 /// lexicographically by `keys_by_col[0]`, then `keys_by_col[1]`, …, with equal

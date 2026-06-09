@@ -718,6 +718,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .rank("average", true, "keep")
             .expect("rank"),
+        "groupby_rank_f64" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .rank("average", true, "keep")
+            .expect("rank"),
         "str_transform_mean" => build_str_key_frame_repeated(n, 64)
             .groupby(&["k"])
             .expect("groupby")
@@ -1170,6 +1175,17 @@ fn main() {
         }
         "groupby_rank" => {
             let frame = build_transform_frame_i64(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .rank("average", true, "keep")
+                    .expect("rank");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_rank_f64" => {
+            let frame = build_transform_frame(n, 100, 4);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])

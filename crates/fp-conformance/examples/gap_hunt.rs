@@ -61,6 +61,19 @@ fn shuffled_index_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, order).expect("shuffled frame")
 }
 
+fn int_frame(n: usize, cols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    for c in 0..cols {
+        let name = format!("c{c}");
+        let v: Vec<i64> = (0..n).map(|i| ((i * (c + 1)) % 9973) as i64 - 4000).collect();
+        columns.insert(name.clone(), Column::from_i64_values(v));
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(Index::new(labels), columns, order).expect("int frame")
+}
+
 fn time_it<F: FnMut()>(label: &str, warmup: usize, iters: usize, mut f: F) {
     for _ in 0..warmup {
         f();
@@ -198,6 +211,13 @@ fn main() {
         print!("{}", golden_dump(&dup.mode().unwrap()));
         print!("{}", golden_dump(&dupn.mode().unwrap()));
         print!("{}", golden_dump(&f.mode().unwrap()));
+        // Int64 frame comparison (compared as f64, matching the Scalar path).
+        let fi = int_frame(5000, 4);
+        let fi2 = int_frame(5000, 4);
+        print!("{}", golden_dump(&fi.gt(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.lt(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.eq(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.ge(&fi).unwrap()));
         return;
     }
     let n: usize = args
@@ -312,6 +332,25 @@ fn main() {
     });
     time_it("mode", 1, 10, || {
         let _ = f.mode().unwrap();
+    });
+    let fi = int_frame(n, 8);
+    time_it("i64.clip", 1, 20, || {
+        let _ = fi.clip(Some(-1000.0), Some(1000.0)).unwrap();
+    });
+    time_it("i64.abs", 1, 20, || {
+        let _ = fi.abs().unwrap();
+    });
+    time_it("i64.diff", 1, 20, || {
+        let _ = fi.diff(1).unwrap();
+    });
+    time_it("i64.cumsum", 1, 20, || {
+        let _ = fi.cumsum().unwrap();
+    });
+    time_it("i64.nunique", 1, 10, || {
+        let _ = fi.nunique().unwrap();
+    });
+    time_it("i64.gt", 1, 20, || {
+        let _ = fi.gt(&fi).unwrap();
     });
     time_it("sem", 1, 20, || {
         let _ = f.sem_agg().unwrap();

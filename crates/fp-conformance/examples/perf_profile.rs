@@ -1027,6 +1027,16 @@ fn run_golden(scenario: &str, n: usize) {
             let out = Series::from_values("u", labels, u).expect("unique series");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_factorize" => {
+            // Series.factorize over contiguous-Utf8 — byte-span FxHash codes (vcstr).
+            let s = build_str_vc_series(n, 1000);
+            let (codes, uniques) = s.factorize().expect("factorize");
+            return print!(
+                "{}{}",
+                golden_dump_series(&codes),
+                golden_dump_series(&uniques)
+            );
+        }
         "reindex_str" => {
             // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
             // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
@@ -1611,6 +1621,13 @@ fn main() {
             for _ in 0..iters {
                 let u = s.unique();
                 sink = sink.wrapping_add(u.len());
+            }
+        }
+        "str_factorize" => {
+            let s = build_str_vc_series(n, 1000);
+            for _ in 0..iters {
+                let (codes, uniques) = s.factorize().expect("factorize");
+                sink = sink.wrapping_add(codes.len() ^ uniques.len());
             }
         }
         "reindex_str" => {

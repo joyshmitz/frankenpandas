@@ -1044,7 +1044,18 @@ fn vectorized_binary_i64(
 }
 
 enum ScalarValues {
-    Eager(Vec<Scalar>),
+    /// Eager Scalar backing (the general fallback for mixed/typed columns that
+    /// no lazy variant covers). The Scalar buffer is `Arc`-shared so
+    /// `Column::clone` shares it in O(1) instead of deep-copying every
+    /// `Scalar` (br-frankenpandas-cfr08). The backing is immutable after
+    /// construction — `ScalarValues` exposes only `&[Scalar]` (via `Deref`),
+    /// never `&mut`; any "mutation" replaces the whole `values` field with a
+    /// freshly built `ScalarValues`. So the shared `Arc` can never observe a
+    /// write underneath another reader, making the share observationally a
+    /// deep copy (identical to the previous `Vec<Scalar>` semantics). This is
+    /// the same structural-sharing trick already used for the lazy typed and
+    /// contiguous-Utf8 backings.
+    Eager(Arc<[Scalar]>),
     LazyAllValidInt64 {
         data: Arc<[i64]>,
         values: OnceLock<Vec<Scalar>>,
@@ -1249,7 +1260,7 @@ type Utf8ArcViewSource = (Arc<[u8]>, Arc<[usize]>, usize);
 
 impl ScalarValues {
     fn from_vec(values: Vec<Scalar>) -> Self {
-        Self::Eager(values)
+        Self::Eager(Arc::from(values))
     }
 
     fn lazy_all_valid_int64(data: Vec<i64>) -> Self {
@@ -2405,7 +2416,7 @@ impl Serialize for ScalarValues {
 
 impl<'de> Deserialize<'de> for ScalarValues {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<Scalar>::deserialize(deserializer).map(Self::Eager)
+        Vec::<Scalar>::deserialize(deserializer).map(|v| Self::Eager(Arc::from(v)))
     }
 }
 

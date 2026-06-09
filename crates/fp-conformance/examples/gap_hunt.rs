@@ -172,6 +172,11 @@ fn main() {
         );
         print!("{}", golden_dump(&f.isin(&[Scalar::Int64(0), Scalar::Int64(250)]).unwrap()));
         print!("{}", golden_dump(&fnull.isin(&[Scalar::Float64(f64::NAN)]).unwrap()));
+        // quantile: several q over all-valid and nullable (nulls filtered) frames.
+        for q in [0.0, 0.25, 0.5, 0.9, 1.0] {
+            print!("{}", golden_dump(&f.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
+            print!("{}", golden_dump(&fnull.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
+        }
         return;
     }
     let n: usize = args
@@ -279,5 +284,27 @@ fn main() {
     });
     time_it("div_df(frame)", 1, 20, || {
         let _ = f.div_df(&other).unwrap();
+    });
+    // Fifth-wave probes: DataFrame column reductions (each -> a per-column Series).
+    time_it("var", 1, 20, || {
+        let _ = f.var().unwrap();
+    });
+    time_it("std", 1, 20, || {
+        let _ = f.std().unwrap();
+    });
+    time_it("median", 1, 20, || {
+        let _ = f.median().unwrap();
+    });
+    time_it("skew", 1, 20, || {
+        let _ = f.skew().unwrap();
+    });
+    time_it("quantile(0.5)", 1, 20, || {
+        let _ = f.quantile(0.5).unwrap();
+    });
+    time_it("nunique", 1, 10, || {
+        let _ = f.nunique().unwrap();
+    });
+    time_it("describe", 1, 10, || {
+        let _ = f.describe().unwrap();
     });
 }

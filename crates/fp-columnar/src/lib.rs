@@ -1392,14 +1392,15 @@ impl ScalarValues {
         let mut bytes = Vec::with_capacity(width.checked_mul(len)?);
         let mut offsets = Vec::with_capacity(len.checked_add(1)?);
         offsets.push(0);
+        let mut row_key = Vec::with_capacity(width);
+        row_key.extend_from_slice(prefix);
+        push_fixed_width_lower_hex(&mut row_key, start, hex_width);
         for row in 0..len {
-            bytes.extend_from_slice(prefix);
-            push_fixed_width_lower_hex(
-                &mut bytes,
-                start.checked_add(u64::try_from(row).ok()?)?,
-                hex_width,
-            );
+            bytes.extend_from_slice(&row_key);
             offsets.push(bytes.len());
+            if row + 1 < len {
+                increment_fixed_width_lower_hex(&mut row_key[prefix.len()..]);
+            }
         }
 
         let strictly_increasing = OnceLock::new();
@@ -2320,6 +2321,23 @@ fn push_fixed_width_lower_hex(bytes: &mut Vec<u8>, value: u64, width: usize) {
         } else {
             b'a' + (nibble - 10)
         });
+    }
+}
+
+fn increment_fixed_width_lower_hex(digits: &mut [u8]) {
+    for byte in digits.iter_mut().rev() {
+        match *byte {
+            b'0'..=b'8' | b'a'..=b'e' => {
+                *byte += 1;
+                return;
+            }
+            b'9' => {
+                *byte = b'a';
+                return;
+            }
+            b'f' => *byte = b'0',
+            _ => return,
+        }
     }
 }
 
@@ -16874,6 +16892,33 @@ mod tests {
 
             assert!(Column::from_lower_hex_sequence_utf8(b"id_", 0x0e, 3, 1).is_none());
             assert!(Column::from_lower_hex_sequence_utf8(b"", 0x0a, 3, 8).is_none());
+        }
+
+        #[test]
+        fn lower_hex_sequence_constructor_preserves_carry_uza0446() {
+            let seeded =
+                Column::from_lower_hex_sequence_utf8(b"id_", 0x0e, 4, 2).expect("seeded column");
+            let manual = {
+                let values = ["id_0e", "id_0f", "id_10", "id_11"];
+                let mut bytes = Vec::new();
+                let mut offsets = Vec::with_capacity(values.len() + 1);
+                offsets.push(0);
+                for value in values {
+                    bytes.extend_from_slice(value.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                Column::from_utf8_contiguous(bytes, offsets)
+            };
+
+            assert_eq!(seeded.values(), manual.values());
+            let (_, _, certificate) = seeded
+                .as_lower_hex_sequence_utf8_contiguous()
+                .expect("seeded certificate");
+            assert_eq!(certificate.prefix_len(), 3);
+            assert_eq!(certificate.hex_width(), 2);
+            assert_eq!(certificate.width(), 5);
+            assert_eq!(certificate.start(), 14);
+            assert_eq!(certificate.value_at(3), Some(17));
         }
 
         #[test]

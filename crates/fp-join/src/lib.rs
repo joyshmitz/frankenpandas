@@ -1889,6 +1889,16 @@ fn take_position_selection_typed(column: &Column, selection: PositionSelection<'
     }
 }
 
+fn take_lower_hex_sequence_range(column: &Column, start: usize, len: usize) -> Option<Column> {
+    let (prefix, certificate, source_len) = column.as_lower_hex_sequence_utf8()?;
+    let end = start.checked_add(len)?;
+    if end > source_len {
+        return None;
+    }
+    let start_value = certificate.value_at(start)?;
+    Column::from_lower_hex_sequence_utf8(prefix, start_value, len, certificate.hex_width())
+}
+
 #[derive(Clone, Copy)]
 enum FusedInt64Side {
     Left,
@@ -4117,11 +4127,14 @@ fn build_single_key_inner_contiguous_no_overlap_output(
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
+        let output_column = if name.as_str() == left_on[0] {
+            take_lower_hex_sequence_range(column, left_start, len)
+                .unwrap_or_else(|| take_position_selection_typed(column, left_selection))
+        } else {
+            take_position_selection_typed(column, left_selection)
+        };
         column_order.push(name.clone());
-        let previous = columns.insert(
-            name.clone(),
-            take_position_selection_typed(column, left_selection),
-        );
+        let previous = columns.insert(name.clone(), output_column);
         debug_assert!(previous.is_none());
     }
     for name in right_col_names.iter().copied() {
@@ -9999,12 +10012,19 @@ mod tests {
         .ok_or_else(|| "no-overlap contiguous output fast path missed".to_owned())?;
 
         assert_eq!(merged.column_order, ["id", "lv", "rv"]);
+        let id_output = merged
+            .columns
+            .get("id")
+            .ok_or_else(|| "id output missing".to_owned())?;
+        let (prefix, certificate, certificate_len) = id_output
+            .as_lower_hex_sequence_utf8()
+            .ok_or_else(|| "id output lost lower-hex sequence witness".to_owned())?;
+        assert_eq!(prefix, b"id_");
+        assert_eq!(certificate.start(), 2);
+        assert_eq!(certificate.hex_width(), 8);
+        assert_eq!(certificate_len, 2);
         assert_eq!(
-            merged
-                .columns
-                .get("id")
-                .ok_or_else(|| "id output missing".to_owned())?
-                .values(),
+            id_output.values(),
             &[
                 Scalar::Utf8("id_00000002".to_owned()),
                 Scalar::Utf8("id_00000003".to_owned())

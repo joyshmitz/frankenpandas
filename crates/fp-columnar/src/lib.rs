@@ -2548,17 +2548,29 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
 /// their original order at every level, matching the stable comparison
 /// sort bit-for-bit in both directions.
 pub fn utf8_msd_argsort(strs: &[&str], ascending: bool) -> Vec<usize> {
-    let n = strs.len();
+    let spans: Vec<&[u8]> = strs.iter().map(|s| s.as_bytes()).collect();
+    utf8_msd_argsort_bytes(&spans, ascending)
+}
+
+/// MSD byte-radix argsort over raw byte spans (br-frankenpandas-prk0a). Same
+/// stable lexicographic ordering as [`utf8_msd_argsort`] but takes `&[&[u8]]`
+/// directly, so callers that already hold validated UTF-8 byte spans (groupby
+/// keys, contiguous-Utf8 columns) skip the `from_utf8` re-validation needed to
+/// build `&[&str]`. Byte order == UTF-8 lexicographic order, so the permutation
+/// is identical.
+#[must_use]
+pub fn utf8_msd_argsort_bytes(spans: &[&[u8]], ascending: bool) -> Vec<usize> {
+    let n = spans.len();
     let mut idx: Vec<usize> = (0..n).collect();
     if n > 1 {
         let mut aux: Vec<usize> = vec![0; n];
-        utf8_msd_sort_range(strs, &mut idx, &mut aux, 0, n, 0, ascending);
+        utf8_msd_sort_range(spans, &mut idx, &mut aux, 0, n, 0, ascending);
     }
     idx
 }
 
 fn utf8_msd_sort_range(
-    strs: &[&str],
+    spans: &[&[u8]],
     idx: &mut [usize],
     aux: &mut [usize],
     lo: usize,
@@ -2578,7 +2590,7 @@ fn utf8_msd_sort_range(
     const MAX_DEPTH: usize = 1024;
     if n <= CUTOFF || depth >= MAX_DEPTH {
         idx[lo..hi].sort_by(|&a, &b| {
-            let ord = strs[a].as_bytes()[depth..].cmp(&strs[b].as_bytes()[depth..]);
+            let ord = spans[a][depth..].cmp(&spans[b][depth..]);
             if ascending { ord } else { ord.reverse() }
         });
         return;
@@ -2586,8 +2598,7 @@ fn utf8_msd_sort_range(
     // Bucket keys ordered so iterating 0..=256 visits buckets in output order:
     // ascending — EOS first (0), then bytes 1..=256;
     // descending — bytes reversed (255-b), then EOS last (256).
-    let key = |s: &str| -> usize {
-        let b = s.as_bytes();
+    let key = |b: &[u8]| -> usize {
         if depth < b.len() {
             if ascending {
                 b[depth] as usize + 1
@@ -2602,7 +2613,7 @@ fn utf8_msd_sort_range(
     };
     let mut counts = [0usize; 258];
     for &i in idx[lo..hi].iter() {
-        counts[key(strs[i]) + 1] += 1;
+        counts[key(spans[i]) + 1] += 1;
     }
     for k in 1..258 {
         counts[k] += counts[k - 1];
@@ -2610,7 +2621,7 @@ fn utf8_msd_sort_range(
     // counts[k] = start offset of bucket k within [lo, hi).
     let mut offsets = counts;
     for &i in idx[lo..hi].iter() {
-        let k = key(strs[i]);
+        let k = key(spans[i]);
         aux[lo + offsets[k]] = i;
         offsets[k] += 1;
     }
@@ -2626,7 +2637,7 @@ fn utf8_msd_sort_range(
         let b_lo = lo + counts[k];
         let b_hi = lo + counts[k + 1];
         if b_hi - b_lo > 1 {
-            utf8_msd_sort_range(strs, idx, aux, b_lo, b_hi, depth + 1, ascending);
+            utf8_msd_sort_range(spans, idx, aux, b_lo, b_hi, depth + 1, ascending);
         }
     }
 }

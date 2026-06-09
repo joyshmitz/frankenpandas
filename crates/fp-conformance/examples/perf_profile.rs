@@ -750,6 +750,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .rank("average", true, "keep")
             .expect("rank"),
+        "groupby_quantile" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .quantile(0.5)
+            .expect("quantile"),
         "str_transform_mean" => build_str_key_frame_repeated(n, 64)
             .groupby(&["k"])
             .expect("groupby")
@@ -1273,6 +1278,17 @@ fn main() {
                     .expect("groupby")
                     .rank("average", true, "keep")
                     .expect("rank");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_quantile" => {
+            let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .quantile(0.5)
+                    .expect("quantile");
                 sink = sink.wrapping_add(out.len());
             }
         }

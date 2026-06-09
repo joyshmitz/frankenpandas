@@ -66,7 +66,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     mem::size_of,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
@@ -1841,6 +1841,15 @@ const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1 << 18;
 const DENSE_I64_INNER_PARALLEL_MIN_VALUES: usize = 1;
 const DENSE_I64_INNER_PARALLEL_MAX_CHUNKS: usize = 16;
 
+fn join_parallel_thread_count() -> usize {
+    static THREAD_COUNT: OnceLock<usize> = OnceLock::new();
+    *THREAD_COUNT.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS)
+    })
+}
+
 struct DenseI64InnerOutputPlan<'a> {
     left_keys: &'a [i64],
     min: i64,
@@ -1960,9 +1969,7 @@ fn build_dense_i64_inner_output_data(
     // Fill the full lanes first (right lanes always; left lanes on
     // low-fanout joins).
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty()
         && plan.output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES
         && thread_count > 1
@@ -2520,9 +2527,7 @@ fn build_single_key_dense_i64_left_merge_output(
         .collect();
 
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty() {
         // Right value tapes in bucket order (muis1), shared read-only.
         let tapes: Vec<Option<Vec<i64>>> = full_specs
@@ -2863,9 +2868,7 @@ fn build_single_key_dense_i64_right_merge_output(
         .collect();
 
     let mut full_data: Vec<Vec<i64>> = Vec::new();
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     if !full_specs.is_empty() {
         // LEFT value tapes in bucket order, shared read-only.
         let tapes: Vec<Option<Vec<i64>>> = full_specs
@@ -3267,9 +3270,7 @@ fn build_single_key_dense_i64_outer_merge_output(
 
     // Output-balanced chunk boundaries over the plan (6bsw3), shared by both
     // fill groups.
-    let thread_count = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+    let thread_count = join_parallel_thread_count();
     let parallel = output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1;
     let mut boundaries = vec![(0usize, 0usize)];
     if parallel {
@@ -3993,9 +3994,7 @@ fn build_single_key_inner_merge_output_with_selections(
     }
 
     let built: Vec<Column> = {
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+        let thread_count = join_parallel_thread_count();
         if specs.len() > 1 && n >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
             let mut slots: Vec<Option<Column>> = (0..specs.len()).map(|_| None).collect();
             let chunk = specs.len().div_ceil(thread_count).max(1);
@@ -6571,9 +6570,7 @@ fn build_asof_output(
     };
 
     let built: Vec<Result<Column, ColumnError>> = {
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(DENSE_I64_INNER_PARALLEL_MAX_CHUNKS);
+        let thread_count = join_parallel_thread_count();
         if specs.len() > 1 && n_out >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1 {
             let mut slots: Vec<Option<Result<Column, ColumnError>>> =
                 (0..specs.len()).map(|_| None).collect();

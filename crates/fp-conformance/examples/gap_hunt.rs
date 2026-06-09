@@ -115,6 +115,22 @@ fn main() {
         print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
         // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
         print!("{}", golden_dump(&fnull.interpolate().unwrap()));
+        // duplicated / drop_duplicates: n>9973 gives real period-9973 row dups;
+        // nullable variant exercises missing-equality. All keep modes.
+        let dup = numeric_frame(20000, 3, false);
+        let dupn = numeric_frame(20000, 3, true);
+        for keep in [DuplicateKeep::First, DuplicateKeep::Last, DuplicateKeep::None] {
+            print!(
+                "{}",
+                golden_dump(&dup.duplicated(None, keep).unwrap().to_frame(Some("d")).unwrap())
+            );
+            print!(
+                "{}",
+                golden_dump(&dupn.duplicated(None, keep).unwrap().to_frame(Some("d")).unwrap())
+            );
+            print!("{}", golden_dump(&dup.drop_duplicates(None, keep, false).unwrap()));
+            print!("{}", golden_dump(&dupn.drop_duplicates(None, keep, false).unwrap()));
+        }
         return;
     }
     let n: usize = args

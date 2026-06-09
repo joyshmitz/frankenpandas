@@ -608,7 +608,7 @@ impl<'de> Deserialize<'de> for ValidityMask {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnData {
     Float64(Arc<[f64]>),
-    Int64(Vec<i64>),
+    Int64(Arc<[i64]>),
     Bool(Vec<bool>),
     Utf8(Vec<String>),
     Timedelta64(Vec<i64>),
@@ -648,7 +648,7 @@ impl ColumnData {
                         _ => 0, // sentinel for invalid positions
                     })
                     .collect();
-                Self::Int64(data)
+                Self::Int64(Arc::from(data))
             }
             DType::Categorical => {
                 let data: Vec<i64> = values
@@ -658,7 +658,7 @@ impl ColumnData {
                         _ => -1,
                     })
                     .collect();
-                Self::Int64(data)
+                Self::Int64(Arc::from(data))
             }
             DType::Bool | DType::BoolNullable => {
                 let data: Vec<bool> = values
@@ -3825,7 +3825,7 @@ impl Column {
                 // (groupby, value_counts, dedup, joins). Bit-identical Scalar
                 // view (`map(Scalar::Int64)`) materializes on demand.
                 // Int64Nullable is excluded to preserve its dtype-tagged view.
-                Some(ScalarValues::lazy_all_valid_int64(data.clone()))
+                Some(ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data)))
             }
             (Some(ColumnData::Float64(data)), DType::Float64)
                 if data.len() == self.values.len() =>
@@ -4543,6 +4543,9 @@ impl Column {
     pub fn as_i64_arc(&self) -> Option<Arc<[i64]>> {
         if self.dtype == DType::Int64 && self.validity.all() {
             if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
+                return Some(Arc::clone(data));
+            }
+            if let Some(ColumnData::Int64(data)) = &self.data {
                 return Some(Arc::clone(data));
             }
             return self.as_i64_slice().map(Arc::from);
@@ -21519,8 +21522,33 @@ mod tests {
         let data = ColumnData::from_scalars(&values, DType::Int64Nullable);
         assert!(matches!(&data, ColumnData::Int64(_)));
         if let ColumnData::Int64(arr) = data {
-            assert_eq!(arr, vec![1, 2, 3]);
+            assert_eq!(arr.as_ref(), [1, 2, 3]);
         }
+    }
+
+    #[test]
+    fn scalar_int64_cache_arc_provenance_is_shared() {
+        let col = Column::new(
+            DType::Int64,
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        assert!(matches!(&col.data, Some(ColumnData::Int64(_))));
+        let Some(ColumnData::Int64(cached)) = &col.data else {
+            return;
+        };
+        let source = col.as_i64_arc().expect("all-valid Int64 source");
+        assert!(Arc::ptr_eq(cached, &source));
+
+        let cloned = col.clone();
+        assert!(matches!(
+            &cloned.values,
+            ScalarValues::LazyAllValidInt64 { .. }
+        ));
+        let ScalarValues::LazyAllValidInt64 { data, .. } = &cloned.values else {
+            return;
+        };
+        assert!(Arc::ptr_eq(cached, data));
     }
 
     #[test]

@@ -308,6 +308,10 @@ fn next_index_label_identity() -> u64 {
     INDEX_LABEL_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
+/// Shared contiguous-Utf8 label backing: a byte buffer + `n+1` offsets, row `i`
+/// being `bytes[offsets[i]..offsets[i+1]]` (br-frankenpandas-nbspq).
+type Utf8LabelBacking = (Arc<[u8]>, Arc<[usize]>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Int64UnitRangeLabels {
     start: i64,
@@ -372,6 +376,13 @@ struct IndexLabels {
     /// Int64-labelled indexes stay on contiguous `i64` storage instead of the
     /// 32 B enum representation.
     int64_typed: OnceLock<Option<Arc<Vec<i64>>>>,
+    /// Lazy contiguous-Utf8 backing (br-frankenpandas-nbspq): `Some((bytes,
+    /// offsets))` means every label is `IndexLabel::Utf8(bytes[off[i]..off[i+1]])`
+    /// (valid UTF-8 by construction). Pre-seeded by `new_utf8_contiguous` so a
+    /// string-keyed result index (groupby keys, sort_values, set-ops) avoids the
+    /// per-label `String` alloc + `from_utf8` re-validation until something
+    /// actually needs the `Vec<IndexLabel>` view.
+    utf8_contiguous: Option<Utf8LabelBacking>,
 }
 
 impl IndexLabels {
@@ -382,6 +393,7 @@ impl IndexLabels {
             materialized,
             int64_unit_range: None,
             int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
         }
     }
 
@@ -390,6 +402,7 @@ impl IndexLabels {
             materialized: OnceLock::new(),
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
             int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
         })
     }
 
@@ -400,6 +413,18 @@ impl IndexLabels {
             materialized: OnceLock::new(),
             int64_unit_range: None,
             int64_typed,
+            utf8_contiguous: None,
+        }
+    }
+
+    fn new_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
+        debug_assert!(!offsets.is_empty());
+        debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
+        Self {
+            materialized: OnceLock::new(),
+            int64_unit_range: None,
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: Some((bytes, offsets)),
         }
     }
 
@@ -408,6 +433,20 @@ impl IndexLabels {
             .get_or_init(|| {
                 if let Some(range) = self.int64_unit_range {
                     return Arc::new(range.materialize());
+                }
+                if let Some((bytes, offsets)) = &self.utf8_contiguous {
+                    return Arc::new(
+                        offsets
+                            .windows(2)
+                            .map(|w| {
+                                IndexLabel::Utf8(
+                                    std::str::from_utf8(&bytes[w[0]..w[1]])
+                                        .expect("contiguous utf8 index buffer is valid")
+                                        .to_owned(),
+                                )
+                            })
+                            .collect(),
+                    );
                 }
                 let values = self
                     .int64_typed
@@ -422,6 +461,9 @@ impl IndexLabels {
     fn len(&self) -> usize {
         if let Some(range) = self.int64_unit_range {
             return range.len;
+        }
+        if let Some((_, offsets)) = &self.utf8_contiguous {
+            return offsets.len() - 1;
         }
         if let Some(labels) = self.materialized.get() {
             return labels.len();
@@ -486,10 +528,11 @@ impl Clone for IndexLabels {
             let _ = int64_typed.set(view.clone());
         }
         let materialized = OnceLock::new();
-        // A unit-range or typed Int64 backing can regenerate the label vector
-        // on demand, so skip the O(n) Vec<IndexLabel> deep clone in that case.
-        let has_lazy_backing =
-            self.int64_unit_range.is_some() || matches!(int64_typed.get(), Some(Some(_)));
+        // A unit-range, typed Int64, or contiguous-Utf8 backing can regenerate
+        // the label vector on demand, so skip the O(n) Vec<IndexLabel> deep clone.
+        let has_lazy_backing = self.int64_unit_range.is_some()
+            || self.utf8_contiguous.is_some()
+            || matches!(int64_typed.get(), Some(Some(_)));
         if !has_lazy_backing && let Some(labels) = self.materialized.get() {
             let _ = materialized.set(labels.clone());
         }
@@ -497,6 +540,7 @@ impl Clone for IndexLabels {
             materialized,
             int64_unit_range: self.int64_unit_range,
             int64_typed,
+            utf8_contiguous: self.utf8_contiguous.clone(),
         }
     }
 }
@@ -693,6 +737,24 @@ impl Index {
     pub fn from_i64_values(values: Vec<i64>) -> Self {
         Self {
             labels: IndexLabels::new_int64_values(Arc::new(values)),
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        }
+    }
+
+    /// Construct an index over Utf8 labels backed by a contiguous byte buffer +
+    /// offsets (br-frankenpandas-nbspq). Label materialization into
+    /// `IndexLabel::Utf8` is deferred until `labels()` is asked for; clones share
+    /// the `Arc` backing. Caller guarantees `bytes` is valid UTF-8 and
+    /// `offsets` holds `n+1` ascending entries ending at `bytes.len()`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
+        Self {
+            labels: IndexLabels::new_utf8_contiguous(bytes, offsets),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),

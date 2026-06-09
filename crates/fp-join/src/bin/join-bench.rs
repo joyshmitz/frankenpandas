@@ -121,6 +121,62 @@ fn push_id_lower_hex_8(bytes: &mut Vec<u8>, value: usize) {
     }
 }
 
+fn write_lower_hex_key_8(key: &mut [u8; 11], value: usize) {
+    for (slot, byte) in key.iter_mut().take(3).zip(b"id_") {
+        *slot = *byte;
+    }
+    for (slot, digit) in key.iter_mut().skip(3).zip((0..8).rev()) {
+        let shift = digit * 4;
+        *slot = lower_hex_digit((value >> shift) & 0x0f);
+    }
+}
+
+fn increment_lower_hex_key_8(key: &mut [u8; 11]) {
+    for byte in key.iter_mut().skip(3).rev() {
+        match *byte {
+            b'0'..=b'8' | b'a'..=b'e' => {
+                *byte += 1;
+                return;
+            }
+            b'9' => {
+                *byte = b'a';
+                return;
+            }
+            b'f' => *byte = b'0',
+            _ => return,
+        }
+    }
+}
+
+fn try_push_sequential_lower_hex_8(
+    bytes: &mut Vec<u8>,
+    offsets: &mut Vec<usize>,
+    rows: usize,
+    key_start: usize,
+) -> bool {
+    if rows == 0 {
+        return true;
+    }
+    let Some(last_key) = rows
+        .checked_sub(1)
+        .and_then(|last_row| key_start.checked_add(last_row))
+    else {
+        return false;
+    };
+    if last_key > u32::MAX as usize {
+        return false;
+    }
+
+    let mut key = [0u8; 11];
+    write_lower_hex_key_8(&mut key, key_start);
+    for _ in 0..rows {
+        bytes.extend_from_slice(&key);
+        offsets.push(bytes.len());
+        increment_lower_hex_key_8(&mut key);
+    }
+    true
+}
+
 fn build_ordered_utf8_frame(
     value_name: &str,
     rows: usize,
@@ -131,9 +187,11 @@ fn build_ordered_utf8_frame(
     let mut bytes = Vec::with_capacity(rows * 11);
     let mut offsets = Vec::with_capacity(rows + 1);
     offsets.push(0);
-    for row in 0..rows {
-        push_id_lower_hex_8(&mut bytes, key_start + row);
-        offsets.push(bytes.len());
+    if !try_push_sequential_lower_hex_8(&mut bytes, &mut offsets, rows, key_start) {
+        for row in 0..rows {
+            push_id_lower_hex_8(&mut bytes, key_start + row);
+            offsets.push(bytes.len());
+        }
     }
     let values = (0..rows)
         .map(|row| ((row as u64).wrapping_mul(multiplier) % 10_003) as f64 * 0.25)

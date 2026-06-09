@@ -1064,6 +1064,21 @@ enum ScalarValues {
         fixed_width: OnceLock<Option<usize>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Nullable counterpart of `LazyContiguousUtf8` (br-frankenpandas-cmxjz):
+    /// one rolling byte buffer + n+1 offsets like the all-valid variant, plus a
+    /// validity mask. Row `i` materializes `Scalar::Utf8(bytes[off[i]..off[i+1]])`
+    /// when `validity.get(i)`, else `Scalar::Null(NullKind::Null)` (=
+    /// `missing_for_dtype(Utf8)`). A missing slot carries an empty span
+    /// (`off[i] == off[i+1]`) so empty-string-vs-null is distinguished purely by
+    /// the validity bit. Built by null-introducing Utf8 gathers (reindex /
+    /// left·right·outer merge of a string payload column) to skip the per-row
+    /// `String` Scalar clone + `Column::new` revalidation.
+    LazyNullableUtf8 {
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
     /// repeat runs (br-frankenpandas-3ad4n) — e.g. the left lanes of a dense
     /// inner join, where every matched left value repeats `bucket_len` times.
@@ -1209,6 +1224,18 @@ impl ScalarValues {
             offsets,
             strictly_increasing: OnceLock::new(),
             fixed_width: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_utf8(bytes: Vec<u8>, offsets: Vec<usize>, validity: ValidityMask) -> Self {
+        debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
+        debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
+        debug_assert_eq!(offsets.len() - 1, validity.len());
+        Self::LazyNullableUtf8 {
+            bytes: Arc::from(bytes),
+            offsets: Arc::from(offsets),
+            validity,
             values: OnceLock::new(),
         }
     }
@@ -1613,6 +1640,30 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    offsets
+                        .windows(2)
+                        .enumerate()
+                        .map(|(idx, w)| {
+                            if validity.get(idx) {
+                                Scalar::Utf8(
+                                    std::str::from_utf8(&bytes[w[0]..w[1]])
+                                        .expect("nullable utf8 buffer is valid by construction")
+                                        .to_owned(),
+                                )
+                            } else {
+                                Scalar::Null(NullKind::Null)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableInt64 {
                 data,
                 validity,
@@ -1707,6 +1758,7 @@ impl ScalarValues {
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
+            Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
@@ -1788,6 +1840,17 @@ impl Clone for ScalarValues {
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
+            Self::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                ..
+            } => Self::LazyNullableUtf8 {
+                bytes: Arc::clone(bytes),
+                offsets: Arc::clone(offsets),
+                validity: validity.clone(),
+                values: OnceLock::new(),
+            },
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
             }
@@ -2904,6 +2967,31 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_nullable_int64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Nullable Utf8 counterpart of `from_f64_values_with_validity`
+    /// (br-frankenpandas-cmxjz): one rolling byte buffer + n+1 offsets (a valid
+    /// row `i` is `bytes[offsets[i]..offsets[i+1]]`) + a validity mask; invalid
+    /// slots materialize `Scalar::Null(NullKind::Null)` (=
+    /// `missing_for_dtype(Utf8)`) and carry an empty span. An all-valid mask
+    /// folds to the contiguous all-valid backing. Public (hidden) for fp-join's
+    /// null-introducing string-column gather (left/right/outer merge, reindex).
+    #[doc(hidden)]
+    pub fn from_utf8_values_with_validity(
+        bytes: Vec<u8>,
+        offsets: Vec<usize>,
+        validity: ValidityMask,
+    ) -> Self {
+        debug_assert_eq!(offsets.len() - 1, validity.len());
+        if validity.all() {
+            return Self::from_utf8_contiguous(bytes, offsets);
+        }
+        Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_nullable_utf8(bytes, offsets, validity.clone()),
             validity,
             data: None,
         }
@@ -4200,6 +4288,37 @@ impl Column {
             }
             return Ok(Self::from_f64_values_with_validity(
                 data,
+                ValidityMask { words, len: n },
+            ));
+        }
+
+        // Typed null-introducing Utf8 gather (br-frankenpandas-cmxjz): an
+        // all-valid Utf8 source (contiguous OR Scalar-backed) gathers present
+        // spans into one fresh byte buffer + offsets + validity bitset, emitting
+        // a nullable-Utf8 backing — no per-row String Scalar clone or Column::new
+        // revalidation. Missing slots get an empty span + cleared bit, which
+        // materializes Null(NullKind::Null) (= missing_for_dtype(Utf8)), exactly
+        // the Scalar fallback. Only fires when the source is all-valid (no NaN/
+        // null ambiguity); a source with its own nulls keeps the Scalar path.
+        if self.dtype == DType::Utf8
+            && let Some(strs) = self.as_all_valid_str_vec()
+        {
+            let mut new_bytes = Vec::new();
+            let mut new_offsets = Vec::with_capacity(n + 1);
+            new_offsets.push(0);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                if let Some(idx) = slot
+                    && *idx < strs.len()
+                {
+                    new_bytes.extend_from_slice(strs[*idx].as_bytes());
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+                new_offsets.push(new_bytes.len());
+            }
+            return Ok(Self::from_utf8_values_with_validity(
+                new_bytes,
+                new_offsets,
                 ValidityMask { words, len: n },
             ));
         }

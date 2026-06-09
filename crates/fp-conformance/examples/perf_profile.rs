@@ -546,6 +546,45 @@ fn build_join_frame_f64_wide(
     DataFrame::from_dict(&name_refs, col_refs).expect("f64 wide join frame")
 }
 
+/// Join frame with a unique Int64 `id` key (1:1 join, no fanout) shifted by
+/// `key_offset`, plus `ncols` all-valid Utf8 value columns. A left join of two
+/// of these with a half-`n` offset leaves ~50% of right rows unmatched, so the
+/// right Utf8 columns gather through `Column::reindex_by_positions`' null-
+/// introducing path (br-frankenpandas-cmxjz). Wide (many Utf8 cols) so the
+/// per-column gather dominates the one-time key/position work.
+fn build_join_frame_utf8_wide(
+    value_prefix: &str,
+    n: usize,
+    ncols: usize,
+    key_offset: i64,
+) -> DataFrame {
+    let mut names: Vec<String> = Vec::with_capacity(ncols + 1);
+    names.push("id".to_string());
+    let mut cols: Vec<(String, Vec<Scalar>)> = Vec::with_capacity(ncols + 1);
+    let keys: Vec<Scalar> = (0..n as i64).map(|row| Scalar::Int64(row + key_offset)).collect();
+    cols.push(("id".to_string(), keys));
+    for c in 0..ncols {
+        let name = format!("{value_prefix}{c}");
+        let values: Vec<Scalar> = (0..n)
+            .map(|row| {
+                let h = (row as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add((c as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                    >> 33;
+                Scalar::Utf8(format!("val_{h:08x}_{:04}", row % 7919))
+            })
+            .collect();
+        names.push(name.clone());
+        cols.push((name, values));
+    }
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let col_refs: Vec<(&str, Vec<Scalar>)> = cols
+        .into_iter()
+        .map(|(n, v)| (Box::leak(n.into_boxed_str()) as &str, v))
+        .collect();
+    DataFrame::from_dict(&name_refs, col_refs).expect("utf8 wide join frame")
+}
+
 /// Two sorted frames for `merge_asof` on an Int64 `on` key. Left has `n` rows
 /// (key 0..n) + `lcols` Float64 cols; right has ~n/2 rows (even keys) + `rcols`
 /// Float64 value cols. The wide Float64 right side makes the per-column output
@@ -796,6 +835,20 @@ fn run_golden(scenario: &str, n: usize) {
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
+        "str_left_join" => {
+            let left = build_join_frame_utf8_wide("lv", n, 6, 0);
+            let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
+        "str_outer_join" => {
+            let left = build_join_frame_utf8_wide("lv", n, 6, 0);
+            let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
         "f64_inner_join" => {
             let left = build_join_frame_f64_wide("lv", n, 512, 6);
             let right = build_join_frame_f64_wide("rv", n, 512, 6);
@@ -899,6 +952,22 @@ fn run_golden(scenario: &str, n: usize) {
                 idx.swap(i, j);
             }
             let out = s.take(&idx).expect("take");
+            return print!("{}", golden_dump_series(&out));
+        }
+        "reindex_str" => {
+            // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
+            // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
+            let s = build_str_series(n);
+            let new_labels: Vec<IndexLabel> = (0..n as i64)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        IndexLabel::Int64(i / 2)
+                    } else {
+                        IndexLabel::Int64(n as i64 + i)
+                    }
+                })
+                .collect();
+            let out = s.reindex(new_labels).expect("reindex");
             return print!("{}", golden_dump_series(&out));
         }
         "series_sort_index" => {
@@ -1290,6 +1359,28 @@ fn main() {
                 sink = sink.wrapping_add(out.index.len());
             }
         }
+        "str_left_join" => {
+            // i64 key (1:1, no fanout) + 6 Utf8 value cols per side, 50% key
+            // overlap: left join leaves ~50% right rows unmatched, so the 6 right
+            // Utf8 cols gather through reindex_by_positions' null path (cmxjz).
+            let left = build_join_frame_utf8_wide("lv", n, 6, 0);
+            let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "str_outer_join" => {
+            // Outer join of 50%-overlapping frames: BOTH sides' 6 Utf8 cols
+            // null-introduce, so all 12 gather through reindex_by_positions'
+            // null path (cmxjz).
+            let left = build_join_frame_utf8_wide("lv", n, 6, 0);
+            let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
         "f64_inner_join" => {
             // i64 key + 6 Float64 value columns per side: forces the position-
             // based output builder (fused dense-i64 path bails on Float64), where
@@ -1410,6 +1501,22 @@ fn main() {
             }
             for _ in 0..iters {
                 let out = s.take(&idx).expect("take");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "reindex_str" => {
+            let s = build_str_series(n);
+            let new_labels: Vec<IndexLabel> = (0..n as i64)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        IndexLabel::Int64(i / 2)
+                    } else {
+                        IndexLabel::Int64(n as i64 + i)
+                    }
+                })
+                .collect();
+            for _ in 0..iters {
+                let out = s.reindex(new_labels.clone()).expect("reindex");
                 sink = sink.wrapping_add(out.len());
             }
         }

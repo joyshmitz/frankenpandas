@@ -1131,6 +1131,21 @@ enum ScalarValues {
         lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Lazy fixed-width lowercase-hex Utf8 sequence
+    /// (br-frankenpandas-uza04.47). Row `i` is
+    /// `prefix || fixed_width_lower_hex(start + i)`, with all construction
+    /// guards checked up front. Ordered joins can consume the sequence witness
+    /// directly without first materializing the full byte buffer; consumers
+    /// that need contiguous spans still get the exact same bytes/offsets via a
+    /// one-time materialization.
+    LazyLowerHexSequenceUtf8 {
+        prefix: Arc<[u8]>,
+        start: u64,
+        len: usize,
+        hex_width: usize,
+        buffers: OnceLock<Utf8ArcBuffers>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Nullable counterpart of `LazyContiguousUtf8` (br-frankenpandas-cmxjz):
     /// one rolling byte buffer + n+1 offsets like the all-valid variant, plus a
     /// validity mask. Row `i` materializes `Scalar::Utf8(bytes[off[i]..off[i+1]])`
@@ -1274,6 +1289,7 @@ enum ScalarValues {
 }
 
 type Utf8ArcViewSource = (Arc<[u8]>, Arc<[usize]>, usize);
+type Utf8ArcBuffers = (Arc<[u8]>, Arc<[usize]>);
 
 impl ScalarValues {
     fn from_vec(values: Vec<Scalar>) -> Self {
@@ -1388,9 +1404,28 @@ impl ScalarValues {
             }
         }
 
-        let width = prefix.len().checked_add(hex_width)?;
-        let mut bytes = Vec::with_capacity(width.checked_mul(len)?);
-        let mut offsets = Vec::with_capacity(len.checked_add(1)?);
+        let _ = prefix.len().checked_add(hex_width)?.checked_mul(len)?;
+        let _ = len.checked_add(1)?;
+
+        Some(Self::LazyLowerHexSequenceUtf8 {
+            prefix: Arc::from(prefix),
+            start,
+            len,
+            hex_width,
+            buffers: OnceLock::new(),
+            values: OnceLock::new(),
+        })
+    }
+
+    fn materialize_lower_hex_sequence_utf8(
+        prefix: &[u8],
+        start: u64,
+        len: usize,
+        hex_width: usize,
+    ) -> Utf8ArcBuffers {
+        let width = prefix.len() + hex_width;
+        let mut bytes = Vec::with_capacity(width * len);
+        let mut offsets = Vec::with_capacity(len + 1);
         offsets.push(0);
         let mut row_key = Vec::with_capacity(width);
         row_key.extend_from_slice(prefix);
@@ -1402,26 +1437,36 @@ impl ScalarValues {
                 increment_fixed_width_lower_hex(&mut row_key[prefix.len()..]);
             }
         }
+        (Arc::from(bytes), Arc::from(offsets))
+    }
 
-        let strictly_increasing = OnceLock::new();
-        let _ = strictly_increasing.set(true);
-        let fixed_width = OnceLock::new();
-        let _ = fixed_width.set(Some(width));
-        let lower_hex_sequence = OnceLock::new();
-        let _ = lower_hex_sequence.set((len > 0).then_some(Utf8LowerHexSequence {
-            prefix_len: prefix.len(),
-            hex_width,
-            start,
-        }));
-
-        Some(Self::LazyContiguousUtf8 {
-            bytes: Arc::from(bytes),
-            offsets: Arc::from(offsets),
-            strictly_increasing,
-            fixed_width,
-            lower_hex_sequence,
-            values: OnceLock::new(),
+    fn materialized_lower_hex_buffers<'a>(
+        prefix: &[u8],
+        start: u64,
+        len: usize,
+        hex_width: usize,
+        buffers: &'a OnceLock<Utf8ArcBuffers>,
+    ) -> &'a Utf8ArcBuffers {
+        buffers.get_or_init(|| {
+            Self::materialize_lower_hex_sequence_utf8(prefix, start, len, hex_width)
         })
+    }
+
+    fn lower_hex_sequence_witness(
+        prefix: &[u8],
+        start: u64,
+        len: usize,
+        hex_width: usize,
+    ) -> (&[u8], Utf8LowerHexSequence, usize) {
+        (
+            prefix,
+            Utf8LowerHexSequence {
+                prefix_len: prefix.len(),
+                hex_width,
+                start,
+            },
+            len,
+        )
     }
 
     /// Construct a `LazyContiguousUtf8` from already-`Arc`-shared buffers,
@@ -2010,6 +2055,30 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let (bytes, offsets) = Self::materialized_lower_hex_buffers(
+                        prefix, *start, *len, *hex_width, buffers,
+                    );
+                    offsets
+                        .windows(2)
+                        .map(|w| {
+                            Scalar::Utf8(
+                                std::str::from_utf8(&bytes[w[0]..w[1]])
+                                    .expect("lower-hex utf8 buffer is valid by construction")
+                                    .to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableUtf8 {
                 bytes,
                 offsets,
@@ -2242,6 +2311,7 @@ impl ScalarValues {
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
+            Self::LazyLowerHexSequenceUtf8 { len, .. } => *len,
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyGatherUtf8 { positions, .. } => positions.len(),
             Self::LazyNullableInt64 { data, .. } => data.len(),
@@ -2423,6 +2493,20 @@ impl Clone for ScalarValues {
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
+            Self::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                ..
+            } => Self::LazyLowerHexSequenceUtf8 {
+                prefix: Arc::clone(prefix),
+                start: *start,
+                len: *len,
+                hex_width: *hex_width,
+                buffers: OnceLock::new(),
+                values: OnceLock::new(),
+            },
             Self::LazyNullableUtf8 {
                 bytes,
                 offsets,
@@ -4127,13 +4211,28 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn as_utf8_contiguous(&self) -> Option<(&[u8], &[usize])> {
-        if self.dtype == DType::Utf8
-            && self.validity.all()
-            && let ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } = &self.values
-        {
-            return Some((bytes.as_ref(), offsets.as_ref()));
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
         }
-        None
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Some((bytes.as_ref(), offsets.as_ref()))
+            }
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                ..
+            } => {
+                let (bytes, offsets) = ScalarValues::materialized_lower_hex_buffers(
+                    prefix, *start, *len, *hex_width, buffers,
+                );
+                Some((bytes.as_ref(), offsets.as_ref()))
+            }
+            _ => None,
+        }
     }
 
     /// Share the `Arc` contiguous-Utf8 backing plus the source-row offset of
@@ -4178,20 +4277,36 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn as_strictly_increasing_utf8_contiguous(&self) -> Option<(&[u8], &[usize])> {
-        if self.dtype == DType::Utf8
-            && self.validity.all()
-            && let ScalarValues::LazyContiguousUtf8 {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
                 strictly_increasing,
                 ..
-            } = &self.values
-            && *strictly_increasing
-                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
-        {
-            return Some((bytes.as_ref(), offsets.as_ref()));
+            } if *strictly_increasing.get_or_init(|| {
+                contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets)
+            }) =>
+            {
+                Some((bytes.as_ref(), offsets.as_ref()))
+            }
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                ..
+            } => {
+                let (bytes, offsets) = ScalarValues::materialized_lower_hex_buffers(
+                    prefix, *start, *len, *hex_width, buffers,
+                );
+                Some((bytes.as_ref(), offsets.as_ref()))
+            }
+            _ => None,
         }
-        None
     }
 
     /// Borrow a strict contiguous-Utf8 backing and its fixed row byte width.
@@ -4203,25 +4318,41 @@ impl Column {
     pub fn as_fixed_width_strictly_increasing_utf8_contiguous(
         &self,
     ) -> Option<(&[u8], &[usize], usize)> {
-        if self.dtype == DType::Utf8
-            && self.validity.all()
-            && let ScalarValues::LazyContiguousUtf8 {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
                 strictly_increasing,
                 fixed_width,
                 ..
-            } = &self.values
-            && *strictly_increasing
-                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
-        {
-            let width = fixed_width
-                .get_or_init(|| contiguous_utf8_fixed_width(offsets))
-                .as_ref()
-                .copied()?;
-            return Some((bytes.as_ref(), offsets.as_ref(), width));
+            } if *strictly_increasing.get_or_init(|| {
+                contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets)
+            }) =>
+            {
+                let width = fixed_width
+                    .get_or_init(|| contiguous_utf8_fixed_width(offsets))
+                    .as_ref()
+                    .copied()?;
+                Some((bytes.as_ref(), offsets.as_ref(), width))
+            }
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                ..
+            } => {
+                let (bytes, offsets) = ScalarValues::materialized_lower_hex_buffers(
+                    prefix, *start, *len, *hex_width, buffers,
+                );
+                Some((bytes.as_ref(), offsets.as_ref(), prefix.len() + *hex_width))
+            }
+            _ => None,
         }
-        None
     }
 
     /// Borrow a strict fixed-width contiguous-Utf8 backing and its cached
@@ -4236,30 +4367,99 @@ impl Column {
     pub fn as_lower_hex_sequence_utf8_contiguous(
         &self,
     ) -> Option<(&[u8], &[usize], Utf8LowerHexSequence)> {
-        if self.dtype == DType::Utf8
-            && self.validity.all()
-            && let ScalarValues::LazyContiguousUtf8 {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
                 strictly_increasing,
                 fixed_width,
                 lower_hex_sequence,
                 ..
-            } = &self.values
-            && *strictly_increasing
-                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
-        {
-            let width = fixed_width
-                .get_or_init(|| contiguous_utf8_fixed_width(offsets))
-                .as_ref()
-                .copied()?;
-            let certificate = lower_hex_sequence
-                .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
-                .as_ref()
-                .copied()?;
-            return Some((bytes.as_ref(), offsets.as_ref(), certificate));
+            } if *strictly_increasing.get_or_init(|| {
+                contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets)
+            }) =>
+            {
+                let width = fixed_width
+                    .get_or_init(|| contiguous_utf8_fixed_width(offsets))
+                    .as_ref()
+                    .copied()?;
+                let certificate = lower_hex_sequence
+                    .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
+                    .as_ref()
+                    .copied()?;
+                Some((bytes.as_ref(), offsets.as_ref(), certificate))
+            }
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                buffers,
+                ..
+            } => {
+                let (bytes, offsets) = ScalarValues::materialized_lower_hex_buffers(
+                    prefix, *start, *len, *hex_width, buffers,
+                );
+                if *len == 0 {
+                    return None;
+                }
+                let (_, certificate, _) =
+                    ScalarValues::lower_hex_sequence_witness(prefix, *start, *len, *hex_width);
+                Some((bytes.as_ref(), offsets.as_ref(), certificate))
+            }
+            _ => None,
         }
-        None
+    }
+
+    /// Borrow a lower-hex sequence witness without forcing contiguous byte
+    /// materialization.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_lower_hex_sequence_utf8(&self) -> Option<(&[u8], Utf8LowerHexSequence, usize)> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyLowerHexSequenceUtf8 {
+                prefix,
+                start,
+                len,
+                hex_width,
+                ..
+            } => Some(ScalarValues::lower_hex_sequence_witness(
+                prefix, *start, *len, *hex_width,
+            )),
+            ScalarValues::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                strictly_increasing,
+                fixed_width,
+                lower_hex_sequence,
+                ..
+            } if *strictly_increasing.get_or_init(|| {
+                contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets)
+            }) =>
+            {
+                let width = fixed_width
+                    .get_or_init(|| contiguous_utf8_fixed_width(offsets))
+                    .as_ref()
+                    .copied()?;
+                let certificate = lower_hex_sequence
+                    .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
+                    .as_ref()
+                    .copied()?;
+                let n = offsets.len().checked_sub(1)?;
+                let first_start = *offsets.first()?;
+                let prefix_end = first_start.checked_add(certificate.prefix_len())?;
+                let first_end = *offsets.get(1)?;
+                (prefix_end <= first_end && first_end <= bytes.len())
+                    .then(|| (&bytes[first_start..prefix_end], certificate, n))
+            }
+            _ => None,
+        }
     }
 
     /// Borrow the column's contiguous `bool` buffer when this is an all-valid
@@ -16889,9 +17089,50 @@ mod tests {
                 Column::from_lower_hex_sequence_utf8(b"id_", 0x0a, 0, 8).expect("empty column");
             assert!(empty.values().is_empty());
             assert!(empty.as_lower_hex_sequence_utf8_contiguous().is_none());
+            let (empty_prefix, empty_certificate, empty_len) = empty
+                .as_lower_hex_sequence_utf8()
+                .expect("empty direct witness");
+            assert_eq!(empty_prefix, b"id_");
+            assert_eq!(empty_certificate.start(), 10);
+            assert_eq!(empty_len, 0);
 
             assert!(Column::from_lower_hex_sequence_utf8(b"id_", 0x0e, 3, 1).is_none());
             assert!(Column::from_lower_hex_sequence_utf8(b"", 0x0a, 3, 8).is_none());
+        }
+
+        #[test]
+        fn lower_hex_sequence_witness_stays_lazy_uza0447() {
+            let column =
+                Column::from_lower_hex_sequence_utf8(b"id_", 0x0a, 3, 8).expect("seeded column");
+            assert!(matches!(
+                &column.values,
+                ScalarValues::LazyLowerHexSequenceUtf8 { .. }
+            ));
+            let ScalarValues::LazyLowerHexSequenceUtf8 { buffers, .. } = &column.values else {
+                return;
+            };
+            assert!(buffers.get().is_none());
+
+            let (prefix, certificate, len) =
+                column.as_lower_hex_sequence_utf8().expect("direct witness");
+            assert_eq!(prefix, b"id_");
+            assert_eq!(certificate.prefix_len(), 3);
+            assert_eq!(certificate.hex_width(), 8);
+            assert_eq!(certificate.start(), 10);
+            assert_eq!(len, 3);
+            assert!(
+                buffers.get().is_none(),
+                "direct witness must not materialize bytes"
+            );
+
+            let (_, _, contiguous_certificate) = column
+                .as_lower_hex_sequence_utf8_contiguous()
+                .expect("contiguous materialization");
+            assert_eq!(contiguous_certificate, certificate);
+            assert!(
+                buffers.get().is_some(),
+                "contiguous accessor materializes exact old byte layout"
+            );
         }
 
         #[test]

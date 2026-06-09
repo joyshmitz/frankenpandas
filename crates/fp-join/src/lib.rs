@@ -1119,38 +1119,21 @@ fn ordered_utf8_lower_hex_overlap_len(
     Some(left_n.saturating_sub(left_idx).min(right_n - right_idx))
 }
 
-fn lower_hex_prefix<'a>(
-    bytes: &'a [u8],
-    offsets: &[usize],
-    cert: Utf8LowerHexSequence,
-) -> Option<&'a [u8]> {
-    let first_start = *offsets.first()?;
-    let first_end = *offsets.get(1)?;
-    if first_start > first_end || first_end > bytes.len() {
-        return None;
-    }
-    let prefix_end = first_start.checked_add(cert.prefix_len())?;
-    (prefix_end <= first_end).then(|| &bytes[first_start..prefix_end])
-}
-
 fn lower_hex_overlap_plan_from_certificates(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<InnerPositionPlan> {
-    let (left_bytes, left_offsets, left_cert) = left_key.as_lower_hex_sequence_utf8_contiguous()?;
-    let (right_bytes, right_offsets, right_cert) =
-        right_key.as_lower_hex_sequence_utf8_contiguous()?;
+    let (left_prefix, left_cert, left_n) = left_key.as_lower_hex_sequence_utf8()?;
+    let (right_prefix, right_cert, right_n) = right_key.as_lower_hex_sequence_utf8()?;
     if !left_cert.same_shape(right_cert) {
         return None;
     }
-    let left_prefix = lower_hex_prefix(left_bytes, left_offsets, left_cert)?;
-    let right_prefix = lower_hex_prefix(right_bytes, right_offsets, right_cert)?;
     if left_prefix != right_prefix {
         return None;
     }
 
-    let left_n = u64::try_from(left_offsets.len().checked_sub(1)?).ok()?;
-    let right_n = u64::try_from(right_offsets.len().checked_sub(1)?).ok()?;
+    let left_n = u64::try_from(left_n).ok()?;
+    let right_n = u64::try_from(right_n).ok()?;
     if left_n == 0 || right_n == 0 {
         return Some(InnerPositionPlan::Gather {
             left_positions: Vec::new(),

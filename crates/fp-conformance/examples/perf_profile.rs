@@ -167,6 +167,27 @@ fn build_groupby_cum_pair(n: usize, num_groups: usize) -> (Series, Series) {
     (value, key)
 }
 
+/// Like `build_transform_frame` but with all-valid bounded-Int64 value columns
+/// (so groupby rank hits the per-group counting-sort histogram, pd7ie). Values
+/// are `row % 9973` (bounded, with ties) to exercise tie handling.
+fn build_transform_frame_i64(n: usize, num_groups: usize, ncols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let keys: Vec<i64> = (0..n).map(|i| (i % num_groups) as i64).collect();
+    let mut columns = BTreeMap::new();
+    let mut column_order = vec!["k".to_string()];
+    columns.insert("k".to_string(), Column::from_i64_values(keys));
+    for c in 0..ncols {
+        let name = format!("v{c}");
+        let vals: Vec<i64> = (0..n)
+            .map(|i| (i.wrapping_mul(c + 1) % 9973) as i64)
+            .collect();
+        columns.insert(name.clone(), Column::from_i64_values(vals));
+        column_order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order).expect("transform frame i64")
+}
+
 fn build_transform_frame(n: usize, num_groups: usize, ncols: usize) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
@@ -692,6 +713,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .transform("mean")
             .expect("transform"),
+        "groupby_rank" => build_transform_frame_i64(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .rank("average", true, "keep")
+            .expect("rank"),
         "str_transform_mean" => build_str_key_frame_repeated(n, 64)
             .groupby(&["k"])
             .expect("groupby")
@@ -1139,6 +1165,17 @@ fn main() {
                     .expect("groupby")
                     .transform("mean")
                     .expect("transform");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_rank" => {
+            let frame = build_transform_frame_i64(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .rank("average", true, "keep")
+                    .expect("rank");
                 sink = sink.wrapping_add(out.len());
             }
         }

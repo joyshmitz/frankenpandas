@@ -104,6 +104,11 @@ fn main() {
         let other_null = numeric_frame(5000, 4, true);
         print!("{}", golden_dump(&fnull.combine_first(&other_null).unwrap()));
         print!("{}", golden_dump(&fnull.combine_first(&f).unwrap()));
+        // ffill / bfill (carry fills) over a nullable frame, with and without limit.
+        print!("{}", golden_dump(&fnull.ffill(None).unwrap()));
+        print!("{}", golden_dump(&fnull.ffill(Some(2)).unwrap()));
+        print!("{}", golden_dump(&fnull.bfill(None).unwrap()));
+        print!("{}", golden_dump(&fnull.bfill(Some(2)).unwrap()));
         return;
     }
     let n: usize = args

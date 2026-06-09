@@ -177,6 +177,14 @@ fn main() {
             print!("{}", golden_dump(&f.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
             print!("{}", golden_dump(&fnull.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
         }
+        // nunique: distinct counts (all-valid + nullable), and dropna=false which
+        // counts the missing bucket as one extra distinct value.
+        print!("{}", golden_dump(&f.nunique().unwrap().to_frame(Some("nu")).unwrap()));
+        print!("{}", golden_dump(&fnull.nunique().unwrap().to_frame(Some("nu")).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fnull.nunique_with_dropna(false).unwrap().to_frame(Some("nu")).unwrap())
+        );
         return;
     }
     let n: usize = args

@@ -188,6 +188,11 @@ fn main() {
         // describe: count/mean/std/min/25%/50%/75%/max over all-valid + nullable.
         print!("{}", golden_dump(&f.describe().unwrap()));
         print!("{}", golden_dump(&fnull.describe().unwrap()));
+        // skew / kurtosis: two/four-moment reductions via numeric_values.
+        print!("{}", golden_dump(&f.skew().unwrap().to_frame(Some("sk")).unwrap()));
+        print!("{}", golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap()));
+        print!("{}", golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
+        print!("{}", golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
         return;
     }
     let n: usize = args

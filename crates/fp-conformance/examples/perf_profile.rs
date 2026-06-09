@@ -63,6 +63,33 @@ fn build_series_pair(n: usize) -> (Series, Series) {
 }
 
 /// Deterministic ~24-char Utf8 Series with ~10% rows containing "needle"
+/// Contiguous-Utf8 string Series with `cardinality` distinct ~12-byte values
+/// (moderately repeated), for the value_counts byte-span tally benchmark
+/// (br-frankenpandas-vcstr). Backed by one byte buffer + offsets so
+/// `as_utf8_contiguous` returns Some (the dense fast path).
+fn build_str_vc_series(n: usize, cardinality: usize) -> Series {
+    let cardinality = cardinality.max(1);
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let mut bytes = Vec::with_capacity(n * 12);
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0);
+    let mut key = String::with_capacity(16);
+    for row in 0..n {
+        let mixed = (row as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(17)
+            ^ (row as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let id = mixed % cardinality as u64;
+        key.clear();
+        write!(&mut key, "val_{id:06x}").expect("writing to a String cannot fail");
+        bytes.extend_from_slice(key.as_bytes());
+        offsets.push(bytes.len());
+    }
+    let index = Index::new(labels);
+    let column = Column::from_utf8_contiguous(bytes, offsets);
+    Series::new("s", index, column).expect("str vc series")
+}
+
 /// mid-string — the canonical str.contains workload for the SIMD string-scan
 /// campaign (every row is a real heap String, exercising the AoS wall).
 fn build_str_series(n: usize) -> Series {
@@ -985,6 +1012,13 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.take(&idx).expect("take");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_value_counts" => {
+            // value_counts over a contiguous-Utf8 Series — exercises the byte-span
+            // FxHash tally (vcstr) vs the ScalarKey/SipHash path.
+            let s = build_str_vc_series(n, 1000);
+            let out = s.value_counts().expect("value_counts");
+            return print!("{}", golden_dump_series(&out));
+        }
         "reindex_str" => {
             // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
             // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
@@ -1554,6 +1588,13 @@ fn main() {
             }
             for _ in 0..iters {
                 let out = s.take(&idx).expect("take");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_value_counts" => {
+            let s = build_str_vc_series(n, 1000);
+            for _ in 0..iters {
+                let out = s.value_counts().expect("value_counts");
                 sink = sink.wrapping_add(out.len());
             }
         }

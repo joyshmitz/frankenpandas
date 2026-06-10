@@ -128,6 +128,13 @@ fn main() {
         print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
         // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
         print!("{}", golden_dump(&fnull.interpolate().unwrap()));
+        // rank: all methods over the multi-column frame (>=2 cols + >=16384
+        // values => exercises the column-parallel rank path bit-for-bit).
+        for method in ["average", "min", "max", "first", "dense"] {
+            print!("{}", golden_dump(&f.rank(method, true, "keep").unwrap()));
+            print!("{}", golden_dump(&f.rank(method, false, "keep").unwrap()));
+            print!("{}", golden_dump(&fnull.rank(method, true, "keep").unwrap()));
+        }
         // duplicated / drop_duplicates: n>9973 gives real period-9973 row dups;
         // nullable variant exercises missing-equality. All keep modes.
         let dup = numeric_frame(20000, 3, false);

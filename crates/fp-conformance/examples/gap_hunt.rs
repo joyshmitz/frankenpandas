@@ -137,6 +137,14 @@ fn main() {
         print!("{}", golden_dump(&f.cumprod().unwrap()));
         print!("{}", golden_dump(&f.abs().unwrap()));
         print!("{}", golden_dump(&fnull.cumsum().unwrap()));
+        // scalar arithmetic (apply_scalar_op): typed f64 arm (f) + Scalar arm
+        // with nulls (fnull). All route through the column-parallel helper.
+        print!("{}", golden_dump(&f.add_scalar(1.0).unwrap()));
+        print!("{}", golden_dump(&f.mul_scalar(2.0).unwrap()));
+        print!("{}", golden_dump(&f.sub_scalar(0.5).unwrap()));
+        print!("{}", golden_dump(&f.div_scalar(3.0).unwrap()));
+        print!("{}", golden_dump(&fnull.add_scalar(2.0).unwrap()));
+        print!("{}", golden_dump(&fnull.mul_scalar(0.0).unwrap()));
         // rank: all methods over the multi-column frame (>=2 cols + >=16384
         // values => exercises the column-parallel rank path bit-for-bit).
         for method in ["average", "min", "max", "first", "dense"] {

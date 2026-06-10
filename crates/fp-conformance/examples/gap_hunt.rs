@@ -213,6 +213,16 @@ fn main() {
         print!("{}", golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap()));
         print!("{}", golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
         print!("{}", golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
+        // sem / var / std / median / prod: the rest of the per-column reduction
+        // family (all route through reduce_numeric, the column-parallel helper);
+        // f is 5000x4 (>=16384 values) so the parallel reduce path is exercised.
+        print!("{}", golden_dump(&f.sem().unwrap().to_frame(Some("se")).unwrap()));
+        print!("{}", golden_dump(&fnull.sem().unwrap().to_frame(Some("se")).unwrap()));
+        print!("{}", golden_dump(&f.var().unwrap().to_frame(Some("va")).unwrap()));
+        print!("{}", golden_dump(&f.std().unwrap().to_frame(Some("sd")).unwrap()));
+        print!("{}", golden_dump(&f.median().unwrap().to_frame(Some("me")).unwrap()));
+        print!("{}", golden_dump(&f.prod().unwrap().to_frame(Some("pr")).unwrap()));
+        print!("{}", golden_dump(&fnull.var().unwrap().to_frame(Some("va")).unwrap()));
         // mode: repeated-value frame (period-9973 dups at n=20000 -> real modes)
         // all-valid and nullable; plus an all-distinct frame (every value a mode).
         print!("{}", golden_dump(&dup.mode().unwrap()));

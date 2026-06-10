@@ -3346,6 +3346,183 @@ fn dense_cycle_domain(witness: Int64DenseCycleWitness) -> Option<(i64, i64)> {
     Some((witness.start, witness.start.checked_add(last_offset)?))
 }
 
+struct DenseOuterRunTape {
+    run_lens: Arc<[usize]>,
+    left_run_valid: Arc<[bool]>,
+    left_run_positions: Arc<[usize]>,
+    right_positions_csr: Arc<[usize]>,
+    right_segments: Arc<[(usize, usize)]>,
+    key_runs: Vec<(i64, usize)>,
+    left_sparse_validity: ValidityMask,
+    right_sparse_validity: ValidityMask,
+    output_len: usize,
+    has_left_missing: bool,
+    has_right_missing: bool,
+}
+
+fn push_dense_outer_invalid_range(ranges: &mut Vec<(usize, usize)>, start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    if let Some((last_start, last_len)) = ranges.last_mut()
+        && last_start.checked_add(*last_len) == Some(start)
+    {
+        *last_len += len;
+        return;
+    }
+    ranges.push((start, len));
+}
+
+fn append_dense_cycle_positions(
+    positions: &mut Vec<usize>,
+    witness: Int64DenseCycleWitness,
+    key: i64,
+) -> Option<usize> {
+    let (mut pos, count) = witness.offset_count_for_key(key)?;
+    positions.reserve(count);
+    for _ in 0..count {
+        positions.push(pos);
+        pos = pos.checked_add(witness.period)?;
+    }
+    Some(count)
+}
+
+fn build_dense_cycle_outer_run_tape(
+    left_witness: Int64DenseCycleWitness,
+    right_witness: Int64DenseCycleWitness,
+    min_key: i64,
+    span: usize,
+) -> Option<DenseOuterRunTape> {
+    let mut run_count = 0usize;
+    let mut active_key_count = 0usize;
+    let mut output_len = 0usize;
+    let mut has_left_missing = false;
+    let mut has_right_missing = false;
+    for bucket in 0..span {
+        let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+        let ll = left_witness
+            .offset_count_for_key(key)
+            .map_or(0, |(_, count)| count);
+        let rl = right_witness
+            .offset_count_for_key(key)
+            .map_or(0, |(_, count)| count);
+        let rows = match (ll > 0, rl > 0) {
+            (true, true) => {
+                run_count = run_count.checked_add(ll)?;
+                ll.checked_mul(rl)?
+            }
+            (true, false) => {
+                has_right_missing = true;
+                run_count = run_count.checked_add(ll)?;
+                ll
+            }
+            (false, true) => {
+                has_left_missing = true;
+                run_count = run_count.checked_add(1)?;
+                rl
+            }
+            (false, false) => continue,
+        };
+        active_key_count = active_key_count.checked_add(1)?;
+        output_len = output_len.checked_add(rows)?;
+    }
+
+    let mut run_lens = Vec::with_capacity(run_count);
+    let mut left_run_valid = Vec::with_capacity(run_count);
+    let mut left_run_positions = Vec::with_capacity(run_count);
+    let mut right_positions_csr = Vec::with_capacity(right_witness.len);
+    let mut right_segments = Vec::with_capacity(run_count);
+    let mut key_runs = Vec::with_capacity(active_key_count);
+    let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
+    let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
+    let mut out_pos = 0usize;
+    for bucket in 0..span {
+        let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+        let left_span = left_witness.offset_count_for_key(key);
+        let right_span = right_witness.offset_count_for_key(key);
+        let ll = left_span.map_or(0, |(_, count)| count);
+        let rl = right_span.map_or(0, |(_, count)| count);
+        if ll == 0 && rl == 0 {
+            continue;
+        }
+
+        let right_start = if rl > 0 {
+            let start = right_positions_csr.len();
+            let appended =
+                append_dense_cycle_positions(&mut right_positions_csr, right_witness, key)?;
+            debug_assert_eq!(appended, rl);
+            start
+        } else {
+            usize::MAX
+        };
+
+        let rows = match (left_span, right_span) {
+            (Some((mut left_pos, left_count)), Some((_, right_count))) => {
+                let rows = left_count.checked_mul(right_count)?;
+                for _ in 0..left_count {
+                    run_lens.push(right_count);
+                    left_run_valid.push(true);
+                    left_run_positions.push(left_pos);
+                    right_segments.push((right_start, right_count));
+                    left_pos = left_pos.checked_add(left_witness.period)?;
+                }
+                rows
+            }
+            (Some((mut left_pos, left_count)), None) => {
+                push_dense_outer_invalid_range(&mut right_invalid_ranges, out_pos, left_count);
+                for _ in 0..left_count {
+                    run_lens.push(1);
+                    left_run_valid.push(true);
+                    left_run_positions.push(left_pos);
+                    right_segments.push((usize::MAX, 1));
+                    left_pos = left_pos.checked_add(left_witness.period)?;
+                }
+                left_count
+            }
+            (None, Some((_, right_count))) => {
+                push_dense_outer_invalid_range(&mut left_invalid_ranges, out_pos, right_count);
+                run_lens.push(right_count);
+                left_run_valid.push(false);
+                left_run_positions.push(0);
+                right_segments.push((right_start, right_count));
+                right_count
+            }
+            (None, None) => unreachable!("empty buckets are skipped above"),
+        };
+        key_runs.push((key, rows));
+        out_pos = out_pos.checked_add(rows)?;
+    }
+    if out_pos != output_len
+        || run_lens.len() != run_count
+        || left_run_valid.len() != run_count
+        || left_run_positions.len() != run_count
+        || right_segments.len() != run_count
+        || right_positions_csr.len() != right_witness.len
+    {
+        return None;
+    }
+
+    Some(DenseOuterRunTape {
+        run_lens: Arc::from(run_lens),
+        left_run_valid: Arc::from(left_run_valid),
+        left_run_positions: Arc::from(left_run_positions),
+        right_positions_csr: Arc::from(right_positions_csr),
+        right_segments: Arc::from(right_segments),
+        key_runs,
+        left_sparse_validity: ValidityMask::from_invalid_ranges(
+            Arc::from(left_invalid_ranges),
+            output_len,
+        ),
+        right_sparse_validity: ValidityMask::from_invalid_ranges(
+            Arc::from(right_invalid_ranges),
+            output_len,
+        ),
+        output_len,
+        has_left_missing,
+        has_right_missing,
+    })
+}
+
 /// Fused dense-i64 OUTER merge builder (br-frankenpandas-343ho).
 ///
 /// `dense_int64_outer_positions` + the position-vector outer builder cost:
@@ -3501,144 +3678,158 @@ fn build_single_key_dense_i64_outer_merge_output(
     }
     let span = usize::try_from(span).expect("span bounded by max_dense_span");
 
-    // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
-    let build_dense_cycle_csr =
-        |witness: Int64DenseCycleWitness| -> Option<(Vec<usize>, Vec<usize>)> {
-            let mut offsets = Vec::with_capacity(span + 1);
-            offsets.push(0);
-            let mut total = 0usize;
-            for bucket in 0..span {
-                let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
-                let count = witness
-                    .offset_count_for_key(key)
-                    .map_or(0, |(_, count)| count);
-                total = total.checked_add(count)?;
-                offsets.push(total);
-            }
-            if total != witness.len {
-                return None;
-            }
-            let mut positions = Vec::with_capacity(witness.len);
-            for bucket in 0..span {
-                let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
-                let Some((offset, count)) = witness.offset_count_for_key(key) else {
-                    continue;
-                };
-                let mut pos = offset;
-                for _ in 0..count {
-                    positions.push(pos);
-                    pos = pos.checked_add(witness.period)?;
-                }
-            }
-            (positions.len() == witness.len).then_some((offsets, positions))
-        };
-    let build_csr = |keys: &[i64], witness: Option<Int64DenseCycleWitness>| {
-        if let Some(csr) = witness
-            .filter(|witness| witness.len == keys.len())
-            .and_then(&build_dense_cycle_csr)
-        {
-            return csr;
-        }
-        let mut offsets = vec![0usize; span + 1];
-        for &key in keys {
-            offsets[(key - min_key) as usize + 1] += 1;
-        }
-        for i in 0..span {
-            offsets[i + 1] += offsets[i];
-        }
-        let mut positions = vec![0usize; keys.len()];
-        let mut cursor = offsets[..span].to_vec();
-        for (pos, &key) in keys.iter().enumerate() {
-            let bucket = (key - min_key) as usize;
-            positions[cursor[bucket]] = pos;
-            cursor[bucket] += 1;
-        }
-        (offsets, positions)
-    };
-    let (left_offsets, left_positions_csr) = build_csr(left_keys, left_witness);
-    let (right_offsets, right_positions_csr) = build_csr(right_keys, right_witness);
-    let right_positions_csr: Arc<[usize]> = Arc::from(right_positions_csr);
-
-    // Bucket walk -> compact plan + closed-form key runs + output length.
     const NONE_POS: usize = usize::MAX;
-    let push_invalid_range = |ranges: &mut Vec<(usize, usize)>, start: usize, len: usize| {
-        if len == 0 {
-            return;
+    let Some(DenseOuterRunTape {
+        run_lens,
+        left_run_valid,
+        left_run_positions,
+        right_positions_csr,
+        right_segments,
+        key_runs,
+        left_sparse_validity,
+        right_sparse_validity,
+        output_len,
+        has_left_missing,
+        has_right_missing,
+    }) = (match (left_witness, right_witness) {
+        (Some(left_witness), Some(right_witness)) => {
+            build_dense_cycle_outer_run_tape(left_witness, right_witness, min_key, span)
         }
-        if let Some((last_start, last_len)) = ranges.last_mut()
-            && last_start.checked_add(*last_len) == Some(start)
-        {
-            *last_len += len;
-            return;
-        }
-        ranges.push((start, len));
-    };
-    let mut plan = Vec::<(usize, usize, usize)>::new();
-    let mut key_runs = Vec::<(i64, usize)>::new();
-    let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
-    let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
-    let mut output_len = 0usize;
-    let mut has_left_missing = false; // right-only buckets exist
-    let mut has_right_missing = false; // left-only rows exist
-    for bucket in 0..span {
-        let ll = left_offsets[bucket + 1] - left_offsets[bucket];
-        let rl = right_offsets[bucket + 1] - right_offsets[bucket];
-        let bucket_rows = match (ll > 0, rl > 0) {
-            (true, true) => {
-                let Some(rows) = ll.checked_mul(rl) else {
-                    return Ok(None);
-                };
-                let rs = right_offsets[bucket];
-                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
-                    plan.push((lp, rs, rl));
+        _ => None,
+    })
+    .or_else(|| {
+        // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
+        let build_dense_cycle_csr =
+            |witness: Int64DenseCycleWitness| -> Option<(Vec<usize>, Vec<usize>)> {
+                let mut offsets = Vec::with_capacity(span + 1);
+                offsets.push(0);
+                let mut total = 0usize;
+                for bucket in 0..span {
+                    let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                    let count = witness
+                        .offset_count_for_key(key)
+                        .map_or(0, |(_, count)| count);
+                    total = total.checked_add(count)?;
+                    offsets.push(total);
                 }
-                rows
-            }
-            (true, false) => {
-                has_right_missing = true;
-                push_invalid_range(&mut right_invalid_ranges, output_len, ll);
-                for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
-                    plan.push((lp, NONE_POS, 1));
+                if total != witness.len {
+                    return None;
                 }
-                ll
+                let mut positions = Vec::with_capacity(witness.len);
+                for bucket in 0..span {
+                    let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                    let appended =
+                        append_dense_cycle_positions(&mut positions, witness, key).unwrap_or(0);
+                    debug_assert_eq!(
+                        appended,
+                        witness
+                            .offset_count_for_key(key)
+                            .map_or(0, |(_, count)| count)
+                    );
+                }
+                (positions.len() == witness.len).then_some((offsets, positions))
+            };
+        let build_csr = |keys: &[i64], witness: Option<Int64DenseCycleWitness>| {
+            if let Some(csr) = witness
+                .filter(|witness| witness.len == keys.len())
+                .and_then(&build_dense_cycle_csr)
+            {
+                return csr;
             }
-            (false, true) => {
-                has_left_missing = true;
-                push_invalid_range(&mut left_invalid_ranges, output_len, rl);
-                plan.push((NONE_POS, right_offsets[bucket], rl));
-                rl
+            let mut offsets = vec![0usize; span + 1];
+            for &key in keys {
+                offsets[(key - min_key) as usize + 1] += 1;
             }
-            (false, false) => continue,
+            for i in 0..span {
+                offsets[i + 1] += offsets[i];
+            }
+            let mut positions = vec![0usize; keys.len()];
+            let mut cursor = offsets[..span].to_vec();
+            for (pos, &key) in keys.iter().enumerate() {
+                let bucket = (key - min_key) as usize;
+                positions[cursor[bucket]] = pos;
+                cursor[bucket] += 1;
+            }
+            (offsets, positions)
         };
-        let Some(new_len) = output_len.checked_add(bucket_rows) else {
-            return Ok(None);
-        };
-        output_len = new_len;
-        key_runs.push((min_key + bucket as i64, bucket_rows));
-    }
+        let (left_offsets, left_positions_csr) = build_csr(left_keys, left_witness);
+        let (right_offsets, right_positions_csr) = build_csr(right_keys, right_witness);
 
-    // Shared lazy-lane descriptors (br-frankenpandas-yiqv5): the plan drives
-    // every value lane as a LAZY column rather than an O(output_len) materialized
-    // buffer. `run_lens` is the per-run output length; `left_run_valid` flags
-    // matched/left-only runs (left value present); `right_segments` carries the
-    // bucket-order tape `(start, run_len)` per run with `NONE_POS == usize::MAX`
-    // marking a null right run. The kept side stays all-valid; the promoted
-    // (null-introduced) side becomes the matching nullable lazy lane — the
-    // validity is rebuilt inside the column ctors, identical to the prior
-    // word-filled masks.
-    let run_lens: Arc<[usize]> = plan.iter().map(|&(_, _, run_len)| run_len).collect();
-    let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp != NONE_POS).collect();
-    let left_run_positions: Option<Arc<[usize]>> = has_left_missing.then(|| {
-        plan.iter()
+        // Bucket walk -> compact plan + closed-form key runs + output length.
+        let mut plan = Vec::<(usize, usize, usize)>::new();
+        let mut key_runs = Vec::<(i64, usize)>::new();
+        let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
+        let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
+        let mut output_len = 0usize;
+        let mut has_left_missing = false; // right-only buckets exist
+        let mut has_right_missing = false; // left-only rows exist
+        for bucket in 0..span {
+            let ll = left_offsets[bucket + 1] - left_offsets[bucket];
+            let rl = right_offsets[bucket + 1] - right_offsets[bucket];
+            let bucket_rows = match (ll > 0, rl > 0) {
+                (true, true) => {
+                    let rows = ll.checked_mul(rl)?;
+                    let rs = right_offsets[bucket];
+                    for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                        plan.push((lp, rs, rl));
+                    }
+                    rows
+                }
+                (true, false) => {
+                    has_right_missing = true;
+                    push_dense_outer_invalid_range(&mut right_invalid_ranges, output_len, ll);
+                    for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
+                        plan.push((lp, NONE_POS, 1));
+                    }
+                    ll
+                }
+                (false, true) => {
+                    has_left_missing = true;
+                    push_dense_outer_invalid_range(&mut left_invalid_ranges, output_len, rl);
+                    plan.push((NONE_POS, right_offsets[bucket], rl));
+                    rl
+                }
+                (false, false) => continue,
+            };
+            output_len = output_len.checked_add(bucket_rows)?;
+            key_runs.push((min_key + bucket as i64, bucket_rows));
+        }
+
+        // Shared lazy-lane descriptors (br-frankenpandas-yiqv5): the plan drives
+        // every value lane as a LAZY column rather than an O(output_len)
+        // materialized buffer. The kept side stays all-valid; the promoted
+        // side becomes the matching nullable lazy lane.
+        let run_lens: Arc<[usize]> = plan.iter().map(|&(_, _, run_len)| run_len).collect();
+        let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp < NONE_POS).collect();
+        let left_run_positions: Arc<[usize]> = plan
+            .iter()
             .map(|&(lp, _, _)| if lp == NONE_POS { 0 } else { lp })
-            .collect()
-    });
-    let right_segments: Arc<[(usize, usize)]> =
-        plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
-    let left_sparse_validity =
-        ValidityMask::from_invalid_ranges(Arc::from(left_invalid_ranges), output_len);
-    let right_sparse_validity =
-        ValidityMask::from_invalid_ranges(Arc::from(right_invalid_ranges), output_len);
+            .collect();
+        let right_segments: Arc<[(usize, usize)]> =
+            plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
+        Some(DenseOuterRunTape {
+            run_lens,
+            left_run_valid,
+            left_run_positions,
+            right_positions_csr: Arc::from(right_positions_csr),
+            right_segments,
+            key_runs,
+            left_sparse_validity: ValidityMask::from_invalid_ranges(
+                Arc::from(left_invalid_ranges),
+                output_len,
+            ),
+            right_sparse_validity: ValidityMask::from_invalid_ranges(
+                Arc::from(right_invalid_ranges),
+                output_len,
+            ),
+            output_len,
+            has_left_missing,
+            has_right_missing,
+        })
+    })
+    else {
+        return Ok(None);
+    };
 
     // Promoted (nullable Float64) when that side has missing rows, preserved
     // (all-valid Int64) otherwise.
@@ -3656,14 +3847,10 @@ fn build_single_key_dense_i64_outer_merge_output(
     };
     // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
     let left_run_values_i64 = |idx: usize| -> Vec<i64> {
-        plan.iter()
-            .map(|&(lp, _, _)| {
-                if lp != NONE_POS {
-                    spec_values[idx][lp]
-                } else {
-                    0
-                }
-            })
+        left_run_positions
+            .iter()
+            .zip(left_run_valid.iter())
+            .map(|(&lp, &valid)| if valid { spec_values[idx][lp] } else { 0 })
             .collect()
     };
     // Assemble columns in spec order, each a lazy lane.
@@ -3693,11 +3880,7 @@ fn build_single_key_dense_i64_outer_merge_output(
                 (FusedInt64Side::Left, true) => {
                     Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
                         Arc::clone(&spec_sources[idx]),
-                        Arc::clone(
-                            left_run_positions
-                                .as_ref()
-                                .expect("left positions exist when left side is promoted"),
-                        ),
+                        Arc::clone(&left_run_positions),
                         Arc::clone(&left_run_valid),
                         Arc::clone(&run_lens),
                         left_sparse_validity.clone(),

@@ -7759,6 +7759,20 @@ impl Column {
             return Ok(Self::from_f64_values(out));
         }
 
+        // Typed Int64 fast path (br-frankenpandas-3llep): as_i64_slice returns
+        // Some only for an all-valid Int64 backing, which has nothing to fill — so
+        // fillna is a copy of the existing values. Re-ingest the contiguous i64
+        // buffer typed, skipping the per-element Scalar clone + Self::new
+        // revalidation the loop below would run on every all-valid Int64 column.
+        // Bit-identical: every value is present (cast_fill is never applied) and
+        // the output is the same all-valid Int64 column. cast_scalar above has
+        // already validated/errored on the fill value.
+        if self.dtype == DType::Int64
+            && let Some(data) = self.as_i64_slice()
+        {
+            return Ok(Self::from_i64_values(data.to_vec()));
+        }
+
         let values = self
             .values
             .iter()

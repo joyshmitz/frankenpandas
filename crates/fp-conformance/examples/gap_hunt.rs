@@ -235,6 +235,8 @@ fn main() {
         print!("{}", golden_dump(&fi.sub_df(&fi2).unwrap()));
         print!("{}", golden_dump(&fi.mul_df(&fi2).unwrap()));
         print!("{}", golden_dump(&fi.div_df(&fi).unwrap()));
+        // Int64 fillna: all-valid -> no-op copy (Int64 output preserved).
+        print!("{}", golden_dump(&fi.fillna(&Scalar::Int64(0)).unwrap()));
         return;
     }
     let n: usize = args

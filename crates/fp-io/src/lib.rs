@@ -1740,8 +1740,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         return None;
     }
     let delim_c = delim as char;
-    let needs_quote =
-        |s: &str| s.bytes().any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r');
+    let needs_quote = |s: &str| {
+        s.bytes()
+            .any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
+    };
 
     let headers: Vec<&String> = frame.column_names().into_iter().collect();
     if headers.iter().any(|h| needs_quote(h)) {
@@ -3590,12 +3592,52 @@ fn format_pandas_float(v: f64) -> String {
 /// the per-call `String` allocation `format_pandas_float` makes — the hot path
 /// for the all-numeric CSV writer (br-frankenpandas-qk2i9).
 ///
+/// Finite values first try `ryu::Buffer` to bypass Rust's generic formatting
+/// machinery. Boundary spellings where `ryu` and Python choose different fixed
+/// vs scientific notation deopt to the Debug-based fallback below.
+fn write_pandas_float(out: &mut String, v: f64) {
+    if v.is_finite() {
+        let mut buffer = ryu::Buffer::new();
+        let rendered = buffer.format_finite(v);
+        let has_exponent = rendered.contains('e');
+        let is_zero = v.to_bits() << 1 == 0;
+        if has_exponent || is_zero || v.abs() >= 1e-4 {
+            append_pandas_normalized_float(out, rendered);
+            return;
+        }
+    }
+
+    write_pandas_float_debug_fallback(out, v);
+}
+
+fn append_pandas_normalized_float(out: &mut String, rendered: &str) {
+    let Some(e) = rendered.find('e') else {
+        out.push_str(rendered);
+        if !rendered.contains('.') {
+            out.push_str(".0");
+        }
+        return;
+    };
+
+    out.push_str(&rendered[..=e]);
+    let exp = &rendered[e + 1..];
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+    };
+    out.push(sign);
+    if digits.len() < 2 {
+        out.push('0');
+    }
+    out.push_str(digits);
+}
+
 /// Rust's Debug formatter gives the shortest round-trip representation and,
 /// unlike Display, keeps ".0" on whole numbers and switches to scientific
 /// notation at Python's repr boundaries. Only the exponent spelling differs
 /// (Rust "1e16"/"1e-5" vs Python "1e+16"/"1e-05"), so the rare sci-notation case
-/// is normalized in place. Byte-for-byte identical to `format_pandas_float`.
-fn write_pandas_float(out: &mut String, v: f64) {
+/// is normalized in place.
+fn write_pandas_float_debug_fallback(out: &mut String, v: f64) {
     use std::fmt::Write as _;
     let start = out.len();
     let _ = write!(out, "{v:?}");
@@ -14408,20 +14450,19 @@ mod tests {
         // ".0", decimals use the shortest round-trip, and extreme magnitudes use
         // signed two-digit scientific notation. Verified vs live pandas 2.2.3.
         let cases: &[(f64, &str)] = &[
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
             (1.0, "1.0"),
-            (3.0, "3.0"),
             (100.0, "100.0"),
-            (-7.0, "-7.0"),
-            (2.5, "2.5"),
-            (0.5, "0.5"),
             (0.1, "0.1"),
             (1.0 / 3.0, "0.3333333333333333"),
-            (1234567890123456.0, "1234567890123456.0"),
+            (9999999999999999.0, "1e+16"),
             (1e16, "1e+16"),
             (1e20, "1e+20"),
-            (1e-5, "1e-05"),
             (0.0001, "0.0001"),
+            (1e-5, "1e-05"),
             (1e-7, "1e-07"),
+            (f64::MIN_POSITIVE / 2.0, "1.1125369292536007e-308"),
             (f64::INFINITY, "inf"),
             (f64::NEG_INFINITY, "-inf"),
         ];
@@ -14432,6 +14473,26 @@ mod tests {
                 "format_pandas_float({v})"
             );
         }
+
+        let col = Column::from_f64_values(vec![1.0, f64::NAN, 3.0]);
+        let mut cols = BTreeMap::new();
+        cols.insert("x".to_owned(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64((0..3).collect()),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .expect("frame");
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: false,
+                na_rep: "NA".to_owned(),
+                ..Default::default()
+            },
+        )
+        .expect("write");
+        assert_eq!(out, "x\n1.0\nNA\n3.0\n");
     }
 
     #[test]

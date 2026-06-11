@@ -251,6 +251,11 @@ fn main() {
         let shuf = shuffled_index_frame(5000, 4);
         print!("{}", golden_dump(&shuf.sort_index(true).unwrap()));
         print!("{}", golden_dump(&shuf.sort_index(false).unwrap()));
+        // DataFrame.take by positions: the (column-parallel) per-column gather in
+        // take_rows_by_positions. Reversed + repeated indices over a 5000x4 frame
+        // (>=16384 values) exercise the parallel gather path bit-for-bit.
+        let take_idx: Vec<i64> = (0..5000).rev().chain(0..2500).collect();
+        print!("{}", golden_dump(&shuf.take(&take_idx, 0).unwrap()));
         // Int64 frame comparison (compared as f64, matching the Scalar path).
         let fi = int_frame(5000, 4);
         let fi2 = int_frame(5000, 4);
@@ -316,6 +321,20 @@ fn main() {
     });
     time_it("duplicated(all cols)", 1, 10, || {
         let _ = f.duplicated(None, DuplicateKeep::First).unwrap();
+    });
+    // Random (cache-unfriendly) gather positions — a scatter read, the case the
+    // per-column take parallelizes (a sequential take is already bandwidth-bound).
+    let take_idx: Vec<i64> = (0..n)
+        .map(|i| {
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17)
+                ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            (mixed % n as u64) as i64
+        })
+        .collect();
+    time_it("df_take", 1, 20, || {
+        let _ = f.take(&take_idx, 0).unwrap();
     });
     time_it("sort_index(shuffled)", 1, 10, || {
         let _ = shuf.sort_index(true).unwrap();

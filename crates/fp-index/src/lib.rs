@@ -339,11 +339,70 @@ impl Int64UnitRangeLabels {
         }
         labels
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Int64AffineLabels {
+    start: i64,
+    step: i64,
+    len: usize,
+}
+
+impl Int64AffineLabels {
+    fn new(start: i64, step: i64, len: usize) -> Option<Self> {
+        if len > 1 && step == 0 {
+            return None;
+        }
+        if len > 0 {
+            let last_index = i64::try_from(len.checked_sub(1)?).ok()?;
+            let span = step.checked_mul(last_index)?;
+            start.checked_add(span)?;
+        }
+        Some(Self { start, step, len })
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        let mut labels = Vec::with_capacity(self.len);
+        let mut value = self.start;
+        for offset in 0..self.len {
+            labels.push(IndexLabel::Int64(value));
+            if offset + 1 < self.len {
+                value = value
+                    .checked_add(self.step)
+                    .expect("validated Int64 affine range end");
+            }
+        }
+        labels
+    }
+
+    fn materialize_i64(self) -> Vec<i64> {
+        let mut labels = Vec::with_capacity(self.len);
+        let mut value = self.start;
+        for offset in 0..self.len {
+            labels.push(value);
+            if offset + 1 < self.len {
+                value = value
+                    .checked_add(self.step)
+                    .expect("validated Int64 affine range end");
+            }
+        }
+        labels
+    }
 
     fn position(self, target: i64) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        if self.step == 0 {
+            return (self.len == 1 && target == self.start).then_some(0);
+        }
         let offset = target.checked_sub(self.start)?;
-        let offset = usize::try_from(offset).ok()?;
-        (offset < self.len).then_some(offset)
+        if offset.checked_rem(self.step)? != 0 {
+            return None;
+        }
+        let pos = offset.checked_div(self.step)?;
+        let pos = usize::try_from(pos).ok()?;
+        (pos < self.len).then_some(pos)
     }
 
     fn equals_slice(self, labels: &[IndexLabel]) -> bool {
@@ -352,12 +411,71 @@ impl Int64UnitRangeLabels {
                 let Ok(offset) = i64::try_from(offset) else {
                     return false;
                 };
+                let Some(delta) = self.step.checked_mul(offset) else {
+                    return false;
+                };
                 matches!(
                     label,
                     IndexLabel::Int64(value)
-                        if self.start.checked_add(offset).is_some_and(|expected| *value == expected)
+                        if self.start.checked_add(delta).is_some_and(|expected| *value == expected)
                 )
             })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Int64StridedLabels {
+    values: Arc<Vec<i64>>,
+    start: usize,
+    step: usize,
+    len: usize,
+}
+
+impl Int64StridedLabels {
+    fn new(values: Arc<Vec<i64>>, start: usize, step: usize, len: usize) -> Option<Self> {
+        if len > 1 && step == 0 {
+            return None;
+        }
+        if len > 0 {
+            let last = start.checked_add(step.checked_mul(len.checked_sub(1)?)?)?;
+            if last >= values.len() {
+                return None;
+            }
+        }
+        Some(Self {
+            values,
+            start,
+            step,
+            len,
+        })
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        let mut labels = Vec::with_capacity(self.len);
+        let mut pos = self.start;
+        for offset in 0..self.len {
+            labels.push(IndexLabel::Int64(self.values[pos]));
+            if offset + 1 < self.len {
+                pos = pos
+                    .checked_add(self.step)
+                    .expect("validated Int64 strided range end");
+            }
+        }
+        labels
+    }
+
+    fn materialize_i64(self) -> Vec<i64> {
+        let mut labels = Vec::with_capacity(self.len);
+        let mut pos = self.start;
+        for offset in 0..self.len {
+            labels.push(self.values[pos]);
+            if offset + 1 < self.len {
+                pos = pos
+                    .checked_add(self.step)
+                    .expect("validated Int64 strided range end");
+            }
+        }
+        labels
     }
 }
 
@@ -369,6 +487,8 @@ struct IndexLabels {
     /// is observationally identical to a private copy.
     materialized: OnceLock<Arc<Vec<IndexLabel>>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
+    int64_affine: Option<Int64AffineLabels>,
+    int64_strided: Option<Int64StridedLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
     /// raw `i64` view; `None` once computed means the labels are not all
@@ -392,6 +512,8 @@ impl IndexLabels {
         Self {
             materialized,
             int64_unit_range: None,
+            int64_affine: None,
+            int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -401,6 +523,38 @@ impl IndexLabels {
         Some(Self {
             materialized: OnceLock::new(),
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
+            int64_affine: None,
+            int64_strided: None,
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
+        })
+    }
+
+    fn new_int64_affine(start: i64, step: i64, len: usize) -> Option<Self> {
+        if step == 1 {
+            return Self::new_int64_unit_range(start, len);
+        }
+        Some(Self {
+            materialized: OnceLock::new(),
+            int64_unit_range: None,
+            int64_affine: Some(Int64AffineLabels::new(start, step, len)?),
+            int64_strided: None,
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
+        })
+    }
+
+    fn new_int64_strided(
+        values: Arc<Vec<i64>>,
+        start: usize,
+        step: usize,
+        len: usize,
+    ) -> Option<Self> {
+        Some(Self {
+            materialized: OnceLock::new(),
+            int64_unit_range: None,
+            int64_affine: None,
+            int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -412,6 +566,8 @@ impl IndexLabels {
         Self {
             materialized: OnceLock::new(),
             int64_unit_range: None,
+            int64_affine: None,
+            int64_strided: None,
             int64_typed,
             utf8_contiguous: None,
         }
@@ -423,6 +579,8 @@ impl IndexLabels {
         Self {
             materialized: OnceLock::new(),
             int64_unit_range: None,
+            int64_affine: None,
+            int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some((bytes, offsets)),
         }
@@ -432,6 +590,9 @@ impl IndexLabels {
         self.materialized
             .get_or_init(|| {
                 if let Some(range) = self.int64_unit_range {
+                    return Arc::new(range.materialize());
+                }
+                if let Some(range) = self.int64_affine {
                     return Arc::new(range.materialize());
                 }
                 if let Some((bytes, offsets)) = &self.utf8_contiguous {
@@ -448,6 +609,9 @@ impl IndexLabels {
                             .collect(),
                     );
                 }
+                if let Some(strided) = self.int64_strided.clone() {
+                    return Arc::new(strided.materialize());
+                }
                 let values = self
                     .int64_typed
                     .get()
@@ -461,6 +625,12 @@ impl IndexLabels {
     fn len(&self) -> usize {
         if let Some(range) = self.int64_unit_range {
             return range.len;
+        }
+        if let Some(range) = self.int64_affine {
+            return range.len;
+        }
+        if let Some(strided) = &self.int64_strided {
+            return strided.len;
         }
         if let Some((_, offsets)) = &self.utf8_contiguous {
             return offsets.len() - 1;
@@ -482,6 +652,16 @@ impl IndexLabels {
         self.int64_unit_range
     }
 
+    fn int64_affine_range(&self) -> Option<Int64AffineLabels> {
+        self.int64_unit_range
+            .map(|range| Int64AffineLabels {
+                start: range.start,
+                step: 1,
+                len: range.len,
+            })
+            .or(self.int64_affine)
+    }
+
     /// The raw `i64` view of an all-Int64 label vector, computing and caching
     /// it on first request. `None` means at least one label is not Int64.
     fn int64_view(&self) -> Option<Arc<Vec<i64>>> {
@@ -500,6 +680,12 @@ impl IndexLabels {
                         );
                     }
                     return Some(Arc::new(values));
+                }
+                if let Some(range) = self.int64_affine {
+                    return Some(Arc::new(range.materialize_i64()));
+                }
+                if let Some(strided) = self.int64_strided.clone() {
+                    return Some(Arc::new(strided.materialize_i64()));
                 }
                 let labels = self.materialized.get()?;
                 let mut values = Vec::with_capacity(labels.len());
@@ -531,6 +717,8 @@ impl Clone for IndexLabels {
         // A unit-range, typed Int64, or contiguous-Utf8 backing can regenerate
         // the label vector on demand, so skip the O(n) Vec<IndexLabel> deep clone.
         let has_lazy_backing = self.int64_unit_range.is_some()
+            || self.int64_affine.is_some()
+            || self.int64_strided.is_some()
             || self.utf8_contiguous.is_some()
             || matches!(int64_typed.get(), Some(Some(_)));
         if !has_lazy_backing && let Some(labels) = self.materialized.get() {
@@ -539,6 +727,8 @@ impl Clone for IndexLabels {
         Self {
             materialized,
             int64_unit_range: self.int64_unit_range,
+            int64_affine: self.int64_affine,
+            int64_strided: self.int64_strided.clone(),
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
@@ -559,7 +749,7 @@ impl fmt::Debug for IndexLabels {
 
 impl PartialEq for IndexLabels {
     fn eq(&self, other: &Self) -> bool {
-        match (self.int64_unit_range, other.int64_unit_range) {
+        match (self.int64_affine_range(), other.int64_affine_range()) {
             (Some(left), Some(right)) => left == right,
             (Some(range), None) => range.equals_slice(other.as_slice()),
             (None, Some(range)) => range.equals_slice(self.as_slice()),
@@ -723,6 +913,28 @@ impl Index {
         index
     }
 
+    /// Construct an index whose labels are the affine Int64 sequence
+    /// `start + i * step`, without allocating the label vector until a caller
+    /// asks for label materialization.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn new_known_unique_int64_affine_range(start: i64, step: i64, len: usize) -> Option<Self> {
+        let labels = IndexLabels::new_int64_affine(start, step, len)?;
+        let index = Self {
+            labels,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        };
+        let _ = index.duplicate_cache.set(false);
+        if len <= 1 || step > 0 {
+            let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
+        }
+        Some(index)
+    }
+
     #[must_use]
     pub fn from_i64(values: Vec<i64>) -> Self {
         Self::from_i64_values(values)
@@ -743,6 +955,27 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
         }
+    }
+
+    /// Construct an Int64-labelled index as a strided view over an existing
+    /// typed backing. Unlike affine ranges, the source values may be duplicated
+    /// or unsorted, so uniqueness and sort caches are intentionally not seeded.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_strided_values(
+        values: Arc<Vec<i64>>,
+        start: usize,
+        step: usize,
+        len: usize,
+    ) -> Option<Self> {
+        Some(Self {
+            labels: IndexLabels::new_int64_strided(values, start, step, len)?,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        })
     }
 
     /// Construct an index over Utf8 labels backed by a contiguous byte buffer +
@@ -903,7 +1136,7 @@ impl Index {
 
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
-        if self.labels.int64_unit_range().is_some() {
+        if self.labels.int64_affine_range().is_some() {
             return false;
         }
         *self.duplicate_cache.get_or_init(|| {
@@ -940,7 +1173,11 @@ impl Index {
     /// AG-13: Lazily detect and cache the sort order of this index.
     #[must_use]
     fn sort_order(&self) -> SortOrder {
-        if self.labels.int64_unit_range().is_some() {
+        if self
+            .labels
+            .int64_affine_range()
+            .is_some_and(|range| range.len <= 1 || range.step > 0)
+        {
             return SortOrder::AscendingInt64;
         }
         *self
@@ -960,7 +1197,9 @@ impl Index {
     /// For unsorted indexes, falls back to linear scan (O(n)).
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
-        if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_unit_range(), needle) {
+        if let (Some(range), IndexLabel::Int64(target)) =
+            (self.labels.int64_affine_range(), needle)
+        {
             return range.position(*target);
         }
         match self.sort_order() {
@@ -13663,6 +13902,8 @@ pub enum MultiIndexOrIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
     use super::{
@@ -14103,6 +14344,57 @@ mod tests {
         assert_eq!(index.position(&IndexLabel::Int64(2)), None);
         assert_eq!(index.labels(), reference.labels());
         assert_eq!(index, reference);
+    }
+
+    #[test]
+    fn int64_affine_range_index_preserves_materialized_surface() {
+        let index = Index::new_known_unique_int64_affine_range(3, 2, 4)
+            .unwrap()
+            .rename_index(Some("idx"));
+        let reference = Index::new(vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(7),
+            IndexLabel::Int64(9),
+        ])
+        .rename_index(Some("idx"));
+
+        assert_eq!(index.len(), 4);
+        assert!(!index.has_duplicates());
+        assert!(index.is_sorted());
+        assert_eq!(index.position(&IndexLabel::Int64(7)), Some(2));
+        assert_eq!(index.position(&IndexLabel::Int64(8)), None);
+        assert_eq!(index.labels(), reference.labels());
+        let values = index.int64_label_values().unwrap();
+        assert_eq!(values.as_slice(), &[3, 5, 7, 9]);
+        assert_eq!(index, reference);
+
+        let singleton = Index::new_known_unique_int64_affine_range(i64::MAX, 1, 1).unwrap();
+        assert_eq!(singleton.labels(), &[IndexLabel::Int64(i64::MAX)]);
+    }
+
+    #[test]
+    fn int64_strided_index_preserves_duplicate_and_unsorted_semantics() {
+        let duplicate =
+            Index::from_i64_strided_values(Arc::new(vec![10, 99, 10, 99, 20]), 0, 2, 3).unwrap();
+        assert_eq!(
+            duplicate.labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+            ]
+        );
+        assert!(duplicate.has_duplicates());
+        assert!(!duplicate.is_sorted());
+        assert_eq!(duplicate.position(&IndexLabel::Int64(20)), Some(2));
+
+        let unsorted =
+            Index::from_i64_strided_values(Arc::new(vec![30, 99, 10, 99, 20]), 0, 2, 3).unwrap();
+        assert_eq!(int64_labels(&unsorted), vec![30, 10, 20]);
+        assert!(!unsorted.has_duplicates());
+        assert!(!unsorted.is_sorted());
+        assert_eq!(unsorted.position(&IndexLabel::Int64(10)), Some(1));
     }
 
     #[test]
@@ -17319,7 +17611,10 @@ mod tests {
             )
             .unwrap()
         };
-        let cases: Vec<(Vec<(&str, i64)>, Vec<(&str, i64)>)> = vec![
+        type TupleSpec = Vec<(&'static str, i64)>;
+        type SetopCase = (TupleSpec, TupleSpec);
+
+        let cases: Vec<SetopCase> = vec![
             (
                 vec![("a", 1), ("b", 2), ("a", 1), ("c", 3), ("b", 2)],
                 vec![("b", 2), ("c", 3), ("z", 9)],
@@ -17330,7 +17625,8 @@ mod tests {
         for (sa, sb) in cases {
             let a = mk(&sa);
             let b = mk(&sb);
-            let bset: std::collections::HashSet<Vec<IndexLabel>> = b.to_list().into_iter().collect();
+            let bset: std::collections::HashSet<Vec<IndexLabel>> =
+                b.to_list().into_iter().collect();
 
             let mut seen = std::collections::HashSet::new();
             let ref_inter: Vec<Vec<IndexLabel>> = a
@@ -17338,7 +17634,11 @@ mod tests {
                 .into_iter()
                 .filter(|t| bset.contains(t) && seen.insert(t.clone()))
                 .collect();
-            assert_eq!(a.intersection(&b).unwrap().to_list(), ref_inter, "inter {sa:?}");
+            assert_eq!(
+                a.intersection(&b).unwrap().to_list(),
+                ref_inter,
+                "inter {sa:?}"
+            );
 
             let mut seen_d = std::collections::HashSet::new();
             let ref_diff: Vec<Vec<IndexLabel>> = a

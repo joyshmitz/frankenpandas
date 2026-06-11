@@ -4318,6 +4318,21 @@ impl Column {
     }
 
     pub fn from_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        if matches!(values.first(), Some(Scalar::Float64(_))) {
+            let mut data = Vec::with_capacity(values.len());
+            let mut all_float64 = true;
+            for value in &values {
+                let Scalar::Float64(value) = value else {
+                    all_float64 = false;
+                    break;
+                };
+                data.push(*value);
+            }
+            if all_float64 {
+                return Ok(Self::from_f64_values(data));
+            }
+        }
+
         let dtype = infer_dtype(&values)?;
         Self::new(dtype, values)
     }
@@ -22238,6 +22253,62 @@ mod tests {
                 Scalar::Float64(f64::INFINITY)
             ]
         );
+    }
+
+    #[test]
+    fn from_values_float64_fast_path_preserves_surface() {
+        let nan = f64::from_bits(0x7ff8_0000_0000_1234);
+        let column = Column::from_values(vec![
+            Scalar::Float64(1.5),
+            Scalar::Float64(-0.0),
+            Scalar::Float64(f64::INFINITY),
+            Scalar::Float64(nan),
+        ])
+        .expect("homogeneous float64 column");
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert!(column.data.is_none());
+        assert!(column.validity.get(0));
+        assert!(column.validity.get(1));
+        assert!(column.validity.get(2));
+        assert!(!column.validity.get(3));
+        let bits = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(value) => Some(value.to_bits()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bits,
+            vec![
+                Some(1.5f64.to_bits()),
+                Some((-0.0f64).to_bits()),
+                Some(f64::INFINITY.to_bits()),
+                Some(nan.to_bits()),
+            ]
+        );
+
+        let mixed = Column::from_values(vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+        ])
+        .expect("mixed float/null fallback");
+        assert_eq!(mixed.dtype(), DType::Float64);
+        assert_eq!(
+            mixed.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ]
+        );
+
+        let empty = Column::from_values(Vec::new()).expect("empty fallback");
+        assert_eq!(empty.dtype(), DType::Null);
+        assert!(empty.values().is_empty());
     }
 
     #[test]

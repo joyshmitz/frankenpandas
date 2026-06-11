@@ -1729,6 +1729,89 @@ impl Default for XmlReadOptions {
 /// numeric typed slice, the index is requested, the delimiter is non-ASCII, or
 /// a header name would need quoting. The produced bytes are identical to the
 /// general writer (see the call-site note). (br-frankenpandas-qk2i9)
+#[derive(Debug, Clone, Copy)]
+struct Float64QuarterAffineCsvPlan {
+    start_scaled: i64,
+    step_scaled: i64,
+}
+
+impl Float64QuarterAffineCsvPlan {
+    fn for_slice(values: &[f64]) -> Option<Self> {
+        let first = scaled_nonnegative_quarter(values.first().copied()?)?;
+        let second = values
+            .get(1)
+            .copied()
+            .map(scaled_nonnegative_quarter)
+            .unwrap_or(Some(first))?;
+        let step_scaled = second.checked_sub(first)?;
+        if step_scaled < 0 {
+            return None;
+        }
+
+        let plan = Self {
+            start_scaled: first,
+            step_scaled,
+        };
+        for (row, &value) in values.iter().enumerate() {
+            if scaled_nonnegative_quarter(value)? != plan.scaled_at(row)? {
+                return None;
+            }
+        }
+        Some(plan)
+    }
+
+    fn scaled_at(self, row: usize) -> Option<i64> {
+        let row = i64::try_from(row).ok()?;
+        self.start_scaled
+            .checked_add(self.step_scaled.checked_mul(row)?)
+    }
+
+    fn append_row(self, out: &mut String, row: usize) -> bool {
+        let Some(scaled) = self.scaled_at(row) else {
+            return false;
+        };
+        append_quarter_scaled_pandas_float(out, scaled);
+        true
+    }
+}
+
+fn scaled_nonnegative_quarter(value: f64) -> Option<i64> {
+    const MAX_EXACT_SCALED: f64 = 9_007_199_254_740_992.0;
+
+    if !value.is_finite() || value.is_sign_negative() {
+        return None;
+    }
+    let scaled = value * 4.0;
+    if !scaled.is_finite()
+        || scaled > MAX_EXACT_SCALED
+        || scaled.fract().to_bits() != 0.0f64.to_bits()
+    {
+        return None;
+    }
+    let scaled_i64 = scaled as i64;
+    if (scaled_i64 as f64).to_bits() == scaled.to_bits() {
+        Some(scaled_i64)
+    } else {
+        None
+    }
+}
+
+fn append_quarter_scaled_pandas_float(out: &mut String, scaled: i64) {
+    use std::fmt::Write as _;
+
+    debug_assert!(scaled >= 0);
+    let whole = scaled / 4;
+    let rem = scaled % 4;
+    let _ = write!(out, "{whole}");
+    match rem {
+        0 => out.push_str(".0"),
+        1 => out.push_str(".25"),
+        2 => out.push_str(".5"),
+        3 => out.push_str(".75"),
+        _ => out.push_str(".0"),
+    }
+}
+
 fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
     use std::fmt::Write as _;
 
@@ -1751,7 +1834,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
     }
 
     enum FastCol<'a> {
-        F(&'a [f64]),
+        F {
+            values: &'a [f64],
+            quarter_plan: Option<Float64QuarterAffineCsvPlan>,
+        },
         I(&'a [i64]),
         // All-valid contiguous Utf8: (bytes, offsets) with row r =
         // bytes[offsets[r]..offsets[r+1]].
@@ -1765,7 +1851,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
             if s.len() != n {
                 return None;
             }
-            cols.push(FastCol::F(s));
+            cols.push(FastCol::F {
+                values: s,
+                quarter_plan: Float64QuarterAffineCsvPlan::for_slice(s),
+            });
         } else if let Some(s) = column.as_i64_slice() {
             if s.len() != n {
                 return None;
@@ -1802,8 +1891,14 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
                 // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
                 // NaN branch never fires; kept for defensive parity.
-                FastCol::F(s) => {
-                    let v = s[r];
+                FastCol::F {
+                    values,
+                    quarter_plan,
+                } => {
+                    if quarter_plan.is_some_and(|plan| plan.append_row(&mut out, r)) {
+                        continue;
+                    }
+                    let v = values[r];
                     if v.is_nan() {
                         out.push_str(&options.na_rep);
                     } else {
@@ -12393,20 +12488,21 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HtmlReadOptions, HtmlWriteOptions,
-        IoError, JsonOrient, LatexWriteOptions, MarkdownWriteOptions, PickleProtocol,
-        PickleWriteOptions, StataWriteOptions, XmlReadOptions, XmlWriteOptions,
-        format_pandas_float, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
-        read_feather_bytes, read_html, read_html_str, read_html_str_with_options, read_json_str,
-        read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
-        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_excel_bytes, write_html, write_html_string,
-        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
-        write_latex_string, write_latex_string_with_options, write_latex_with_options,
-        write_markdown, write_markdown_string, write_markdown_string_with_options,
-        write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
-        write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
-        write_xml_string, write_xml_string_with_options,
+        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, Float64QuarterAffineCsvPlan,
+        HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
+        MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
+        XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html, read_html_str,
+        read_html_str_with_options, read_json_str, read_orc, read_orc_bytes, read_parquet_bytes,
+        read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
+        write_excel_bytes, write_html, write_html_string, write_html_string_with_options,
+        write_json_string, write_jsonl_string, write_latex, write_latex_string,
+        write_latex_string_with_options, write_latex_with_options, write_markdown,
+        write_markdown_string, write_markdown_string_with_options, write_markdown_with_options,
+        write_orc, write_orc_bytes, write_pickle, write_pickle_bytes, write_stata,
+        write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
+        write_xml_string_with_options,
     };
     #[cfg(feature = "hdf5")]
     use super::{
@@ -14493,6 +14589,69 @@ mod tests {
         )
         .expect("write");
         assert_eq!(out, "x\n1.0\nNA\n3.0\n");
+    }
+
+    #[test]
+    fn to_csv_quarter_affine_float_plan_matches_pandas_str_uza0481() {
+        let values = (0..128)
+            .map(|row| (row as f64 * 1.25) + 2.0)
+            .collect::<Vec<_>>();
+        let plan = Float64QuarterAffineCsvPlan::for_slice(&values).expect("quarter plan");
+        let expected_cells = values
+            .iter()
+            .copied()
+            .map(format_pandas_float)
+            .collect::<Vec<_>>();
+        let mut fast_cells = Vec::with_capacity(values.len());
+        for row in 0..values.len() {
+            let mut out = String::new();
+            assert!(plan.append_row(&mut out, row));
+            fast_cells.push(out);
+        }
+        assert_eq!(fast_cells, expected_cells);
+
+        let col = Column::from_f64_values(values);
+        let mut cols = BTreeMap::new();
+        cols.insert("x".to_owned(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64((0..128).collect()),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .expect("frame");
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: false,
+                ..Default::default()
+            },
+        )
+        .expect("write");
+        let mut expected = String::from("x\n");
+        for cell in expected_cells {
+            expected.push_str(&cell);
+            expected.push('\n');
+        }
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn quarter_affine_float_plan_rejects_fallback_boundaries_uza0481() {
+        let rejected: &[&[f64]] = &[
+            &[-0.0, 1.25, 2.5],
+            &[-1.25, 0.0, 1.25],
+            &[0.0, f64::NAN, 2.5],
+            &[0.0, f64::INFINITY, 2.5],
+            &[0.1, 1.35, 2.6],
+            &[0.0, 1.25, 2.75],
+            &[1e16, 1e16 + 1.25],
+        ];
+        for values in rejected {
+            assert!(
+                Float64QuarterAffineCsvPlan::for_slice(values).is_none(),
+                "unexpected quarter plan for {values:?}"
+            );
+        }
     }
 
     #[test]

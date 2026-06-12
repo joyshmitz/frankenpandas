@@ -6811,8 +6811,17 @@ impl Column {
 
         let lsrc = self.float64_binary_data();
         let rsrc = right.float64_binary_data();
-        let lvalid = self.nan_aware_validity();
-        let rvalid = right.nan_aware_validity();
+        // Fused NaN-tracked gather (br-frankenpandas-419of): rather than two full
+        // input-column `nan_aware_validity` pre-scans, gate each GATHERED element
+        // inline. `validity.get(i) && !lsrc[i].is_nan()` equals
+        // `nan_aware_validity(self).get(i)` (the validity bit already covers Null
+        // slots; the `is_nan` term covers a still-valid `Float64(NaN)`), but it is
+        // evaluated only at referenced positions, never the whole column. Because
+        // `validity.len() == lsrc.len()`, the short-circuit on `validity.get(i)`
+        // (false when out of range) keeps `lsrc[i]` in bounds, matching the old
+        // `lvalid.get(i)` OOB-as-invalid behaviour.
+        let lvalid = &self.validity;
+        let rvalid = &right.validity;
 
         let apply = binary_f64_apply(op);
 
@@ -6823,7 +6832,9 @@ impl Column {
             if let Some(i) = *left_slot
                 && let Some(j) = right_positions.get(k).copied().flatten()
                 && lvalid.get(i)
+                && !lsrc[i].is_nan()
                 && rvalid.get(j)
+                && !rsrc[j].is_nan()
             {
                 let value = apply(lsrc[i], rsrc[j]);
                 data.push(value);
@@ -6838,7 +6849,7 @@ impl Column {
             }
         }
         if all_valid {
-            return Ok(Self::from_f64_values(data));
+            return Ok(Self::from_f64_values_all_valid_unchecked(data));
         }
         Ok(Self::from_f64_values_with_validity(
             data,

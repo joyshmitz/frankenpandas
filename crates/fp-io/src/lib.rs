@@ -1797,19 +1797,40 @@ fn scaled_nonnegative_quarter(value: f64) -> Option<i64> {
 }
 
 fn append_quarter_scaled_pandas_float(out: &mut String, scaled: i64) {
-    use std::fmt::Write as _;
-
     debug_assert!(scaled >= 0);
-    let whole = scaled / 4;
+    let mut whole = (scaled / 4) as u64;
     let rem = scaled % 4;
-    let _ = write!(out, "{whole}");
-    match rem {
-        0 => out.push_str(".0"),
-        1 => out.push_str(".25"),
-        2 => out.push_str(".5"),
-        3 => out.push_str(".75"),
-        _ => out.push_str(".0"),
+
+    // Manual decimal emitter (br-frankenpandas-uza04.84): the quarter-affine
+    // whole part previously went through `write!(out, "{whole}")`, i.e. the
+    // core::fmt::write + i64 Display machinery (Formatter dispatch, padding
+    // checks) the profile flagged as the residual hot path. Here we write the
+    // whole digits and the fixed fractional suffix into one stack buffer and
+    // emit a single push_str — byte-identical output, no fmt dispatch. `whole`
+    // is non-negative (scaled >= 0) so no sign handling is needed; max 20 u64
+    // digits + a 3-byte ".75" suffix fit in 23 bytes.
+    let mut buf = [0u8; 23];
+    let suffix: &[u8] = match rem {
+        1 => b".25",
+        2 => b".5",
+        3 => b".75",
+        _ => b".0",
+    };
+    let mut end = buf.len() - suffix.len();
+    buf[end..].copy_from_slice(suffix);
+
+    // Whole digits, written right-to-left immediately before the suffix.
+    let mut start = end;
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (whole % 10) as u8;
+        whole /= 10;
+        if whole == 0 {
+            break;
+        }
     }
+    end = buf.len();
+    out.push_str(std::str::from_utf8(&buf[start..end]).unwrap_or("0.0"));
 }
 
 fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {

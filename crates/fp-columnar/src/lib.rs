@@ -6928,6 +6928,17 @@ impl Column {
         // `nan_aware_validity` mask builds and the per-element fn-pointer/validity
         // gating. Bit-identical to the general path under all-valid inputs: the
         // arithmetic and the typed `from_f64_values` constructor are the same.
+        //
+        // The two input NaN pre-scans look redundant (a NaN-bearing Float64 column
+        // normally has its validity bit cleared, and `from_f64_values` re-derives
+        // validity from the output anyway) but they are NOT removable: an input
+        // NaN must route to the general `Scalar::Null(NaN)` arm, whereas
+        // `from_f64_values` would surface it as `Scalar::Float64(NaN)` — a
+        // golden-observable variant difference (and `NaN**0 == 1.0` for `Pow`
+        // diverges outright). Dropping them is a parity break, not a speedup;
+        // see br-frankenpandas-d3mfh for the rejected variants. The
+        // `same_positions == general` parity is locked by
+        // `aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf`.
         if self.validity.all()
             && right.validity.all()
             && !lsrc.iter().any(|x| x.is_nan())
@@ -15952,6 +15963,75 @@ mod tests {
         assert_eq!(actual.values(), expected.values());
         for idx in 0..actual.len() {
             assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
+        }
+    }
+
+    #[test]
+    fn aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf() {
+        // br-frankenpandas-d3mfh: lock the same-positions f64 fast path
+        // byte-identical to the general alignment path (the reference) for every
+        // op across NaN inputs, inf±inf generated NaN, and the `Pow` identity
+        // slots (`NaN**0`, `1**NaN`). This pins the parity that makes the two
+        // input NaN pre-scans NON-removable: an input NaN must surface as
+        // `Scalar::Null(NaN)` (not `Float64(NaN)`), and `NaN**0 == 1.0` must stay
+        // missing — exactly what routing NaN inputs to the general arm preserves.
+        // Build pathological all-valid columns whose f64 data still contains NaN.
+        // (Normal constructors mark a NaN slot invalid, so the `validity.all()`
+        // fast path would never see a NaN; a strided/aliased lazy view can,
+        // however, present `validity.all()` over NaN-bearing data — that is the
+        // exact case the dropped input pre-scan must remain correct for.)
+        let make = |data: Vec<f64>| -> Column {
+            let len = data.len();
+            Column {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64(data),
+                validity: ValidityMask::all_valid(len),
+                data: None,
+            }
+        };
+        let left = make(vec![1.0, f64::NAN, 2.0, f64::INFINITY, 1.0, f64::NAN, -3.5]);
+        let right = make(vec![10.0, 3.0, f64::NAN, f64::INFINITY, f64::NAN, 0.0, 2.0]);
+        assert!(left.validity().all());
+        assert!(right.validity().all());
+        let n = left.len();
+        let positions: Vec<Option<usize>> = (0..n).map(Some).collect();
+
+        for op in [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+            ArithmeticOp::Mod,
+            ArithmeticOp::Pow,
+            ArithmeticOp::FloorDiv,
+        ] {
+            let expected = left
+                .aligned_binary_f64(&right, &positions, &positions, op)
+                .expect("general aligned path");
+            let actual = left
+                .aligned_binary_f64_same_positions(&right, op)
+                .expect("same-position fast path");
+
+            assert_eq!(actual.dtype(), expected.dtype(), "dtype op={op:?}");
+            assert_eq!(actual.len(), expected.len(), "len op={op:?}");
+            let got = actual.values();
+            let want = expected.values();
+            for i in 0..n {
+                // Raw-bit scalar equality (covers NaN payloads + missing kind).
+                match (&got[i], &want[i]) {
+                    (Scalar::Float64(g), Scalar::Float64(w)) => assert_eq!(
+                        g.to_bits(),
+                        w.to_bits(),
+                        "value bits op={op:?} slot={i}"
+                    ),
+                    (g, w) => assert_eq!(g, w, "scalar op={op:?} slot={i}"),
+                }
+                assert_eq!(
+                    actual.validity().get(i),
+                    expected.validity().get(i),
+                    "validity op={op:?} slot={i}"
+                );
+            }
         }
     }
 

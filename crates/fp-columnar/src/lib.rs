@@ -1102,31 +1102,48 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     }
 }
 
-/// Apply a binary f64 op over two equal-length slices with the operation
-/// monomorphized into each arm (br-frankenpandas-f64simd). Unlike a
-/// `fn(f64,f64)->f64` pointer applied per element, the closed-form arms let LLVM
-/// autovectorize Add/Sub/Mul/Div to packed SIMD; Mod/Pow/FloorDiv keep their
-/// scalar helpers but still avoid the indirect call. Element-for-element
-/// identical to `binary_f64_apply(op)` applied in order.
+/// Single-pass monomorphized binary f64 kernel that also reports whether any
+/// input or output element was NaN (br-frankenpandas-9houf). Each op is
+/// monomorphized into its own arm (closed-form for Add/Sub/Mul/Div so LLVM
+/// autovectorizes to packed SIMD; scalar helpers for Mod/Pow/FloorDiv), so the
+/// `data` vector is element-for-element identical to `binary_f64_apply(op)`
+/// applied in order. `input_nan` equals `a.any(is_nan) || b.any(is_nan)` and
+/// `output_nan` equals `data.any(is_nan)`.
+///
+/// This fuses the same-index fast path's two input NaN pre-scans and the
+/// `from_f64_values` output re-scan into the single arithmetic sweep, so a
+/// fully-valid NaN-free add no longer pays four memory passes (2 input scans +
+/// add + output scan) where numpy pays one. The reductions are plain `bool`
+/// OR-accumulators alongside a contiguous store.
 #[inline]
-fn apply_f64_slices(op: ArithmeticOp, a: &[f64], b: &[f64]) -> Vec<f64> {
-    match op {
-        ArithmeticOp::Add => a.iter().zip(b).map(|(x, y)| x + y).collect(),
-        ArithmeticOp::Sub => a.iter().zip(b).map(|(x, y)| x - y).collect(),
-        ArithmeticOp::Mul => a.iter().zip(b).map(|(x, y)| x * y).collect(),
-        ArithmeticOp::Div => a.iter().zip(b).map(|(x, y)| x / y).collect(),
-        ArithmeticOp::Mod => a
-            .iter()
-            .zip(b)
-            .map(|(x, y)| python_mod_f64(*x, *y))
-            .collect(),
-        ArithmeticOp::Pow => a.iter().zip(b).map(|(x, y)| x.powf(*y)).collect(),
-        ArithmeticOp::FloorDiv => a
-            .iter()
-            .zip(b)
-            .map(|(x, y)| python_floor_div_f64(*x, *y))
-            .collect(),
+fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<f64>, bool, bool) {
+    debug_assert_eq!(a.len(), b.len());
+    let mut data = vec![0.0_f64; a.len()];
+    let mut input_nan = false;
+    let mut output_nan = false;
+
+    macro_rules! sweep {
+        ($f:expr) => {{
+            for ((x, y), d) in a.iter().zip(b).zip(data.iter_mut()) {
+                let r = $f(*x, *y);
+                input_nan |= x.is_nan() | y.is_nan();
+                output_nan |= r.is_nan();
+                *d = r;
+            }
+        }};
     }
+
+    match op {
+        ArithmeticOp::Add => sweep!(|x: f64, y: f64| x + y),
+        ArithmeticOp::Sub => sweep!(|x: f64, y: f64| x - y),
+        ArithmeticOp::Mul => sweep!(|x: f64, y: f64| x * y),
+        ArithmeticOp::Div => sweep!(|x: f64, y: f64| x / y),
+        ArithmeticOp::Mod => sweep!(python_mod_f64),
+        ArithmeticOp::Pow => sweep!(|x: f64, y: f64| x.powf(y)),
+        ArithmeticOp::FloorDiv => sweep!(python_floor_div_f64),
+    }
+
+    (data, input_nan, output_nan)
 }
 
 fn unit_range_len(start: i64, end: i64) -> Option<usize> {
@@ -4758,6 +4775,20 @@ impl Column {
     /// Vec<Scalar>)` for sources that have already proven every value is a
     /// valid f64.
     #[must_use]
+    /// Build an all-valid Float64 column WITHOUT scanning `data` for NaN. The
+    /// caller must have already proven `data` is NaN-free (otherwise a NaN slot
+    /// would wrongly claim valid). Identical to the no-NaN branch of
+    /// [`Self::from_f64_values`]. (br-frankenpandas-9houf)
+    fn from_f64_values_all_valid_unchecked(data: Vec<f64>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     pub fn from_f64_values(data: Vec<f64>) -> Self {
         let len = data.len();
         // pandas treats NaN in a float column as MISSING. The Scalar path
@@ -6936,15 +6967,31 @@ impl Column {
         // `from_f64_values` would surface it as `Scalar::Float64(NaN)` — a
         // golden-observable variant difference (and `NaN**0 == 1.0` for `Pow`
         // diverges outright). Dropping them is a parity break, not a speedup;
-        // see br-frankenpandas-d3mfh for the rejected variants. The
+        // see br-frankenpandas-d3mfh for the rejected variants.
+        //
+        // Instead of two separate input scans + the add + the `from_f64_values`
+        // output re-scan (four memory passes), FUSE all of them into the single
+        // arithmetic sweep (br-frankenpandas-9houf): `apply_f64_slices_nan_tracked`
+        // reports `input_nan`/`output_nan` while it stores `data`. The branch
+        // outcomes are byte-for-byte the prior fast path:
+        //   * `validity.all() && validity.all() && !input_nan` is EXACTLY the old
+        //     gate (`input_nan == lsrc.any(nan) || rsrc.any(nan)`), and it then
+        //     yields `from_f64_values(data)` — split into a no-rescan all-valid
+        //     stamp when `!output_nan` and the identical `from_f64_values(data)`
+        //     when a generated NaN (e.g. inf-inf) is present.
+        //   * any input NaN with all-valid bits falls through to the general
+        //     Scalar path below (so `Scalar::Null(NaN)` and `NaN**0 == 1.0` stay
+        //     correct), unchanged.
         // `same_positions == general` parity is locked by
         // `aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf`.
-        if self.validity.all()
-            && right.validity.all()
-            && !lsrc.iter().any(|x| x.is_nan())
-            && !rsrc.iter().any(|x| x.is_nan())
-        {
-            return Ok(Self::from_f64_values(apply_f64_slices(op, &lsrc, &rsrc)));
+        if self.validity.all() && right.validity.all() {
+            let (data, input_nan, output_nan) = apply_f64_slices_nan_tracked(op, &lsrc, &rsrc);
+            if !input_nan {
+                if output_nan {
+                    return Ok(Self::from_f64_values(data));
+                }
+                return Ok(Self::from_f64_values_all_valid_unchecked(data));
+            }
         }
 
         let lvalid = self.nan_aware_validity();
@@ -15914,7 +15961,7 @@ mod tests {
                 let b: Vec<f64> = (0..vals.len())
                     .map(|i| vals[(i + shift) % vals.len()])
                     .collect();
-                let got = super::apply_f64_slices(op, &a, &b);
+                let got = super::apply_f64_slices_nan_tracked(op, &a, &b).0;
                 let apply = super::binary_f64_apply(op);
                 let expected: Vec<f64> = a.iter().zip(&b).map(|(x, y)| apply(*x, *y)).collect();
                 for i in 0..a.len() {
@@ -16019,11 +16066,9 @@ mod tests {
             for i in 0..n {
                 // Raw-bit scalar equality (covers NaN payloads + missing kind).
                 match (&got[i], &want[i]) {
-                    (Scalar::Float64(g), Scalar::Float64(w)) => assert_eq!(
-                        g.to_bits(),
-                        w.to_bits(),
-                        "value bits op={op:?} slot={i}"
-                    ),
+                    (Scalar::Float64(g), Scalar::Float64(w)) => {
+                        assert_eq!(g.to_bits(), w.to_bits(), "value bits op={op:?} slot={i}")
+                    }
                     (g, w) => assert_eq!(g, w, "scalar op={op:?} slot={i}"),
                 }
                 assert_eq!(

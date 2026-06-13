@@ -220,6 +220,20 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = df.loc(&labels).expect("loc");
             })
         }
+        ("io", "csv_read") => {
+            // pandas: df.to_csv(file, index=False) [setup]; time pd.read_csv(file).
+            // FP: serialize once (setup), time read_csv_str of the same text.
+            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            time_us(|| {
+                let _ = fp_io::read_csv_str(&csv).expect("read_csv");
+            })
+        }
+        ("io", "csv_write") => {
+            // pandas: time df.to_csv(file, index=False). FP: time write_csv_string.
+            time_us(|| {
+                let _ = fp_io::write_csv_string(&df).expect("write_csv");
+            })
+        }
         ("indexing", "reindex") => {
             // pandas: df.reindex(Index(range(0, n*2, 2)))
             let new_labels: Vec<IndexLabel> =

@@ -1282,6 +1282,7 @@ dependencies = [
  "fp-columnar",
  "fp-frame",
  "fp-index",
+ "fp-io",
 ]
 
 [[package]]

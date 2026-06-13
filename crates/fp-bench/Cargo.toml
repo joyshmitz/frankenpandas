@@ -20,3 +20,4 @@ path = "src/main.rs"
 fp-columnar = { path = "../fp-columnar", version = "0.1.0" }
 fp-frame = { path = "../fp-frame", version = "0.1.0" }
 fp-index = { path = "../fp-index", version = "0.1.0" }
+fp-io = { path = "../fp-io", version = "0.1.0" }

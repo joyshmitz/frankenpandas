@@ -3514,19 +3514,23 @@ fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
 
 /// Format one datetime (ns since epoch) under a column's `to_csv` spec.
 fn format_datetime_csv(nanos: i64, fmt: DatetimeCsvFormat) -> String {
-    // format_datetime_ns yields "YYYY-MM-DD HH:MM:SS" (ASCII, 19 chars for the
-    // i64-ns datetime range, year always 4 digits). Trim or extend per spec.
+    // `format_datetime_ns` now CARRIES sub-second precision (trailing-zero
+    // trimmed, e.g. ".5"); to_csv instead wants a COLUMN-UNIFORM fixed-width
+    // fraction (e.g. ".500"), so work from the fixed 19-char
+    // "YYYY-MM-DD HH:MM:SS" stem (year is always 4 digits across the i64-ns
+    // range) and apply the column's resolution here. (br-frankenpandas-dt64fmt)
     let base = format_datetime_ns(nanos);
     if fmt.date_only {
         return base[..10].to_owned();
     }
+    let stem = &base[..19];
     if fmt.subsec_digits == 0 {
-        return base;
+        return stem.to_owned();
     }
     let subsec = (nanos.rem_euclid(1_000_000_000)) as u32;
     let frac = subsec / 10u32.pow(9 - u32::from(fmt.subsec_digits));
     format!(
-        "{base}.{frac:0>width$}",
+        "{stem}.{frac:0>width$}",
         width = usize::from(fmt.subsec_digits)
     )
 }

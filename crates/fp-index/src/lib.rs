@@ -177,11 +177,27 @@ pub fn format_datetime_ns(nanos: i64) -> String {
     if nanos == i64::MIN {
         return "NaT".to_owned();
     }
-    let secs = nanos / 1_000_000_000;
-    let subsec_nanos = (nanos % 1_000_000_000).unsigned_abs() as u32;
-    let dt = chrono::DateTime::from_timestamp(secs, subsec_nanos)
-        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    // `from_timestamp_nanos` decomposes the full i64 nanosecond count with the
+    // correct floor semantics for pre-epoch instants (the old manual
+    // `nanos / 1e9` + `(nanos % 1e9).unsigned_abs()` mis-decomposed negatives:
+    // -0.5s became 1970-01-01 00:00:00.5 instead of 1969-12-31 23:59:59.5).
+    let dt = chrono::DateTime::from_timestamp_nanos(nanos);
+    let mut rendered = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    // Carry subsecond precision (br-frankenpandas-dt64fmt): the old formatter
+    // dropped any fraction, so a Datetime64 column with sub-second nanos lost
+    // precision in repr/to_csv. Append the fraction with the SAME trailing-zero
+    // trimming `format_naive_datetime` uses, so a Datetime64 value and the Utf8
+    // datetime string for the same instant render identically.
+    let subsec_nanos = dt.timestamp_subsec_nanos();
+    if subsec_nanos != 0 {
+        let mut fractional = format!("{subsec_nanos:09}");
+        while fractional.ends_with('0') {
+            fractional.pop();
+        }
+        rendered.push('.');
+        rendered.push_str(&fractional);
+    }
+    rendered
 }
 
 /// AG-13: Detected sort order of an index's labels.
@@ -21591,6 +21607,34 @@ mod tests {
             formatted,
             vec![Some("2024-01-15T12:34:56.789".to_owned()), None]
         );
+    }
+
+    #[test]
+    fn format_datetime_ns_keeps_subsecond_and_pre_epoch_precision_dt64fmt() {
+        const NS: i64 = 1_000_000_000;
+        let base: i64 = 1_705_322_096_i64 * NS; // 2024-01-15 12:34:56 UTC
+
+        // No subsecond: unchanged plain "%Y-%m-%d %H:%M:%S".
+        assert_eq!(super::format_datetime_ns(base), "2024-01-15 12:34:56");
+        // Millisecond fraction is carried (was DROPPED before dt64fmt), with the
+        // same trailing-zero trimming format_naive_datetime uses.
+        assert_eq!(
+            super::format_datetime_ns(base + 789_000_000),
+            "2024-01-15 12:34:56.789"
+        );
+        // Full nanosecond precision survives.
+        assert_eq!(
+            super::format_datetime_ns(base + 123_456_789),
+            "2024-01-15 12:34:56.123456789"
+        );
+        // Pre-epoch instants decompose with floor semantics: -0.5s is
+        // 1969-12-31 23:59:59.5, not 1970-01-01 00:00:00.5.
+        assert_eq!(
+            super::format_datetime_ns(-500_000_000),
+            "1969-12-31 23:59:59.5"
+        );
+        // NaT sentinel is preserved.
+        assert_eq!(super::format_datetime_ns(i64::MIN), "NaT");
     }
 
     #[test]

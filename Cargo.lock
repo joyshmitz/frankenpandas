@@ -1276,6 +1276,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fp-bench"
+version = "0.1.0"
+dependencies = [
+ "fp-columnar",
+ "fp-frame",
+ "fp-index",
+]
+
+[[package]]
 name = "fp-columnar"
 version = "0.1.0"
 dependencies = [

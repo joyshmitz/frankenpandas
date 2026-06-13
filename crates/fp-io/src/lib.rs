@@ -14791,6 +14791,32 @@ mod tests {
     }
 
     #[test]
+    fn format_pandas_float_matches_python_str_float_at_boundaries() {
+        // to_csv float cells use Python str(float): fixed notation for decimal
+        // exponents in [-4, 16), scientific (signed 2-digit exp) outside. Each
+        // expectation verified vs live pandas 2.2.3 `DataFrame({'v':[x]}).to_csv`.
+        let cases: &[(f64, &str)] = &[
+            (0.1, "0.1"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (1e16, "1e+16"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (123_456_789_012_345.6, "123456789012345.6"),
+            (1e21, "1e+21"),
+            (1e-7, "1e-07"),
+            (-0.0, "-0.0"),
+            // 9999999999999999.0 rounds to 1e16 in f64.
+            (9_999_999_999_999_999.0, "1e+16"),
+            (2.5e-8, "2.5e-08"),
+            (1e17, "1e+17"),
+            (0.00012345, "0.00012345"),
+        ];
+        for &(v, expected) in cases {
+            assert_eq!(super::format_pandas_float(v), expected, "format_pandas_float({v:?})");
+        }
+    }
+
+    #[test]
     fn read_csv_with_options_object_fallback_preserves_text() {
         use super::{CsvReadOptions, read_csv_with_options};
         // Same pandas object-fallback rule on the options reader (custom

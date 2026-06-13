@@ -708,7 +708,7 @@ pub fn evaluate(
         }
         Expr::PctChange { expr, periods } => {
             let input = evaluate(expr, context, policy, ledger)?;
-            input.pct_change(*periods).map_err(ExprError::from)
+            input.pct_change(*periods as i64).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -1499,7 +1499,7 @@ fn evaluate_delta(
         }
         Expr::PctChange { expr, periods } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.pct_change(*periods).map_err(ExprError::from)
+            input.pct_change(*periods as i64).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)

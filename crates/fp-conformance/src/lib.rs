@@ -9716,7 +9716,7 @@ fn run_fixture_operation(
         FixtureOperation::SeriesPctChange => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let periods = fixture.pct_change_periods.unwrap_or(1);
             let actual = series.pct_change(periods).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
@@ -15587,12 +15587,7 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     .pct_change_axis1(periods)
                     .map_err(|err| err.to_string())
             } else {
-                if periods < 0 {
-                    return Err("dataframe_pct_change periods must be non-negative".to_owned());
-                }
-                frame
-                    .pct_change(periods as usize)
-                    .map_err(|err| err.to_string())
+                frame.pct_change(periods).map_err(|err| err.to_string())
             }
         }
         FixtureOperation::DataFrameMelt => {
@@ -18921,7 +18916,7 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesPctChange => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let periods = fixture.pct_change_periods.unwrap_or(1) as usize;
+            let periods = fixture.pct_change_periods.unwrap_or(1);
             let actual = series.pct_change(periods).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),

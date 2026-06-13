@@ -3569,7 +3569,14 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Null(_) => na_rep.to_owned(),
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        // All temporal NaT sentinels render as `na_rep`, identically. Previously
+        // only Timedelta64 NaT did; Datetime64/Period NaT fell through to
+        // `scalar_to_csv`, which emits "" — so a NaT datetime/period showed a
+        // blank cell while a NaT timedelta (and NaN float) showed the table's
+        // `na_rep` (default "NaN"). (br-frankenpandas-tblnat)
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        Scalar::Datetime64(v) if *v == Timestamp::NAT => na_rep.to_owned(),
+        Scalar::Period(v) if *v == i64::MIN => na_rep.to_owned(),
         other => scalar_to_csv(other),
     }
 }
@@ -14702,6 +14709,35 @@ mod tests {
         assert_eq!(
             super::index_label_to_scalar_value(&IndexLabel::Datetime64(i64::MIN)),
             Scalar::Datetime64(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn table_writers_render_all_temporal_nat_as_na_rep_tblnat() {
+        // markdown/latex tables use na_rep (default "NaN"). Every NaT sentinel —
+        // float NaN, timedelta NaT, datetime NaT, period NaT — must render as
+        // na_rep, not a blank cell (datetime/period previously emitted "").
+        let na = "NaN";
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Float64(f64::NAN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Timedelta64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Datetime64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Period(i64::MIN), na),
+            na
+        );
+        // A non-NaT datetime still renders normally (sanity).
+        assert_eq!(
+            super::scalar_to_table_with_na(&Scalar::Datetime64(1_577_836_800_000_000_000), na),
+            "2020-01-01 00:00:00"
         );
     }
 

@@ -2303,23 +2303,25 @@ fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
                 html_text(value, options.escape)
             }
         }
+        // pandas to_html renders a temporal NaT as the literal "NaT" (na_rep
+        // overrides only float NaN); verified vs pandas 2.2.3. (tblnat)
         Scalar::Timedelta64(value) => {
             if *value == Timedelta::NAT {
-                html_text(&options.na_rep, options.escape)
+                html_text("NaT", options.escape)
             } else {
                 html_text(&Timedelta::format(*value), options.escape)
             }
         }
         Scalar::Datetime64(value) => {
             if *value == Timestamp::NAT {
-                html_text(&options.na_rep, options.escape)
+                html_text("NaT", options.escape)
             } else {
                 html_text(&format_datetime_ns(*value), options.escape)
             }
         }
         Scalar::Period(value) => {
             if *value == i64::MIN {
-                html_text(&options.na_rep, options.escape)
+                html_text("NaT", options.escape)
             } else {
                 html_text(&format!("Period[{value}]"), options.escape)
             }
@@ -3569,14 +3571,16 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Null(_) => na_rep.to_owned(),
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
-        // All temporal NaT sentinels render as `na_rep`, identically. Previously
-        // only Timedelta64 NaT did; Datetime64/Period NaT fell through to
-        // `scalar_to_csv`, which emits "" — so a NaT datetime/period showed a
-        // blank cell while a NaT timedelta (and NaN float) showed the table's
-        // `na_rep` (default "NaN"). (br-frankenpandas-tblnat)
-        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
-        Scalar::Datetime64(v) if *v == Timestamp::NAT => na_rep.to_owned(),
-        Scalar::Period(v) if *v == i64::MIN => na_rep.to_owned(),
+        // pandas to_string / to_markdown / to_html render a TEMPORAL NaT as the
+        // literal "NaT": na_rep overrides only float NaN, NOT NaT. Verified vs
+        // pandas 2.2.3 — `df.to_html(na_rep='X')` keeps "NaT" for datetime/
+        // timedelta but shows "X" for NaN. (Datetime64/Period NaT previously
+        // fell through to scalar_to_csv -> "" blank cells; an earlier fix wrongly
+        // routed all temporal NaT to na_rep.) to_latex DIFFERS (collapses NaT to
+        // na_rep) and is corrected in scalar_to_latex_cell. (br-frankenpandas-tblnat)
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => "NaT".to_owned(),
+        Scalar::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_owned(),
+        Scalar::Period(v) if *v == i64::MIN => "NaT".to_owned(),
         other => scalar_to_csv(other),
     }
 }
@@ -3588,6 +3592,14 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
 fn scalar_to_latex_cell(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        // pandas to_latex collapses ALL missing — float NaN AND temporal NaT —
+        // to na_rep (default "NaN"), unlike to_string/to_html which keep "NaT".
+        // Verified vs pandas 2.2.3. Override here before delegating, since
+        // scalar_to_table_with_na now renders temporal NaT as "NaT" for the
+        // markdown/string family. (br-frankenpandas-tblnat)
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        Scalar::Datetime64(v) if *v == Timestamp::NAT => na_rep.to_owned(),
+        Scalar::Period(v) if *v == i64::MIN => na_rep.to_owned(),
         // Rust `{:.6}` matches Python `%.6f` (round-half-to-even) and renders
         // infinities as "inf"/"-inf", exactly as pandas to_latex does.
         Scalar::Float64(v) => format!("{v:.6}"),
@@ -14713,25 +14725,43 @@ mod tests {
     }
 
     #[test]
-    fn table_writers_render_all_temporal_nat_as_na_rep_tblnat() {
-        // markdown/latex tables use na_rep (default "NaN"). Every NaT sentinel —
-        // float NaN, timedelta NaT, datetime NaT, period NaT — must render as
-        // na_rep, not a blank cell (datetime/period previously emitted "").
+    fn table_writers_render_temporal_nat_dtype_aware_tblnat() {
+        // Verified vs pandas 2.2.3:
+        //   to_string/to_markdown/to_html: temporal NaT -> "NaT", float NaN -> na_rep.
+        //   to_latex:                       temporal NaT -> na_rep, float NaN -> na_rep.
         let na = "NaN";
+        // markdown/string family (scalar_to_table_with_na): NaT literal, NaN -> na_rep.
         assert_eq!(
             super::scalar_to_table_with_na(&Scalar::Float64(f64::NAN), na),
             na
         );
         assert_eq!(
             super::scalar_to_table_with_na(&Scalar::Timedelta64(i64::MIN), na),
-            na
+            "NaT"
         );
         assert_eq!(
             super::scalar_to_table_with_na(&Scalar::Datetime64(i64::MIN), na),
-            na
+            "NaT"
         );
         assert_eq!(
             super::scalar_to_table_with_na(&Scalar::Period(i64::MIN), na),
+            "NaT"
+        );
+        // latex (scalar_to_latex_cell): ALL missing collapse to na_rep.
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Float64(f64::NAN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Timedelta64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Datetime64(i64::MIN), na),
+            na
+        );
+        assert_eq!(
+            super::scalar_to_latex_cell(&Scalar::Period(i64::MIN), na),
             na
         );
         // A non-NaT datetime still renders normally (sanity).

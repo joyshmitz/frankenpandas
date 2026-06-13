@@ -1458,7 +1458,7 @@ fn main() {
             }
         }
         "str_groupby_sum" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1469,7 +1469,7 @@ fn main() {
             }
         }
         "str_groupby_mean" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1480,7 +1480,7 @@ fn main() {
             }
         }
         "str_groupby_count" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1515,7 +1515,7 @@ fn main() {
             }
         }
         "str_groupby_min" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1526,7 +1526,7 @@ fn main() {
             }
         }
         "str_groupby_max" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1537,7 +1537,7 @@ fn main() {
             }
         }
         "str_groupby_var" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1548,7 +1548,7 @@ fn main() {
             }
         }
         "str_groupby_std" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1559,7 +1559,7 @@ fn main() {
             }
         }
         "str_groupby_first" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1570,7 +1570,7 @@ fn main() {
             }
         }
         "str_groupby_last" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1581,7 +1581,7 @@ fn main() {
             }
         }
         "str_groupby_prod" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])
@@ -1592,7 +1592,7 @@ fn main() {
             }
         }
         "str_groupby_median" => {
-            let frame = build_str_key_frame(n, 4096);
+            let frame = build_str_key_frame_repeated(n, 64);
             for _ in 0..iters {
                 let out = frame
                     .groupby(&["k"])

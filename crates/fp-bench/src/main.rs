@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
-use fp_index::{DuplicateKeep, Index};
+use fp_index::{DuplicateKeep, Index, IndexLabel};
 
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
@@ -201,6 +201,31 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let series = df.get_column("col_0");
             time_us(|| {
                 let _ = series.ewm(Some(10.0), None).mean().expect("ewm mean");
+            })
+        }
+        // The fp-bench frame uses a default 0..rows Int64 index (matching the
+        // pandas side's set_index(range(n))), so loc/reindex labels line up.
+        ("indexing", "iloc_slice") => {
+            // pandas: df.iloc[n/4 : 3n/4]
+            let positions: Vec<i64> = ((rows / 4) as i64..(3 * rows / 4) as i64).collect();
+            time_us(|| {
+                let _ = df.iloc(&positions).expect("iloc");
+            })
+        }
+        ("indexing", "loc_labels") => {
+            // pandas: df.loc[list(range(n/4, 3n/4))]
+            let labels: Vec<IndexLabel> =
+                ((rows / 4) as i64..(3 * rows / 4) as i64).map(IndexLabel::Int64).collect();
+            time_us(|| {
+                let _ = df.loc(&labels).expect("loc");
+            })
+        }
+        ("indexing", "reindex") => {
+            // pandas: df.reindex(Index(range(0, n*2, 2)))
+            let new_labels: Vec<IndexLabel> =
+                (0..(rows * 2) as i64).step_by(2).map(IndexLabel::Int64).collect();
+            time_us(|| {
+                let _ = df.reindex(new_labels.clone()).expect("reindex");
             })
         }
         _ => return None,

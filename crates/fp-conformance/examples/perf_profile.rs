@@ -551,6 +551,41 @@ fn build_corr_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Like `build_corr_frame` but scatters NaN into ~0.3% of cells so the complete
+/// (NaN-free) fast path is skipped and `df.corr()`/`cov()` exercise the exact
+/// per-pair (NaN-skipping) path.
+fn build_corr_nan_frame(n: usize, cols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(cols);
+    for c in 0..cols {
+        let col_name = format!("c{c}");
+        let values: Vec<Scalar> = (0..n)
+            .map(|i| {
+                let mut z = (i as u64)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    .wrapping_add((c as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^= z >> 31;
+                // Deterministic ~0.3% NaN scatter (offset by column so the
+                // dropped-row set differs per pair, as in real missing data).
+                if (z % 331) == (c as u64 % 331) {
+                    Scalar::Float64(f64::NAN)
+                } else {
+                    let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
+                    Scalar::Float64(unit.mul_add(2.0, -1.0))
+                }
+            })
+            .collect();
+        let column = fp_columnar::Column::from_values(values).expect("column");
+        columns.insert(col_name.clone(), column);
+        column_order.push(col_name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
+}
+
 fn build_csv_string(n: usize, cols: usize) -> String {
     let mut csv = String::with_capacity(n * cols * 15);
     let mut float_buffer = ryu::Buffer::new();
@@ -979,6 +1014,7 @@ fn run_golden(scenario: &str, n: usize) {
             let b = build_corr_frame(256, 256);
             a.dot(&b).expect("dot")
         }
+        "df_corr_nan" => build_corr_nan_frame(n, 64).corr().expect("corr_nan"),
         "inner_join" => {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
@@ -1623,6 +1659,13 @@ fn main() {
             let b = build_corr_frame(256, 256);
             for _ in 0..iters {
                 let out = a.dot(&b).expect("dot");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_corr_nan" => {
+            let frame = build_corr_nan_frame(n, 64);
+            for _ in 0..iters {
+                let out = frame.corr().expect("corr_nan");
                 sink = sink.wrapping_add(out.len());
             }
         }

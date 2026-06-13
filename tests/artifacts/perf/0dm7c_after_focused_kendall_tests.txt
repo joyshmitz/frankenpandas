@@ -110,4 +110,3 @@ test tests::dataframe_corr_kendall_dense_path_preserves_order_and_values ... ok
 test tests::complete_kendall_parallel_matrix_matches_serial_ordered_ranks ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2861 filtered out; finished in 0.02s
-

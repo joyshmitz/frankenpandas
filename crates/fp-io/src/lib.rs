@@ -1893,13 +1893,22 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         }
     }
 
+    // csv QUOTE_MINIMAL (matched by the general WriterBuilder path) quotes a field
+    // as `""` when it is the SOLE field in its record and would otherwise be empty,
+    // so the line is not an ambiguous blank that read_csv decodes as zero fields.
+    // With no index written, a record has one field exactly when there is one column.
+    let single_field = cols.len() == 1;
     let mut out = String::with_capacity(n.saturating_mul(headers.len()).saturating_mul(8) + 64);
     if options.header {
         for (i, h) in headers.iter().enumerate() {
             if i > 0 {
                 out.push(delim_c);
             }
-            out.push_str(h);
+            if single_field && h.is_empty() {
+                out.push_str("\"\"");
+            } else {
+                out.push_str(h);
+            }
         }
         out.push('\n');
     }
@@ -1923,7 +1932,13 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                     }
                     let v = values[r];
                     if v.is_nan() {
-                        out.push_str(&options.na_rep);
+                        // Unreachable in practice (as_f64_slice is NaN-free), but kept
+                        // isomorphic with the general path: a sole empty na_rep is quoted.
+                        if single_field && options.na_rep.is_empty() {
+                            out.push_str("\"\"");
+                        } else {
+                            out.push_str(&options.na_rep);
+                        }
                     } else {
                         write_pandas_float(&mut out, v);
                     }
@@ -1937,7 +1952,11 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
                 FastCol::U(bytes, offsets) => {
                     let field = &bytes[offsets[r]..offsets[r + 1]];
-                    if field
+                    if single_field && field.is_empty() {
+                        // Sole empty string field -> `""` so read_csv round-trips '' (not a
+                        // blank line decoded as NaN). Multi-column empties stay bare.
+                        out.push_str("\"\"");
+                    } else if field
                         .iter()
                         .any(|&b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
                     {
@@ -14931,6 +14950,59 @@ mod tests {
         assert!(frame.column("x").unwrap().values()[1].is_missing());
         let out = write_csv_string(&frame).expect("write");
         assert_eq!(out, "x\n1.0\n\"\"\n3.0\n");
+    }
+
+    #[test]
+    fn to_csv_typed_single_empty_string_field_is_quoted_like_pandas() {
+        // Oracle pandas 2.2.3 (csv QUOTE_MINIMAL): a SOLE empty field per record is
+        // quoted "" so read_csv round-trips '' instead of a blank line -> NaN. An
+        // all-valid contiguous Utf8 single column takes the typed fast path
+        // (try_write_csv_typed), which previously emitted the empty cell bare.
+        // DataFrame({'a':['','x','y']}).to_csv(index=False) -> 'a\n""\nx\ny\n'
+        let col = Column::from_utf8_contiguous(b"xy".to_vec(), vec![0, 0, 1, 2]);
+        // Sanity: this column is the all-valid contiguous Utf8 the typed path needs.
+        assert!(col.as_utf8_contiguous().is_some());
+        assert_eq!(col.value(0), Some(&Scalar::Utf8(String::new())));
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), col);
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]),
+            columns,
+            vec!["a".to_string()],
+        )
+        .unwrap();
+        assert_eq!(write_csv_string(&frame).expect("write"), "a\n\"\"\nx\ny\n");
+
+        // Empty header for a sole column is quoted too (DataFrame({'':['a','b']})).
+        let named = frame.rename_columns(&[("a", "")]).expect("rename");
+        assert_eq!(write_csv_string(&named).expect("write2"), "\"\"\n\"\"\nx\ny\n");
+    }
+
+    #[test]
+    fn to_csv_typed_multi_column_empty_string_stays_bare_like_pandas() {
+        // With >1 field per record an empty field is NOT quoted (no blank-line
+        // ambiguity): DataFrame({'a':['','x'],'b':['y','']}).to_csv(index=False)
+        // -> 'a,b\n,y\nx,\n'.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "a".to_string(),
+            Column::from_utf8_contiguous(b"x".to_vec(), vec![0, 0, 1]),
+        );
+        columns.insert(
+            "b".to_string(),
+            Column::from_utf8_contiguous(b"y".to_vec(), vec![0, 1, 1]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(write_csv_string(&frame).expect("write"), "a,b\n,y\nx,\n");
     }
 
     #[test]

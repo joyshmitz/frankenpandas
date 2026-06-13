@@ -4,11 +4,11 @@
 Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-0dm7c-base2/release-perf/examples/perf_profile df_kendall 50000 3
   Time (mean ± σ):     439.8 ms ±  16.3 ms    [User: 2774.0 ms, System: 197.5 ms]
   Range (min … max):   423.1 ms … 482.1 ms    10 runs
- 
+
 Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-0dm7c-after/release-perf/examples/perf_profile df_kendall 50000 3
   Time (mean ± σ):     435.0 ms ±   7.2 ms    [User: 2998.6 ms, System: 200.4 ms]
   Range (min … max):   422.2 ms … 444.3 ms    10 runs
- 
+
 Summary
   /data/projects/.scratch/cargo-target-orangepeak-0dm7c-after/release-perf/examples/perf_profile df_kendall 50000 3 ran
     1.01 ± 0.04 times faster than /data/projects/.scratch/cargo-target-orangepeak-0dm7c-base2/release-perf/examples/perf_profile df_kendall 50000 3

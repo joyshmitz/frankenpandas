@@ -8,8 +8,7 @@
 //! digest of the full output (incl. group-boundary nulls) so the two runs prove
 //! bit-identicality.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::Series;
@@ -18,13 +17,18 @@ use fp_types::Scalar;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let groups = 100usize;
 
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let keys: Vec<i64> = (0..n).map(|i| (i % groups) as i64).collect();
-    let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25).collect();
+    let vals: Vec<f64> = (0..n)
+        .map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25)
+        .collect();
     let value = Series::new(
         "v".to_string(),
         Index::new(labels.clone()),

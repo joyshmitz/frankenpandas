@@ -5,9 +5,7 @@
 //!
 //! Run: cargo run -p fp-frame --example bench_to_numpy --release
 
-use std::collections::BTreeMap;
-use std::hint::black_box;
-use std::time::Instant;
+use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -31,13 +29,17 @@ fn build(n: usize) -> DataFrame {
     let mut cols = BTreeMap::new();
     let mut order = Vec::new();
     for c in 0..6 {
-        let v: Vec<f64> = (0..n).map(|i| ((i as u64).wrapping_mul(2654435761 + c) % 100000) as f64 * 0.125).collect();
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i as u64).wrapping_mul(2654435761 + c) % 100000) as f64 * 0.125)
+            .collect();
         let name = format!("f{c}");
         cols.insert(name.clone(), Column::from_f64_values(v));
         order.push(name);
     }
     for c in 0..2 {
-        let v: Vec<i64> = (0..n as i64).map(|i| i.wrapping_mul(31 + c) % 9973).collect();
+        let v: Vec<i64> = (0..n as i64)
+            .map(|i| i.wrapping_mul(31 + c) % 9973)
+            .collect();
         let name = format!("i{c}");
         cols.insert(name.clone(), Column::from_i64_values(v));
         order.push(name);
@@ -46,8 +48,14 @@ fn build(n: usize) -> DataFrame {
 }
 
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(500_000);
-    let iters: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let n: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500_000);
+    let iters: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
 
     let small = build(37);
     println!("GOLDEN_FNV {:016x}", fnv_f64(&small.to_numpy()));
@@ -61,5 +69,8 @@ fn main() {
         sink = sink.wrapping_add(m.len());
     }
     let d = t.elapsed();
-    println!("TIMING n={n} iters={iters} per_iter={:.3}ms sink={sink}", d.as_secs_f64() * 1e3 / iters as f64);
+    println!(
+        "TIMING n={n} iters={iters} per_iter={:.3}ms sink={sink}",
+        d.as_secs_f64() * 1e3 / iters as f64
+    );
 }

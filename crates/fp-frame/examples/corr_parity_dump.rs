@@ -5,12 +5,11 @@
 //!
 //! Run: cargo run -p fp-frame --example corr_parity_dump --release
 
-use std::io::Write;
+use std::{collections::BTreeMap, io::Write};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
-use std::collections::BTreeMap;
 
 fn splitmix_unit(i: usize, c: usize) -> f64 {
     // Identical to perf_profile::build_corr_frame.

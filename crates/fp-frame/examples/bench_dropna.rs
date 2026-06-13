@@ -12,9 +12,7 @@
 //! GATHER-bound: the cost is filter_rows building the kept-row output frame
 //! (take_positions per column, already typed), not the missing detection.
 
-use std::collections::BTreeMap;
-use std::hint::black_box;
-use std::time::Instant;
+use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -26,7 +24,10 @@ fn build(n: usize) -> DataFrame {
     let mut order = Vec::new();
     for c in 0..6 {
         let name = format!("i{c}");
-        map.insert(name.clone(), Column::from_i64_values((0..n as i64).collect()));
+        map.insert(
+            name.clone(),
+            Column::from_i64_values((0..n as i64).collect()),
+        );
         order.push(name);
     }
     let name = "s".to_string();
@@ -54,7 +55,10 @@ fn build(n: usize) -> DataFrame {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let df = build(n);
 

@@ -114,8 +114,7 @@ fn ref_values(vals: &[f64], window: usize, min_periods: usize, center: bool, a: 
                     f64::NAN
                 } else {
                     let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                    (nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                        / (nums.len() - 1) as f64)
+                    (nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64)
                         .sqrt()
                 }
             }
@@ -204,9 +203,7 @@ fn cross_check() -> (usize, usize) {
             for (g, w) in got_vals.iter().zip(want.iter()) {
                 let matches = match g {
                     Scalar::Null(_) => w.is_nan() && mp_eff > 0, // min_periods-null sentinel
-                    Scalar::Float64(f) => {
-                        f.to_bits() == w.to_bits() || (f.is_nan() && w.is_nan())
-                    }
+                    Scalar::Float64(f) => f.to_bits() == w.to_bits() || (f.is_nan() && w.is_nan()),
                     _ => false,
                 };
                 if !matches {
@@ -220,7 +217,10 @@ fn cross_check() -> (usize, usize) {
         } else {
             bad += 1;
             if bad <= 3 {
-                eprintln!("MISMATCH n={n} w={window} mp={mp:?} c={center} agg={}", agg_name(a));
+                eprintln!(
+                    "MISMATCH n={n} w={window} mp={mp:?} c={center} agg={}",
+                    agg_name(a)
+                );
             }
         }
     }

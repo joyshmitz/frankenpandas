@@ -7,10 +7,9 @@
 
 use std::io::Write;
 
-use fp_frame::DataFrame;
 use fp_columnar::Column;
+use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
-use fp_types::Scalar;
 use std::collections::BTreeMap;
 
 fn splitmix_unit(i: usize, c: usize) -> f64 {
@@ -52,11 +51,11 @@ fn main() {
     let corr = df.corr().expect("corr");
     // corr is m x m; extract row-major by the same column order.
     let mut fp = Vec::<f64>::with_capacity(m * m);
-    for ri in 0..m {
-        let col = corr.column(&order[ri]).expect("corr col");
+    for name in order.iter().take(m) {
+        let col = corr.column(name).expect("corr col");
         let vals = col.values();
-        for cj in 0..m {
-            fp.push(vals[cj].to_f64().unwrap_or(f64::NAN));
+        for value in vals.iter().take(m) {
+            fp.push(value.to_f64().unwrap_or(f64::NAN));
         }
     }
 

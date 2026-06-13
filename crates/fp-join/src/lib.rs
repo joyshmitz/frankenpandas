@@ -5089,6 +5089,29 @@ fn build_single_key_ordered_unique_outer_merge_output(
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
 
+    // Per-column output build is INDEPENDENT across columns and was the serial
+    // hot phase of the join (~10.5ms of str_outer_join's reindex assembly at
+    // n=150000, 12 Utf8 value columns). Build an ordered list of column specs
+    // (cheap), compute each column — the O(output) `reindex_outer_join_column`
+    // gather / take / key-coalesce — across workers, then insert in the SAME
+    // first-seen order (br-frankenpandas-uza04.102). Byte-identical: each output
+    // column is the same values in the same row order, inserted in the same
+    // left-then-right column order, so `columns`/`column_order` are unchanged.
+    enum ColBuild<'a> {
+        KeyCoalesce {
+            left_key_col: &'a Column,
+            right_key_col: &'a Column,
+        },
+        Reindex {
+            col: &'a Column,
+            positions: &'a [Option<usize>],
+        },
+        Take {
+            col: &'a Column,
+            present: &'a [usize],
+        },
+    }
+    let mut jobs: Vec<(String, ColBuild<'_>)> = Vec::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -5100,59 +5123,50 @@ fn build_single_key_ordered_unique_outer_merge_output(
                     .columns()
                     .get(left_on[*left_key_idx])
                     .expect("left key column must exist");
-                let key_column = if let Some(positions) = all_present_left_positions {
-                    take_positions_typed(left_key_col, positions)
+                let spec = if let Some(positions) = all_present_left_positions {
+                    ColBuild::Take {
+                        col: left_key_col,
+                        present: positions,
+                    }
                 } else {
                     let right_key_col = right
                         .columns()
                         .get(right_on[*right_key_idx])
                         .expect("right key column must exist");
-                    let values = left_positions
-                        .iter()
-                        .zip(right_positions.iter())
-                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                        })
-                        .collect::<Vec<_>>();
-                    Column::from_values(values)?
+                    ColBuild::KeyCoalesce {
+                        left_key_col,
+                        right_key_col,
+                    }
                 };
-                insert_merged_output_column(
-                    &mut columns,
-                    &mut column_order,
-                    name.clone(),
-                    key_column,
-                )?;
+                jobs.push((name.clone(), spec));
             } else {
-                let key_column = if let Some(positions) = all_present_left_positions {
-                    take_positions_typed(col, positions)
+                let spec = if let Some(positions) = all_present_left_positions {
+                    ColBuild::Take { col, present: positions }
                 } else {
-                    reindex_outer_join_column(col, left_positions)?
+                    ColBuild::Reindex {
+                        col,
+                        positions: left_positions,
+                    }
                 };
-                insert_merged_output_column(
-                    &mut columns,
-                    &mut column_order,
-                    name.clone(),
-                    key_column,
-                )?;
+                jobs.push((name.clone(), spec));
             }
             continue;
         }
-
-        let reindexed = if let Some(positions) = all_present_left_positions {
-            take_positions_typed(col, positions)
+        let spec = if let Some(positions) = all_present_left_positions {
+            ColBuild::Take { col, present: positions }
         } else {
-            reindex_outer_join_column(col, left_positions)?
+            ColBuild::Reindex {
+                col,
+                positions: left_positions,
+            }
         };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        jobs.push((out_name, spec));
     }
-
     for name in right.column_names() {
         let col = right
             .columns()
@@ -5163,18 +5177,90 @@ fn build_single_key_ordered_unique_outer_merge_output(
         {
             continue;
         }
-
-        let reindexed = if let Some(positions) = all_present_right_positions {
-            take_positions_typed(col, positions)
+        let spec = if let Some(positions) = all_present_right_positions {
+            ColBuild::Take { col, present: positions }
         } else {
-            reindex_outer_join_column(col, right_positions)?
+            ColBuild::Reindex {
+                col,
+                positions: right_positions,
+            }
         };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()
         };
-        insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
+        jobs.push((out_name, spec));
+    }
+
+    let compute = |spec: &ColBuild<'_>| -> Result<Column, JoinError> {
+        match spec {
+            ColBuild::KeyCoalesce {
+                left_key_col,
+                right_key_col,
+            } => {
+                let values = left_positions
+                    .iter()
+                    .zip(right_positions.iter())
+                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(Column::from_values(values)?)
+            }
+            ColBuild::Reindex { col, positions } => Ok(reindex_outer_join_column(col, positions)?),
+            ColBuild::Take { col, present } => Ok(take_positions_typed(col, present)),
+        }
+    };
+
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(64)
+        .min(jobs.len().max(1));
+    let computed: Vec<Result<Column, JoinError>> = if worker_count >= 2 && jobs.len() >= 2 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let jobs_ref = &jobs;
+        let compute_ref = &compute;
+        let mut slots: Vec<Option<Result<Column, JoinError>>> =
+            (0..jobs.len()).map(|_| None).collect();
+        let parts = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let next = &next;
+                handles.push(scope.spawn(move || {
+                    let mut out: Vec<(usize, Result<Column, JoinError>)> = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= jobs_ref.len() {
+                            break;
+                        }
+                        out.push((i, compute_ref(&jobs_ref[i].1)));
+                    }
+                    out
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join assembly worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        for part in parts {
+            for (i, r) in part {
+                slots[i] = Some(r);
+            }
+        }
+        slots
+            .into_iter()
+            .map(|s| s.expect("every output column computed"))
+            .collect()
+    } else {
+        jobs.iter().map(|(_, spec)| compute(spec)).collect()
+    };
+
+    for ((out_name, _), col_res) in jobs.into_iter().zip(computed.into_iter()) {
+        insert_merged_output_column(&mut columns, &mut column_order, out_name, col_res?)?;
     }
 
     Ok(MergedDataFrame {

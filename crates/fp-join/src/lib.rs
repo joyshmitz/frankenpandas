@@ -2663,6 +2663,179 @@ fn build_single_key_dense_i64_inner_merge_output(
     }))
 }
 
+fn push_join_invalid_range(ranges: &mut Vec<(usize, usize)>, start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    if let Some((last_start, last_len)) = ranges.last_mut()
+        && last_start.checked_add(*last_len) == Some(start)
+    {
+        *last_len += len;
+        return;
+    }
+    ranges.push((start, len));
+}
+
+fn dense_cycle_key_at(witness: Int64DenseCycleWitness, row: usize) -> Option<i64> {
+    let offset = i64::try_from(row % witness.period).ok()?;
+    witness.start.checked_add(offset)
+}
+
+fn dense_cycle_left_join_shape(
+    left_witness: Int64DenseCycleWitness,
+    right_witness: Int64DenseCycleWitness,
+) -> Option<(usize, ValidityMask)> {
+    let mut output_len = 0usize;
+    let mut invalid_ranges = Vec::<(usize, usize)>::new();
+    for left_pos in 0..left_witness.len {
+        let key = dense_cycle_key_at(left_witness, left_pos)?;
+        if let Some((_, right_count)) = right_witness.offset_count_for_key(key) {
+            output_len = output_len.checked_add(right_count)?;
+        } else {
+            push_join_invalid_range(&mut invalid_ranges, output_len, 1);
+            output_len = output_len.checked_add(1)?;
+        }
+    }
+    let right_validity = ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), output_len);
+    Some((output_len, right_validity))
+}
+
+/// Dense-cycle LEFT merge builder (br-frankenpandas-yq96z).
+///
+/// For certified `key[row] = start + (row % period)` Int64 keys, the previous
+/// high-fanout left path still built an O(left_rows) plan, right segment tape,
+/// and one repeat-run descriptor per left lane. This path keeps the same
+/// left-major pandas order but stores only the two key witnesses:
+///
+/// - output length/right validity are derived by scanning the left witness once;
+/// - left lanes read `source[left_pos]` and repeat by the matching right count;
+/// - right lanes replay positions `right_offset + k * right_period`;
+/// - unmatched left rows emit one right null at the same output slot.
+///
+/// The route accepts only all-valid Int64 columns. Any other dtype/null shape
+/// falls back to the existing materialized-plan builder.
+fn build_single_key_dense_cycle_i64_left_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    let Some(left_witness) = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_key.len())
+    else {
+        return Ok(None);
+    };
+    let Some(right_witness) = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_key.len())
+    else {
+        return Ok(None);
+    };
+    let Some((output_len, right_validity)) =
+        dense_cycle_left_join_shape(left_witness, right_witness)
+    else {
+        return Ok(None);
+    };
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+
+    enum DenseCycleLeftLane {
+        Left,
+        Right,
+    }
+    let mut spec_names = Vec::<String>::new();
+    let mut spec_kinds = Vec::<DenseCycleLeftLane>::new();
+    let mut spec_sources = Vec::<Arc<[i64]>>::new();
+
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let Some(source) = col.as_i64_arc() else {
+            return Ok(None);
+        };
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(DenseCycleLeftLane::Left);
+        spec_sources.push(source);
+    }
+
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let Some(source) = col.as_i64_arc() else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        spec_names.push(out_name);
+        spec_kinds.push(DenseCycleLeftLane::Right);
+        spec_sources.push(source);
+    }
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(spec_names.len());
+    for ((name, kind), source) in spec_names.into_iter().zip(spec_kinds).zip(spec_sources) {
+        let column = match kind {
+            DenseCycleLeftLane::Left => Column::from_i64_left_join_dense_cycle_left(
+                source,
+                left_witness,
+                right_witness,
+                output_len,
+            ),
+            DenseCycleLeftLane::Right => Column::from_i64_left_join_dense_cycle_right_nullable(
+                source,
+                left_witness,
+                right_witness,
+                right_validity.clone(),
+                output_len,
+            ),
+        };
+        debug_assert_eq!(column.len(), output_len);
+        insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 /// Fused dense-i64 LEFT merge builder (br-frankenpandas-7wxoc).
 ///
 /// The partial-match left join previously materialized TWO
@@ -6030,6 +6203,24 @@ pub fn merge_dataframes_on_with_options(
         && !sort
         && indicator_name.is_none()
         && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_dense_cycle_i64_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
         && let Some(merged) = build_single_key_dense_i64_inner_merge_output(
             left,
             right,
@@ -7628,7 +7819,9 @@ mod tests {
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
         FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
-        build_dense_i64_inner_output_data, build_single_key_dense_i64_left_merge_output,
+        ResolvedMergeSuffixes, build_dense_i64_inner_output_data,
+        build_single_key_dense_cycle_i64_left_merge_output,
+        build_single_key_dense_i64_left_merge_output,
         build_single_key_dense_i64_right_merge_output, build_single_key_dense_left_merge_output,
         build_single_key_inner_contiguous_no_overlap_output, dense_int64_left_positions,
         join_series, join_series_with_options, join_series_with_trace,
@@ -8533,6 +8726,114 @@ mod tests {
         assert_eq!(lazy.as_i64_slice(), eager.as_i64_slice());
         assert_eq!(lazy.values(), eager.values());
         assert_eq!(lazy, eager);
+    }
+
+    #[test]
+    fn dense_cycle_left_join_output_matches_dense_left_builder() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                        Scalar::Int64(15),
+                        Scalar::Int64(16),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "rv"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let suffixes = ResolvedMergeSuffixes::default();
+        let left_key = left.column("id").unwrap();
+        let right_key = right.column("id").unwrap();
+
+        let fast = build_single_key_dense_cycle_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle route");
+        let old = build_single_key_dense_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense left route");
+
+        assert_eq!(fast.index, old.index);
+        assert_eq!(fast.column_order, old.column_order);
+        assert_eq!(fast.columns, old.columns);
+        assert_eq!(
+            fast.columns.get("v").unwrap().as_i64_slice(),
+            old.columns.get("v").unwrap().as_i64_slice()
+        );
+        assert_eq!(
+            fast.columns.get("rv").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
     }
 
     #[test]

@@ -1574,6 +1574,17 @@ enum ScalarValues {
         data: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Dense-cycle LEFT-join left lane. Stores the source column and certified
+    /// key witnesses instead of one `(value, run_len)` descriptor per left row;
+    /// materialization preserves left-major join order exactly.
+    LazyLeftJoinDenseCycleLeftInt64 {
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+        data: OnceLock<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Probe-order dense-cycle nullable build lane for one-sided joins.
     /// Matched probe rows replay build-side positions in their original
     /// duplicate order; unmatched probe rows materialize `Null`.
@@ -1582,6 +1593,17 @@ enum ScalarValues {
         probe_witness: Int64DenseCycleWitness,
         build_witness: Int64DenseCycleWitness,
         total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Dense-cycle LEFT-join right lane. Reconstructs each matched right
+    /// position as `offset + k * period`; unmatched left rows materialize as
+    /// `Null(NullKind::Null)`, matching nullable Int64 reindex semantics.
+    LazyLeftJoinDenseCycleRightInt64 {
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+        data: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Source-position backed sibling of `LazyNullableRepeatValuesFloat64`.
@@ -2108,6 +2130,23 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_left_join_dense_cycle_left_int64(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), left_witness.len);
+        Self::LazyLeftJoinDenseCycleLeftInt64 {
+            source,
+            left_witness,
+            right_witness,
+            total_len,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
     fn lazy_nullable_dense_cycle_probe_build_int64(
         source: Arc<[i64]>,
         probe_witness: Int64DenseCycleWitness,
@@ -2120,6 +2159,23 @@ impl ScalarValues {
             probe_witness,
             build_witness,
             total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_left_join_dense_cycle_right_int64(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), right_witness.len);
+        Self::LazyLeftJoinDenseCycleRightInt64 {
+            source,
+            left_witness,
+            right_witness,
+            total_len,
+            data: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -2456,6 +2512,88 @@ impl ScalarValues {
         }
         debug_assert_eq!(out.len(), total_len);
         out
+    }
+
+    fn expand_left_join_dense_cycle_left_i64(
+        source: &[i64],
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Vec<i64> {
+        let mut out = Vec::with_capacity(total_len);
+        for (left_pos, &value) in source.iter().enumerate().take(left_witness.len) {
+            let key = Self::dense_cycle_key_at(left_witness, left_pos);
+            let run_len = right_witness
+                .offset_count_for_key(key)
+                .map_or(1, |(_, count)| count);
+            out.resize(out.len() + run_len, value);
+        }
+        debug_assert_eq!(out.len(), total_len);
+        out
+    }
+
+    fn expand_left_join_dense_cycle_right_i64(
+        source: &[i64],
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Vec<i64> {
+        let mut out = Vec::with_capacity(total_len);
+        for left_pos in 0..left_witness.len {
+            let key = Self::dense_cycle_key_at(left_witness, left_pos);
+            if let Some((mut right_pos, right_count)) = right_witness.offset_count_for_key(key) {
+                for _ in 0..right_count {
+                    out.push(source[right_pos]);
+                    right_pos += right_witness.period;
+                }
+            } else {
+                out.push(0);
+            }
+        }
+        debug_assert_eq!(out.len(), total_len);
+        out
+    }
+
+    fn left_join_dense_cycle_i64_data(&self) -> Option<&[i64]> {
+        match self {
+            Self::LazyLeftJoinDenseCycleLeftInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                data,
+                ..
+            } => Some(
+                data.get_or_init(|| {
+                    Self::expand_left_join_dense_cycle_left_i64(
+                        source,
+                        *left_witness,
+                        *right_witness,
+                        *total_len,
+                    )
+                })
+                .as_slice(),
+            ),
+            Self::LazyLeftJoinDenseCycleRightInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                data,
+                ..
+            } => Some(
+                data.get_or_init(|| {
+                    Self::expand_left_join_dense_cycle_right_i64(
+                        source,
+                        *left_witness,
+                        *right_witness,
+                        *total_len,
+                    )
+                })
+                .as_slice(),
+            ),
+            _ => None,
+        }
     }
 
     fn expand_strided_float64(data: &[f64], start: usize, step: usize, len: usize) -> Vec<f64> {
@@ -2933,6 +3071,26 @@ impl ScalarValues {
                     .collect()
                 })
                 .as_slice(),
+            Self::LazyLeftJoinDenseCycleLeftInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    Self::expand_left_join_dense_cycle_left_i64(
+                        source,
+                        *left_witness,
+                        *right_witness,
+                        *total_len,
+                    )
+                    .into_iter()
+                    .map(Scalar::Int64)
+                    .collect()
+                })
+                .as_slice(),
             Self::LazyNullableDenseCycleProbeBuildInt64 {
                 source,
                 probe_witness,
@@ -2950,6 +3108,33 @@ impl ScalarValues {
                             for _ in 0..count {
                                 out.push(Scalar::Int64(source[build_pos]));
                                 build_pos += build_witness.period;
+                            }
+                        } else {
+                            out.push(Scalar::Null(NullKind::Null));
+                        }
+                    }
+                    debug_assert_eq!(out.len(), *total_len);
+                    out
+                })
+                .as_slice(),
+            Self::LazyLeftJoinDenseCycleRightInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for left_pos in 0..left_witness.len {
+                        let key = Self::dense_cycle_key_at(*left_witness, left_pos);
+                        if let Some((mut right_pos, right_count)) =
+                            right_witness.offset_count_for_key(key)
+                        {
+                            for _ in 0..right_count {
+                                out.push(Scalar::Int64(source[right_pos]));
+                                right_pos += right_witness.period;
                             }
                         } else {
                             out.push(Scalar::Null(NullKind::Null));
@@ -3038,6 +3223,8 @@ impl ScalarValues {
             Self::LazyNullableDenseCycleLeftI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyDenseCycleProbeRepeatInt64 { total_len, .. } => *total_len,
             Self::LazyNullableDenseCycleProbeBuildInt64 { total_len, .. } => *total_len,
+            Self::LazyLeftJoinDenseCycleLeftInt64 { total_len, .. } => *total_len,
+            Self::LazyLeftJoinDenseCycleRightInt64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
@@ -3382,6 +3569,30 @@ impl Clone for ScalarValues {
                 Arc::clone(source),
                 *probe_witness,
                 *build_witness,
+                *total_len,
+            ),
+            Self::LazyLeftJoinDenseCycleLeftInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                ..
+            } => Self::lazy_left_join_dense_cycle_left_int64(
+                Arc::clone(source),
+                *left_witness,
+                *right_witness,
+                *total_len,
+            ),
+            Self::LazyLeftJoinDenseCycleRightInt64 {
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+                ..
+            } => Self::lazy_left_join_dense_cycle_right_int64(
+                Arc::clone(source),
+                *left_witness,
+                *right_witness,
                 *total_len,
             ),
             Self::LazyNullableRepeatPositionsI64AsFloat64 {
@@ -4939,6 +5150,31 @@ impl Column {
         }
     }
 
+    /// Dense-cycle LEFT-join left lane (all-valid Int64). Equivalent to
+    /// `from_i64_repeat_runs` over every left row's fanout, but stores only the
+    /// certified key witnesses and source buffer.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_left_join_dense_cycle_left(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), left_witness.len);
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_left_join_dense_cycle_left_int64(
+                source,
+                left_witness,
+                right_witness,
+                total_len,
+            ),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
     /// Probe-order dense-cycle nullable build lane for one-sided joins. Matched
     /// rows replay the build side in stable duplicate order; unmatched probe
     /// rows materialize `Null(NullKind::Null)` under the supplied sparse mask.
@@ -4958,6 +5194,33 @@ impl Column {
                 source,
                 probe_witness,
                 build_witness,
+                total_len,
+            ),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Dense-cycle LEFT-join right lane (nullable Int64). Matched rows replay
+    /// `offset + k * period` positions from the right source; unmatched left
+    /// rows materialize as `Null(NullKind::Null)`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_left_join_dense_cycle_right_nullable(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), right_witness.len);
+        debug_assert_eq!(validity.len(), total_len);
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_left_join_dense_cycle_right_int64(
+                source,
+                left_witness,
+                right_witness,
                 total_len,
             ),
             validity,
@@ -5265,6 +5528,9 @@ impl Column {
                 return Some(data);
             }
             if let Some(data) = self.values.repeated_slices_i64_data() {
+                return Some(data);
+            }
+            if let Some(data) = self.values.left_join_dense_cycle_i64_data() {
                 return Some(data);
             }
         }

@@ -113,6 +113,25 @@ Longer paired gate, `csv_parse_dates_dt_year 100000 20`:
   attempted, but the scanner stalled for more than five minutes in `ast-grep`
   over the large `fp-frame` shadow copy and was terminated without findings.
 
+## Additional rebased validation evidence
+
+After this source/proof landed upstream, the same tree was rechecked with
+separate RCH crate-scoped gates:
+
+- `rch exec -- cargo test -j 1 -p fp-io csv_parse_dates --lib`: passed on
+  `vmi1153651`.
+- `rch exec -- cargo check -p fp-frame -p fp-io --all-targets`: passed on
+  `vmi1227854`.
+- `rch exec -- cargo clippy -p fp-frame -p fp-io --lib -- -D warnings`:
+  passed on `vmi1227854`.
+
+The rebased all-targets clippy attempt still fails only on pre-existing
+`fp-frame` test-only `type_complexity` and `useless_vec` warnings around
+`crates/fp-frame/src/lib.rs:82035+`. Rebased release-perf rebuild attempts were
+not used for the keep decision: one RCH worker build went stale and was
+canceled; a retry fell back local because no admissible worker slot was
+available and was stopped.
+
 ## Score
 
 Impact 2.0 x Confidence 4.0 / Effort 2.0 = 4.0. Keep.

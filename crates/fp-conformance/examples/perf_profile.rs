@@ -972,6 +972,13 @@ fn run_golden(scenario: &str, n: usize) {
         "df_kendall" => build_corr_frame(n, 32)
             .corr_method("kendall")
             .expect("kendall"),
+        "df_dot" => {
+            // GEMM C = A(m x k) · B(k x n): A is n rows x 256 cols, B is
+            // 256 x 256, so the result is n x 256.
+            let a = build_corr_frame(n, 256);
+            let b = build_corr_frame(256, 256);
+            a.dot(&b).expect("dot")
+        }
         "inner_join" => {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
@@ -1607,6 +1614,15 @@ fn main() {
             let frame = build_corr_frame(n, 64);
             for _ in 0..iters {
                 let out = frame.corr_method("spearman").expect("spearman");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_dot" => {
+            // GEMM C = A(n x 256) · B(256 x 256) -> n x 256.
+            let a = build_corr_frame(n, 256);
+            let b = build_corr_frame(256, 256);
+            for _ in 0..iters {
+                let out = a.dot(&b).expect("dot");
                 sink = sink.wrapping_add(out.len());
             }
         }

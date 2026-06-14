@@ -801,6 +801,50 @@ impl PyGroupBy {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
     }
+
+    fn var(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .var()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn std(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .std()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn median(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .median()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn prod(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .prod()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
 }
 
 /// Read a CSV file into a DataFrame.

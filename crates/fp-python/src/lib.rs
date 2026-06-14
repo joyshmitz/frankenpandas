@@ -194,6 +194,122 @@ impl PySeries {
             .collect::<PyResult<Vec<Py<PyAny>>>>()?;
         Ok(PyList::new(py, values)?.into_any().unbind())
     }
+
+    /// Return the median value.
+    fn median(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let r = self
+                .inner
+                .median()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            scalar_to_py(py, &r)
+        })
+    }
+
+    /// Return the (sample) variance.
+    fn var(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let r = self
+                .inner
+                .var()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            scalar_to_py(py, &r)
+        })
+    }
+
+    /// Return the product of the values.
+    fn prod(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let r = self
+                .inner
+                .prod()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            scalar_to_py(py, &r)
+        })
+    }
+
+    /// Return the quantile at `q` in [0, 1].
+    fn quantile(&self, q: f64) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let r = self
+                .inner
+                .quantile(q)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            scalar_to_py(py, &r)
+        })
+    }
+
+    /// Return the number of non-missing values.
+    fn count(&self) -> usize {
+        self.inner.count()
+    }
+
+    /// Return the number of distinct non-missing values.
+    fn nunique(&self) -> usize {
+        self.inner.nunique()
+    }
+
+    /// Return the sample skewness.
+    fn skew(&self) -> PyResult<f64> {
+        self.inner
+            .skew()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Return the sample (excess) kurtosis.
+    fn kurt(&self) -> PyResult<f64> {
+        self.inner
+            .kurt()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Return the absolute value of each element as a new Series.
+    fn abs(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .abs()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the cumulative sum as a new Series.
+    fn cumsum(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .cumsum()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return counts of unique values (descending) as a new Series.
+    fn value_counts(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .value_counts()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the distinct values as a Python list (order of first appearance).
+    fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values: Vec<Py<PyAny>> = self
+            .inner
+            .unique()
+            .iter()
+            .map(|s| scalar_to_py(py, s))
+            .collect::<PyResult<Vec<Py<PyAny>>>>()?;
+        Ok(PyList::new(py, values)?.into_any().unbind())
+    }
+
+    /// Sort the Series by value, returning a new Series.
+    #[pyo3(signature = (ascending=true))]
+    fn sort_values(&self, ascending: bool) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .sort_values(ascending)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
@@ -321,6 +437,60 @@ impl PyDataFrame {
         let result = self
             .inner
             .mean()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the median of each column.
+    fn median(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .median()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the standard deviation of each column.
+    fn std(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .std()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the variance of each column.
+    fn var(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .var()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the count of non-missing values per column.
+    fn count(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .count()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the minimum of each column.
+    fn min(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .min()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: result })
+    }
+
+    /// Return the maximum of each column.
+    fn max(&self) -> PyResult<PySeries> {
+        let result = self
+            .inner
+            .max()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: result })
     }

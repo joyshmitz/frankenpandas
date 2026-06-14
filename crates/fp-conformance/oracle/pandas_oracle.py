@@ -1229,7 +1229,10 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     def datetime_scalar_to_json(value: Any) -> dict[str, Any]:
         if pd.isna(value):
             return {"kind": "null", "value": "null"}
-        return {"kind": "utf8", "value": str(value)}
+        # to_datetime yields datetime64[ns]; represent as nanosecond epoch ticks
+        # to match FrankenPandas' typed Datetime64 output (br-frankenpandas-0ezw7),
+        # rather than the legacy str() form.
+        return {"kind": "datetime64", "value": int(pd.Timestamp(value).value)}
 
     return {
         "expected_series": {

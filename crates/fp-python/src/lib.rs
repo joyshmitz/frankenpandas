@@ -103,9 +103,9 @@ impl PySeries {
         self.inner.len()
     }
 
-    /// Return a string representation.
+    /// Return a string representation (renders values, like pandas).
     fn __repr__(&self) -> String {
-        format!("Series('{}', len={})", self.inner.name(), self.inner.len())
+        format!("{}", self.inner)
     }
 
     /// Return the sum of the Series.
@@ -465,13 +465,10 @@ impl PyDataFrame {
         self.inner.len()
     }
 
-    /// Return a string representation.
+    /// Return a string representation (renders the table, like pandas;
+    /// the underlying Display truncates to 60 rows).
     fn __repr__(&self) -> String {
-        format!(
-            "DataFrame(shape=({}, {}))",
-            self.inner.len(),
-            self.inner.columns().len()
-        )
+        format!("{}", self.inner)
     }
 
     /// Return the first n rows.

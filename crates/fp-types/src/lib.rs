@@ -407,8 +407,12 @@ pub enum Scalar {
     /// Nanoseconds since Unix epoch. Matches pandas `datetime64[ns]`.
     /// Uses `Timestamp::NAT` (i64::MIN) for missing values.
     Datetime64(i64),
-    /// Period ordinal. Uses i64::MIN for NaT (missing value).
-    Period(i64),
+    /// Period value (ordinal + frequency). A `Period` whose `ordinal` is
+    /// `i64::MIN` is NaT (missing). The frequency is carried so writers can
+    /// render the pandas calendar string (`2024Q1`, `2024-03`, ...) — the
+    /// calendar string is not recoverable from the ordinal alone, since
+    /// different frequencies share overlapping ordinal axes.
+    Period(Period),
     /// Numeric interval value. Missing values remain `Scalar::Null`.
     Interval(Interval),
 }
@@ -431,11 +435,11 @@ impl std::fmt::Display for Scalar {
                     write!(f, "Timestamp[{nanos}]")
                 }
             }
-            Self::Period(ordinal) => {
-                if *ordinal == i64::MIN {
+            Self::Period(p) => {
+                if p.ordinal == i64::MIN {
                     write!(f, "NaT")
                 } else {
-                    write!(f, "Period[{ordinal}]")
+                    write!(f, "{}", p.calendar_string())
                 }
             }
             Self::Interval(interval) => write!(f, "{interval}"),
@@ -505,7 +509,7 @@ impl Scalar {
             Self::Float64(v) => v.is_nan(),
             Self::Timedelta64(v) => *v == Timedelta::NAT,
             Self::Datetime64(v) => *v == Timestamp::NAT,
-            Self::Period(v) => *v == i64::MIN,
+            Self::Period(p) => p.ordinal == i64::MIN,
             _ => false,
         }
     }
@@ -575,7 +579,7 @@ impl Scalar {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
-            DType::Period => Self::Period(i64::MIN),
+            DType::Period => Self::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool
             | DType::BoolNullable
@@ -678,10 +682,10 @@ impl Scalar {
                 }
             }
             (Self::Period(a), Self::Period(b)) => {
-                if *a == i64::MIN || *b == i64::MIN {
+                if a.ordinal == i64::MIN || b.ordinal == i64::MIN {
                     std::cmp::Ordering::Equal
                 } else {
-                    a.cmp(b)
+                    a.ordinal.cmp(&b.ordinal)
                 }
             }
             (Self::Interval(a), Self::Interval(b)) => a
@@ -730,11 +734,11 @@ impl Scalar {
                 value: format!("Timestamp[{v}]"),
                 dtype: DType::Datetime64,
             }),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Err(TypeError::NonNumericValue {
-                value: format!("Period[{v}]"),
+            Self::Period(p) => Err(TypeError::NonNumericValue {
+                value: p.calendar_string(),
                 dtype: DType::Period,
             }),
             Self::Interval(v) => Err(TypeError::NonNumericValue {
@@ -763,10 +767,10 @@ impl Scalar {
                 kind: NullKind::NaT,
             }),
             Self::Datetime64(v) => Ok(*v),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Ok(*v),
+            Self::Period(p) => Ok(p.ordinal),
             Self::Interval(v) => Err(TypeError::NonNumericValue {
                 value: v.to_string(),
                 dtype: DType::Interval,
@@ -790,10 +794,10 @@ impl Scalar {
                 kind: NullKind::NaT,
             }),
             Self::Datetime64(v) => Ok(*v != 0),
-            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+            Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
             }),
-            Self::Period(v) => Ok(*v != 0),
+            Self::Period(p) => Ok(p.ordinal != 0),
             Self::Interval(_) => Ok(true),
         }
     }
@@ -817,8 +821,8 @@ impl Scalar {
             Self::Timedelta64(v) => Timedelta::format(*v),
             Self::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_string(),
             Self::Datetime64(v) => Timestamp::from_nanos(*v).isoformat(),
-            Self::Period(v) if *v == i64::MIN => "NaT".to_string(),
-            Self::Period(v) => format!("Period[{}]", v),
+            Self::Period(p) if p.ordinal == i64::MIN => "NaT".to_string(),
+            Self::Period(p) => p.calendar_string(),
             Self::Interval(v) => v.to_string(),
         }
     }
@@ -1077,9 +1081,11 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Period => match &value {
-            Scalar::Int64(v) => Ok(Scalar::Period(*v)),
+            // Int cast to a freq-less DType::Period: default to Daily (pandas
+            // requires an explicit freq in the dtype; ours is freq-less).
+            Scalar::Int64(v) => Ok(Scalar::Period(Period::new(*v, PeriodFreq::Daily))),
             Scalar::Utf8(s) => Period::parse(s)
-                .map(|period| Scalar::Period(period.ordinal))
+                .map(Scalar::Period)
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
@@ -1107,8 +1113,8 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Timedelta64(v) => Timedelta::format(v),
         Scalar::Datetime64(v) if v == Timestamp::NAT => "NaT".to_owned(),
         Scalar::Datetime64(v) => format!("Timestamp[{v}]"),
-        Scalar::Period(v) if v == i64::MIN => "NaT".to_owned(),
-        Scalar::Period(v) => format!("Period[{v}]"),
+        Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
+        Scalar::Period(p) => p.calendar_string(),
         Scalar::Interval(v) => v.to_string(),
     }
 }
@@ -3938,7 +3944,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Utf8(&'a str),
         Timedelta64(i64),
         Datetime64(i64),
-        Period(i64),
+        Period(i64, PeriodFreq),
         Interval(u64, u64, IntervalClosed),
     }
 
@@ -3957,7 +3963,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
             Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
             Scalar::Datetime64(v) => ScalarKey::Datetime64(*v),
-            Scalar::Period(v) => ScalarKey::Period(*v),
+            Scalar::Period(p) => ScalarKey::Period(p.ordinal, p.freq),
             Scalar::Interval(v) => ScalarKey::Interval(
                 normalized_float_bits(v.left),
                 normalized_float_bits(v.right),
@@ -4528,6 +4534,84 @@ impl Period {
             target: "Period".to_owned(),
         })
     }
+
+    /// Pandas calendar string for this period, matching `str(pd.Period)`.
+    ///
+    /// Inverts the frequency-specific ordinal axes anchored at 1970:
+    /// `1970`/`1970Q1`/`1970-01`/`1970-01-01`/`1970-01-01 00:00` all have
+    /// ordinal 0. Returns `"NaT"` for the missing sentinel (`i64::MIN`).
+    ///
+    /// Annual/Quarterly/Monthly/Daily and the sub-daily clocks
+    /// (Hourly/Minutely/Secondly) are exact. Weekly and Business use a
+    /// best-effort `YYYY-MM-DD` rendering (their pandas axes — a Sunday-ended
+    /// week range and a business-day count — are not yet wired; neither is
+    /// reachable through the current parse/cast paths).
+    #[must_use]
+    pub fn calendar_string(&self) -> String {
+        if self.ordinal == i64::MIN {
+            return "NaT".to_owned();
+        }
+        let ord = self.ordinal;
+        match self.freq {
+            PeriodFreq::Annual => {
+                let year = 1970 + ord;
+                format!("{year}")
+            }
+            PeriodFreq::Quarterly => {
+                let year = 1970 + ord.div_euclid(4);
+                let quarter = ord.rem_euclid(4) + 1;
+                format!("{year}Q{quarter}")
+            }
+            PeriodFreq::Monthly => {
+                let year = 1970 + ord.div_euclid(12);
+                let month = ord.rem_euclid(12) + 1;
+                format!("{year:04}-{month:02}")
+            }
+            PeriodFreq::Daily | PeriodFreq::Business | PeriodFreq::Weekly => {
+                let (y, m, d) = civil_from_days(ord);
+                format!("{y:04}-{m:02}-{d:02}")
+            }
+            PeriodFreq::Hourly => {
+                let (y, m, d) = civil_from_days(ord.div_euclid(24));
+                let hour = ord.rem_euclid(24);
+                format!("{y:04}-{m:02}-{d:02} {hour:02}:00")
+            }
+            PeriodFreq::Minutely => {
+                let day = ord.div_euclid(1440);
+                let mins = ord.rem_euclid(1440);
+                let (y, m, d) = civil_from_days(day);
+                format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", mins / 60, mins % 60)
+            }
+            PeriodFreq::Secondly => {
+                let day = ord.div_euclid(86_400);
+                let secs = ord.rem_euclid(86_400);
+                let (y, m, d) = civil_from_days(day);
+                format!(
+                    "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60
+                )
+            }
+        }
+    }
+}
+
+/// Convert a day count (days since 1970-01-01) to a proleptic-Gregorian
+/// `(year, month, day)`, using Howard Hinnant's civil-from-days algorithm
+/// (same kernel as `Timestamp::isoformat`).
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
 }
 
 fn parse_annual_period(value: &str) -> Option<i64> {
@@ -4573,11 +4657,10 @@ fn parse_quarter_period(value: &str) -> Option<(i64, u32)> {
 }
 
 impl std::fmt::Display for Period {
-    /// Phase 1: ordinal+freq form, e.g. `Period[Q-DEC, 216]`. Calendar-
-    /// formatted display (`2024Q1`, `2024-03`) lands in Phase 2 once the
-    /// ordinal-to-ymd arithmetic is wired.
+    /// Pandas `str(Period)` form: the calendar string (`2024`, `2024Q1`,
+    /// `2024-03`, `2024-01-15`, ...). NaT (ordinal `i64::MIN`) renders `NaT`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Period[{}, {}]", self.freq, self.ordinal)
+        f.write_str(&self.calendar_string())
     }
 }
 
@@ -4686,7 +4769,7 @@ mod tests {
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("2024Q1".to_owned()), DType::Period).expect("period cast"),
-            Scalar::Period(216)
+            Scalar::Period(Period::new(216, PeriodFreq::Quarterly))
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("(0, 1]".to_owned()), DType::Interval)
@@ -6400,9 +6483,27 @@ mod tests {
     }
 
     #[test]
-    fn period_display_carries_freq_and_ordinal() {
-        let p = Period::new(216, PeriodFreq::Quarterly);
-        assert_eq!(p.to_string(), "Period[Q-DEC, 216]");
+    fn period_display_is_pandas_calendar_string() {
+        // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
+        assert_eq!(Period::new(216, PeriodFreq::Quarterly).to_string(), "2024Q1");
+        // 1970 + 54 == 2024 on the annual axis.
+        assert_eq!(Period::new(54, PeriodFreq::Annual).to_string(), "2024");
+        // 1970-01 == 0 -> 2024-03 is 54*12 + 2 == 650 months.
+        assert_eq!(Period::new(650, PeriodFreq::Monthly).to_string(), "2024-03");
+        // Day 0 == 1970-01-01; 2024-01-15.
+        assert_eq!(
+            Period::new(fp_days("2024-01-15"), PeriodFreq::Daily).to_string(),
+            "2024-01-15"
+        );
+        assert_eq!(
+            Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)).to_string(),
+            "NaT"
+        );
+    }
+
+    #[cfg(test)]
+    fn fp_days(ymd: &str) -> i64 {
+        Period::parse(ymd).expect("daily period").ordinal
     }
 
     #[test]

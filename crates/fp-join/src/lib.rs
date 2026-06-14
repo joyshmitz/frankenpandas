@@ -7294,7 +7294,7 @@ impl<'a> ByKey<'a> {
             Scalar::Utf8(s) => ByKey::Str(s.as_str()),
             Scalar::Timedelta64(v) => ByKey::Timedelta(*v),
             Scalar::Datetime64(v) => ByKey::Datetime(*v),
-            Scalar::Period(v) => ByKey::Period(*v),
+            Scalar::Period(v) => ByKey::Period(v.ordinal),
             Scalar::Float64(_) | Scalar::Interval(_) => return None,
         })
     }

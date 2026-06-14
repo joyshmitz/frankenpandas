@@ -59,7 +59,7 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
         Scalar::Utf8(s) => s.into_py_any(py),
         Scalar::Datetime64(ns) => ns.into_py_any(py),
         Scalar::Timedelta64(ns) => ns.into_py_any(py),
-        Scalar::Period(ordinal) => ordinal.into_py_any(py),
+        Scalar::Period(p) => p.ordinal.into_py_any(py),
         Scalar::Interval(_) => Ok(py.None()),
     }
 }

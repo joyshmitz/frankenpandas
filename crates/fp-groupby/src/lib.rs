@@ -406,7 +406,7 @@ fn emit_groupby_result<'a>(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Float64(sum));
@@ -459,10 +459,10 @@ impl<'a> GroupKeyRef<'a> {
                 }
             }
             Scalar::Period(v) => {
-                if *v == i64::MIN {
+                if v.ordinal == i64::MIN {
                     Self::Null(NullKind::NaT)
                 } else {
-                    Self::Period(*v)
+                    Self::Period(v.ordinal)
                 }
             }
             Scalar::Interval(iv) => {
@@ -575,7 +575,7 @@ fn groupby_sum_timedelta64(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Timedelta64(sum));
@@ -659,7 +659,7 @@ fn groupby_sum_utf8(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Utf8(joined));
@@ -757,7 +757,7 @@ fn groupby_sum_int64(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(match i64::try_from(total) {
@@ -1615,7 +1615,7 @@ pub fn groupby_agg(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
 
@@ -1846,7 +1846,7 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
         Scalar::Null(_) => 0,
         Scalar::Timedelta64(v) => *v as u64,
         Scalar::Datetime64(v) => *v as u64,
-        Scalar::Period(v) => *v as u64,
+        Scalar::Period(v) => v.ordinal as u64,
         Scalar::Interval(iv) => iv.left.to_bits() ^ iv.right.to_bits(),
     }
 }

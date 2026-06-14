@@ -57,7 +57,8 @@
 use std::sync::{Arc, OnceLock};
 
 use fp_types::{
-    DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, Timedelta, Timestamp,
+    DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType, Timedelta,
+    Timestamp,
     TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
     nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean,
     nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
@@ -653,7 +654,10 @@ pub enum ColumnData {
     Utf8(Vec<String>),
     Timedelta64(Vec<i64>),
     Datetime64(Vec<i64>),
-    Period(Vec<i64>),
+    /// Period column: per-row ordinals plus the column-uniform frequency
+    /// (a pandas `PeriodArray` carries a single freq for the whole array).
+    /// `i64::MIN` ordinals are NaT.
+    Period(Vec<i64>, PeriodFreq),
     Interval(Vec<Interval>),
 }
 
@@ -900,15 +904,24 @@ impl ColumnData {
                 Self::Datetime64(data)
             }
             DType::Period => {
+                // A pandas PeriodArray has one freq for the whole column; take
+                // it from the first non-NaT Period (default Daily if none).
+                let freq = values
+                    .iter()
+                    .find_map(|v| match v {
+                        Scalar::Period(p) if p.ordinal != i64::MIN => Some(p.freq),
+                        _ => None,
+                    })
+                    .unwrap_or(PeriodFreq::Daily);
                 let data: Vec<i64> = values
                     .iter()
                     .map(|v| match v {
-                        Scalar::Period(n) => *n,
+                        Scalar::Period(p) => p.ordinal,
                         Scalar::Int64(i) => *i,
                         _ => i64::MIN, // NaT sentinel for Period
                     })
                     .collect();
-                Self::Period(data)
+                Self::Period(data, freq)
             }
             DType::Interval => {
                 let data: Vec<Interval> = values
@@ -993,14 +1006,14 @@ impl ColumnData {
                     }
                 })
                 .collect(),
-            Self::Period(data) => data
+            Self::Period(data, freq) => data
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) || *v == i64::MIN {
-                        Scalar::Period(i64::MIN)
+                        Scalar::Period(Period::new(i64::MIN, *freq))
                     } else {
-                        Scalar::Period(*v)
+                        Scalar::Period(Period::new(*v, *freq))
                     }
                 })
                 .collect(),
@@ -1027,7 +1040,7 @@ impl ColumnData {
             Self::Utf8(d) => d.len(),
             Self::Timedelta64(d) => d.len(),
             Self::Datetime64(d) => d.len(),
-            Self::Period(d) => d.len(),
+            Self::Period(d, _) => d.len(),
             Self::Interval(d) => d.len(),
         }
     }
@@ -4456,7 +4469,7 @@ enum SetMemberKey<'a> {
     Utf8(&'a str),
     Timedelta64(i64),
     Datetime64(i64),
-    Period(i64),
+    Period(i64, PeriodFreq),
     Interval(u64, u64, IntervalClosed),
 }
 
@@ -4471,7 +4484,7 @@ fn set_member_key(v: &Scalar) -> Option<SetMemberKey<'_>> {
         Scalar::Utf8(s) => SetMemberKey::Utf8(s.as_str()),
         Scalar::Timedelta64(v) => SetMemberKey::Timedelta64(*v),
         Scalar::Datetime64(v) => SetMemberKey::Datetime64(*v),
-        Scalar::Period(v) => SetMemberKey::Period(*v),
+        Scalar::Period(p) => SetMemberKey::Period(p.ordinal, p.freq),
         Scalar::Interval(v) => {
             let (left, right, closed) = interval_key(v);
             SetMemberKey::Interval(left, right, closed)
@@ -4706,9 +4719,15 @@ impl Column {
                     data.iter().copied().map(Scalar::Datetime64).collect(),
                 ))
             }
-            (Some(ColumnData::Period(data)), DType::Period) if data.len() == self.values.len() => {
+            (Some(ColumnData::Period(data, freq)), DType::Period)
+                if data.len() == self.values.len() =>
+            {
+                let freq = *freq;
                 Some(ScalarValues::from_vec(
-                    data.iter().copied().map(Scalar::Period).collect(),
+                    data.iter()
+                        .copied()
+                        .map(|ord| Scalar::Period(Period::new(ord, freq)))
+                        .collect(),
                 ))
             }
             _ => None,
@@ -6612,9 +6631,9 @@ impl Column {
                     values.push(Scalar::Datetime64(data[pos]));
                 }
             }
-            (DType::Period, ColumnData::Period(data)) => {
+            (DType::Period, ColumnData::Period(data, freq)) => {
                 for &pos in positions {
-                    values.push(Scalar::Period(data[pos]));
+                    values.push(Scalar::Period(Period::new(data[pos], *freq)));
                 }
             }
             _ => return None,
@@ -10308,7 +10327,7 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
-                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Period(p) => Key::Period(p.ordinal),
                 Scalar::Interval(v) => {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
@@ -10918,7 +10937,7 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
-                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Period(p) => Key::Period(p.ordinal),
                 Scalar::Interval(v) => {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
@@ -11393,7 +11412,7 @@ impl Column {
                 Scalar::Utf8(s) => !s.is_empty(),
                 Scalar::Timedelta64(x) => *x != 0,
                 Scalar::Datetime64(x) => *x != Timestamp::NAT,
-                Scalar::Period(x) => *x != i64::MIN,
+                Scalar::Period(p) => p.ordinal != i64::MIN,
                 Scalar::Interval(_) => true,
                 Scalar::Null(_) => false,
             };
@@ -12491,7 +12510,7 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
-                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Period(p) => Key::Period(p.ordinal),
                 Scalar::Interval(v) => {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
@@ -12696,10 +12715,10 @@ impl Column {
                     }
                 }
                 Scalar::Period(p) => {
-                    if *p == i64::MIN {
+                    if p.ordinal == i64::MIN {
                         None
                     } else {
-                        Some(LocalKey::Period(*p))
+                        Some(LocalKey::Period(p.ordinal))
                     }
                 }
                 Scalar::Interval(interval) => {
@@ -14570,7 +14589,7 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
-                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Period(p) => Key::Period(p.ordinal),
                 Scalar::Interval(v) => {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
@@ -14695,7 +14714,7 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
-                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Period(p) => Key::Period(p.ordinal),
                 Scalar::Interval(v) => {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
@@ -15173,7 +15192,9 @@ impl CrackIndex {
 mod tests {
     use std::sync::Arc;
 
-    use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
+    use fp_types::{
+        DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
+    };
 
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ScalarValues,
@@ -15267,7 +15288,11 @@ mod tests {
             ),
             (
                 DType::Period,
-                vec![Scalar::Period(10), Scalar::Period(-5), Scalar::Period(42)],
+                vec![
+                    Scalar::Period(Period::new(10, PeriodFreq::Daily)),
+                    Scalar::Period(Period::new(-5, PeriodFreq::Daily)),
+                    Scalar::Period(Period::new(42, PeriodFreq::Daily)),
+                ],
             ),
         ];
 

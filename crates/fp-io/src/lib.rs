@@ -2348,10 +2348,10 @@ fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
             }
         }
         Scalar::Period(value) => {
-            if *value == i64::MIN {
+            if value.ordinal == i64::MIN {
                 html_text("NaT", options.escape)
             } else {
-                html_text(&format!("Period[{value}]"), options.escape)
+                html_text(&value.calendar_string(), options.escape)
             }
         }
         Scalar::Interval(iv) => html_text(&format!("{iv}"), options.escape),
@@ -3313,10 +3313,10 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
             }
         }
         Scalar::Period(value) => {
-            if *value == i64::MIN {
+            if value.ordinal == i64::MIN {
                 None
             } else {
-                Some(format!("Period[{value}]"))
+                Some(value.calendar_string())
             }
         }
         Scalar::Interval(iv) => Some(format!("{iv}")),
@@ -3608,7 +3608,7 @@ fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
         // na_rep) and is corrected in scalar_to_latex_cell. (br-frankenpandas-tblnat)
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => "NaT".to_owned(),
         Scalar::Datetime64(v) if *v == Timestamp::NAT => "NaT".to_owned(),
-        Scalar::Period(v) if *v == i64::MIN => "NaT".to_owned(),
+        Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
         other => scalar_to_csv(other),
     }
 }
@@ -3627,7 +3627,7 @@ fn scalar_to_latex_cell(scalar: &Scalar, na_rep: &str) -> String {
         // markdown/string family. (br-frankenpandas-tblnat)
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
         Scalar::Datetime64(v) if *v == Timestamp::NAT => na_rep.to_owned(),
-        Scalar::Period(v) if *v == i64::MIN => na_rep.to_owned(),
+        Scalar::Period(p) if p.ordinal == i64::MIN => na_rep.to_owned(),
         // Rust `{:.6}` matches Python `%.6f` (round-half-to-even) and renders
         // infinities as "inf"/"-inf", exactly as pandas to_latex does.
         Scalar::Float64(v) => format!("{v:.6}"),
@@ -3856,11 +3856,11 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
                 format_datetime_ns(*v)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 String::new()
             } else {
-                format!("Period[{v}]")
+                p.calendar_string()
             }
         }
         Scalar::Interval(iv) => format!("{iv}"),
@@ -4673,10 +4673,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                     }
                 }
                 Scalar::Period(v) => {
-                    if v == i64::MIN {
+                    if v.ordinal == i64::MIN {
                         fp_index::IndexLabel::Utf8("<NaT>".to_owned())
                     } else {
-                        fp_index::IndexLabel::Utf8(format!("Period[{v}]"))
+                        fp_index::IndexLabel::Utf8(v.calendar_string())
                     }
                 }
                 Scalar::Interval(iv) => fp_index::IndexLabel::Utf8(format!("{iv}")),
@@ -5231,11 +5231,11 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
                 serde_json::json!(*v / 1_000_000)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(format!("Period[{v}]"))
+                serde_json::Value::String(p.calendar_string())
             }
         }
         Scalar::Interval(iv) => serde_json::Value::String(format!("{iv}")),
@@ -6365,11 +6365,11 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             let mut builder = Int64Builder::with_capacity(column.len());
             for value in column.values() {
                 match value {
-                    Scalar::Period(ordinal) => {
-                        if *ordinal == i64::MIN {
+                    Scalar::Period(p) => {
+                        if p.ordinal == i64::MIN {
                             builder.append_null();
                         } else {
-                            builder.append_value(*ordinal);
+                            builder.append_value(p.ordinal);
                         }
                     }
                     _ if value.is_missing() => builder.append_null(),
@@ -7490,10 +7490,10 @@ fn write_excel_scalar(
                     .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
         }
-        Scalar::Period(v) => {
-            if *v != i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal != i64::MIN {
                 worksheet
-                    .write_string(excel_row, excel_col, format!("Period[{v}]"))
+                    .write_string(excel_row, excel_col, p.calendar_string())
                     .map_err(|e| IoError::Excel(format!("write period: {e}")))?;
             }
         }
@@ -8820,11 +8820,11 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
                 rusqlite::types::Value::Integer(*v)
             }
         }
-        Scalar::Period(v) => {
-            if *v == i64::MIN {
+        Scalar::Period(p) => {
+            if p.ordinal == i64::MIN {
                 rusqlite::types::Value::Null
             } else {
-                rusqlite::types::Value::Integer(*v)
+                rusqlite::types::Value::Integer(p.ordinal)
             }
         }
         Scalar::Interval(iv) => rusqlite::types::Value::Text(format!("{iv}")),
@@ -14862,7 +14862,10 @@ mod tests {
             "NaT"
         );
         assert_eq!(
-            super::scalar_to_table_with_na(&Scalar::Period(i64::MIN), na),
+            super::scalar_to_table_with_na(
+                &Scalar::Period(fp_types::Period::new(i64::MIN, fp_types::PeriodFreq::Daily)),
+                na
+            ),
             "NaT"
         );
         // latex (scalar_to_latex_cell): ALL missing collapse to na_rep.
@@ -14879,7 +14882,10 @@ mod tests {
             na
         );
         assert_eq!(
-            super::scalar_to_latex_cell(&Scalar::Period(i64::MIN), na),
+            super::scalar_to_latex_cell(
+                &Scalar::Period(fp_types::Period::new(i64::MIN, fp_types::PeriodFreq::Daily)),
+                na
+            ),
             na
         );
         // A non-NaT datetime still renders normally (sanity).

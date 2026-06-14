@@ -128,8 +128,9 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar, cast_scalar_owned, common_dtype,
-    dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum, nanvar,
+    DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp, cast_scalar,
+    cast_scalar_owned, common_dtype, dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd,
+    nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -6359,7 +6360,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
         }
         DType::Datetime64 => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
-        DType::Period => Scalar::Period(i64::from(payload % 100)),
+        DType::Period => Scalar::Period(Period::new(i64::from(payload % 100), PeriodFreq::Daily)),
         DType::Interval => Scalar::Interval(fp_types::Interval {
             left: f64::from(payload % 10),
             right: f64::from(payload % 10 + 5),
@@ -17259,10 +17260,10 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                 format!("dt:{v}")
             }
             Scalar::Period(v) => {
-                if *v == i64::MIN {
+                if v.ordinal == i64::MIN {
                     return Err("groupby composite key component cannot be NaT".to_owned());
                 }
-                format!("pd:{v}")
+                format!("pd:{}:{}", v.freq, v.ordinal)
             }
             Scalar::Interval(iv) => format!("iv:{iv}"),
             Scalar::Null(_) => {

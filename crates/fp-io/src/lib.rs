@@ -4163,6 +4163,10 @@ fn apply_one_parse_date_combination(
 }
 
 fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, IoError> {
+    if let Some(parsed) = parse_csv_fixed_naive_datetime_values(values) {
+        return Ok(Some(parsed));
+    }
+
     // pandas pd.read_csv(parse_dates=[col]) parses each value on its own —
     // a column with mixed naive ("2024-01-15 10:30:00") and aware
     // ("2024-01-15T10:30:00Z") entries normalizes each value
@@ -4192,6 +4196,111 @@ fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, I
     } else {
         Ok(Some(parsed))
     }
+}
+
+fn parse_csv_fixed_naive_datetime_values(values: &[Scalar]) -> Option<Vec<Scalar>> {
+    let mut parsed = Vec::with_capacity(values.len());
+    let mut saw_datetime = false;
+
+    for value in values {
+        match value {
+            Scalar::Utf8(text) => {
+                parsed.push(Scalar::Datetime64(parse_fixed_naive_csv_datetime_nanos(
+                    text,
+                )?));
+                saw_datetime = true;
+            }
+            Scalar::Null(_) => parsed.push(Scalar::Datetime64(Timestamp::NAT)),
+            _ => return None,
+        }
+    }
+
+    saw_datetime.then_some(parsed)
+}
+
+fn parse_fixed_naive_csv_datetime_nanos(value: &str) -> Option<i64> {
+    let bytes = value.trim().as_bytes();
+    let (year, month, day, hour, minute, second) = match bytes.len() {
+        10 => (
+            parse_4_digits(bytes, 0)?,
+            parse_2_digits(bytes, 5)?,
+            parse_2_digits(bytes, 8)?,
+            0,
+            0,
+            0,
+        ),
+        19 => (
+            parse_4_digits(bytes, 0)?,
+            parse_2_digits(bytes, 5)?,
+            parse_2_digits(bytes, 8)?,
+            parse_2_digits(bytes, 11)?,
+            parse_2_digits(bytes, 14)?,
+            parse_2_digits(bytes, 17)?,
+        ),
+        _ => return None,
+    };
+
+    if bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || (bytes.len() == 19
+            && (bytes.get(10) != Some(&b' ')
+                || bytes.get(13) != Some(&b':')
+                || bytes.get(16) != Some(&b':')))
+        || !valid_ymd(year, month, day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_ymd(year, month, day);
+    days.checked_mul(Timedelta::NANOS_PER_DAY)?
+        .checked_add(hour.checked_mul(Timedelta::NANOS_PER_HOUR)?)?
+        .checked_add(minute.checked_mul(Timedelta::NANOS_PER_MIN)?)?
+        .checked_add(second.checked_mul(Timedelta::NANOS_PER_SEC)?)
+}
+
+fn parse_2_digits(bytes: &[u8], offset: usize) -> Option<i64> {
+    let hi = *bytes.get(offset)?;
+    let lo = *bytes.get(offset + 1)?;
+    if !hi.is_ascii_digit() || !lo.is_ascii_digit() {
+        return None;
+    }
+    Some((i64::from(hi - b'0') * 10) + i64::from(lo - b'0'))
+}
+
+fn parse_4_digits(bytes: &[u8], offset: usize) -> Option<i64> {
+    let hi = parse_2_digits(bytes, offset)?;
+    let lo = parse_2_digits(bytes, offset + 2)?;
+    Some((hi * 100) + lo)
+}
+
+fn valid_ymd(year: i64, month: i64, day: i64) -> bool {
+    if !(1..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - (era * 400);
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy;
+    (era * 146_097) + doe - 719_468
 }
 
 fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
@@ -12770,7 +12879,7 @@ mod tests {
     use fp_columnar::Column;
     use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
-    use fp_types::{DType, NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar, Timestamp};
 
     use super::{
         CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, Float64QuarterAffineCsvPlan,
@@ -21936,6 +22045,36 @@ mod tests {
             frame.column("value").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
         );
+    }
+
+    #[test]
+    fn csv_parse_dates_fixed_naive_fast_path_accepts_only_safe_domain() {
+        let values = vec![
+            Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+            Scalar::Utf8("2024-02-29".to_owned()),
+            Scalar::Null(NullKind::NaT),
+        ];
+        let parsed = super::parse_csv_fixed_naive_datetime_values(&values).expect("fixed parse");
+        assert_eq!(
+            parsed,
+            vec![
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_709_164_800_000_000_000),
+                Scalar::Datetime64(Timestamp::NAT),
+            ]
+        );
+
+        for rejected in [
+            "2024-01-15T10:30:00Z",
+            "2024-02-30",
+            "2024-01-15 10:30:00.123",
+        ] {
+            assert!(
+                super::parse_csv_fixed_naive_datetime_values(&[Scalar::Utf8(rejected.to_owned())])
+                    .is_none(),
+                "{rejected:?} must use the general parse_dates path"
+            );
+        }
     }
 
     #[test]

@@ -2894,7 +2894,9 @@ proptest! {
                     IndexLabel::Int64(_)
                     | IndexLabel::Utf8(_)
                     | IndexLabel::Timedelta64(_)
-                    | IndexLabel::Datetime64(_) => {}
+                    | IndexLabel::Datetime64(_)
+                    | IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_) => {}
                     // All labels must be non-null when dropna=true. This used
                     // to be vacuous (IndexLabel had no null variant); since
                     // br-frankenpandas-joeff added IndexLabel::Null it is a
@@ -6310,11 +6312,11 @@ proptest! {
         factor in 0.25f64..5.0,
     ) {
         let baseline = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let scaled = scale_series(&series, factor);
         let scaled_change = scaled
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed after positive scaling");
         prop_assert!(
             approx_equal_series(&baseline, &scaled_change),
@@ -6329,11 +6331,11 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let baseline = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let flipped = sign_flip_series(&series);
         let flipped_change = flipped
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed after sign flipping");
         prop_assert!(
             approx_equal_series(&baseline, &flipped_change),
@@ -6348,7 +6350,7 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let observed = series
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("Series::pct_change() must succeed for numeric inputs");
         let reconstructed = reconstruct_pct_change_series(&series, periods);
         prop_assert!(
@@ -6365,11 +6367,11 @@ proptest! {
         factor in 0.25f64..5.0,
     ) {
         let baseline = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let scaled = scale_dataframe(&df, factor);
         let scaled_change = scaled
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed after positive scaling");
         prop_assert!(
             approx_equal_dataframe(&baseline, &scaled_change),
@@ -6384,11 +6386,11 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let baseline = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let flipped = sign_flip_dataframe(&df);
         let flipped_change = flipped
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed after sign flipping");
         prop_assert!(
             approx_equal_dataframe(&baseline, &flipped_change),
@@ -6403,7 +6405,7 @@ proptest! {
         periods in 1usize..=3,
     ) {
         let observed = df
-            .pct_change(periods)
+            .pct_change(periods as i64)
             .expect("DataFrame::pct_change() must succeed for numeric inputs");
         let reconstructed = reconstruct_pct_change_dataframe(&df, periods);
         prop_assert!(

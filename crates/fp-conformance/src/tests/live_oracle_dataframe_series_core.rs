@@ -21220,6 +21220,7 @@ fn live_oracle_series_to_datetime_unit_milliseconds() {
             utc: false,
             origin: None,
             infer_mixed_timezone: true,
+            mixed_tz_as_object: false,
         },
     )
     .expect("to_datetime");
@@ -33916,6 +33917,7 @@ fn live_oracle_series_to_datetime_unit_microseconds() {
             utc: false,
             origin: None,
             infer_mixed_timezone: true,
+            mixed_tz_as_object: false,
         },
     )
     .expect("to_datetime");
@@ -33970,6 +33972,7 @@ fn live_oracle_series_to_datetime_unit_minutes() {
             utc: false,
             origin: None,
             infer_mixed_timezone: true,
+            mixed_tz_as_object: false,
         },
     )
     .expect("to_datetime");

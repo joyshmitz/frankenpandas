@@ -4176,6 +4176,9 @@ fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, I
         values,
         ToDatetimeOptions {
             infer_mixed_timezone: false,
+            // pandas keeps a mixed naive+tz-aware parse_dates column as object
+            // rather than datetime64 (br-frankenpandas-unz0t).
+            mixed_tz_as_object: true,
             ..ToDatetimeOptions::default()
         },
     )?;
@@ -21895,15 +21898,14 @@ mod tests {
 
     #[test]
     fn csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value() {
-        // pandas pd.read_csv(parse_dates=["ts"]) normalizes each value
-        // independently when the column has mixed naive + aware timestamps:
-        // the naive entry is represented as typed Datetime64, and the aware
-        // entry stays in offset string form because the scalar model has no
-        // timezone metadata slot.
-        // The previous "preserves object" behavior locked the entire
-        // column to the first inferred timezone pattern and silently
-        // rejected mismatched values; conformance fixture FP-P2D-429
-        // documents the pandas-2.2.3 expectation.
+        // pandas pd.read_csv(parse_dates=["ts"]) CANNOT unify a column mixing
+        // tz-naive and tz-aware timestamps into datetime64[ns], so it keeps the
+        // whole column as object — a Series of mixed Timestamp objects whose
+        // str() forms are the naive `YYYY-MM-DD HH:MM:SS` and the aware
+        // `... +HH:MM`. FrankenPandas reproduces that (br-frankenpandas-unz0t):
+        // both entries are normalized to their pandas object-string form rather
+        // than coercing the naive one to Datetime64 (which contradicted both
+        // pandas and conformance fixture FP-P2D-mixed-timezone).
         let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
         let opts = CsvReadOptions {
             parse_dates: Some(vec!["ts".to_owned()]),
@@ -21913,7 +21915,7 @@ mod tests {
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
                 Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
             ]
         );

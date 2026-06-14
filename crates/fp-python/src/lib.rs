@@ -653,6 +653,24 @@ impl PyDataFrame {
         self.inner.to_csv(',', false)
     }
 
+    /// Export to a column-oriented dict `{column: [values]}` (pandas
+    /// `DataFrame.to_dict(orient="list")`).
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let out = PyDict::new(py);
+        for name in self.inner.column_names() {
+            let col = self.inner.column(name).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+            })?;
+            let values: Vec<Py<PyAny>> = col
+                .values()
+                .iter()
+                .map(|s| scalar_to_py(py, s))
+                .collect::<PyResult<Vec<_>>>()?;
+            out.set_item(name, PyList::new(py, values)?)?;
+        }
+        Ok(out.into_any().unbind())
+    }
+
     /// Render the DataFrame as an HTML table (pandas `DataFrame.to_html`).
     #[pyo3(signature = (index=true))]
     fn to_html(&self, index: bool) -> String {

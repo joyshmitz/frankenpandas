@@ -89,20 +89,70 @@ fn golden() -> String {
     out
 }
 
-fn main() {
-    let g = golden();
-    print!("GOLDEN_BEGIN\n{g}GOLDEN_END\n");
-
-    let n: usize = 1_000_000;
+fn gen_i64(n: usize, modulo: i64) -> Vec<i64> {
     let mut x: u64 = 0x9e37_79b9;
-    let vals: Vec<i64> = (0..n)
+    (0..n)
         .map(|_| {
             x = x
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            (x >> 16) as i64 % 1_000_000
+            (x >> 16) as i64 % modulo
         })
-        .collect();
+        .collect()
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(String::as_str).unwrap_or("bench");
+
+    if mode == "ab" {
+        // Same-process A/B for the Int64 sort_values lever (br-frankenpandas-p4zpz):
+        // inlined O(n log n) comparison argsort (the pre-lever path) vs the O(n)
+        // stable `fp_columnar::radix_argsort_i64`. One process => reliable ratio
+        // despite variable rch worker speed; the per-iter equality assert is the
+        // isomorphism proof on 2M random values WITH heavy ties (modulo 1e6).
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(15);
+        let vals = gen_i64(n, 1_000_000);
+        let (mut cmp_ns, mut rad_ns) = (0u128, 0u128);
+        let (mut sink_a, mut sink_b) = (0usize, 0usize);
+        for ascending in [true, false] {
+            for _ in 0..iters {
+                let t = Instant::now();
+                let mut keyed: Vec<(usize, i64)> = vals.iter().copied().enumerate().collect();
+                keyed.sort_by(|left, right| {
+                    let order = left.1.cmp(&right.1);
+                    if ascending { order } else { order.reverse() }
+                });
+                let order_cmp: Vec<usize> = keyed.into_iter().map(|(p, _)| p).collect();
+                cmp_ns += t.elapsed().as_nanos();
+                sink_a = sink_a.wrapping_add(order_cmp[0]);
+
+                let t = Instant::now();
+                let order_rad = fp_columnar::radix_argsort_i64(&vals, ascending);
+                rad_ns += t.elapsed().as_nanos();
+                sink_b = sink_b.wrapping_add(order_rad[0]);
+
+                assert_eq!(
+                    order_cmp, order_rad,
+                    "ISOMORPHISM FAIL (ascending={ascending}): radix order != comparison order"
+                );
+            }
+        }
+        let cmp_ms = cmp_ns as f64 / 1e6 / (iters * 2) as f64;
+        let rad_ms = rad_ns as f64 / 1e6 / (iters * 2) as f64;
+        println!(
+            "AB n={n} iters={iters}x2dir comparison={cmp_ms:.3}ms radix={rad_ms:.3}ms ratio={:.3}x (sink {sink_a}/{sink_b})",
+            cmp_ms / rad_ms
+        );
+        return;
+    }
+
+    let g = golden();
+    print!("GOLDEN_BEGIN\n{g}GOLDEN_END\n");
+
+    let n: usize = 1_000_000;
+    let vals = gen_i64(n, 1_000_000);
     let s = s_i64(vals);
 
     let _ = s.sort_values(true).unwrap(); // warmup

@@ -290,6 +290,12 @@ pub struct CsvReadOptions {
     /// Matches pandas `lineterminator` (C-engine only). `None` keeps
     /// the default CRLF/LF handling.
     pub lineterminator: Option<u8>,
+    /// When true, skip ASCII spaces (0x20 only, not tabs) immediately after a
+    /// delimiter and at each field start, before quote handling. Matches pandas
+    /// `skipinitialspace` (default false). Trailing spaces are preserved; spaces
+    /// inside quoted fields are preserved; a space-then-quote field (`   "x,y"`)
+    /// is parsed as the quoted value.
+    pub skipinitialspace: bool,
 }
 
 impl Default for CsvReadOptions {
@@ -319,6 +325,7 @@ impl Default for CsvReadOptions {
             doublequote: true,
             skipfooter: 0,
             lineterminator: None,
+            skipinitialspace: false,
         }
     }
 }
@@ -566,6 +573,7 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
         doublequote: true,
         skipfooter: options.skipfooter,
         lineterminator: None,
+        skipinitialspace: false,
     }
 }
 
@@ -4329,7 +4337,92 @@ fn should_skip_bad_csv_record(
 
 // ── CSV with options ───────────────────────────────────────────────────
 
+/// Strip ASCII spaces (0x20) at each unquoted field start for `skipinitialspace`
+/// (br-frankenpandas-i4h5g). A field starts at line start and immediately after a
+/// delimiter; spaces there are dropped until the first non-space byte. Quote
+/// state is tracked so spaces inside quoted fields (and delimiters/terminators
+/// inside quotes) are preserved, and a `   "x,y"` field becomes the quoted value.
+/// `doublequote` (a doubled quotechar = literal quote, stay in quote) and
+/// `escapechar` (next byte is literal) are honored. Only ASCII 0x20 is stripped
+/// (tabs are kept, matching pandas); trailing spaces are preserved. Every byte
+/// other than the stripped leading spaces is copied verbatim, so the output is
+/// valid UTF-8 and the downstream parse is byte-identical except for the removed
+/// leading spaces.
+fn apply_skipinitialspace(
+    input: &str,
+    delimiter: u8,
+    quotechar: u8,
+    doublequote: bool,
+    escapechar: Option<u8>,
+    lineterminator: Option<u8>,
+) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let is_terminator = |b: u8| match lineterminator {
+        Some(t) => b == t,
+        None => b == b'\n' || b == b'\r',
+    };
+    let mut in_quote = false;
+    let mut at_field_start = true;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quote {
+            out.push(b);
+            if let Some(esc) = escapechar
+                && b == esc
+                && i + 1 < bytes.len()
+            {
+                out.push(bytes[i + 1]);
+                i += 2;
+                continue;
+            }
+            if b == quotechar {
+                if doublequote && i + 1 < bytes.len() && bytes[i + 1] == quotechar {
+                    out.push(quotechar);
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if at_field_start && b == b' ' {
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        if at_field_start && b == quotechar {
+            in_quote = true;
+            at_field_start = false;
+        } else {
+            at_field_start = b == delimiter || is_terminator(b);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
+    // br-frankenpandas-i4h5g: pandas `skipinitialspace` strips leading ASCII
+    // spaces at each field start BEFORE quote handling, so it cannot be expressed
+    // as a post-parse field trim. Rewrite the raw input once (quote/escape-aware)
+    // and re-enter with the flag cleared, so the existing fast paths still apply
+    // to the stripped text.
+    if options.skipinitialspace {
+        let processed = apply_skipinitialspace(
+            input,
+            options.delimiter,
+            options.quotechar,
+            options.doublequote,
+            options.escapechar,
+            options.lineterminator,
+        );
+        let mut opts = options.clone();
+        opts.skipinitialspace = false;
+        return read_csv_with_options(&processed, &opts);
+    }
     if csv_read_options_match_default_fast_path(options) {
         return read_csv_str(input);
     }
@@ -14818,8 +14911,51 @@ mod tests {
             (0.00012345, "0.00012345"),
         ];
         for &(v, expected) in cases {
-            assert_eq!(super::format_pandas_float(v), expected, "format_pandas_float({v:?})");
+            assert_eq!(
+                super::format_pandas_float(v),
+                expected,
+                "format_pandas_float({v:?})"
+            );
         }
+    }
+
+    #[test]
+    fn skipinitialspace_preprocessor_strips_leading_field_spaces_i4h5g() {
+        let f = |s: &str| super::apply_skipinitialspace(s, b',', b'"', true, None, None);
+        // Leading spaces at every field start (first field + header + after
+        // delimiter) stripped; trailing spaces kept; verified vs pandas 2.2.3.
+        assert_eq!(f(" a,  b\n  x,  y  \n"), "a,b\nx,y  \n");
+        // Space before a quoted field is stripped, the quote is then honored, and
+        // spaces INSIDE the quotes are preserved.
+        assert_eq!(f("a,b\nx,  \"  q,q  \"\n"), "a,b\nx,\"  q,q  \"\n");
+        // Tabs are not stripped (only ASCII 0x20).
+        assert_eq!(f("a,b\nx,\t y\n"), "a,b\nx,\t y\n");
+        // An all-space field collapses to empty.
+        assert_eq!(f("a,   ,b\n"), "a,,b\n");
+        // Doubled quotes inside a quoted field stay intact.
+        assert_eq!(f("a\n  \"x\"\"y\"\n"), "a\n\"x\"\"y\"\n");
+    }
+
+    #[test]
+    fn read_csv_skipinitialspace_strips_field_leading_spaces_i4h5g() {
+        use super::{CsvReadOptions, read_csv_with_options, write_csv_string};
+        let opts = CsvReadOptions {
+            skipinitialspace: true,
+            ..Default::default()
+        };
+        // Object columns: leading spaces at each field start are dropped.
+        let frame = read_csv_with_options("k,v\n  aa,bb\n cc,  dd\n", &opts).expect("read");
+        assert_eq!(
+            write_csv_string(&frame).expect("write"),
+            "k,v\naa,bb\ncc,dd\n"
+        );
+        // Default (skipinitialspace=false) keeps the leading spaces.
+        let frame_def =
+            read_csv_with_options("k,v\n  aa,bb\n", &CsvReadOptions::default()).expect("read");
+        assert_eq!(
+            write_csv_string(&frame_def).expect("write"),
+            "k,v\n  aa,bb\n"
+        );
     }
 
     #[test]
@@ -15011,7 +15147,10 @@ mod tests {
 
         // Empty header for a sole column is quoted too (DataFrame({'':['a','b']})).
         let named = frame.rename_columns(&[("a", "")]).expect("rename");
-        assert_eq!(write_csv_string(&named).expect("write2"), "\"\"\n\"\"\nx\ny\n");
+        assert_eq!(
+            write_csv_string(&named).expect("write2"),
+            "\"\"\n\"\"\nx\ny\n"
+        );
     }
 
     #[test]

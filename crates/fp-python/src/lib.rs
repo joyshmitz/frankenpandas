@@ -329,6 +329,73 @@ impl PySeries {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: r })
     }
+
+    /// Return the cumulative product as a new Series.
+    fn cumprod(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .cumprod()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the cumulative minimum as a new Series.
+    fn cummin(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .cummin()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the cumulative maximum as a new Series.
+    fn cummax(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .cummax()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the discrete first difference over `periods`.
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: i64) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .diff(periods)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return the fractional change over `periods`.
+    #[pyo3(signature = (periods=1))]
+    fn pct_change(&self, periods: i64) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .pct_change(periods)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Round each value to `decimals` places, returning a new Series.
+    #[pyo3(signature = (decimals=0))]
+    fn round(&self, decimals: i32) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .round(decimals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Compute numerical data ranks (pandas `Series.rank`).
+    #[pyo3(signature = (method="average", ascending=true, na_option="keep"))]
+    fn rank(&self, method: &str, ascending: bool, na_option: &str) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .rank(method, ascending, na_option)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.

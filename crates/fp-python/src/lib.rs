@@ -648,9 +648,19 @@ impl PyDataFrame {
         })
     }
 
-    /// Export to CSV string.
-    fn to_csv(&self) -> String {
-        self.inner.to_csv(',', false)
+    /// Export to CSV. With no `path`, returns the CSV string; with a `path`,
+    /// writes the file and returns `None` (pandas `DataFrame.to_csv`).
+    #[pyo3(signature = (path=None, index=false))]
+    fn to_csv(&self, path: Option<&str>, index: bool) -> PyResult<Option<String>> {
+        let csv = self.inner.to_csv(',', index);
+        match path {
+            Some(p) => {
+                std::fs::write(p, csv)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+                Ok(None)
+            }
+            None => Ok(Some(csv)),
+        }
     }
 
     /// Export to a column-oriented dict `{column: [values]}` (pandas

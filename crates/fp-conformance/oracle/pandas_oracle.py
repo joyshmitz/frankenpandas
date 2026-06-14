@@ -787,7 +787,9 @@ def op_csv_read_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"csv_read_frame failed: {exc}") from exc
 
-    return {"expected_frame": dataframe_to_json(frame)}
+    # parse_dates produces typed datetime64[ns] columns in FrankenPandas, so
+    # serialize them as datetime64 ticks rather than utf8 (br-frankenpandas-0ezw7).
+    return {"expected_frame": dataframe_to_json(frame, datetime_as_typed=True)}
 
 
 def op_index_align_union(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3111,12 +3113,31 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
     return frame
 
 
-def dataframe_to_json(frame) -> dict[str, Any]:
+def dataframe_to_json(frame, datetime_as_typed: bool = False) -> dict[str, Any]:
+    # `datetime_as_typed`: serialize naive datetime64[ns] COLUMNS as
+    # {kind: datetime64, value: <ns>} rather than the legacy utf8 str() form, to
+    # match FrankenPandas' typed Datetime64 columns from parse_dates
+    # (br-frankenpandas-0ezw7). Off by default so every other caller is
+    # unchanged. Mixed-tz / object columns (pandas keeps them object) are NOT
+    # datetime64[ns] dtype, so they still route through scalar_to_json.
     columns: dict[str, list[dict[str, Any]]] = {}
     column_order: list[str] = []
     for position, name in enumerate(frame.columns.tolist()):
         key = str(name)
-        values = [scalar_to_json(v) for v in frame.iloc[:, position].tolist()]
+        col = frame.iloc[:, position]
+        if (
+            datetime_as_typed
+            and _PD is not None
+            and _PD.api.types.is_datetime64_ns_dtype(col.dtype)
+        ):
+            values = [
+                {"kind": "null", "value": "null"}
+                if _PD.isna(v)
+                else {"kind": "datetime64", "value": int(_PD.Timestamp(v).value)}
+                for v in col.tolist()
+            ]
+        else:
+            values = [scalar_to_json(v) for v in col.tolist()]
         if key in columns and columns[key] != values:
             raise OracleError(
                 f"duplicate column label {key!r} has non-identical values and cannot be represented"

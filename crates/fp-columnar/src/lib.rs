@@ -58,11 +58,10 @@ use std::sync::{Arc, OnceLock};
 
 use fp_types::{
     DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType, Timedelta,
-    Timestamp,
-    TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
-    nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean,
-    nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
-    nanvar,
+    Timestamp, TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall,
+    nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax,
+    nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd,
+    nansum, nanvar,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -1512,6 +1511,20 @@ enum ScalarValues {
         positions: Arc<[usize]>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred null-introducing Utf8 contiguous-range gather. This is the
+    /// common ordered-join shape where missing slots form a prefix and/or
+    /// suffix while present slots read one contiguous source range. It is
+    /// semantically the same as `LazyGatherUtf8` over
+    /// `[MAX; prefix] + start..start+len + [MAX; suffix]`, but stores O(1)
+    /// descriptors instead of an O(output) position tape.
+    LazyNullableUtf8Range {
+        source: Arc<[Scalar]>,
+        null_prefix: usize,
+        source_start: usize,
+        source_len: usize,
+        null_suffix: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
     /// repeat runs (br-frankenpandas-3ad4n) — e.g. the left lanes of a dense
     /// inner join, where every matched left value repeats `bucket_len` times.
@@ -1951,6 +1964,28 @@ impl ScalarValues {
         Self::LazyGatherUtf8 {
             source,
             positions,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_utf8_range(
+        source: Arc<[Scalar]>,
+        null_prefix: usize,
+        source_start: usize,
+        source_len: usize,
+        null_suffix: usize,
+    ) -> Self {
+        debug_assert!(
+            source_start
+                .checked_add(source_len)
+                .is_some_and(|end| end <= source.len())
+        );
+        Self::LazyNullableUtf8Range {
+            source,
+            null_prefix,
+            source_start,
+            source_len,
+            null_suffix,
             values: OnceLock::new(),
         }
     }
@@ -2716,7 +2751,7 @@ impl ScalarValues {
             Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
                 .as_slice(),
-            Self::LazyAllValidFloat64 { data, values } => values
+            Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
             Self::LazyAllValidFloat64Chunks { chunks, values, .. } => values
@@ -2865,6 +2900,29 @@ impl ScalarValues {
                                 Scalar::Null(NullKind::Null)
                             } else {
                                 source[pos].clone()
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyNullableUtf8Range {
+                source,
+                null_prefix,
+                source_start,
+                source_len,
+                null_suffix,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let total_len = null_prefix + source_len + null_suffix;
+                    (0..total_len)
+                        .map(|out_idx| {
+                            if out_idx < *null_prefix
+                                || out_idx >= null_prefix.saturating_add(*source_len)
+                            {
+                                Scalar::Null(NullKind::Null)
+                            } else {
+                                source[source_start + out_idx - null_prefix].clone()
                             }
                         })
                         .collect()
@@ -3305,6 +3363,12 @@ impl ScalarValues {
             Self::LazyLowerHexSequenceUtf8 { len, .. } => *len,
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyGatherUtf8 { positions, .. } => positions.len(),
+            Self::LazyNullableUtf8Range {
+                null_prefix,
+                source_len,
+                null_suffix,
+                ..
+            } => null_prefix + source_len + null_suffix,
             Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyNullableBool { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
@@ -3524,6 +3588,20 @@ impl Clone for ScalarValues {
             Self::LazyGatherUtf8 {
                 source, positions, ..
             } => Self::lazy_gather_utf8(Arc::clone(source), Arc::clone(positions)),
+            Self::LazyNullableUtf8Range {
+                source,
+                null_prefix,
+                source_start,
+                source_len,
+                null_suffix,
+                ..
+            } => Self::lazy_nullable_utf8_range(
+                Arc::clone(source),
+                *null_prefix,
+                *source_start,
+                *source_len,
+                *null_suffix,
+            ),
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
             }
@@ -5533,6 +5611,76 @@ impl Column {
             validity,
             data: None,
         }
+    }
+
+    /// Build a deferred null-introducing Utf8 gather from a caller-proven
+    /// shared position plan. This is the same representation as
+    /// [`Self::reindex_by_positions`] uses for all-valid eager Utf8 sources,
+    /// but lets join builders compute the nullable plan once and share it
+    /// across many output columns with identical row positions.
+    #[doc(hidden)]
+    pub fn reindex_eager_utf8_with_shared_plan(
+        &self,
+        positions: Arc<[usize]>,
+        validity: ValidityMask,
+    ) -> Option<Self> {
+        debug_assert_eq!(positions.len(), validity.len());
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        let source = self.values.eager_arc()?;
+        debug_assert!(
+            positions
+                .iter()
+                .all(|&pos| pos == usize::MAX || pos < source.len())
+        );
+        Some(Self::from_utf8_lazy_gather(
+            Arc::clone(source),
+            positions,
+            validity,
+        ))
+    }
+
+    /// Build a deferred nullable Utf8 gather for the ordered-join shape where
+    /// valid rows read one contiguous source range and missing rows form only a
+    /// prefix and/or suffix.
+    #[doc(hidden)]
+    pub fn reindex_eager_utf8_with_nullable_range(
+        &self,
+        null_prefix: usize,
+        source_start: usize,
+        source_len: usize,
+        null_suffix: usize,
+    ) -> Option<Self> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        let source = self.values.eager_arc()?;
+        source_start
+            .checked_add(source_len)
+            .filter(|&end| end <= source.len())?;
+        let len = null_prefix
+            .checked_add(source_len)?
+            .checked_add(null_suffix)?;
+        let mut invalid_ranges = Vec::with_capacity(2);
+        if null_prefix > 0 {
+            invalid_ranges.push((0, null_prefix));
+        }
+        if null_suffix > 0 {
+            invalid_ranges.push((null_prefix + source_len, null_suffix));
+        }
+        Some(Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_nullable_utf8_range(
+                Arc::clone(source),
+                null_prefix,
+                source_start,
+                source_len,
+                null_suffix,
+            ),
+            validity: ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), len),
+            data: None,
+        })
     }
 
     /// Null-introducing positional reindex with Float64 promotion
@@ -15422,7 +15570,7 @@ mod tests {
             matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
             "Float64 gather should defer scalar materialization"
         );
-        if let ScalarValues::LazyAllValidFloat64 { data, values } = &gathered.values {
+        if let ScalarValues::LazyAllValidFloat64 { data, values, .. } = &gathered.values {
             assert_eq!(
                 data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
                 vec![
@@ -15731,7 +15879,7 @@ mod tests {
             matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
             "all-present Float64 reindex should defer scalar materialization"
         );
-        if let ScalarValues::LazyAllValidFloat64 { data, values } = &gathered.values {
+        if let ScalarValues::LazyAllValidFloat64 { data, values, .. } = &gathered.values {
             assert_eq!(
                 data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
                 vec![
@@ -15808,7 +15956,7 @@ mod tests {
             matches!(&cloned_values, ScalarValues::LazyAllValidFloat64 { .. }),
             "Float64 clone should defer scalar materialization"
         );
-        if let ScalarValues::LazyAllValidFloat64 { data, values } = &cloned_values {
+        if let ScalarValues::LazyAllValidFloat64 { data, values, .. } = &cloned_values {
             assert_eq!(
                 data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
                 vec![1.5f64.to_bits(), (-0.0f64).to_bits(), 3.25f64.to_bits()]

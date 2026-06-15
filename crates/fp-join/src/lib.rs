@@ -348,6 +348,129 @@ fn reindex_outer_join_column(
     Ok(Column::new(fp_types::DType::Float64, values)?)
 }
 
+enum SharedOptionalUtf8GatherPlan {
+    NullableRange {
+        null_prefix: usize,
+        source_start: usize,
+        source_len: usize,
+        null_suffix: usize,
+    },
+    Positions {
+        positions: Arc<[usize]>,
+        validity: ValidityMask,
+    },
+}
+
+fn shared_optional_utf8_gather_plan(
+    positions: &[Option<usize>],
+    source_len: usize,
+) -> Option<SharedOptionalUtf8GatherPlan> {
+    let mut first_valid = None;
+    let mut last_valid_exclusive = 0usize;
+    let mut has_missing = false;
+    for (out_idx, slot) in positions.iter().enumerate() {
+        match slot {
+            Some(idx) if *idx < source_len => {
+                first_valid.get_or_insert(out_idx);
+                last_valid_exclusive = out_idx + 1;
+            }
+            _ => has_missing = true,
+        }
+    }
+    if !has_missing {
+        return None;
+    }
+    if let Some(first_valid) = first_valid {
+        let source_start = positions.get(first_valid).copied().flatten()?;
+        let valid_len = last_valid_exclusive - first_valid;
+        let valid_window = positions.get(first_valid..last_valid_exclusive)?;
+        let contiguous = valid_window
+            .iter()
+            .enumerate()
+            .all(|(offset, slot)| *slot == Some(source_start + offset));
+        if contiguous
+            && source_start
+                .checked_add(valid_len)
+                .is_some_and(|end| end <= source_len)
+        {
+            return Some(SharedOptionalUtf8GatherPlan::NullableRange {
+                null_prefix: first_valid,
+                source_start,
+                source_len: valid_len,
+                null_suffix: positions.len() - last_valid_exclusive,
+            });
+        }
+    } else {
+        return Some(SharedOptionalUtf8GatherPlan::NullableRange {
+            null_prefix: positions.len(),
+            source_start: 0,
+            source_len: 0,
+            null_suffix: 0,
+        });
+    }
+
+    let mut plan = Vec::with_capacity(positions.len());
+    let mut words = vec![0_u64; positions.len().div_ceil(64)];
+    for (out_idx, slot) in positions.iter().enumerate() {
+        match slot {
+            Some(idx) if *idx < source_len => {
+                plan.push(*idx);
+                words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+            }
+            _ => plan.push(usize::MAX),
+        }
+    }
+    Some(SharedOptionalUtf8GatherPlan::Positions {
+        positions: Arc::from(plan),
+        validity: ValidityMask::from_words(words, positions.len()),
+    })
+}
+
+fn reindex_with_shared_utf8_plan(
+    column: &Column,
+    positions: &[Option<usize>],
+    plan: Option<&SharedOptionalUtf8GatherPlan>,
+) -> Result<Column, JoinError> {
+    if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
+        return Ok(column);
+    }
+    Ok(column.reindex_by_positions(positions)?)
+}
+
+fn reindex_outer_with_shared_utf8_plan(
+    column: &Column,
+    positions: &[Option<usize>],
+    plan: Option<&SharedOptionalUtf8GatherPlan>,
+) -> Result<Column, JoinError> {
+    if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
+        return Ok(column);
+    }
+    reindex_outer_join_column(column, positions)
+}
+
+fn reindex_eager_utf8_with_plan(
+    column: &Column,
+    plan: &SharedOptionalUtf8GatherPlan,
+) -> Option<Column> {
+    match plan {
+        SharedOptionalUtf8GatherPlan::NullableRange {
+            null_prefix,
+            source_start,
+            source_len,
+            null_suffix,
+        } => column.reindex_eager_utf8_with_nullable_range(
+            *null_prefix,
+            *source_start,
+            *source_len,
+            *null_suffix,
+        ),
+        SharedOptionalUtf8GatherPlan::Positions {
+            positions,
+            validity,
+        } => column.reindex_eager_utf8_with_shared_plan(Arc::clone(positions), validity.clone()),
+    }
+}
+
 fn sort_outer_join_rows(
     out_labels: &mut Vec<IndexLabel>,
     left_positions: &mut [Option<usize>],
@@ -5062,7 +5185,6 @@ fn build_single_key_dense_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
-
     for name in left.column_names() {
         let col = left
             .columns()
@@ -5135,6 +5257,7 @@ fn build_single_key_ordered_unique_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+    let right_utf8_plan = shared_optional_utf8_gather_plan(right_positions, right.len());
 
     for name in left.column_names() {
         let col = left
@@ -5161,7 +5284,8 @@ fn build_single_key_ordered_unique_left_merge_output(
             continue;
         }
 
-        let reindexed = col.reindex_by_positions(right_positions)?;
+        let reindexed =
+            reindex_with_shared_utf8_plan(col, right_positions, right_utf8_plan.as_ref())?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -5398,6 +5522,14 @@ fn build_single_key_ordered_unique_outer_merge_output(
     let all_present_right_positions = all_present_take_positions
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
+    let left_utf8_plan = all_present_left_positions
+        .is_none()
+        .then(|| shared_optional_utf8_gather_plan(left_positions, left.len()))
+        .flatten();
+    let right_utf8_plan = all_present_right_positions
+        .is_none()
+        .then(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
+        .flatten();
 
     // Per-column output build is INDEPENDENT across columns and was the serial
     // hot phase of the join (~10.5ms of str_outer_join's reindex assembly at
@@ -5415,6 +5547,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
         Reindex {
             col: &'a Column,
             positions: &'a [Option<usize>],
+            utf8_plan: Option<&'a SharedOptionalUtf8GatherPlan>,
         },
         Take {
             col: &'a Column,
@@ -5459,6 +5592,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
                     ColBuild::Reindex {
                         col,
                         positions: left_positions,
+                        utf8_plan: left_utf8_plan.as_ref(),
                     }
                 };
                 jobs.push((name.clone(), spec));
@@ -5474,6 +5608,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
             ColBuild::Reindex {
                 col,
                 positions: left_positions,
+                utf8_plan: left_utf8_plan.as_ref(),
             }
         };
         let out_name = if right_col_names.contains(name) {
@@ -5502,6 +5637,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
             ColBuild::Reindex {
                 col,
                 positions: right_positions,
+                utf8_plan: right_utf8_plan.as_ref(),
             }
         };
         let out_name = if left_col_names.contains(name) {
@@ -5529,7 +5665,11 @@ fn build_single_key_ordered_unique_outer_merge_output(
                     .collect::<Vec<_>>();
                 Ok(Column::from_values(values)?)
             }
-            ColBuild::Reindex { col, positions } => Ok(reindex_outer_join_column(col, positions)?),
+            ColBuild::Reindex {
+                col,
+                positions,
+                utf8_plan,
+            } => reindex_outer_with_shared_utf8_plan(col, positions, *utf8_plan),
             ColBuild::Take { col, present } => Ok(take_positions_typed(col, present)),
         }
     };

@@ -1,5 +1,6 @@
-rolling_n=100000 expanding_n=8000 window=50
-rolling skew  OLD    10.125 ms -> NEW    13.481 ms = 0.75x
-rolling kurt  OLD     9.011 ms -> NEW     9.734 ms = 0.93x
-expanding skew OLD    68.041 ms -> NEW    68.730 ms = 0.99x
-expanding kurt OLD    67.856 ms -> NEW    69.257 ms = 0.98x
+n=12000 window=250
+rolling_skew: 9.100 ms checksum 6f4ee13001d85e37
+rolling_kurt: 7.548 ms checksum fcf2ade53dc4beb8
+expanding_skew: 155.673 ms checksum fe7ed19352f5a8c5
+expanding_kurt: 153.920 ms checksum 120ef936042f9b07
+total_ms 326.242 combined_checksum ff53e5eaa40edb2d

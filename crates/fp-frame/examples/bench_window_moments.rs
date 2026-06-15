@@ -1,7 +1,8 @@
 //! Before/after micro-benchmark for br-frankenpandas-g2veb.
 //!
 //! Times rolling/expanding skew and kurt against the historical per-window or
-//! per-prefix two-pass moment formulas reproduced inline.
+//! per-prefix two-pass moment formulas reproduced inline, and emits a checksum
+//! over the visible candidate API outputs.
 //!
 //! Run: cargo run --release -p fp-frame --example bench_window_moments
 
@@ -126,6 +127,20 @@ fn series(raw: &[f64]) -> Series {
     Series::from_values("s", labels, values).expect("series")
 }
 
+fn checksum(series: &Series) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for value in series.values() {
+        let bits = match value {
+            Scalar::Float64(v) => v.to_bits(),
+            Scalar::Null(_) => 0x7ff8_0000_0000_0000,
+            other => other.to_string().len() as u64,
+        };
+        hash ^= bits;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
 fn main() {
     let rolling_raw = data(ROLLING_N);
     let rolling_series = series(&rolling_raw);
@@ -158,4 +173,14 @@ fn main() {
         "expanding kurt OLD {exp_kurt_old:9.3} ms -> NEW {exp_kurt_new:9.3} ms = {:.2}x",
         exp_kurt_old / exp_kurt_new
     );
+
+    let rolling_skew = rolling_series.rolling(WINDOW, Some(1)).skew().unwrap();
+    let rolling_kurt = rolling_series.rolling(WINDOW, Some(1)).kurt().unwrap();
+    let expanding_skew = expanding_series.expanding(Some(1)).skew().unwrap();
+    let expanding_kurt = expanding_series.expanding(Some(1)).kurt().unwrap();
+    let combined = checksum(&rolling_skew)
+        ^ checksum(&rolling_kurt).rotate_left(13)
+        ^ checksum(&expanding_skew).rotate_left(27)
+        ^ checksum(&expanding_kurt).rotate_left(41);
+    println!("candidate_combined_checksum {combined:016x}");
 }

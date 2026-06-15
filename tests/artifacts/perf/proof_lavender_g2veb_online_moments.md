@@ -5,6 +5,11 @@ Date: 2026-06-15
 Lever: replace rolling/expanding skew and kurtosis refold paths with one
 safe-Rust online raw-moment state.
 
+Merge note: origin/main independently landed a smaller fused-scan g2veb lever
+while this pass was validating. This proof keeps the online evidence under
+`lavender_g2veb_online_*` names and leaves the fused evidence artifacts at
+their original paths.
+
 ## Profile-backed target
 
 `br-frankenpandas-g2veb` identified `Rolling::skew`, `Rolling::kurt`,
@@ -15,10 +20,10 @@ through `apply_rolling` / `apply_expanding`.
 ## Baseline
 
 Build:
-`tests/artifacts/perf/lavender_g2veb_base_build_bench_window_moments.txt`
+`tests/artifacts/perf/lavender_g2veb_online_base_build_bench_window_moments.txt`
 
 Benchmark:
-`tests/artifacts/perf/lavender_g2veb_base_bench_window_moments.txt`
+`tests/artifacts/perf/lavender_g2veb_online_base_bench_window_moments.txt`
 
 Baseline output:
 
@@ -44,10 +49,10 @@ Implementation summary:
   gate before numeric conversion.
 
 Candidate build:
-`tests/artifacts/perf/lavender_g2veb_candidate_build_bench_window_moments.txt`
+`tests/artifacts/perf/lavender_g2veb_online_candidate_build_bench_window_moments.txt`
 
 Candidate benchmark:
-`tests/artifacts/perf/lavender_g2veb_candidate_bench_window_moments.txt`
+`tests/artifacts/perf/lavender_g2veb_online_candidate_bench_window_moments.txt`
 
 Candidate output:
 
@@ -83,16 +88,24 @@ Score: Impact 5 * Confidence 5 / Effort 2 = 12.5. Kept.
 - `rch exec -- cargo test -p fp-frame kurt -- --nocapture` passed:
   `tests/artifacts/perf/lavender_g2veb_test_kurt_filter.txt`.
 - `rch exec -- cargo check -p fp-frame --all-targets` passed:
-  `tests/artifacts/perf/lavender_g2veb_cargo_check_fp_frame.txt`.
+  `tests/artifacts/perf/lavender_g2veb_online_cargo_check_fp_frame.txt`.
 - `rch exec -- cargo clippy -p fp-frame --all-targets -- -D warnings` passed:
   `tests/artifacts/perf/lavender_g2veb_clippy_fp_frame.txt`.
+- Post-merge `rch exec -- cargo check -p fp-frame --all-targets` passed:
+  `tests/artifacts/perf/lavender_g2veb_merge_cargo_check_fp_frame.txt`.
+- Post-merge `rch exec -- cargo clippy -p fp-frame --all-targets --
+  -D warnings` passed:
+  `tests/artifacts/perf/lavender_g2veb_merge_clippy_fp_frame.txt`.
 - `rustfmt --edition 2024 --check crates/fp-frame/src/lib.rs
   crates/fp-frame/examples/bench_window_moments.rs` passed:
   `tests/artifacts/perf/lavender_g2veb_rustfmt_check_final.txt`.
+- The same rustfmt check passed after resolving the concurrent origin/main
+  g2veb merge:
+  `tests/artifacts/perf/lavender_g2veb_merge_rustfmt_check.txt`.
 - `ubs --only=rust crates/fp-frame/src/lib.rs
   crates/fp-frame/examples/bench_window_moments.rs` timed out after 180s on
   the large touched source file and recorded `UBS_EXIT=124`:
-  `tests/artifacts/perf/lavender_g2veb_ubs_touched.txt`.
+  `tests/artifacts/perf/lavender_g2veb_online_ubs_touched.txt`.
 
 ## Golden SHA256
 

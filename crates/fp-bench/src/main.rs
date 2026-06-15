@@ -177,7 +177,7 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     // instead of three separate gb.sum()/mean()/std() calls so the
                     // workload measures the path br-frankenpandas-m0gcq will fuse.
                     let gb = gframe.groupby(&["key"]).expect("groupby");
-                    let _ = gb.agg(&["sum", "mean", "std"]).expect("agg");
+                    let _ = gb.agg_list(&["sum", "mean", "std"]).expect("agg_list");
                 }),
             }
         }

@@ -810,6 +810,11 @@ fn run_golden(scenario: &str, n: usize) {
         "drop_duplicates" => build_groupby_frame(n, 100)
             .drop_duplicates(None, DuplicateKeep::First, false)
             .expect("dedup"),
+        "iloc_slice" => {
+            let frame = build_numeric_frame(n, 10);
+            let positions: Vec<i64> = ((n / 4) as i64..(3 * n / 4) as i64).collect();
+            frame.iloc(&positions).expect("iloc")
+        }
         "groupby_cumsum" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
             let out = value
@@ -1303,6 +1308,14 @@ fn main() {
                 let out = frame
                     .drop_duplicates(None, DuplicateKeep::First, false)
                     .expect("dedup");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "iloc_slice" => {
+            let frame = build_numeric_frame(n, 10);
+            let positions: Vec<i64> = ((n / 4) as i64..(3 * n / 4) as i64).collect();
+            for _ in 0..iters {
+                let out = frame.iloc(&positions).expect("iloc");
                 sink = sink.wrapping_add(out.len());
             }
         }

@@ -26,6 +26,34 @@ use pyo3::{
     types::{PyDict, PyList},
 };
 
+/// Map a pandas-style dtype string to a FrankenPandas `DType`.
+fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
+    use fp_types::DType;
+    match name {
+        "int" | "int64" | "i64" | "Int64" => Ok(DType::Int64),
+        "float" | "float64" | "f64" | "Float64" => Ok(DType::Float64),
+        "str" | "string" | "object" | "O" | "utf8" => Ok(DType::Utf8),
+        "bool" | "boolean" => Ok(DType::Bool),
+        "datetime64" | "datetime64[ns]" | "datetime" => Ok(DType::Datetime64),
+        "timedelta64" | "timedelta64[ns]" | "timedelta" => Ok(DType::Timedelta64),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unsupported dtype {other:?}"
+        ))),
+    }
+}
+
+/// Convert a Python dict `{old: new}` into FrankenPandas `(Scalar, Scalar)` pairs.
+fn py_dict_to_scalar_pairs(
+    py: Python<'_>,
+    mapping: &Bound<'_, PyDict>,
+) -> PyResult<Vec<(Scalar, Scalar)>> {
+    let mut pairs = Vec::with_capacity(mapping.len());
+    for (k, v) in mapping.iter() {
+        pairs.push((py_to_scalar(py, &k)?, py_to_scalar(py, &v)?));
+    }
+    Ok(pairs)
+}
+
 /// Convert a Python value to a FrankenPandas Scalar.
 fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if obj.is_none() {
@@ -443,6 +471,37 @@ impl PySeries {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: r })
     }
+
+    /// Map values via an `{old: new}` dict (pandas `Series.map`); unmapped
+    /// values follow the Rust core's semantics.
+    fn map(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PySeries> {
+        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
+        let r = self
+            .inner
+            .map(&pairs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Replace values via an `{old: new}` dict (pandas `Series.replace`).
+    fn replace(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PySeries> {
+        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
+        let r = self
+            .inner
+            .replace(&pairs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Cast to a dtype (int64/float64/str/bool/datetime64/timedelta64).
+    fn astype(&self, dtype: &str) -> PyResult<PySeries> {
+        let dt = parse_dtype(dtype)?;
+        let r = self
+            .inner
+            .astype(dt)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
@@ -787,6 +846,26 @@ impl PyDataFrame {
         let result = self
             .inner
             .round(decimals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Replace values via an `{old: new}` dict (pandas `DataFrame.replace`).
+    fn replace(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
+        let result = self
+            .inner
+            .replace(&pairs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Cast every column to a dtype (int64/float64/str/bool/datetime64/timedelta64).
+    fn astype(&self, dtype: &str) -> PyResult<PyDataFrame> {
+        let dt = parse_dtype(dtype)?;
+        let result = self
+            .inner
+            .astype(dt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
     }

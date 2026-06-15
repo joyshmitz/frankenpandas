@@ -415,6 +415,34 @@ impl PySeries {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: r })
     }
+
+    /// Return a boolean Series marking missing values (pandas `Series.isna`).
+    fn isna(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .isna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return a boolean Series marking non-missing values (pandas `Series.notna`).
+    fn notna(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .notna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Clip values to the `[lower, upper]` range (either bound optional).
+    #[pyo3(signature = (lower=None, upper=None))]
+    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .clip(lower, upper)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
@@ -675,6 +703,53 @@ impl PyDataFrame {
         let result = self
             .inner
             .rename(&refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Return a boolean DataFrame marking missing values (pandas `DataFrame.isna`).
+    fn isna(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .isna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Return a boolean DataFrame marking non-missing values (pandas `notna`).
+    fn notna(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .notna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Return the elementwise absolute value as a new DataFrame.
+    fn abs(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .abs()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Clip values to the `[lower, upper]` range (either bound optional).
+    #[pyo3(signature = (lower=None, upper=None))]
+    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .clip(lower, upper)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Round each numeric value to `decimals` places, returning a new DataFrame.
+    #[pyo3(signature = (decimals=0))]
+    fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .round(decimals)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
     }

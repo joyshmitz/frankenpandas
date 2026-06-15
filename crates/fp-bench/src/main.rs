@@ -206,10 +206,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         // The fp-bench frame uses a default 0..rows Int64 index (matching the
         // pandas side's set_index(range(n))), so loc/reindex labels line up.
         ("indexing", "iloc_slice") => {
-            // pandas: df.iloc[n/4 : 3n/4]
-            let positions: Vec<i64> = ((rows / 4) as i64..(3 * rows / 4) as i64).collect();
+            // pandas: df.iloc[n/4 : 3n/4] — a contiguous SLICE (returns a view).
+            // Match the slice semantics with DataFrame::iloc_slice(start, stop)
+            // (the O(1) lazy-slice path), NOT df.iloc(&positions): passing an
+            // explicit 50k-element position Vec measures pandas' *list* indexer
+            // (df.iloc[list(...)] is ~200x slower than the slice) against fp's
+            // list API — an apples-to-oranges comparison. iloc_slice is the
+            // same contiguous-range operation pandas' slice performs.
+            let start = Some((rows / 4) as i64);
+            let stop = Some((3 * rows / 4) as i64);
             time_us(|| {
-                let _ = df.iloc(&positions).expect("iloc");
+                let _ = df.iloc_slice(start, stop).expect("iloc_slice");
             })
         }
         ("indexing", "loc_labels") => {

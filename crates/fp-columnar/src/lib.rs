@@ -5669,6 +5669,18 @@ impl Column {
         None
     }
 
+    /// Borrow the column's contiguous `datetime64[ns]` buffer when available.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_datetime64_slice(&self) -> Option<&[i64]> {
+        if self.dtype == DType::Datetime64
+            && let Some(ColumnData::Datetime64(data)) = &self.data
+        {
+            return Some(data.as_slice());
+        }
+        None
+    }
+
     /// Return an Arc-backed all-valid Int64 buffer for lazy descriptor builders.
     /// Existing Arc-backed columns share in O(1); legacy cached `Vec<i64>`
     /// columns are copied once into immutable Arc storage.

@@ -723,6 +723,336 @@ impl Float64DotInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum PairwiseFloat64Stat {
+    Corr,
+    Cov,
+}
+
+#[derive(Clone)]
+struct Float64PairwiseStatInput {
+    data: Arc<[f64]>,
+    start: usize,
+}
+
+impl Float64PairwiseStatInput {
+    fn new(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self { data, start }
+    }
+
+    fn value_at(&self, row: usize) -> f64 {
+        self.data[self.start + row]
+    }
+}
+
+struct Float64PairwiseStatMatrixPlan {
+    cols: Arc<[Float64PairwiseStatInput]>,
+    row_len: usize,
+    stat: PairwiseFloat64Stat,
+    min_periods: usize,
+    matrix: OnceLock<Arc<[f64]>>,
+}
+
+impl Float64PairwiseStatMatrixPlan {
+    fn new(
+        cols: Arc<[Float64PairwiseStatInput]>,
+        row_len: usize,
+        stat: PairwiseFloat64Stat,
+        min_periods: usize,
+    ) -> Self {
+        Self {
+            cols,
+            row_len,
+            stat,
+            min_periods,
+            matrix: OnceLock::new(),
+        }
+    }
+
+    fn column_len(&self) -> usize {
+        self.cols.len()
+    }
+
+    fn materialize_column(&self, col: usize) -> Vec<f64> {
+        let n = self.column_len();
+        debug_assert!(col < n);
+        let matrix = self
+            .matrix
+            .get_or_init(|| Arc::from(self.compute_matrix_values()));
+        (0..n).map(|row| matrix[row * n + col]).collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize(
+        stat: PairwiseFloat64Stat,
+        min_periods: usize,
+        count: usize,
+        sum_x: f64,
+        sum_y: f64,
+        sum_xy: f64,
+        sum_x2: f64,
+        sum_y2: f64,
+    ) -> f64 {
+        let threshold = min_periods.max(2);
+        if count < threshold {
+            return f64::NAN;
+        }
+        let n_f = count as f64;
+        let mean_x = sum_x / n_f;
+        let mean_y = sum_y / n_f;
+        let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
+        match stat {
+            PairwiseFloat64Stat::Cov => cov_xy,
+            PairwiseFloat64Stat::Corr => {
+                let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
+                let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
+                let denom = (var_x * var_y).sqrt();
+                if denom < f64::EPSILON {
+                    f64::NAN
+                } else {
+                    cov_xy / denom
+                }
+            }
+        }
+    }
+
+    fn compute_matrix_values(&self) -> Vec<f64> {
+        let n = self.column_len();
+        let len = self.row_len;
+        let mut mat = vec![0.0_f64; n * n];
+        if n == 0 {
+            return mat;
+        }
+
+        let shifted_storage: Vec<Vec<f64>> = self
+            .cols
+            .iter()
+            .map(|col| {
+                let k = (0..len)
+                    .map(|row| col.value_at(row))
+                    .find(|x| x.is_finite())
+                    .unwrap_or(0.0);
+                (0..len).map(|row| col.value_at(row) - k).collect()
+            })
+            .collect();
+        let col_data: Vec<&[f64]> = shifted_storage.iter().map(Vec::as_slice).collect();
+
+        let mut sum = vec![0.0_f64; n];
+        let mut sum2 = vec![0.0_f64; n];
+        let moment = |col: &[f64]| -> (f64, f64) {
+            let mut s = 0.0_f64;
+            let mut s2 = 0.0_f64;
+            for &x in col {
+                s += x;
+                s2 += x * x;
+            }
+            (s, s2)
+        };
+        let moment_workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(64)
+            .min(n.max(1));
+        if moment_workers >= 2 && (len as u128) * (n as u128) >= (1u128 << 20) {
+            let next_col = std::sync::atomic::AtomicUsize::new(0);
+            let col_data_ref: &[&[f64]] = &col_data;
+            let parts = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(moment_workers);
+                for _ in 0..moment_workers {
+                    let next_col = &next_col;
+                    handles.push(scope.spawn(move || {
+                        let mut out: Vec<(usize, f64, f64)> = Vec::new();
+                        loop {
+                            let idx = next_col.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if idx >= col_data_ref.len() {
+                                break;
+                            }
+                            let (s, s2) = moment(col_data_ref[idx]);
+                            out.push((idx, s, s2));
+                        }
+                        out
+                    }));
+                }
+                let mut all = Vec::with_capacity(handles.len());
+                for handle in handles {
+                    all.push(handle.join().unwrap_or_default());
+                }
+                all
+            });
+            for part in parts {
+                for (idx, s, s2) in part {
+                    sum[idx] = s;
+                    sum2[idx] = s2;
+                }
+            }
+        } else {
+            for (idx, col) in col_data.iter().enumerate() {
+                let (s, s2) = moment(col);
+                sum[idx] = s;
+                sum2[idx] = s2;
+            }
+        }
+
+        const BT: usize = 4;
+        const BAND_COUNT: usize = 64;
+        let mut gram = vec![0.0_f64; n * n];
+        let big_enough = (len as u128) * (n as u128) * (n as u128) >= (1u128 << 23);
+        let band_count = BAND_COUNT.min(len);
+        if band_count >= 2 && big_enough {
+            let band = len.div_ceil(band_count);
+            let bands: Vec<(usize, usize)> = (0..band_count)
+                .map(|b| (b * band, ((b + 1) * band).min(len)))
+                .filter(|&(a, b)| a < b)
+                .collect();
+            let worker_count = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(64)
+                .min(bands.len());
+            let next_band = std::sync::atomic::AtomicUsize::new(0);
+            let bands_ref: &[(usize, usize)] = &bands;
+            let cols_ref: &[&[f64]] = &col_data;
+            let mut partials: Vec<Vec<f64>> = Vec::new();
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for _ in 0..worker_count {
+                    let next_band = &next_band;
+                    handles.push(scope.spawn(move || {
+                        let mut out: Vec<(usize, Vec<f64>)> = Vec::new();
+                        loop {
+                            let b = next_band.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if b >= bands_ref.len() {
+                                break;
+                            }
+                            let (r0, r1) = bands_ref[b];
+                            let mut panel = vec![0.0_f64; (r1 - r0) * BT];
+                            let mut gram_out = vec![0.0_f64; n * n];
+                            pairwise_stat_gram_partial_rows(
+                                cols_ref,
+                                n,
+                                r0,
+                                r1,
+                                &mut panel,
+                                &mut gram_out,
+                            );
+                            out.push((b, gram_out));
+                        }
+                        out
+                    }));
+                }
+                let mut indexed: Vec<(usize, Vec<f64>)> = Vec::with_capacity(bands.len());
+                for handle in handles {
+                    if let Ok(mut part) = handle.join() {
+                        indexed.append(&mut part);
+                    }
+                }
+                indexed.sort_by_key(|(b, _)| *b);
+                partials = indexed.into_iter().map(|(_, g)| g).collect();
+            });
+            for partial in &partials {
+                if partial.len() != n * n {
+                    continue;
+                }
+                for j in 0..n {
+                    for i in 0..=j {
+                        gram[i * n + j] += partial[i * n + j];
+                    }
+                }
+            }
+        } else {
+            let mut panel = vec![0.0_f64; len.max(1) * BT];
+            pairwise_stat_gram_partial_rows(&col_data, n, 0, len, &mut panel, &mut gram);
+        }
+
+        for j in 0..n {
+            for i in 0..=j {
+                let g = gram[i * n + j];
+                mat[i * n + j] = Self::finalize(
+                    self.stat,
+                    self.min_periods,
+                    len,
+                    sum[i],
+                    sum[j],
+                    g,
+                    sum2[i],
+                    sum2[j],
+                );
+                if i != j {
+                    mat[j * n + i] = Self::finalize(
+                        self.stat,
+                        self.min_periods,
+                        len,
+                        sum[j],
+                        sum[i],
+                        g,
+                        sum2[j],
+                        sum2[i],
+                    );
+                }
+            }
+        }
+        mat
+    }
+}
+
+fn pairwise_stat_gram_partial_rows(
+    col_data: &[&[f64]],
+    n: usize,
+    r0: usize,
+    r1: usize,
+    panel: &mut [f64],
+    gram_out: &mut [f64],
+) {
+    const BT: usize = 4;
+    let rows = r1 - r0;
+    let mut tj = 0;
+    while tj < n {
+        let bj = BT.min(n - tj);
+        for dj in 0..bj {
+            let cj = col_data[tj + dj];
+            for lr in 0..rows {
+                panel[lr * BT + dj] = cj[r0 + lr];
+            }
+        }
+        let mut ti = 0;
+        while ti <= tj {
+            let bi = BT.min(n - ti);
+            let mut acc = [[0.0_f64; BT]; BT];
+            if bi == BT && bj == BT {
+                for lr in 0..rows {
+                    let pr = &panel[lr * BT..lr * BT + BT];
+                    for (di, acc_row) in acc.iter_mut().enumerate() {
+                        let av = col_data[ti + di][r0 + lr];
+                        for dj in 0..BT {
+                            acc_row[dj] += av * pr[dj];
+                        }
+                    }
+                }
+            } else {
+                for lr in 0..rows {
+                    for (di, acc_row) in acc.iter_mut().enumerate().take(bi) {
+                        let av = col_data[ti + di][r0 + lr];
+                        for (dj, slot) in acc_row.iter_mut().enumerate().take(bj) {
+                            *slot += av * panel[lr * BT + dj];
+                        }
+                    }
+                }
+            }
+            for (di, acc_row) in acc.iter().enumerate().take(bi) {
+                let gi = ti + di;
+                for (dj, slot) in acc_row.iter().enumerate().take(bj) {
+                    let gj = tj + dj;
+                    if gi <= gj {
+                        gram_out[gi * n + gj] += *slot;
+                    }
+                }
+            }
+            ti += BT;
+        }
+        tj += BT;
+    }
+}
+
 fn certify_int64_dense_cycle(data: &[i64]) -> Option<Int64DenseCycleWitness> {
     let (&start, rest) = data.split_first()?;
     let mut period = None;
@@ -1437,6 +1767,18 @@ enum ScalarValues {
         data: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred all-valid Float64 result column for finite `DataFrame::corr`
+    /// and `DataFrame::cov` matrices.
+    ///
+    /// All result columns share one pairwise-stat matrix plan. Shape/metadata
+    /// reads only touch `len`; scalar or f64-buffer reads materialize the full
+    /// matrix once and then expose the requested output column `j`.
+    LazyAllValidFloat64PairwiseStatMatrixColumn {
+        plan: Arc<Float64PairwiseStatMatrixPlan>,
+        col: usize,
+        data: OnceLock<Vec<f64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Arithmetic-progression view over shared all-valid Float64 data.
     ///
     /// Semantically identical to gathering `data[start + i * step]` for
@@ -1801,7 +2143,25 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_float64(data: Vec<f64>) -> Self {
-        Self::lazy_all_valid_float64_arc(Arc::from(data))
+        Self::lazy_all_valid_float64_with_finite(data, None)
+    }
+
+    fn bool_once_lock(value: Option<bool>) -> OnceLock<bool> {
+        let lock = OnceLock::new();
+        if let Some(value) = value {
+            let _ = lock.set(value);
+        }
+        lock
+    }
+
+    fn lazy_all_valid_float64_with_finite(data: Vec<f64>, all_finite: Option<bool>) -> Self {
+        let data = Arc::from(data);
+        match all_finite {
+            Some(all_finite) => {
+                Self::lazy_all_valid_float64_arc_with_finite(data, Some(all_finite))
+            }
+            None => Self::lazy_all_valid_float64_arc(data),
+        }
     }
 
     fn bool_once_lock(value: Option<bool>) -> OnceLock<bool> {
@@ -1890,6 +2250,19 @@ impl ScalarValues {
             a_cols,
             b_col,
             len,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_float64_pairwise_stat_matrix_column(
+        plan: Arc<Float64PairwiseStatMatrixPlan>,
+        col: usize,
+    ) -> Self {
+        debug_assert!(col < plan.column_len());
+        Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
+            plan,
+            col,
             data: OnceLock::new(),
             values: OnceLock::new(),
         }
@@ -2870,6 +3243,19 @@ impl ScalarValues {
         None
     }
 
+    fn pairwise_stat_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
+            plan, col, data, ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| plan.materialize_column(*col))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
@@ -2916,6 +3302,20 @@ impl ScalarValues {
             } => values
                 .get_or_init(|| {
                     data.get_or_init(|| Self::materialize_float64_dot(a_cols, b_col, *len))
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
+                plan,
+                col,
+                data,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.get_or_init(|| plan.materialize_column(*col))
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -3502,6 +3902,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
+            Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
@@ -3724,6 +4125,9 @@ impl Clone for ScalarValues {
             Self::LazyAllValidFloat64Dot {
                 a_cols, b_col, len, ..
             } => Self::lazy_all_valid_float64_dot(Arc::clone(a_cols), Arc::clone(b_col), *len),
+            Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, col, .. } => {
+                Self::lazy_all_valid_float64_pairwise_stat_matrix_column(Arc::clone(plan), *col)
+            }
             Self::LazyStridedFloat64 {
                 data,
                 start,
@@ -5810,6 +6214,46 @@ impl Column {
         }
     }
 
+    /// Build all columns of a finite all-valid Float64 pairwise corr/cov matrix
+    /// over a shared lazy plan.
+    ///
+    /// The caller must prove that every input value is finite and that every
+    /// output cell is finite under `stat`/`min_periods`. This mirrors the
+    /// no-NaN branch of `DataFrame`'s eager pairwise matrix kernel, but defers
+    /// the `O(n_cols^2 * n_rows)` moment/Gram work until a consumer reads the
+    /// result values.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_all_valid_pairwise_stat_matrix_columns(
+        cols: Vec<(Arc<[f64]>, usize)>,
+        row_len: usize,
+        stat: PairwiseFloat64Stat,
+        min_periods: usize,
+    ) -> Vec<Self> {
+        let inputs: Vec<Float64PairwiseStatInput> = cols
+            .into_iter()
+            .map(|(data, start)| Float64PairwiseStatInput::new(data, start, row_len))
+            .collect();
+        let plan = Arc::new(Float64PairwiseStatMatrixPlan::new(
+            Arc::from(inputs),
+            row_len,
+            stat,
+            min_periods,
+        ));
+        let n = plan.column_len();
+        (0..n)
+            .map(|col| Self {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64_pairwise_stat_matrix_column(
+                    Arc::clone(&plan),
+                    col,
+                ),
+                validity: ValidityMask::all_valid(n),
+                data: None,
+            })
+            .collect()
+    }
+
     /// Public (hidden) for fp-join's fused dense outer-merge builder
     /// (br-frankenpandas-343ho); invalid slots carry the 0.0-datum convention
     /// and materialize `Scalar::Null(NullKind::NaN)`.
@@ -6088,6 +6532,9 @@ impl Column {
                 return data.get(*start..end);
             }
             if let Some(data) = self.values.dot_float64_data() {
+                return Some(data);
+            }
+            if let Some(data) = self.values.pairwise_stat_float64_data() {
                 return Some(data);
             }
             if let Some(data) = self.values.strided_float64_data() {

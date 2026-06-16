@@ -311,6 +311,37 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     .expect("transform");
             })
         }
+        ("groupby", "groupby_transform_mean_str") => {
+            // String-key variant: s.groupby(str_key).transform("mean"). key =
+            // "g{col_0 % 1000:04}" (~1000 distinct categorical labels).
+            let mut kb = Vec::with_capacity(rows * 5);
+            let mut ko = Vec::with_capacity(rows + 1);
+            ko.push(0usize);
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key series");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val series");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .transform("mean")
+                    .expect("transform");
+            })
+        }
         ("groupby", "groupby_cumcount") => {
             // pandas: df.groupby("key").cumcount() — within-group 0-based row
             // number. key = (col_0 % 100).astype(int64).
@@ -446,6 +477,39 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             };
             time_us(|| {
                 let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], join_type)
+                    .expect("merge");
+            })
+        }
+        ("joins", "join_inner_str") => {
+            // String-key inner merge: left key = "k{i:08}" (unique), right key =
+            // "k{2i:08}" — mirrors the int64 join shape (~n/2 inner matches) but
+            // exercises the Utf8 key path. pandas: left.merge(right, on="key").
+            let build = |stride: usize, valname: &str| -> DataFrame {
+                let mut bytes = Vec::with_capacity(rows * 9);
+                let mut off = Vec::with_capacity(rows + 1);
+                off.push(0usize);
+                for i in 0..rows {
+                    bytes.extend_from_slice(format!("k{:08}", i * stride).as_bytes());
+                    off.push(bytes.len());
+                }
+                let index = Index::new_known_unique_int64_unit_range(0, rows);
+                let mut cols = BTreeMap::new();
+                cols.insert("key".to_string(), Column::from_utf8_contiguous(bytes, off));
+                cols.insert(
+                    valname.to_string(),
+                    Column::from_f64_values((0..rows).map(|i| i as f64).collect()),
+                );
+                DataFrame::new_with_column_order(
+                    index,
+                    cols,
+                    vec!["key".to_string(), valname.to_string()],
+                )
+                .expect("fp-bench str join frame")
+            };
+            let left = build(1, "left_val");
+            let right = build(2, "right_val");
+            time_us(|| {
+                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
                     .expect("merge");
             })
         }

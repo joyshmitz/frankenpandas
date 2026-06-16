@@ -224,6 +224,11 @@ def bench_groupby_transform_mean_pandas(df: pd.DataFrame) -> list[float]:
     df["key"] = (df["col_0"] % 100).astype("int64")
     return time_operation(lambda: df.groupby("key")["col_1"].transform("mean"))
 
+def bench_groupby_transform_mean_str_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
+    return time_operation(lambda: df.groupby("key")["col_1"].transform("mean"))
+
 def bench_groupby_cumcount_pandas(df: pd.DataFrame) -> list[float]:
     df = df.copy()
     df["key"] = (df["col_0"] % 100).astype("int64")
@@ -291,6 +296,23 @@ def bench_join_outer_pandas(df: pd.DataFrame) -> list[float]:
     left, right = _build_join_frames(len(df))
     return time_operation(lambda: left.merge(right, on="key", how="outer"))
 
+def _build_str_join_frames(n: int):
+    # String-key variant of _build_join_frames: left key "k{i:08}" (unique),
+    # right key "k{2i:08}" — ~n/2 inner matches, exercises the Utf8 key path.
+    left = pd.DataFrame({
+        "key": [f"k{i:08}" for i in range(n)],
+        "left_val": np.arange(n, dtype=np.float64),
+    })
+    right = pd.DataFrame({
+        "key": [f"k{i*2:08}" for i in range(n)],
+        "right_val": np.arange(n, dtype=np.float64),
+    })
+    return left, right
+
+def bench_join_inner_str_pandas(df: pd.DataFrame) -> list[float]:
+    left, right = _build_str_join_frames(len(df))
+    return time_operation(lambda: left.merge(right, on="key", how="inner"))
+
 
 def _build_str_frame(n: int) -> pd.DataFrame:
     # Mirrors fp-bench build_str_frame: key = ~1000-distinct group label,
@@ -355,6 +377,7 @@ PANDAS_WORKLOADS = {
         "groupby_mean_float64": bench_groupby_mean_pandas,
         "groupby_agg_multi": bench_groupby_agg_multi_pandas,
         "groupby_transform_mean": bench_groupby_transform_mean_pandas,
+        "groupby_transform_mean_str": bench_groupby_transform_mean_str_pandas,
         "groupby_cumcount": bench_groupby_cumcount_pandas,
         "groupby_count": bench_groupby_count_pandas,
     },
@@ -373,6 +396,7 @@ PANDAS_WORKLOADS = {
         "join_inner": bench_join_inner_pandas,
         "join_left": bench_join_left_pandas,
         "join_outer": bench_join_outer_pandas,
+        "join_inner_str": bench_join_inner_str_pandas,
     },
     "strings": {
         "str_sort": bench_str_sort_pandas,

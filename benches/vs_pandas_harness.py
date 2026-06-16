@@ -229,6 +229,11 @@ def bench_groupby_cumcount_pandas(df: pd.DataFrame) -> list[float]:
     df["key"] = (df["col_0"] % 100).astype("int64")
     return time_operation(lambda: df.groupby("key").cumcount())
 
+def bench_groupby_count_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = (df["col_0"] % 100).astype("int64")
+    return time_operation(lambda: df.groupby("key")["col_1"].count())
+
 
 # Rolling Workloads (pandas)
 def bench_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
@@ -351,6 +356,7 @@ PANDAS_WORKLOADS = {
         "groupby_agg_multi": bench_groupby_agg_multi_pandas,
         "groupby_transform_mean": bench_groupby_transform_mean_pandas,
         "groupby_cumcount": bench_groupby_cumcount_pandas,
+        "groupby_count": bench_groupby_count_pandas,
     },
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,

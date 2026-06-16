@@ -2563,12 +2563,69 @@ impl Index {
         self.labels_equal(other) && self.name == other.name
     }
 
+    /// Typed `value_counts_raw` over raw `i64` keys: first-seen (value, count)
+    /// pairs, then the same stable count sort. Bit-identical to the
+    /// `FxHashMap<IndexLabel,usize>` path for all-Int64 indexes (which have no
+    /// missing labels, so `dropna` is a no-op): a dense direct-address histogram
+    /// when the value span is bounded, else an inline-key `FxHashMap<i64,usize>`.
+    fn value_counts_raw_i64(
+        vals: &[i64],
+        sort: bool,
+        ascending: bool,
+    ) -> (Vec<(IndexLabel, usize)>, usize) {
+        let total = vals.len();
+        let mut seen: Vec<i64> = Vec::new();
+        let mut pairs: Vec<(IndexLabel, usize)> = match Self::i64_dense_span(vals) {
+            Some((min, span)) => {
+                let mut counts = vec![0usize; span];
+                for &v in vals {
+                    let s = (v - min) as usize;
+                    if counts[s] == 0 {
+                        seen.push(v);
+                    }
+                    counts[s] += 1;
+                }
+                seen.iter()
+                    .map(|&v| (IndexLabel::Int64(v), counts[(v - min) as usize]))
+                    .collect()
+            }
+            None => {
+                let mut counts: FxHashMap<i64, usize> =
+                    FxHashMap::with_capacity_and_hasher(vals.len(), Default::default());
+                for &v in vals {
+                    let c = counts.entry(v).or_insert(0);
+                    if *c == 0 {
+                        seen.push(v);
+                    }
+                    *c += 1;
+                }
+                seen.iter()
+                    .map(|&v| (IndexLabel::Int64(v), counts[&v]))
+                    .collect()
+            }
+        };
+        if sort {
+            if ascending {
+                pairs.sort_by_key(|entry| entry.1);
+            } else {
+                pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+            }
+        }
+        (pairs, total)
+    }
+
     fn value_counts_raw(
         &self,
         sort: bool,
         ascending: bool,
         dropna: bool,
     ) -> (Vec<(IndexLabel, usize)>, usize) {
+        // Typed all-Int64 fast path: inline `i64` histogram instead of the
+        // cloned-key, double-hashed `FxHashMap<IndexLabel,usize>`. Int64 labels
+        // are never missing, so `dropna` changes nothing — bit-identical pairs.
+        if let Some(vals) = self.labels.int64_view() {
+            return Self::value_counts_raw_i64(&vals, sort, ascending);
+        }
         let mut seen_order: Vec<IndexLabel> = Vec::new();
         let mut counts: FxHashMap<IndexLabel, usize> = FxHashMap::default();
         let mut total = 0usize;

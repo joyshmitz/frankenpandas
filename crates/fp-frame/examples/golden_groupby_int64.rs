@@ -117,9 +117,7 @@ fn main() {
                     } else {
                         vec!["key"]
                     };
-                    let gb = df
-                        .groupby_full(&by, as_index, sort)
-                        .expect("groupby_full");
+                    let gb = df.groupby_full(&by, as_index, sort).expect("groupby_full");
                     for &f in &funcs {
                         let res = match f {
                             "sum" => gb.sum(),

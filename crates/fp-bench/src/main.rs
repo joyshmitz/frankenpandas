@@ -15,7 +15,7 @@
 use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
-use fp_frame::DataFrame;
+use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_join::{JoinType, merge_dataframes_on_with};
 
@@ -413,6 +413,28 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let frame = build_square_f64_frame(dim);
             time_us(|| {
                 let _ = frame.dot(&frame).expect("dot");
+            })
+        }
+        // to_datetime parse throughput: `rows` ISO date strings (2020-01-DD,
+        // ~28 distinct), same strings on both engines. pandas: pd.to_datetime(s).
+        ("datetime", "to_datetime") => {
+            let mut date_bytes: Vec<u8> = Vec::new();
+            let mut date_off: Vec<usize> = Vec::with_capacity(rows + 1);
+            date_off.push(0);
+            for i in 0..rows {
+                let s = format!("2020-01-{:02}", i % 28 + 1);
+                date_bytes.extend_from_slice(s.as_bytes());
+                date_off.push(date_bytes.len());
+            }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let series = Series::new(
+                "d".to_string(),
+                index,
+                Column::from_utf8_contiguous(date_bytes, date_off),
+            )
+            .expect("date series");
+            time_us(|| {
+                let _ = to_datetime(&series).expect("to_datetime");
             })
         }
         _ => return None,

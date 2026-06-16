@@ -48,6 +48,7 @@ CATEGORIES = {
     "indexing": 0.10,
     "strings": 0.10,
     "linalg": 0.10,
+    "datetime": 0.10,
 }
 
 SIZE_CONFIGS = {
@@ -307,6 +308,12 @@ def bench_df_dot_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: m.dot(m))
 
 
+def bench_to_datetime_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    s = pd.Series([f"2020-01-{i % 28 + 1:02d}" for i in range(n)])
+    return time_operation(lambda: pd.to_datetime(s))
+
+
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
@@ -350,6 +357,9 @@ PANDAS_WORKLOADS = {
     },
     "linalg": {
         "df_dot": bench_df_dot_pandas,
+    },
+    "datetime": {
+        "to_datetime": bench_to_datetime_pandas,
     },
 }
 

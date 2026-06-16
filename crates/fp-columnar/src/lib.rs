@@ -12707,10 +12707,21 @@ impl Column {
         if let Some(perm) = self.typed_radix_perm(ascending) {
             return perm;
         }
-        // All-valid Utf8: stable MSD byte radix replaces the O(n log n)
-        // Scalar-comparator sort. Bit-identical — `String::cmp` is exactly
-        // byte order with shorter-prefix-first, no value is missing (so the
-        // na-last arms never fire), and both sorts are stable.
+        // All-valid contiguous Utf8: feed the MSD byte radix the raw `&[u8]`
+        // row spans straight from the backing buffer, skipping the `Vec<&str>`
+        // build + per-row `from_utf8` re-validation (the bytes are valid UTF-8
+        // by construction) and the radix's own `&str -> &[u8]` remap. Byte order
+        // == UTF-8 lexicographic order, so the permutation is identical.
+        if self.validity.all()
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let spans: Vec<&[u8]> = offsets.windows(2).map(|w| &bytes[w[0]..w[1]]).collect();
+            return utf8_msd_argsort_bytes(&spans, ascending);
+        }
+        // All-valid Utf8 (non-contiguous backing): stable MSD byte radix replaces
+        // the O(n log n) Scalar-comparator sort. Bit-identical — `String::cmp` is
+        // exactly byte order with shorter-prefix-first, no value is missing (so
+        // the na-last arms never fire), and both sorts are stable.
         if let Some(strs) = self.as_all_valid_str_vec() {
             return utf8_msd_argsort(&strs, ascending);
         }

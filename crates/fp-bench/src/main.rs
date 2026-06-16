@@ -285,6 +285,32 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 }),
             }
         }
+        ("groupby", "groupby_transform_mean") => {
+            // pandas: s = df["col_1"]; s.groupby(key).transform("mean")
+            // — SeriesGroupBy.transform (broadcast each group's mean back to its
+            // rows). key = (col_0 % 100).astype(int64).
+            let keys: Vec<i64> = raw[0].iter().map(|&v| (v as i64).rem_euclid(100)).collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_i64_values(keys),
+            )
+            .expect("key series");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val series");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .transform("mean")
+                    .expect("transform");
+            })
+        }
         ("rolling", "rolling_mean_w10") => {
             let series = df.get_column("col_0");
             time_us(|| {

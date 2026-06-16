@@ -219,6 +219,11 @@ def bench_groupby_agg_multi_pandas(df: pd.DataFrame) -> list[float]:
     df["key"] = (df["col_0"] % 100).astype("int64")
     return time_operation(lambda: df.groupby("key").agg({"col_1": ["sum", "mean", "std"]}))
 
+def bench_groupby_transform_mean_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = (df["col_0"] % 100).astype("int64")
+    return time_operation(lambda: df.groupby("key")["col_1"].transform("mean"))
+
 
 # Rolling Workloads (pandas)
 def bench_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
@@ -339,6 +344,7 @@ PANDAS_WORKLOADS = {
         "groupby_sum_int64": bench_groupby_sum_pandas,
         "groupby_mean_float64": bench_groupby_mean_pandas,
         "groupby_agg_multi": bench_groupby_agg_multi_pandas,
+        "groupby_transform_mean": bench_groupby_transform_mean_pandas,
     },
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,

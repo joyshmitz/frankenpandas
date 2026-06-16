@@ -18,6 +18,7 @@ use std::time::Instant;
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_join::{JoinType, merge_dataframes_on_with};
 
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
@@ -92,6 +93,44 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
     let df = DataFrame::new_with_column_order(index, columns, column_order)
         .expect("fp-bench frame construction");
     (df, raw)
+}
+
+/// Build the two merge inputs for the joins category — mirrors the criterion
+/// `build_join_frames` and the pandas `_build_join_frames` (left key 0..n,
+/// right key 0,2,..,2(n-1); a unique-key Int64 join whose inner result keeps
+/// ~n/2 matched rows).
+fn build_join_frames(n: usize) -> (DataFrame, DataFrame) {
+    let left_index = Index::new_known_unique_int64_unit_range(0, n);
+    let mut left_cols = BTreeMap::new();
+    left_cols.insert("key".to_string(), Column::from_i64_values((0..n as i64).collect()));
+    left_cols.insert(
+        "left_val".to_string(),
+        Column::from_f64_values((0..n).map(|i| i as f64).collect()),
+    );
+    let left = DataFrame::new_with_column_order(
+        left_index,
+        left_cols,
+        vec!["key".to_string(), "left_val".to_string()],
+    )
+    .expect("fp-bench left join frame");
+
+    let right_index = Index::new_known_unique_int64_unit_range(0, n);
+    let mut right_cols = BTreeMap::new();
+    right_cols.insert(
+        "key".to_string(),
+        Column::from_i64_values((0..n as i64).map(|i| i * 2).collect()),
+    );
+    right_cols.insert(
+        "right_val".to_string(),
+        Column::from_f64_values((0..n).map(|i| i as f64 * 10.0).collect()),
+    );
+    let right = DataFrame::new_with_column_order(
+        right_index,
+        right_cols,
+        vec!["key".to_string(), "right_val".to_string()],
+    )
+    .expect("fp-bench right join frame");
+    (left, right)
 }
 
 /// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
@@ -249,6 +288,21 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 (0..(rows * 2) as i64).step_by(2).map(IndexLabel::Int64).collect();
             time_us(|| {
                 let _ = df.reindex(new_labels.clone()).expect("reindex");
+            })
+        }
+        // pandas: left.merge(right, on="key", how=inner|left|outer). The frame
+        // built above is unused for joins; build the two merge inputs sized to
+        // `rows` (outside the timed window) instead.
+        ("joins", "join_inner" | "join_left" | "join_outer") => {
+            let (left, right) = build_join_frames(rows);
+            let join_type = match workload {
+                "join_inner" => JoinType::Inner,
+                "join_left" => JoinType::Left,
+                _ => JoinType::Outer,
+            };
+            time_us(|| {
+                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], join_type)
+                    .expect("merge");
             })
         }
         _ => return None,

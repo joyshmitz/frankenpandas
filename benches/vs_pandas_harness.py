@@ -248,6 +248,32 @@ def bench_reindex_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.reindex(new_index))
 
 
+def _build_join_frames(n: int):
+    # Mirrors the fp-bench / criterion build_join_frames: left key 0..n, right
+    # key 0,2,..,2(n-1) — a unique-key int64 join (inner keeps ~n/2 rows).
+    left = pd.DataFrame({
+        "key": np.arange(n, dtype=np.int64),
+        "left_val": np.arange(n, dtype=np.float64),
+    })
+    right = pd.DataFrame({
+        "key": np.arange(n, dtype=np.int64) * 2,
+        "right_val": np.arange(n, dtype=np.float64) * 10.0,
+    })
+    return left, right
+
+def bench_join_inner_pandas(df: pd.DataFrame) -> list[float]:
+    left, right = _build_join_frames(len(df))
+    return time_operation(lambda: left.merge(right, on="key", how="inner"))
+
+def bench_join_left_pandas(df: pd.DataFrame) -> list[float]:
+    left, right = _build_join_frames(len(df))
+    return time_operation(lambda: left.merge(right, on="key", how="left"))
+
+def bench_join_outer_pandas(df: pd.DataFrame) -> list[float]:
+    left, right = _build_join_frames(len(df))
+    return time_operation(lambda: left.merge(right, on="key", how="outer"))
+
+
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
@@ -278,6 +304,11 @@ PANDAS_WORKLOADS = {
         "iloc_slice": bench_iloc_slice_pandas,
         "loc_labels": bench_loc_labels_pandas,
         "reindex": bench_reindex_pandas,
+    },
+    "joins": {
+        "join_inner": bench_join_inner_pandas,
+        "join_left": bench_join_left_pandas,
+        "join_outer": bench_join_outer_pandas,
     },
 }
 

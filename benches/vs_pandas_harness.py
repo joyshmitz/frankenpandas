@@ -314,6 +314,12 @@ def bench_to_datetime_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: pd.to_datetime(s))
 
 
+def bench_dt_floor_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    s = pd.Series(pd.date_range("2000-01-01", periods=n, freq="37s"))
+    return time_operation(lambda: s.dt.floor("D"))
+
+
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
@@ -360,6 +366,7 @@ PANDAS_WORKLOADS = {
     },
     "datetime": {
         "to_datetime": bench_to_datetime_pandas,
+        "dt_floor": bench_dt_floor_pandas,
     },
 }
 

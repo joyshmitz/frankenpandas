@@ -437,6 +437,22 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = to_datetime(&series).expect("to_datetime");
             })
         }
+        // dt.floor("D") over `rows` Datetime64 nanos at 37s intervals from
+        // 2000-01-01. pandas: s.dt.floor("D").
+        ("datetime", "dt_floor") => {
+            let base: i64 = 946_684_800_000_000_000; // 2000-01-01 00:00:00 UTC, ns
+            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 37_000_000_000).collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let series = Series::new(
+                "d".to_string(),
+                index,
+                Column::from_datetime64_values(nanos),
+            )
+            .expect("dt series");
+            time_us(|| {
+                let _ = series.dt().floor("D").expect("dt floor");
+            })
+        }
         _ => return None,
     };
     Some(times)

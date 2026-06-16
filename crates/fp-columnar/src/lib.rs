@@ -5987,9 +5987,17 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn as_datetime64_slice(&self) -> Option<&[i64]> {
-        if self.dtype == DType::Datetime64
-            && let Some(ColumnData::Datetime64(data)) = &self.data
-        {
+        if self.dtype != DType::Datetime64 {
+            return None;
+        }
+        // LazyAllValidDatetime64 (br-frankenpandas-j5150, the to_datetime output
+        // backing) carries the nanos in `values`, not `data`; expose them too so
+        // the typed dt.year/floor/round fast paths see a from_datetime64_values
+        // column as typed (otherwise they'd silently fall back to the slow path).
+        if let ScalarValues::LazyAllValidDatetime64 { data, .. } = &self.values {
+            return Some(data.as_ref());
+        }
+        if let Some(ColumnData::Datetime64(data)) = &self.data {
             return Some(data.as_slice());
         }
         None

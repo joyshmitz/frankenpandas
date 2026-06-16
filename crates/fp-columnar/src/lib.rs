@@ -1402,11 +1402,13 @@ enum ScalarValues {
     },
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
+        all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
     LazyAllValidFloat64Chunks {
         chunks: Arc<[Float64Chunk]>,
         len: usize,
+        all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Zero-copy contiguous row-range view over an `Arc`-shared all-valid
@@ -1419,6 +1421,7 @@ enum ScalarValues {
         data: Arc<[f64]>,
         start: usize,
         len: usize,
+        all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Deferred all-valid Float64 output column for finite `DataFrame::dot`.
@@ -1801,10 +1804,27 @@ impl ScalarValues {
         Self::lazy_all_valid_float64_arc(Arc::from(data))
     }
 
+    fn bool_once_lock(value: Option<bool>) -> OnceLock<bool> {
+        let lock = OnceLock::new();
+        if let Some(value) = value {
+            let _ = lock.set(value);
+        }
+        lock
+    }
+
+    fn lazy_all_valid_float64_with_finite(data: Vec<f64>, all_finite: Option<bool>) -> Self {
+        Self::lazy_all_valid_float64_arc_with_finite(Arc::from(data), all_finite)
+    }
+
     /// Share an existing `Arc` f64 buffer in O(1) (used by `Clone`).
     fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
+        Self::lazy_all_valid_float64_arc_with_finite(data, None)
+    }
+
+    fn lazy_all_valid_float64_arc_with_finite(data: Arc<[f64]>, all_finite: Option<bool>) -> Self {
         Self::LazyAllValidFloat64 {
             data,
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -1813,6 +1833,7 @@ impl ScalarValues {
         Self::LazyAllValidFloat64Chunks {
             chunks,
             len,
+            all_finite: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -1837,6 +1858,15 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_float64_slice(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        Self::lazy_all_valid_float64_slice_with_finite(data, start, len, None)
+    }
+
+    fn lazy_all_valid_float64_slice_with_finite(
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        all_finite: Option<bool>,
+    ) -> Self {
         debug_assert!(
             start.checked_add(len).is_some_and(|end| end <= data.len()),
             "Float64 view window must lie within source data"
@@ -1845,6 +1875,7 @@ impl ScalarValues {
             data,
             start,
             len,
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -2866,6 +2897,7 @@ impl ScalarValues {
                 start,
                 len,
                 values,
+                ..
             } => values
                 .get_or_init(|| {
                     data[*start..*start + *len]
@@ -3654,15 +3686,41 @@ impl Clone for ScalarValues {
             Self::LazyAllValidDatetime64 { data, .. } => {
                 Self::lazy_all_valid_datetime64_arc(Arc::clone(data))
             }
-            Self::LazyAllValidFloat64 { data, .. } => {
-                Self::lazy_all_valid_float64_arc(Arc::clone(data))
-            }
-            Self::LazyAllValidFloat64Chunks { chunks, len, .. } => {
-                Self::lazy_all_valid_float64_chunks(Arc::clone(chunks), *len)
+            Self::LazyAllValidFloat64 {
+                data, all_finite, ..
+            } => Self::lazy_all_valid_float64_arc_with_finite(
+                Arc::clone(data),
+                all_finite.get().copied(),
+            ),
+            Self::LazyAllValidFloat64Chunks {
+                chunks,
+                len,
+                all_finite,
+                ..
+            } => {
+                let cloned = Self::lazy_all_valid_float64_chunks(Arc::clone(chunks), *len);
+                if let Self::LazyAllValidFloat64Chunks {
+                    all_finite: cloned_finite,
+                    ..
+                } = &cloned
+                    && let Some(value) = all_finite.get().copied()
+                {
+                    let _ = cloned_finite.set(value);
+                }
+                cloned
             }
             Self::LazyAllValidFloat64Slice {
-                data, start, len, ..
-            } => Self::lazy_all_valid_float64_slice(Arc::clone(data), *start, *len),
+                data,
+                start,
+                len,
+                all_finite,
+                ..
+            } => Self::lazy_all_valid_float64_slice_with_finite(
+                Arc::clone(data),
+                *start,
+                *len,
+                all_finite.get().copied(),
+            ),
             Self::LazyAllValidFloat64Dot {
                 a_cols, b_col, len, ..
             } => Self::lazy_all_valid_float64_dot(Arc::clone(a_cols), Arc::clone(b_col), *len),
@@ -4958,7 +5016,10 @@ impl Column {
             (Some(ColumnData::Float64(data)), DType::Float64)
                 if data.len() == self.values.len() =>
             {
-                Some(ScalarValues::lazy_all_valid_float64_arc(Arc::clone(data)))
+                Some(ScalarValues::lazy_all_valid_float64_arc_with_finite(
+                    Arc::clone(data),
+                    Some(data.iter().all(|value| value.is_finite())),
+                ))
             }
             (Some(ColumnData::Timedelta64(data)), DType::Timedelta64)
                 if data.len() == self.values.len() =>
@@ -5085,15 +5146,21 @@ impl Column {
         if matches!(values.first(), Some(Scalar::Float64(_))) {
             let mut data = Vec::with_capacity(values.len());
             let mut all_float64 = true;
+            let mut has_nan = false;
+            let mut all_finite = true;
             for value in &values {
                 let Scalar::Float64(value) = value else {
                     all_float64 = false;
                     break;
                 };
+                has_nan |= value.is_nan();
+                all_finite &= value.is_finite();
                 data.push(*value);
             }
             if all_float64 {
-                return Ok(Self::from_f64_values(data));
+                return Ok(Self::from_f64_values_with_finite_witness(
+                    data, has_nan, all_finite,
+                ));
             }
         }
 
@@ -5656,6 +5723,20 @@ impl Column {
     }
 
     pub fn from_f64_values(data: Vec<f64>) -> Self {
+        let mut has_nan = false;
+        let mut all_finite = true;
+        for value in &data {
+            has_nan |= value.is_nan();
+            all_finite &= value.is_finite();
+        }
+        Self::from_f64_values_with_finite_witness(data, has_nan, all_finite)
+    }
+
+    fn from_f64_values_with_finite_witness(
+        data: Vec<f64>,
+        has_nan: bool,
+        all_finite: bool,
+    ) -> Self {
         let len = data.len();
         // pandas treats NaN in a float column as MISSING. The Scalar path
         // (Column::new -> ValidityMask::from_values) already marks NaN invalid
@@ -5664,14 +5745,14 @@ impl Column {
         // as_f64_slice would hand the NaN out as a real value. Fast all-valid
         // path (cheap u64::MAX fill) when no NaN is present; per-bit mask only
         // when one is. (br-frankenpandas-jyhf7)
-        let validity = if data.iter().any(|v| v.is_nan()) {
+        let validity = if has_nan {
             ValidityMask::from_f64(&data)
         } else {
             ValidityMask::all_valid(len)
         };
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64(data),
+            values: ScalarValues::lazy_all_valid_float64_with_finite(data, Some(all_finite)),
             validity,
             data: None,
         }
@@ -6231,12 +6312,86 @@ impl Column {
         }
     }
 
+    fn finite_float64_arc_view_source(&self, row_len: usize) -> Option<(Arc<[f64]>, usize)> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidFloat64 {
+                data, all_finite, ..
+            } => {
+                let slice = data.get(..row_len)?;
+                let finite = if row_len == data.len() {
+                    *all_finite.get_or_init(|| data.iter().all(|value| value.is_finite()))
+                } else {
+                    slice.iter().all(|value| value.is_finite())
+                };
+                finite.then(|| (Arc::clone(data), 0))
+            }
+            ScalarValues::LazyAllValidFloat64Slice {
+                data,
+                start,
+                len,
+                all_finite,
+                ..
+            } => {
+                if *len != row_len {
+                    return None;
+                }
+                let end = start.checked_add(row_len)?;
+                let slice = data.get(*start..end)?;
+                let finite =
+                    *all_finite.get_or_init(|| slice.iter().all(|value| value.is_finite()));
+                finite.then(|| (Arc::clone(data), *start))
+            }
+            ScalarValues::LazyAllValidFloat64Chunks {
+                chunks,
+                len,
+                all_finite,
+                ..
+            } => {
+                if *len != row_len {
+                    return None;
+                }
+                let finite = *all_finite.get_or_init(|| {
+                    chunks
+                        .iter()
+                        .flat_map(Float64Chunk::as_slice)
+                        .all(|value| value.is_finite())
+                });
+                if !finite || chunks.len() != 1 {
+                    return None;
+                }
+                let chunk = &chunks[0];
+                Some((Arc::clone(&chunk.data), chunk.start))
+            }
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => {
+                    let slice = data.get(..row_len)?;
+                    slice
+                        .iter()
+                        .all(|value| value.is_finite())
+                        .then(|| (Arc::clone(data), 0))
+                }
+                _ => None,
+            },
+        }
+    }
+
     /// Return an all-valid Float64 column's shared contiguous backing and row
     /// start offset when the column is represented as an immutable Arc view.
     #[must_use]
     #[doc(hidden)]
     pub fn as_f64_arc_view_source(&self) -> Option<(Arc<[f64]>, usize)> {
         self.float64_arc_view_source()
+    }
+
+    /// Return an all-valid finite Float64 column's shared contiguous backing
+    /// and row start offset when represented as an immutable Arc view.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_f64_finite_arc_view_source(&self, row_len: usize) -> Option<(Arc<[f64]>, usize)> {
+        self.finite_float64_arc_view_source(row_len)
     }
 
     /// Borrow the contiguous Utf8 backing only when its byte spans are already
@@ -17289,6 +17444,38 @@ mod tests {
         let clean = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
         assert!(clean.validity().all());
         assert_eq!(clean.as_f64_slice(), Some([1.0, 2.0, 3.0].as_slice()));
+    }
+
+    #[test]
+    fn finite_float64_arc_view_uses_constructor_witness() {
+        let finite = Column::from_values(vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(-0.0),
+            Scalar::Float64(3.5),
+        ])
+        .expect("finite float column");
+        assert!(
+            finite.as_f64_finite_arc_view_source(3).is_some(),
+            "all-finite Float64 columns should expose the finite Arc view"
+        );
+        assert!(
+            finite.clone().as_f64_finite_arc_view_source(3).is_some(),
+            "finite witness should survive Column::clone"
+        );
+
+        let with_infinity =
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(f64::INFINITY)])
+                .expect("infinite float column");
+        assert!(
+            with_infinity.as_f64_finite_arc_view_source(2).is_none(),
+            "infinity is valid Float64 data but must not enter finite dot fast paths"
+        );
+
+        let with_nan = Column::from_f64_values(vec![1.0, f64::NAN]);
+        assert!(
+            with_nan.as_f64_finite_arc_view_source(2).is_none(),
+            "NaN-bearing Float64 columns are nullable and must not expose all-valid views"
+        );
     }
 
     #[test]

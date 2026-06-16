@@ -4461,9 +4461,36 @@ fn utf8_msd_sort_range_par(
             256
         }
     };
+    let eos_bucket = if ascending { 0 } else { 256 };
     let mut counts = [0usize; 258];
     for &i in idx.iter() {
         counts[key(spans[i]) + 1] += 1;
+    }
+    // LCP fast-skip (br-frankenpandas-msdlcp): a single shared byte at `depth`
+    // makes the scatter an identity permutation — descend in parallel mode to
+    // depth+1 directly, skipping the wasted scatter + copy. Same skip the serial
+    // `utf8_msd_sort_range` applies; bit-identical (one stable bucket preserves
+    // order). A lone EOS bucket means all spans are equal here — done.
+    {
+        let mut only: Option<usize> = None;
+        let mut multi = false;
+        for k in 0..=256usize {
+            if counts[k + 1] != 0 {
+                if only.is_some() {
+                    multi = true;
+                    break;
+                }
+                only = Some(k);
+            }
+        }
+        if !multi {
+            if let Some(k) = only
+                && k != eos_bucket
+            {
+                utf8_msd_sort_range_par(spans, idx, aux, depth + 1, ascending, workers);
+            }
+            return;
+        }
     }
     for k in 1..258 {
         counts[k] += counts[k - 1];
@@ -4477,7 +4504,6 @@ fn utf8_msd_sort_range_par(
     idx.copy_from_slice(aux);
     // `counts[k]..counts[k+1]` is bucket k. The EOS bucket (fully-equal at this
     // depth) is left as-is. Collect the non-trivial byte buckets.
-    let eos_bucket = if ascending { 0 } else { 256 };
     let mut buckets: Vec<(usize, usize)> = Vec::new();
     for k in 0..257 {
         if k == eos_bucket {
@@ -4607,9 +4633,41 @@ fn utf8_msd_sort_range(
             256
         }
     };
+    let eos_bucket = if ascending { 0 } else { 256 };
     let mut counts = [0usize; 258];
     for &i in idx[lo..hi].iter() {
         counts[key(spans[i]) + 1] += 1;
+    }
+    // LCP fast-skip (br-frankenpandas-msdlcp): when every span shares the same
+    // byte at `depth` — exactly one non-empty bucket, and it is a real byte
+    // (not EOS) — the counting scatter is an identity permutation of this
+    // already-stable range and the `copy_from_slice` is pure waste. Descend to
+    // depth+1 over the same [lo, hi) directly. This makes the sort cost scale
+    // with the DISTINGUISHING prefix length rather than the full key width, the
+    // common case for shared-prefix keys (IDs, paths, URLs, timestamps).
+    // Bit-identical: a single stable bucket leaves `idx` order exactly as the
+    // scatter+copy would have written it. A lone EOS bucket means every span is
+    // fully equal at this depth, so the range is already ordered — return.
+    {
+        let mut only: Option<usize> = None;
+        let mut multi = false;
+        for k in 0..=256usize {
+            if counts[k + 1] != 0 {
+                if only.is_some() {
+                    multi = true;
+                    break;
+                }
+                only = Some(k);
+            }
+        }
+        if !multi {
+            if let Some(k) = only
+                && k != eos_bucket
+            {
+                utf8_msd_sort_range(spans, idx, aux, lo, hi, depth + 1, ascending);
+            }
+            return;
+        }
     }
     for k in 1..258 {
         counts[k] += counts[k - 1];
@@ -4625,7 +4683,6 @@ fn utf8_msd_sort_range(
     // Recurse into byte buckets; the EOS bucket holds fully-equal strings
     // (same first `depth` bytes and length == depth) already in original
     // relative order — nothing to sort.
-    let eos_bucket = if ascending { 0 } else { 256 };
     for k in 0..257 {
         if k == eos_bucket {
             continue;

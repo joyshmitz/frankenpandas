@@ -107,6 +107,23 @@ fn build_nullable_float_vc_series(n: usize) -> Series {
         .expect("nullable float vc series")
 }
 
+fn build_nullable_f64_value_counts_series(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let cardinality = (n / 4).max(1);
+    let values: Vec<f64> = (0..n)
+        .map(|row| {
+            if row % 2 == 0 {
+                f64::NAN
+            } else {
+                let bucket = (row / 2) % cardinality;
+                bucket as f64 + ((bucket % 7) as f64 * 0.125)
+            }
+        })
+        .collect();
+    Series::new("s", Index::new(labels), Column::from_f64_values(values))
+        .expect("nullable f64 value_counts series")
+}
+
 /// mid-string — the canonical str.contains workload for the SIMD string-scan
 /// campaign (every row is a real heap String, exercising the AoS wall).
 fn build_str_series(n: usize) -> Series {
@@ -925,6 +942,12 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .agg_list(&["sum", "mean", "std"])
             .expect("agg multi"),
+        "value_counts_nan50" => {
+            let out = build_nullable_f64_value_counts_series(n)
+                .value_counts()
+                .expect("value_counts");
+            return print!("{}", golden_dump_series(&out));
+        }
         "str_transform_mean" => build_str_key_frame_repeated(n, 64)
             .groupby(&["k"])
             .expect("groupby")
@@ -1510,6 +1533,13 @@ fn main() {
                     .expect("groupby")
                     .agg_list(&["sum", "mean", "std"])
                     .expect("agg multi");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "value_counts_nan50" => {
+            let series = build_nullable_f64_value_counts_series(n);
+            for _ in 0..iters {
+                let out = series.value_counts().expect("value_counts");
                 sink = sink.wrapping_add(out.len());
             }
         }

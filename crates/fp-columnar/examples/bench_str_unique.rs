@@ -83,7 +83,7 @@ fn main() {
 
     // Cold (fresh column each call — the realistic one-shot unique pattern).
     // We also time bare build() to subtract the common-mode construction cost.
-    let cold_iters = iters.min(100).max(20);
+    let cold_iters = iters.clamp(20, 100);
     let t = Instant::now();
     let mut bsink = 0usize;
     for _ in 0..cold_iters {

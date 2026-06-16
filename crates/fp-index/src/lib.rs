@@ -1733,6 +1733,121 @@ impl Index {
         }
     }
 
+    /// First-occurrence-deduplicated unique values over raw `i64` keys, in
+    /// input order. Bit-identical to the `FxHashMap<&IndexLabel>` first-seen
+    /// filter for all-Int64 indexes, with inline `i64` dedup keys (dense bitset
+    /// when bounded, else `FxHashSet<i64>`).
+    fn unique_i64(vals: &[i64]) -> Vec<IndexLabel> {
+        let mut out: Vec<IndexLabel> = Vec::new();
+        let dense = Self::i64_dense_span(vals);
+        let mut seen_bits = Vec::<u64>::new();
+        let mut seen_hash = FxHashSet::<i64>::default();
+        if let Some((_, span)) = dense {
+            seen_bits = vec![0u64; span.div_ceil(64)];
+        } else {
+            seen_hash.reserve(vals.len());
+        }
+        for &v in vals {
+            let fresh = match dense {
+                Some((min, _)) => {
+                    let s = (v - min) as usize;
+                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                    let f = seen_bits[w] & bit == 0;
+                    if f {
+                        seen_bits[w] |= bit;
+                    }
+                    f
+                }
+                None => seen_hash.insert(v),
+            };
+            if fresh {
+                out.push(IndexLabel::Int64(v));
+            }
+        }
+        out
+    }
+
+    /// `duplicated` mask over raw `i64` keys — bit-identical to the
+    /// `FxHashMap<&IndexLabel>` path for all-Int64 indexes, with inline `i64`
+    /// keys (dense bitsets when the value span is bounded, else hash sets).
+    fn duplicated_i64(vals: &[i64], keep: DuplicateKeep) -> Vec<bool> {
+        let n = vals.len();
+        let mut result = vec![false; n];
+        let dense = Self::i64_dense_span(vals);
+        match keep {
+            DuplicateKeep::First | DuplicateKeep::Last => {
+                let mut seen_bits = Vec::<u64>::new();
+                let mut seen_hash = FxHashSet::<i64>::default();
+                if let Some((_, span)) = dense {
+                    seen_bits = vec![0u64; span.div_ceil(64)];
+                } else {
+                    seen_hash.reserve(n);
+                }
+                let mut mark = |i: usize| {
+                    let v = vals[i];
+                    let fresh = match dense {
+                        Some((min, _)) => {
+                            let s = (v - min) as usize;
+                            let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                            let f = seen_bits[w] & bit == 0;
+                            if f {
+                                seen_bits[w] |= bit;
+                            }
+                            f
+                        }
+                        None => seen_hash.insert(v),
+                    };
+                    if !fresh {
+                        result[i] = true;
+                    }
+                };
+                if matches!(keep, DuplicateKeep::First) {
+                    for i in 0..n {
+                        mark(i);
+                    }
+                } else {
+                    for i in (0..n).rev() {
+                        mark(i);
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                // Two-bitset (seen / seen-again) ⇒ `result[i] = count > 1`.
+                match dense {
+                    Some((min, span)) => {
+                        let words = span.div_ceil(64);
+                        let mut seen = vec![0u64; words];
+                        let mut dup = vec![0u64; words];
+                        for &v in vals {
+                            let s = (v - min) as usize;
+                            let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                            if seen[w] & bit == 0 {
+                                seen[w] |= bit;
+                            } else {
+                                dup[w] |= bit;
+                            }
+                        }
+                        for (i, &v) in vals.iter().enumerate() {
+                            let s = (v - min) as usize;
+                            result[i] = (dup[s >> 6] >> (s & 63)) & 1 == 1;
+                        }
+                    }
+                    None => {
+                        let mut counts: FxHashMap<i64, u32> =
+                            FxHashMap::with_capacity_and_hasher(n, Default::default());
+                        for &v in vals {
+                            *counts.entry(v).or_insert(0) += 1;
+                        }
+                        for (i, &v) in vals.iter().enumerate() {
+                            result[i] = counts[&v] > 1;
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
     // ── Pandas Index Model: lookup and membership ──────────────────────
 
     #[must_use]
@@ -1854,6 +1969,11 @@ impl Index {
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
             return self.clone();
         }
+        // Typed all-Int64 fast path: inline `i64` first-occurrence dedup instead
+        // of the pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical order.
+        if let Some(vals) = self.labels.int64_view() {
+            return self.propagate_name(Self::new(Self::unique_i64(&vals)));
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
@@ -1870,6 +1990,12 @@ impl Index {
         // Strictly-ascending => no duplicates under any keep mode; skip hashing.
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
             return result;
+        }
+        // Typed all-Int64 fast path: inline `i64` keys (dense bitsets when the
+        // value span is bounded) instead of the pointer-keyed
+        // `FxHashMap<&IndexLabel>`. Bit-identical mask per keep mode.
+        if let Some(vals) = self.labels.int64_view() {
+            return Self::duplicated_i64(&vals, keep);
         }
         match keep {
             DuplicateKeep::First => {

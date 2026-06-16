@@ -1392,6 +1392,14 @@ enum ScalarValues {
         dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// All-valid Datetime64 (nanosecond epoch) backing — the typed counterpart
+    /// of `LazyAllValidInt64` for `DType::Datetime64`, so a datetime-producing op
+    /// (e.g. `to_datetime`) can ingest a `Vec<i64>` of nanos without boxing a
+    /// `Scalar::Datetime64` per row. Materializes `Scalar::Datetime64(data[i])`.
+    LazyAllValidDatetime64 {
+        data: Arc<[i64]>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
         values: OnceLock<Vec<Scalar>>,
@@ -1774,6 +1782,17 @@ impl ScalarValues {
         Self::LazyAllValidInt64 {
             data,
             dense_cycle: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_datetime64(data: Vec<i64>) -> Self {
+        Self::lazy_all_valid_datetime64_arc(Arc::from(data))
+    }
+
+    fn lazy_all_valid_datetime64_arc(data: Arc<[i64]>) -> Self {
+        Self::LazyAllValidDatetime64 {
+            data,
             values: OnceLock::new(),
         }
     }
@@ -2826,6 +2845,9 @@ impl ScalarValues {
             Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
                 .as_slice(),
+            Self::LazyAllValidDatetime64 { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Datetime64).collect())
+                .as_slice(),
             Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
@@ -3443,6 +3465,7 @@ impl ScalarValues {
         match self {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
+            Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
@@ -3627,6 +3650,9 @@ impl Clone for ScalarValues {
             Self::Eager(values) => Self::Eager(values.clone()),
             Self::LazyAllValidInt64 { data, .. } => {
                 Self::lazy_all_valid_int64_arc(Arc::clone(data))
+            }
+            Self::LazyAllValidDatetime64 { data, .. } => {
+                Self::lazy_all_valid_datetime64_arc(Arc::clone(data))
             }
             Self::LazyAllValidFloat64 { data, .. } => {
                 Self::lazy_all_valid_float64_arc(Arc::clone(data))
@@ -5029,6 +5055,23 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_all_valid_int64(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
+    /// Build an all-valid `Datetime64` column from a `Vec<i64>` of nanosecond
+    /// epochs (br-frankenpandas-j5150). Caller guarantees no `Timestamp::NAT`
+    /// sentinel (all rows present); semantically identical to
+    /// `Column::new(DType::Datetime64, data.map(Scalar::Datetime64))` but defers
+    /// the per-row `Scalar::Datetime64` boxing until a Scalar view is read.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_datetime64_values(data: Vec<i64>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Datetime64,
+            values: ScalarValues::lazy_all_valid_datetime64(data),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

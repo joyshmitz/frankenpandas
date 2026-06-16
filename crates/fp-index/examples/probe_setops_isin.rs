@@ -38,5 +38,7 @@ fn main() {
     let vals: Vec<IndexLabel> = (0..n as i64).map(|i| IndexLabel::Int64(i * 2)).collect();
 
     bench("intersection", 8, || a.intersection(&b).len());
+    bench("union", 8, || a.union(&b).len());
+    bench("difference", 8, || a.difference(&b).len());
     bench("isin", 8, || a.isin(&vals).iter().filter(|x| **x).count());
 }

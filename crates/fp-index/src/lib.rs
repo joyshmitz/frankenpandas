@@ -1548,8 +1548,9 @@ impl Index {
     /// direct-address bitset (≤ 2^26 slots and ≤ 16× the element count),
     /// else `None` (caller uses an inline-key hash set).
     fn i64_dense_span(vals: &[i64]) -> Option<(i64, usize)> {
-        let mut min = vals[0];
-        let mut max = vals[0];
+        let first = *vals.first()?;
+        let mut min = first;
+        let mut max = first;
         for &v in vals {
             if v < min {
                 min = v;
@@ -1565,16 +1566,23 @@ impl Index {
         }
     }
 
-    /// Self-ordered, first-occurrence-deduplicated intersection over raw `i64`
-    /// keys. Bit-identical to the `FxHashMap<&IndexLabel>` filter
+    /// Self-ordered, first-occurrence-deduplicated membership filter over raw
+    /// `i64` keys: keep each `a` value whose presence in `b` equals
+    /// `keep_present` (`true` ⇒ intersection, `false` ⇒ difference). Bit-
+    /// identical to the `FxHashMap<&IndexLabel>` filter
     /// (`other.position_map_first_ref()` membership + a `seen` dedup) for
     /// all-Int64 indexes, but membership and dedup use INLINE `i64` keys —
     /// a dense bitset when the value span is bounded (the membership test then
     /// fits in L2: 1 bit/slot vs the 16-byte pointer-keyed map entry that also
     /// chases into the 32-byte enum vector), else an inline-key `FxHashSet<i64>`.
-    fn intersection_i64(a: &[i64], b: &[i64]) -> Vec<IndexLabel> {
+    fn membership_filter_i64(a: &[i64], b: &[i64], keep_present: bool) -> Vec<IndexLabel> {
         let mut out: Vec<IndexLabel> = Vec::new();
-        if a.is_empty() || b.is_empty() {
+        if a.is_empty() {
+            return out;
+        }
+        // `b` empty ⇒ nothing is present: intersection is empty, difference is
+        // all of `a` (deduplicated, self order).
+        if b.is_empty() && keep_present {
             return out;
         }
 
@@ -1594,7 +1602,7 @@ impl Index {
             }
         }
 
-        // First-occurrence dedup over matched `a` values.
+        // First-occurrence dedup over the kept `a` values.
         let a_dense = Self::i64_dense_span(a);
         let mut seen_bits = Vec::<u64>::new();
         let mut seen_hash = FxHashSet::<i64>::default();
@@ -1613,12 +1621,70 @@ impl Index {
                 }
                 None => b_hash.contains(&v),
             };
-            if !in_b {
+            if in_b != keep_present {
                 continue;
             }
             let fresh = match a_dense {
                 Some((amin, _)) => {
                     let s = (v - amin) as usize;
+                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                    let f = seen_bits[w] & bit == 0;
+                    if f {
+                        seen_bits[w] |= bit;
+                    }
+                    f
+                }
+                None => seen_hash.insert(v),
+            };
+            if fresh {
+                out.push(IndexLabel::Int64(v));
+            }
+        }
+        out
+    }
+
+    /// First-occurrence-deduplicated union over raw `i64` keys: every value of
+    /// `a` then `b`, in that order, each emitted once. Bit-identical to the
+    /// `union_with` `FxHashMap<&IndexLabel>` seen-set filter for all-Int64
+    /// indexes, with INLINE `i64` dedup keys (dense bitset over the combined
+    /// value span when bounded, else `FxHashSet<i64>`).
+    fn union_i64(a: &[i64], b: &[i64]) -> Vec<IndexLabel> {
+        let mut out: Vec<IndexLabel> = Vec::with_capacity(a.len() + b.len());
+        // Combined span for the single shared dedup set over both inputs.
+        let dense = if a.is_empty() {
+            Self::i64_dense_span(b)
+        } else if b.is_empty() {
+            Self::i64_dense_span(a)
+        } else {
+            let mut min = a[0];
+            let mut max = a[0];
+            for &v in a.iter().chain(b.iter()) {
+                if v < min {
+                    min = v;
+                } else if v > max {
+                    max = v;
+                }
+            }
+            let span = (max as i128 - min as i128 + 1) as u128;
+            let total = a.len().saturating_add(b.len());
+            if span <= (1u128 << 26) && span <= (total as u128).saturating_mul(16) {
+                Some((min, span as usize))
+            } else {
+                None
+            }
+        };
+
+        let mut seen_bits = Vec::<u64>::new();
+        let mut seen_hash = FxHashSet::<i64>::default();
+        if let Some((_, span)) = dense {
+            seen_bits = vec![0u64; span.div_ceil(64)];
+        } else {
+            seen_hash.reserve(a.len() + b.len());
+        }
+        for &v in a.iter().chain(b.iter()) {
+            let fresh = match dense {
+                Some((min, _)) => {
+                    let s = (v - min) as usize;
                     let (w, bit) = (s >> 6, 1u64 << (s & 63));
                     let f = seen_bits[w] & bit == 0;
                     if f {
@@ -1833,7 +1899,7 @@ impl Index {
         // the enum vector — ~9× slower than pandas at 1M). Bit-identical:
         // self-order, first-occurrence dedup, same matched labels.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut result = Self::new(Self::intersection_i64(&a_i64, &b_i64));
+            let mut result = Self::new(Self::membership_filter_i64(&a_i64, &b_i64, true));
             result.name = self.shared_name(other);
             return result;
         }
@@ -1894,6 +1960,15 @@ impl Index {
 
     #[must_use]
     pub fn union_with(&self, other: &Self) -> Self {
+        // Typed all-Int64 fast path: inline `i64` dedup instead of the
+        // pointer-keyed `FxHashMap<&IndexLabel>` seen-set (whose probes chase
+        // into the 32-byte enum vector). Bit-identical: self-then-other order,
+        // first-occurrence dedup.
+        if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
+            let mut result = Self::new(Self::union_i64(&a_i64, &b_i64));
+            result.name = self.shared_name(other);
+            return result;
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut labels = Vec::with_capacity(self.labels.len() + other.labels.len());
         for label in self.labels.iter().chain(other.labels.iter()) {
@@ -1912,6 +1987,14 @@ impl Index {
         // intersection / sorted_merge_set_op).
         if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Difference) {
             return self.propagate_name(Self::new(labels));
+        }
+        // Typed all-Int64 fast path: inline `i64` membership (keep absent) +
+        // dedup instead of the pointer-keyed `FxHashMap<&IndexLabel>`.
+        // Bit-identical: self-order, first-occurrence dedup, labels not in other.
+        if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
+            return self.propagate_name(Self::new(Self::membership_filter_i64(
+                &a_i64, &b_i64, false,
+            )));
         }
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();

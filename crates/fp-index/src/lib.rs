@@ -1738,6 +1738,48 @@ impl Index {
         }
     }
 
+    /// Factorize raw `i64` keys: first-occurrence integer codes + the unique
+    /// values in first-occurrence order. Bit-identical to the
+    /// `FxHashMap<IndexLabel, isize>` path for all-Int64 indexes (which never
+    /// have a missing label, so no `-1` codes), with inline `i64` keys — a dense
+    /// direct-address code table when the value span is bounded, else an
+    /// inline-key `FxHashMap<i64, isize>`.
+    fn factorize_i64(vals: &[i64]) -> (Vec<isize>, Vec<i64>) {
+        let mut codes = Vec::with_capacity(vals.len());
+        let mut uniques = Vec::<i64>::new();
+        match Self::i64_dense_span(vals) {
+            Some((min, span)) => {
+                // `-1` marks an unseen slot; assigned codes are always `>= 0`.
+                let mut table = vec![-1isize; span];
+                for &v in vals {
+                    let s = (v - min) as usize;
+                    let mut code = table[s];
+                    if code == -1 {
+                        code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                        table[s] = code;
+                        uniques.push(v);
+                    }
+                    codes.push(code);
+                }
+            }
+            None => {
+                let mut positions: FxHashMap<i64, isize> =
+                    FxHashMap::with_capacity_and_hasher(vals.len(), Default::default());
+                for &v in vals {
+                    if let Some(&code) = positions.get(&v) {
+                        codes.push(code);
+                    } else {
+                        let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                        positions.insert(v, code);
+                        uniques.push(v);
+                        codes.push(code);
+                    }
+                }
+            }
+        }
+        (codes, uniques)
+    }
+
     /// Whether `vals` contains any duplicate, over raw `i64` keys with an
     /// early exit. Bit-identical to `detect_duplicates` for all-Int64 indexes,
     /// with inline keys (dense bitset when bounded, else `FxHashSet<i64>`).
@@ -3224,6 +3266,17 @@ impl Index {
     /// order in the returned uniques index.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
+        // Typed all-Int64 fast path: inline `i64` codes (dense code table when
+        // the value span is bounded) instead of the cloned-key
+        // `FxHashMap<IndexLabel, isize>`. Int64 labels are never missing, so the
+        // generic `-1` missing branch never fires — bit-identical codes/uniques.
+        if let Some(vals) = self.labels.int64_view() {
+            let (codes, uniques) = Self::factorize_i64(&vals);
+            // Build the uniques over the typed Int64 backing — defers the
+            // per-label `IndexLabel` materialization the `Vec<IndexLabel>` form
+            // would force (the dominant tail at high cardinality).
+            return (codes, self.propagate_name(Self::from_i64(uniques)));
+        }
         let mut positions = FxHashMap::<IndexLabel, isize>::default();
         let mut uniques = Vec::<IndexLabel>::new();
         let mut codes = Vec::with_capacity(self.labels.len());

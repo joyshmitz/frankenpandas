@@ -1491,6 +1491,59 @@ impl Index {
         positions
     }
 
+    /// First-occurrence position of every `target` value within `haystack`,
+    /// over raw `i64` keys. Bit-identical to the `FxHashMap<&IndexLabel>` probe
+    /// (`position_map_first_ref` + `map.get`) for all-Int64 indexes — same
+    /// first-occurrence semantics — but the keys are INLINE `i64` rather than
+    /// pointers into the 32-byte `IndexLabel` enum vector, so each probe costs
+    /// one cache miss instead of two (hashtable slot + pointer-chase into the
+    /// label vector). A bounded value span uses a hash-free direct-address
+    /// table; otherwise an inline-key `FxHashMap<i64, usize>`.
+    fn get_indexer_i64(haystack: &[i64], target: &[i64]) -> Vec<Option<usize>> {
+        // Dense direct-address gate (mirrors the groupby/value-counts dense
+        // histogram cap): bounded span, ≤ 2^26 slots and ≤ 16× the key count.
+        if !haystack.is_empty() {
+            let mut min = haystack[0];
+            let mut max = haystack[0];
+            for &v in haystack {
+                if v < min {
+                    min = v;
+                } else if v > max {
+                    max = v;
+                }
+            }
+            let span = (max as i128 - min as i128 + 1) as u128;
+            if span <= (1u128 << 26) && span <= (haystack.len() as u128).saturating_mul(16) {
+                let span = span as usize;
+                let mut table = vec![usize::MAX; span];
+                for (idx, &v) in haystack.iter().enumerate() {
+                    let slot = (v as i128 - min as i128) as usize;
+                    if table[slot] == usize::MAX {
+                        table[slot] = idx;
+                    }
+                }
+                return target
+                    .iter()
+                    .map(|&v| {
+                        if v < min || v > max {
+                            return None;
+                        }
+                        let slot = (v as i128 - min as i128) as usize;
+                        let pos = table[slot];
+                        (pos != usize::MAX).then_some(pos)
+                    })
+                    .collect();
+            }
+        }
+
+        let mut map: FxHashMap<i64, usize> =
+            FxHashMap::with_capacity_and_hasher(haystack.len(), Default::default());
+        for (idx, &v) in haystack.iter().enumerate() {
+            map.entry(v).or_insert(idx);
+        }
+        target.iter().map(|&v| map.get(&v).copied()).collect()
+    }
+
     // ── Pandas Index Model: lookup and membership ──────────────────────
 
     #[must_use]
@@ -1528,6 +1581,17 @@ impl Index {
                 return out;
             }
             return targets.iter().map(|label| self.position(label)).collect();
+        }
+        // Typed all-Int64 fast path: probe over raw `i64` keys (inline, one
+        // cache miss per lookup) instead of the `FxHashMap<&IndexLabel>` whose
+        // pointer keys force a second cache miss chasing into the 32-byte enum
+        // label vector — the dominant cost of unsorted Int64 get_indexer
+        // (~14× slower than pandas' inline-key khash). Bit-identical: same
+        // first-occurrence position per target label.
+        if let (Some(self_i64), Some(target_i64)) =
+            (self.labels.int64_view(), target.labels.int64_view())
+        {
+            return Self::get_indexer_i64(&self_i64, &target_i64);
         }
         let map = self.position_map_first_ref();
         target

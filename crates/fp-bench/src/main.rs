@@ -358,13 +358,21 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                         let _ = series.value_counts().expect("str value_counts");
                     })
                 }
-                _ => time_us(|| {
-                    let _ = frame
-                        .groupby(&["key"])
-                        .expect("groupby")
-                        .sum()
-                        .expect("sum");
-                }),
+                _ => {
+                    // pandas: f.groupby("key")["val"].sum() — sums ONLY val.
+                    // Drop the unrelated "name" column (a ~1M-unique string)
+                    // first so fp's groupby(key).sum() likewise aggregates only
+                    // val, instead of also concatenating the string column per
+                    // group (which made this workload look ~2x slower).
+                    let gframe = frame.drop_columns(&["name"]).expect("drop name");
+                    time_us(|| {
+                        let _ = gframe
+                            .groupby(&["key"])
+                            .expect("groupby")
+                            .sum()
+                            .expect("sum");
+                    })
+                }
             }
         }
         _ => return None,

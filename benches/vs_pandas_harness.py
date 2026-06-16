@@ -12,8 +12,8 @@ Per BENCH_MATRIX_SPEC.md:
 - EngineIdentity Subject!=Oracle on every artifact
 
 Usage:
-    python benches/vs_pandas_harness.py --category io --size 100k
-    python benches/vs_pandas_harness.py --all --sizes 10k,100k
+    python benches/vs_pandas_harness.py --category io --sizes 100k
+    python benches/vs_pandas_harness.py --all --sizes 10k,100k,1M
 """
 from __future__ import annotations
 
@@ -501,7 +501,7 @@ def main():
     parser.add_argument("--category", choices=list(CATEGORIES.keys()),
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
-    parser.add_argument("--sizes", default="10k,100k",
+    parser.add_argument("--sizes", default="10k,100k,1M",
                         help="Comma-separated sizes (10k,100k,1M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")

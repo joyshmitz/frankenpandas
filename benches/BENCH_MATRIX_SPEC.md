@@ -58,9 +58,9 @@ Define comprehensive head-to-head benchmark coverage to validate (or disprove) t
 
 | Workload | Description | Sizes |
 |----------|-------------|-------|
-| merge_inner | Inner join on key | 10k/100k |
-| merge_left | Left join | 10k/100k |
-| merge_outer | Outer join | 10k/100k |
+| merge_inner | Inner join on key | 10k/100k/1M |
+| merge_left | Left join | 10k/100k/1M |
+| merge_outer | Outer join | 10k/100k/1M |
 | merge_asof | Time-series asof join | 10k/100k |
 | concat_axis0 | Vertical concatenation | 10k/100k/1M |
 | concat_axis1 | Horizontal concatenation | 10k/100k |

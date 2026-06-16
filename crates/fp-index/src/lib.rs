@@ -11424,6 +11424,41 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
         return align_non_unique(left, right, AlignMode::Inner);
     }
 
+    // Typed all-Int64 fast path: inline `i64` right-position map instead of the
+    // pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical: left-order matches
+    // present in right, with their (left, right) positions.
+    if let (Some(left_vals), Some(right_vals)) =
+        (left.labels.int64_view(), right.labels.int64_view())
+    {
+        let mut right_pos: FxHashMap<i64, usize> =
+            FxHashMap::with_capacity_and_hasher(right_vals.len(), Default::default());
+        for (i, &v) in right_vals.iter().enumerate() {
+            right_pos.entry(v).or_insert(i);
+        }
+        let mut out_vals = Vec::new();
+        let mut left_positions = Vec::new();
+        let mut right_positions = Vec::new();
+        for (left_pos, &v) in left_vals.iter().enumerate() {
+            if let Some(&rp) = right_pos.get(&v) {
+                out_vals.push(v);
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(rp));
+            }
+        }
+        let shared_name = if left.name() == right.name() {
+            left.name().map(str::to_owned)
+        } else {
+            None
+        };
+        let mut union_index = Index::from_i64(out_vals);
+        union_index.name = shared_name;
+        return AlignmentPlan {
+            union_index,
+            left_positions,
+            right_positions,
+        };
+    }
+
     let right_map = right.position_map_first_ref();
 
     let mut output_labels = Vec::new();
@@ -11459,6 +11494,31 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
 pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
     if left.has_duplicates() || right.has_duplicates() {
         return align_non_unique(left, right, AlignMode::Left);
+    }
+
+    // Typed all-Int64 fast path: inline `i64` right-position map instead of the
+    // pointer-keyed `FxHashMap<&IndexLabel>`. The union is `left` unchanged, and
+    // `left_positions` is the identity `0..n` — only `right_positions` needs a
+    // lookup. Bit-identical.
+    if let (Some(left_vals), Some(right_vals)) =
+        (left.labels.int64_view(), right.labels.int64_view())
+    {
+        let mut right_pos: FxHashMap<i64, usize> =
+            FxHashMap::with_capacity_and_hasher(right_vals.len(), Default::default());
+        for (i, &v) in right_vals.iter().enumerate() {
+            right_pos.entry(v).or_insert(i);
+        }
+        let n = left_vals.len();
+        let left_positions: Vec<Option<usize>> = (0..n).map(Some).collect();
+        let right_positions: Vec<Option<usize>> = left_vals
+            .iter()
+            .map(|v| right_pos.get(v).copied())
+            .collect();
+        return AlignmentPlan {
+            union_index: left.clone(),
+            left_positions,
+            right_positions,
+        };
     }
 
     let right_map = right.position_map_first_ref();

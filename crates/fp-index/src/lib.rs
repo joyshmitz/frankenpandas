@@ -1701,6 +1701,38 @@ impl Index {
         out
     }
 
+    /// Membership of each `haystack` value within `needles`, over raw `i64`
+    /// keys (dense bitset when the needle span is bounded, else inline-key
+    /// `FxHashSet<i64>`). Bit-identical to the `FxHashMap<&IndexLabel>`
+    /// `set.contains_key` probe for all-Int64 inputs.
+    fn isin_i64(haystack: &[i64], needles: &[i64]) -> Vec<bool> {
+        if needles.is_empty() {
+            return vec![false; haystack.len()];
+        }
+        match Self::i64_dense_span(needles) {
+            Some((min, span)) => {
+                let mut bits = vec![0u64; span.div_ceil(64)];
+                for &v in needles {
+                    let s = (v - min) as usize;
+                    bits[s >> 6] |= 1u64 << (s & 63);
+                }
+                haystack
+                    .iter()
+                    .map(|&v| {
+                        let off = v as i128 - min as i128;
+                        off >= 0
+                            && (off as u128) < span as u128
+                            && (bits[(off as usize) >> 6] >> ((off as usize) & 63)) & 1 == 1
+                    })
+                    .collect()
+            }
+            None => {
+                let set: FxHashSet<i64> = needles.iter().copied().collect();
+                haystack.iter().map(|&v| set.contains(&v)).collect()
+            }
+        }
+    }
+
     // ── Pandas Index Model: lookup and membership ──────────────────────
 
     #[must_use]
@@ -1760,6 +1792,21 @@ impl Index {
 
     #[must_use]
     pub fn isin(&self, values: &[IndexLabel]) -> Vec<bool> {
+        // Typed all-Int64 fast path: probe over raw `i64` keys. An all-Int64
+        // index can only match `IndexLabel::Int64` needles (the enum's Eq is
+        // variant-sensitive), so non-Int64 needles are dropped without changing
+        // membership — bit-identical to the pointer-keyed `FxHashMap` probe but
+        // without the per-label enum-pointer cache miss.
+        if let Some(self_i64) = self.labels.int64_view() {
+            let needles: Vec<i64> = values
+                .iter()
+                .filter_map(|v| match v {
+                    IndexLabel::Int64(x) => Some(*x),
+                    _ => None,
+                })
+                .collect();
+            return Self::isin_i64(&self_i64, &needles);
+        }
         let set: FxHashMap<&IndexLabel, ()> = values.iter().map(|v| (v, ())).collect();
         self.labels.iter().map(|l| set.contains_key(l)).collect()
     }
@@ -2009,6 +2056,18 @@ impl Index {
 
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
+        // Typed all-Int64 fast path: the two halves (self-not-in-other,
+        // other-not-in-self) are disjoint by construction, so the original
+        // shared `seen` only ever dedups WITHIN a half — exactly what two
+        // independent `membership_filter_i64(.., keep_present=false)` calls do,
+        // with inline `i64` keys instead of the pointer-keyed `FxHashMap`.
+        if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
+            let mut labels = Self::membership_filter_i64(&a_i64, &b_i64, false);
+            labels.extend(Self::membership_filter_i64(&b_i64, &a_i64, false));
+            let mut result = Self::new(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
         let self_set = self.position_map_first_ref();
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();

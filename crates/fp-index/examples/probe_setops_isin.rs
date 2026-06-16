@@ -40,5 +40,8 @@ fn main() {
     bench("intersection", 8, || a.intersection(&b).len());
     bench("union", 8, || a.union(&b).len());
     bench("difference", 8, || a.difference(&b).len());
+    bench("symmetric_difference", 8, || {
+        a.symmetric_difference(&b).len()
+    });
     bench("isin", 8, || a.isin(&vals).iter().filter(|x| **x).count());
 }

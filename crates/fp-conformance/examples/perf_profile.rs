@@ -90,6 +90,23 @@ fn build_str_vc_series(n: usize, cardinality: usize) -> Series {
     Series::new("s", index, column).expect("str vc series")
 }
 
+fn build_nullable_float_vc_series(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let data: Vec<f64> = (0..n)
+        .map(|i| {
+            if i % 5 == 1 {
+                f64::NAN
+            } else if i % 11 == 0 {
+                -0.0
+            } else {
+                (i % 17) as f64 + 0.25
+            }
+        })
+        .collect();
+    Series::new("s", Index::new(labels), Column::from_f64_values(data))
+        .expect("nullable float vc series")
+}
+
 /// mid-string — the canonical str.contains workload for the SIMD string-scan
 /// campaign (every row is a real heap String, exercising the AoS wall).
 fn build_str_series(n: usize) -> Series {
@@ -1158,6 +1175,11 @@ fn run_golden(scenario: &str, n: usize) {
             // value_counts over a contiguous-Utf8 Series — exercises the byte-span
             // FxHash tally (vcstr) vs the ScalarKey/SipHash path.
             let s = build_str_vc_series(n, 1000);
+            let out = s.value_counts().expect("value_counts");
+            return print!("{}", golden_dump_series(&out));
+        }
+        "nullable_float_value_counts" => {
+            let s = build_nullable_float_vc_series(n);
             let out = s.value_counts().expect("value_counts");
             return print!("{}", golden_dump_series(&out));
         }

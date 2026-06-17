@@ -430,6 +430,14 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 
+Known fp-frame inventory: `crates/fp-frame/src/lib.rs` has a tracked broad
+scanner backlog in `br-frankenpandas-yavyk`, triaged in
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`. When touching this
+large file, run `timeout 180s ubs crates/fp-frame/src/lib.rs`; fix any new
+focused finding on the touched hunk, but do not fold the pre-existing whole-file
+inventory or timeout/stall behavior into unrelated beads. Cite the audit in the
+closeout if the bounded UBS run reproduces only the known inventory or stalls.
+
 ### Commands
 
 ```bash

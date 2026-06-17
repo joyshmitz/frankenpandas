@@ -1421,13 +1421,22 @@ fn main() {
     }
 
     eprintln!("perf_profile: scenario={scenario} n={n} iters={iters}");
-    let start = Instant::now();
     let mut sink: usize = 0;
 
-    match scenario {
+    macro_rules! profile_iters {
+        ($($body:tt)*) => {{
+            let start = Instant::now();
+            for _ in 0..iters {
+                $($body)*
+            }
+            start.elapsed()
+        }};
+    }
+
+    let elapsed = match scenario {
         "drop_duplicates" => {
             let frame = build_groupby_frame(n, 100);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .drop_duplicates(None, DuplicateKeep::First, false)
                     .expect("dedup");
@@ -1436,7 +1445,7 @@ fn main() {
         }
         "iloc_slice" => {
             let frame = build_numeric_frame(n, 10);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .iloc_slice(Some((n / 4) as i64), Some((3 * n / 4) as i64))
                     .expect("iloc_slice");
@@ -1445,7 +1454,7 @@ fn main() {
         }
         "groupby_transform_median" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1456,7 +1465,7 @@ fn main() {
         }
         "groupby_transform_std" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1467,7 +1476,7 @@ fn main() {
         }
         "groupby_cumsum" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = value
                     .groupby(&key)
                     .expect("groupby")
@@ -1478,7 +1487,7 @@ fn main() {
         }
         "df_groupby_cumsum" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1489,14 +1498,14 @@ fn main() {
         }
         "groupby_diff" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = value.groupby(&key).expect("groupby").diff(1).expect("diff");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "df_groupby_diff" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1507,7 +1516,7 @@ fn main() {
         }
         "groupby_transform_mean" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1518,7 +1527,7 @@ fn main() {
         }
         "groupby_rank" => {
             let frame = build_transform_frame_i64(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1529,7 +1538,7 @@ fn main() {
         }
         "groupby_rank_f64" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1540,7 +1549,7 @@ fn main() {
         }
         "groupby_quantile" => {
             let frame = build_transform_frame(n, 100, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1551,7 +1560,7 @@ fn main() {
         }
         "groupby_agg_multi" => {
             let frame = build_transform_frame(n, 100, 1);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1562,7 +1571,7 @@ fn main() {
         }
         "groupby_agg_multi_int2" => {
             let frame = build_multi_int_groupby_frame(n, 100);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k0", "k1"])
                     .expect("groupby")
@@ -1573,14 +1582,14 @@ fn main() {
         }
         "value_counts_nan50" => {
             let series = build_nullable_f64_value_counts_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = series.value_counts().expect("value_counts");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_transform_mean" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("groupby")
@@ -1591,14 +1600,14 @@ fn main() {
         }
         "sort_single" => {
             let frame = build_numeric_frame(n, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.sort_values("c0", true).expect("sort");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "sort_multi" => {
             let frame = build_multisort_frame(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .sort_values_multi(&["k0", "k1"], &[true, true], "last")
                     .expect("sort multi");
@@ -1607,21 +1616,21 @@ fn main() {
         }
         "sort_index" => {
             let frame = build_sortindex_frame(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.sort_index(true).expect("sort index");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_sort" => {
             let frame = build_str_key_frame(n, 4096);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.sort_values("k", true).expect("str sort");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_groupby_sum" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1632,7 +1641,7 @@ fn main() {
         }
         "str_groupby_mean" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1643,7 +1652,7 @@ fn main() {
         }
         "str_groupby_count" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1656,7 +1665,7 @@ fn main() {
             // Common-case groupby: many rows, FEW distinct string keys
             // (br-frankenpandas-90yoh). 64 groups -> hash-group + sort-distinct.
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1667,7 +1676,7 @@ fn main() {
         }
         "str_groupby_count_lowcard" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1678,7 +1687,7 @@ fn main() {
         }
         "str_groupby_min" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1689,7 +1698,7 @@ fn main() {
         }
         "str_groupby_max" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1700,7 +1709,7 @@ fn main() {
         }
         "str_groupby_var" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1711,7 +1720,7 @@ fn main() {
         }
         "str_groupby_std" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1722,7 +1731,7 @@ fn main() {
         }
         "str_groupby_first" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1733,7 +1742,7 @@ fn main() {
         }
         "str_groupby_last" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1744,7 +1753,7 @@ fn main() {
         }
         "str_groupby_prod" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1755,7 +1764,7 @@ fn main() {
         }
         "str_groupby_median" => {
             let frame = build_str_key_frame_repeated(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame
                     .groupby(&["k"])
                     .expect("str groupby")
@@ -1767,21 +1776,21 @@ fn main() {
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
             let mask = build_every_other_bool_mask(frame.index(), n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.filter_rows(&mask).expect("filter");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "dt_year" => {
             let parsed = to_datetime(&build_datetime_string_series(n)).expect("to datetime");
-            for _ in 0..iters {
+            profile_iters! {
                 let out = parsed.dt().year().expect("dt year");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "csv_parse_dates_dt_year" => {
             let csv = build_datetime_csv_string(n, 4);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = read_csv_parse_dates_dt_year(&csv);
                 sink = sink.wrapping_add(out.len());
             }
@@ -1789,28 +1798,28 @@ fn main() {
         "str_filter" => {
             let frame = build_str_multi_frame(n, 4);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.iloc_bool(&mask).expect("str filter");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "df_corr" => {
             let frame = build_corr_frame(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.corr().expect("corr");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "df_cov" => {
             let frame = build_corr_frame(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.cov().expect("cov");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "df_spearman" => {
             let frame = build_corr_frame(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.corr_method("spearman").expect("spearman");
                 sink = sink.wrapping_add(out.len());
             }
@@ -1819,14 +1828,14 @@ fn main() {
             // GEMM C = A(n x 256) · B(256 x 256) -> n x 256.
             let a = build_corr_frame(n, 256);
             let b = build_corr_frame(256, 256);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = a.dot(&b).expect("dot");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "df_corr_nan" => {
             let frame = build_corr_nan_frame(n, 64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.corr().expect("corr_nan");
                 sink = sink.wrapping_add(out.len());
             }
@@ -1834,7 +1843,7 @@ fn main() {
         "df_kendall" => {
             // kendall is O(M^2) per pair; keep n small in the bench invocation.
             let frame = build_corr_frame(n, 32);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = frame.corr_method("kendall").expect("kendall");
                 sink = sink.wrapping_add(out.len());
             }
@@ -1844,7 +1853,7 @@ fn main() {
             // ~n^2/cardinality rows, which is where the ~36x cost lives.
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1855,7 +1864,7 @@ fn main() {
             // Utf8 cols gather through reindex_by_positions' null path (cmxjz).
             let left = build_join_frame_utf8_wide("lv", n, 6, 0);
             let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1866,7 +1875,7 @@ fn main() {
             // null path (cmxjz).
             let left = build_join_frame_utf8_wide("lv", n, 6, 0);
             let right = build_join_frame_utf8_wide("rv", n, 6, (n / 2) as i64);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1877,7 +1886,7 @@ fn main() {
             // per-column gather over the ~n^2/card output dominates (j3jnd).
             let left = build_join_frame_f64_wide("lv", n, 512, 6);
             let right = build_join_frame_f64_wide("rv", n, 512, 6);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1887,7 +1896,7 @@ fn main() {
             // the small matched output (br-frankenpandas-i388q).
             let left = build_str_join_frame("lv", n, n, 0);
             let right = build_str_join_frame("rv", n, n, n - n / 10);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1896,7 +1905,7 @@ fn main() {
             // merge_asof on a sorted i64 key, wide Float64 right side: output is
             // left.len() rows x all cols, dominated by the per-column build (fu8f5).
             let (left, right) = build_asof_frames(n, 1, 8);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_asof(&left, &right, "on", AsofDirection::Backward).expect("asof");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1907,7 +1916,7 @@ fn main() {
             // (null-introduced right values -> Float64 promotion path).
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame_offset("right_value", n, 512, 13, 256);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1917,7 +1926,7 @@ fn main() {
             // BOTH sides (null-introduced on each side).
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame_offset("right_value", n, 512, 13, 256);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
@@ -1927,35 +1936,35 @@ fn main() {
             // unmatched (null-introduced left values, dtype preserved).
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame_offset("right_value", n, 512, 13, 256);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Right).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
         }
         "str_contains" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.str().contains("needle").expect("str contains");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_len" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.str().len().expect("str len");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_lower" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.str().lower().expect("str lower");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_chain" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let lowered = s.str().lower().expect("lower");
                 let stripped = lowered.str().strip().expect("strip");
                 let out = stripped.str().contains("needle").expect("contains");
@@ -1964,7 +1973,7 @@ fn main() {
         }
         "str_starts_chain" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let lowered = s.str().lower().expect("lower");
                 let out = lowered.str().startswith("prefix_0").expect("startswith");
                 sink = sink.wrapping_add(out.len());
@@ -1972,7 +1981,7 @@ fn main() {
         }
         "str_series_sort" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.sort_values(true).expect("sort");
                 sink = sink.wrapping_add(out.len());
             }
@@ -1991,42 +2000,42 @@ fn main() {
                 let j = (state >> 33) as usize % (i + 1);
                 idx.swap(i, j);
             }
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.take(&idx).expect("take");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_value_counts" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.value_counts().expect("value_counts");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_unique" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let u = s.unique();
                 sink = sink.wrapping_add(u.len());
             }
         }
         "str_factorize" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let (codes, uniques) = s.factorize().expect("factorize");
                 sink = sink.wrapping_add(codes.len() ^ uniques.len());
             }
         }
         "str_drop_duplicates" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.drop_duplicates().expect("drop_duplicates");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_mode" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.mode().expect("mode");
                 sink = sink.wrapping_add(out.len());
             }
@@ -2036,14 +2045,14 @@ fn main() {
             let needles: Vec<Scalar> = (0..500u64)
                 .map(|id| Scalar::Utf8(format!("val_{id:06x}")))
                 .collect();
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.isin(&needles).expect("isin");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_duplicated" => {
             let s = build_str_vc_series(n, 1000);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.duplicated().expect("duplicated");
                 sink = sink.wrapping_add(out.len());
             }
@@ -2059,28 +2068,28 @@ fn main() {
                     }
                 })
                 .collect();
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.reindex(new_labels.clone()).expect("reindex");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "series_sort_index" => {
             let s = build_series_sortindex(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.sort_index(true).expect("series sort index");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "rank_avg" => {
             let s = build_rank_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = s.rank("average", true, "keep").expect("rank");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "str_sort_chain" => {
             let s = build_str_series(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let lowered = s.str().lower().expect("lower");
                 let out = lowered.sort_values(true).expect("sort");
                 sink = sink.wrapping_add(out.len());
@@ -2093,7 +2102,7 @@ fn main() {
             // gate for lazy join outputs (br-frankenpandas-3ad4n).
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 let mut acc: i64 = 0;
                 for name in &out.column_order {
@@ -2112,21 +2121,21 @@ fn main() {
             // (2n allocations) is the dominant non-gather cost here.
             let left = build_join_frame("left_value", n, n, 7);
             let right = build_join_frame("right_value", n, n, 13);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
         }
         "series_add" => {
             let (left, right) = build_series_pair(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = left.add(&right).expect("series add");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "series_add_same" => {
             let (left, right) = build_series_pair_same(n);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = left.add(&right).expect("series add same");
                 sink = sink.wrapping_add(out.len());
             }
@@ -2134,7 +2143,7 @@ fn main() {
         "series_add_align" => {
             let (left, right) = build_series_pair(n);
             let policy = RuntimePolicy::strict();
-            for _ in 0..iters {
+            profile_iters! {
                 let mut ledger = EvidenceLedger::new();
                 let out = match left.add_with_policy(&right, &policy, &mut ledger) {
                     Ok(out) => out,
@@ -2150,21 +2159,21 @@ fn main() {
             // Matches bench_runner::build_csv_string + io/csv_read shape:
             // 10 dense numeric columns, default pandas-style CSV parsing.
             let csv = build_csv_string(n, 10);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = read_csv_str(&csv).expect("csv read");
                 sink = sink.wrapping_add(out.len());
             }
         }
         "csv_read_options" => {
             let csv = build_csv_string(n, 10);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = read_csv_options_default(&csv);
                 sink = sink.wrapping_add(out.len());
             }
         }
         "csv_read_no_na_filter" => {
             let csv = build_csv_string(n, 10);
-            for _ in 0..iters {
+            profile_iters! {
                 let out = read_csv_no_na_filter(&csv);
                 sink = sink.wrapping_add(out.len());
             }
@@ -2173,9 +2182,8 @@ fn main() {
             eprintln!("unknown scenario: {other}");
             std::process::exit(2);
         }
-    }
+    };
 
-    let elapsed = start.elapsed();
     let per_iter_ms = elapsed.as_secs_f64() * 1e3 / iters as f64;
     eprintln!(
         "perf_profile: done {iters} iters in {:.3}s ({per_iter_ms:.3} ms/iter), sink={sink}",

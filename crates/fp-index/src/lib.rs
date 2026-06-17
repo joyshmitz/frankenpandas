@@ -2991,6 +2991,11 @@ impl Index {
     /// treated as falsy. Empty index returns false.
     #[must_use]
     pub fn any(&self) -> bool {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values.iter().any(|&value| value != 0);
+        }
         self.labels.iter().any(index_label_is_truthy)
     }
 
@@ -3000,6 +3005,11 @@ impl Index {
     /// convention: vacuously true). Missing labels count as falsy.
     #[must_use]
     pub fn all(&self) -> bool {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values.iter().all(|&value| value != 0);
+        }
         self.labels.iter().all(index_label_is_truthy)
     }
 
@@ -17521,6 +17531,39 @@ mod tests {
         let all_zero = Index::from_i64(vec![0, 0]);
         assert!(!all_zero.any());
         assert!(!all_zero.all());
+    }
+
+    #[test]
+    fn typed_int64_any_all_avoid_label_materialization_c1ikv() {
+        let mixed = Index::from_i64_values(vec![0, 3, 0]);
+        assert!(mixed.labels.materialized.get().is_none());
+        assert!(mixed.any());
+        assert!(!mixed.all());
+        assert!(
+            mixed.labels.materialized.get().is_none(),
+            "any/all should read typed Int64 values without materializing labels"
+        );
+
+        let all_nonzero = Index::from_i64_values(vec![-2, 1, 5]);
+        assert!(all_nonzero.labels.materialized.get().is_none());
+        assert!(all_nonzero.any());
+        assert!(all_nonzero.all());
+        assert!(all_nonzero.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn affine_int64_any_all_avoid_label_materialization_c1ikv() {
+        let zeros = Index::new_known_unique_int64_affine_range(0, 0, 0).unwrap();
+        assert!(zeros.labels.materialized.get().is_none());
+        assert!(!zeros.any());
+        assert!(zeros.all());
+        assert!(zeros.labels.materialized.get().is_none());
+
+        let values = Index::new_known_unique_int64_affine_range(2, 2, 3).unwrap();
+        assert!(values.labels.materialized.get().is_none());
+        assert!(values.any());
+        assert!(values.all());
+        assert!(values.labels.materialized.get().is_none());
     }
 
     #[test]

@@ -5,13 +5,16 @@
 //! keeps the linear path — the baseline for what every datetime get_loc did
 //! before.
 
+use std::{hint::black_box, time::Instant};
+
 use fp_index::DatetimeIndex;
-use std::hint::black_box;
-use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let queries: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000);
 
     let sorted: Vec<i64> = (0..n).map(|i| i as i64 * 1000).collect();
@@ -25,7 +28,11 @@ fn main() {
         .collect();
 
     let mode = args.get(3).map(String::as_str).unwrap_or("sorted");
-    let target = if mode == "linear" { &dt_unsorted } else { &dt_sorted };
+    let target = if mode == "linear" {
+        &dt_unsorted
+    } else {
+        &dt_sorted
+    };
 
     let mut sink = 0usize;
     let start = Instant::now();

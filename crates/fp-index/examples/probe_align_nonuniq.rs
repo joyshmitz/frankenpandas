@@ -1,9 +1,9 @@
 //! Probe: align_non_unique (all 4 modes) on duplicate-containing Int64 indexes.
 //! Run: cargo run -p fp-index --example probe_align_nonuniq --release -- 1000000
 
-use fp_index::{align, AlignMode, Index, IndexLabel};
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
+
+use fp_index::{AlignMode, Index, IndexLabel, align};
 
 fn bench(name: &str, iters: usize, mut f: impl FnMut() -> usize) {
     for _ in 0..2 {
@@ -40,12 +40,17 @@ fn main() {
     // ~10% duplicates (each value ~1.1 occurrences) so the cartesian stays
     // tame and the grouping cost dominates. ~50% key overlap between sides.
     let l = shuf((0..n).map(|i| (i as i64) * 9 / 10).collect(), &mut z);
-    let r = shuf((0..n).map(|i| (i as i64) * 9 / 10 + n as i64 / 2).collect(), &mut z);
+    let r = shuf(
+        (0..n).map(|i| (i as i64) * 9 / 10 + n as i64 / 2).collect(),
+        &mut z,
+    );
 
     bench("inner", 5, || {
         align(&l, &r, AlignMode::Inner).union_index.len()
     });
-    bench("left", 5, || align(&l, &r, AlignMode::Left).union_index.len());
+    bench("left", 5, || {
+        align(&l, &r, AlignMode::Left).union_index.len()
+    });
     bench("outer", 5, || {
         align(&l, &r, AlignMode::Outer).union_index.len()
     });

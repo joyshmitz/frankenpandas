@@ -3,9 +3,7 @@
 //! cache hits. Here we pre-build K DISTINCT CSVs and read each ONCE.
 //! Run: cargo run -p fp-io --example probe_csv_read_uncached --release -- 100000 10 12
 
-use std::collections::BTreeMap;
-use std::hint::black_box;
-use std::time::Instant;
+use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -57,5 +55,8 @@ fn main() {
         sink ^= df.len();
     }
     let per = start.elapsed().as_secs_f64() * 1000.0 / k as f64;
-    println!("uncached read_csv_str rows={rows} cols={cols}: {per:.2} ms/read ({mb:.1} MB, {:.0} MB/s, sink={sink})", mb / (per / 1000.0));
+    println!(
+        "uncached read_csv_str rows={rows} cols={cols}: {per:.2} ms/read ({mb:.1} MB, {:.0} MB/s, sink={sink})",
+        mb / (per / 1000.0)
+    );
 }

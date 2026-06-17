@@ -2,9 +2,9 @@
 //! a LOW-cardinality Utf8 index (the common categorical case).
 //! Run: cargo run -p fp-index --example probe_str_categorical --release -- 1000000
 
+use std::{hint::black_box, time::Instant};
+
 use fp_index::{DuplicateKeep, Index, IndexLabel};
-use std::hint::black_box;
-use std::time::Instant;
 
 fn bench(name: &str, iters: usize, mut f: impl FnMut() -> usize) {
     for _ in 0..2 {
@@ -45,6 +45,9 @@ fn main() {
     bench("value_counts", 6, || idx.value_counts().len());
     bench("unique", 6, || idx.unique().labels().len());
     bench("duplicated", 6, || {
-        idx.duplicated(DuplicateKeep::First).iter().filter(|b| **b).count()
+        idx.duplicated(DuplicateKeep::First)
+            .iter()
+            .filter(|b| **b)
+            .count()
     });
 }

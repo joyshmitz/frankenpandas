@@ -8,14 +8,17 @@
 //! `FP_NO_MISETOP=1` forces the to_list baseline; the printed `chk` (FNV digest
 //! of the result tuples) must match between the two runs.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_index::{IndexLabel, MultiIndex};
 
 fn mk(n: usize, off: usize) -> MultiIndex {
-    let l0: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("g{}", (i + off) % 700))).collect();
-    let l1: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("h{}", ((i + off) / 7) % 700))).collect();
+    let l0: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Utf8(format!("g{}", (i + off) % 700)))
+        .collect();
+    let l1: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Utf8(format!("h{}", ((i + off) / 7) % 700)))
+        .collect();
     MultiIndex::from_arrays(vec![l0, l1]).expect("mi")
 }
 
@@ -24,7 +27,9 @@ fn digest(mi: &MultiIndex) -> u64 {
     for tuple in mi.to_list() {
         for lbl in tuple {
             let h = match lbl {
-                IndexLabel::Utf8(s) => s.bytes().fold(1469598103934665603u64, |a, b| (a ^ b as u64).wrapping_mul(0x100000001b3)),
+                IndexLabel::Utf8(s) => s.bytes().fold(1469598103934665603u64, |a, b| {
+                    (a ^ b as u64).wrapping_mul(0x100000001b3)
+                }),
                 IndexLabel::Int64(v) => v as u64,
                 _ => 0xDEAD,
             };
@@ -36,12 +41,16 @@ fn digest(mi: &MultiIndex) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
     let a = mk(n, 0);
     let b = mk(n, n / 3); // ~partial overlap
 
-    let chk = digest(&a.intersection(&b).unwrap()) ^ digest(&a.difference(&b).unwrap()).rotate_left(1);
+    let chk =
+        digest(&a.intersection(&b).unwrap()) ^ digest(&a.difference(&b).unwrap()).rotate_left(1);
 
     let mut sink = 0usize;
     let start = Instant::now();

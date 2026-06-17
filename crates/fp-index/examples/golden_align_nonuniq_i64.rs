@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use fp_index::{align, AlignMode, Index, IndexLabel};
+use fp_index::{AlignMode, Index, IndexLabel, align};
 
 fn mk(v: &[i64]) -> Index {
     Index::new(v.iter().map(|&x| IndexLabel::Int64(x)).collect())
@@ -37,11 +37,12 @@ fn reference(l: &[i64], r: &[i64], mode: AlignMode) -> Tup {
     let lg = groups(l);
     let rg = groups(r);
     let (mut u, mut lp, mut rp) = (Vec::new(), Vec::new(), Vec::new());
-    let mut push = |u: &mut Vec<i64>, lp: &mut Vec<Option<usize>>, rp: &mut Vec<Option<usize>>, v, a, b| {
-        u.push(v);
-        lp.push(a);
-        rp.push(b);
-    };
+    let mut push =
+        |u: &mut Vec<i64>, lp: &mut Vec<Option<usize>>, rp: &mut Vec<Option<usize>>, v, a, b| {
+            u.push(v);
+            lp.push(a);
+            rp.push(b);
+        };
     match mode {
         AlignMode::Inner => {
             for (i, &v) in l.iter().enumerate() {
@@ -98,11 +99,20 @@ fn reference(l: &[i64], r: &[i64], mode: AlignMode) -> Tup {
 }
 
 fn check(name: &str, l: &[i64], r: &[i64]) {
-    for mode in [AlignMode::Inner, AlignMode::Left, AlignMode::Right, AlignMode::Outer] {
+    for mode in [
+        AlignMode::Inner,
+        AlignMode::Left,
+        AlignMode::Right,
+        AlignMode::Outer,
+    ] {
         let rf = reference(l, r, mode);
         let ac = plan_tuple(align(&mk(l), &mk(r), mode));
         if rf != ac {
-            println!("FAIL {name} mode={mode:?}: ref.len={} act.len={}", rf.0.len(), ac.0.len());
+            println!(
+                "FAIL {name} mode={mode:?}: ref.len={} act.len={}",
+                rf.0.len(),
+                ac.0.len()
+            );
             std::process::exit(1);
         }
     }
@@ -130,13 +140,21 @@ fn main() {
     check("left_dups", &c, &d);
 
     // Negatives + dups.
-    check("negatives", &(0..n).map(|_| rnd(30) - 15).collect::<Vec<_>>(), &(0..n).map(|_| rnd(30) - 15).collect::<Vec<_>>());
+    check(
+        "negatives",
+        &(0..n).map(|_| rnd(30) - 15).collect::<Vec<_>>(),
+        &(0..n).map(|_| rnd(30) - 15).collect::<Vec<_>>(),
+    );
 
     // Sparse (unbounded span) with dups.
     check(
         "sparse_dups",
-        &(0..n).map(|i| ((i % 10) as i64) * 1_000_003).collect::<Vec<_>>(),
-        &(0..n).map(|i| ((i % 13) as i64) * 1_000_003).collect::<Vec<_>>(),
+        &(0..n)
+            .map(|i| ((i % 10) as i64) * 1_000_003)
+            .collect::<Vec<_>>(),
+        &(0..n)
+            .map(|i| ((i % 13) as i64) * 1_000_003)
+            .collect::<Vec<_>>(),
     );
 
     // Disjoint with dups.
@@ -144,7 +162,11 @@ fn main() {
     // One empty.
     check("empty_left", &[], &[1, 1, 2]);
     check("empty_right", &[1, 1, 2], &[]);
-    check("i64_extremes", &[i64::MIN, i64::MIN, i64::MAX, 0], &[i64::MAX, i64::MAX, i64::MIN, 7]);
+    check(
+        "i64_extremes",
+        &[i64::MIN, i64::MIN, i64::MAX, 0],
+        &[i64::MAX, i64::MAX, i64::MIN, 7],
+    );
 
     println!("ALL GOLDEN CHECKS PASSED");
 }

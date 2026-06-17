@@ -5,33 +5,53 @@
 //! typed-&[i64] rewrite is proven bit-identical to the Scalar walk.
 //! Run: cargo run -p fp-join --example golden_join_dense_left --release
 use std::collections::BTreeMap;
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
-use fp_join::{merge_dataframes_on, JoinType, MergedDataFrame};
+use fp_join::{JoinType, MergedDataFrame, merge_dataframes_on};
 
 fn build(left_keys: Vec<i64>, right_keys: Vec<i64>) -> (DataFrame, DataFrame) {
-    let nl = left_keys.len(); let nr = right_keys.len();
+    let nl = left_keys.len();
+    let nr = right_keys.len();
     let idx = |m: usize| Index::new((0..m as i64).map(IndexLabel::Int64).collect());
     let mut lm = BTreeMap::new();
     lm.insert("key".to_string(), Column::from_i64_values(left_keys));
-    lm.insert("left_val".to_string(), Column::from_f64_values((0..nl).map(|i| i as f64).collect()));
-    let left = DataFrame::new_with_column_order(idx(nl), lm, vec!["key".into(), "left_val".into()]).unwrap();
+    lm.insert(
+        "left_val".to_string(),
+        Column::from_f64_values((0..nl).map(|i| i as f64).collect()),
+    );
+    let left = DataFrame::new_with_column_order(idx(nl), lm, vec!["key".into(), "left_val".into()])
+        .unwrap();
     let mut rm = BTreeMap::new();
     rm.insert("key".to_string(), Column::from_i64_values(right_keys));
-    rm.insert("right_val".to_string(), Column::from_f64_values((0..nr).map(|i| i as f64 * 10.0).collect()));
-    let right = DataFrame::new_with_column_order(idx(nr), rm, vec!["key".into(), "right_val".into()]).unwrap();
+    rm.insert(
+        "right_val".to_string(),
+        Column::from_f64_values((0..nr).map(|i| i as f64 * 10.0).collect()),
+    );
+    let right =
+        DataFrame::new_with_column_order(idx(nr), rm, vec!["key".into(), "right_val".into()])
+            .unwrap();
     (left, right)
 }
 
 fn hash_merged(m: &MergedDataFrame) -> (u64, usize) {
     let mut h = 0xcbf29ce484222325u64;
-    let mut feed = |s: &str| { for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); } };
+    let mut feed = |s: &str| {
+        for b in s.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
     let mut rows = 0usize;
     for name in &m.column_order {
-        feed(name); feed("|");
-        let col = &m.columns[name]; rows = col.len();
-        for v in col.values().iter() { feed(&format!("{v:?},")); }
+        feed(name);
+        feed("|");
+        let col = &m.columns[name];
+        rows = col.len();
+        for v in col.values().iter() {
+            feed(&format!("{v:?},"));
+        }
         feed("\n");
     }
     (h, rows)
@@ -41,11 +61,11 @@ fn main() {
     // (left_keys, right_keys) configs exercising dense branches: unordered,
     // duplicate right keys, out-of-range left keys, empty sides.
     let configs: Vec<(Vec<i64>, Vec<i64>)> = vec![
-        (vec![2, 0, 1], vec![1, 1, 0]),                       // dup right, unordered
-        (vec![5, 3, 9, 3], vec![3, 3, 5]),                    // dup left + right
-        (vec![0, 1, 2], vec![]),                              // empty right
-        (vec![7, 7, 7], vec![7]),                             // all dup left, single right
-        (vec![10, 4, 4, 8, 0], vec![4, 8, 8, 0, 0, 99]),      // mixed dups + unmatched right
+        (vec![2, 0, 1], vec![1, 1, 0]),    // dup right, unordered
+        (vec![5, 3, 9, 3], vec![3, 3, 5]), // dup left + right
+        (vec![0, 1, 2], vec![]),           // empty right
+        (vec![7, 7, 7], vec![7]),          // all dup left, single right
+        (vec![10, 4, 4, 8, 0], vec![4, 8, 8, 0, 0, 99]), // mixed dups + unmatched right
     ];
     // Larger shuffled config.
     let n = 4000i64;
@@ -57,7 +77,10 @@ fn main() {
     // gate-5 fast path (unique right keys, float payload bypasses int64 gates).
     let m = 5000i64;
     let lk2: Vec<i64> = (0..m)
-        .map(|i| { let v = (i * 2654435761i64).rem_euclid(m); v * 7 + (v % 2) })
+        .map(|i| {
+            let v = (i * 2654435761i64).rem_euclid(m);
+            v * 7 + (v % 2)
+        })
         .collect();
     let rk2: Vec<i64> = (0..m).map(|i| (i * 40503i64).rem_euclid(m) * 7).collect();
     all.push((lk2, rk2));

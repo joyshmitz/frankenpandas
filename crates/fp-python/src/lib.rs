@@ -758,7 +758,10 @@ impl PyDataFrame {
         for (k, v) in mapping.iter() {
             pairs.push((k.extract::<String>()?, v.extract::<String>()?));
         }
-        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         let result = self
             .inner
             .rename(&refs)
@@ -798,8 +801,9 @@ impl PyDataFrame {
         let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
         let merged = fp_join::merge_dataframes_on(&self.inner, &other.inner, &on_refs, join_type)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let frame =
+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: frame })
     }
 
@@ -1068,8 +1072,10 @@ impl PyStyler {
                 StyleOp::NaRep(n) => styled.na_rep(n),
                 StyleOp::SetCaption(c) => styled.set_caption(c),
                 StyleOp::SetProperties(pairs) => {
-                    let refs: Vec<(&str, &str)> =
-                        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    let refs: Vec<(&str, &str)> = pairs
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
                     styled.set_properties(&refs)
                 }
                 StyleOp::Bar(c) => styled.bar(c),

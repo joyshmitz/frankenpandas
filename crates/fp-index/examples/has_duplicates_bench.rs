@@ -5,13 +5,16 @@
 //!
 //! `FP_NO_IDXDUP=1` forces the old FxHashMap path for the baseline measurement.
 
+use std::{hint::black_box, time::Instant};
+
 use fp_index::{Index, IndexLabel};
-use std::hint::black_box;
-use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
 
     // Strictly ascending, gapped (so it is a materialized label vector, not a

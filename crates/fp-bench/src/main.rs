@@ -186,8 +186,7 @@ fn build_square_f64_frame(dim: usize) -> DataFrame {
         columns.insert(name.clone(), Column::from_f64_values(data));
         column_order.push(name);
     }
-    DataFrame::new_with_column_order(index, columns, column_order)
-        .expect("fp-bench square frame")
+    DataFrame::new_with_column_order(index, columns, column_order).expect("fp-bench square frame")
 }
 
 /// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
@@ -540,8 +539,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let left = build(1, "left_val");
             let right = build(2, "right_val");
             time_us(|| {
-                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
-                    .expect("merge");
+                let _ =
+                    merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
+                        .expect("merge");
             })
         }
         // String-column ops (the rest of the matrix is numeric-only). pandas:
@@ -612,7 +612,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         // 2000-01-01. pandas: s.dt.floor("D").
         ("datetime", "dt_floor") => {
             let base: i64 = 946_684_800_000_000_000; // 2000-01-01 00:00:00 UTC, ns
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 37_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 37_000_000_000)
+                .collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
             let series = Series::new(
                 "d".to_string(),

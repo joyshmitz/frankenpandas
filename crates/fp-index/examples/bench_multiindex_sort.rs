@@ -7,14 +7,16 @@
 //! tuple-comparison baseline; the printed `chk` (FNV digest of the argsort
 //! permutation) must match between the two runs.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_index::{IndexLabel, MultiIndex};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
     let k = 1000usize;
 

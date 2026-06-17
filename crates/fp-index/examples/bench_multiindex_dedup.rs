@@ -8,19 +8,25 @@
 //! forces the Vec<IndexLabel>-key baseline; the printed `chk` (FNV digest of the
 //! duplicated mask + kept count) must match between the two runs.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_index::{DuplicateKeep, IndexLabel, MultiIndex};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
 
     // ~50% duplicate tuples: low-cardinality 2 Utf8 levels.
-    let l0: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("g{}", i % 700))).collect();
-    let l1: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("h{}", (i / 7) % 700))).collect();
+    let l0: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Utf8(format!("g{}", i % 700)))
+        .collect();
+    let l1: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Utf8(format!("h{}", (i / 7) % 700)))
+        .collect();
     let mi = MultiIndex::from_arrays(vec![l0, l1]).expect("mi");
 
     let mask = mi.duplicated(DuplicateKeep::First);

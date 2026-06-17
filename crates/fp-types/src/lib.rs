@@ -6485,7 +6485,10 @@ mod tests {
     #[test]
     fn period_display_is_pandas_calendar_string() {
         // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
-        assert_eq!(Period::new(216, PeriodFreq::Quarterly).to_string(), "2024Q1");
+        assert_eq!(
+            Period::new(216, PeriodFreq::Quarterly).to_string(),
+            "2024Q1"
+        );
         // 1970 + 54 == 2024 on the annual axis.
         assert_eq!(Period::new(54, PeriodFreq::Annual).to_string(), "2024");
         // 1970-01 == 0 -> 2024-03 is 54*12 + 2 == 650 months.

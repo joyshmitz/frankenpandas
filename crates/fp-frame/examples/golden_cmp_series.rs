@@ -38,8 +38,18 @@ fn main() {
     a[100] = f64::NAN;
 
     let shared = idx(&(0..n as i64).collect::<Vec<_>>());
-    let sa = Series::new("a".to_string(), shared.clone(), Column::from_f64_values(a.clone())).unwrap();
-    let sb = Series::new("b".to_string(), shared.clone(), Column::from_f64_values(b.clone())).unwrap();
+    let sa = Series::new(
+        "a".to_string(),
+        shared.clone(),
+        Column::from_f64_values(a.clone()),
+    )
+    .unwrap();
+    let sb = Series::new(
+        "b".to_string(),
+        shared.clone(),
+        Column::from_f64_values(b.clone()),
+    )
+    .unwrap();
 
     // Misaligned: same labels, reversed order (alignment path, no fast path).
     let rev = idx(&(0..n as i64).rev().collect::<Vec<_>>());
@@ -47,7 +57,8 @@ fn main() {
 
     // Partial overlap: shift labels by n/2 so only half intersect.
     let shifted = idx(&((n as i64 / 2)..(n as i64 + n as i64 / 2)).collect::<Vec<_>>());
-    let sb_shift = Series::new("b".to_string(), shifted, Column::from_f64_values(b.clone())).unwrap();
+    let sb_shift =
+        Series::new("b".to_string(), shifted, Column::from_f64_values(b.clone())).unwrap();
 
     let mut acc = String::new();
     let ops: [(&str, fn(&Series, &Series) -> Series); 6] = [

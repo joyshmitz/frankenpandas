@@ -1606,6 +1606,30 @@ fn ordered_unique_int64_right_match_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<Vec<Option<usize>>> {
+    // Typed fast path (mirror of ordered_unique_int64_left_match_positions):
+    // walk over raw &[i64] when both keys carry a contiguous Int64 backing,
+    // skipping the Vec<Scalar> materialization (32 B/elem, ~64 MB per merge at
+    // 1M rows). Bit-identical: same strictly-increasing gate and the same
+    // monotone walk producing the same left_idx per right row.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let mut left_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+        let mut left_idx = 0usize;
+        for &right_value in right_values {
+            while left_idx < left_values.len() && left_values[left_idx] < right_value {
+                left_idx += 1;
+            }
+            let matched = match left_values.get(left_idx) {
+                Some(&left_value) if left_value == right_value => Some(left_idx),
+                _ => None,
+            };
+            left_positions.push(matched);
+        }
+        return Some(left_positions);
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 

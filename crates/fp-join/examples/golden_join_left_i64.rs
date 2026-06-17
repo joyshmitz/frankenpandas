@@ -39,7 +39,7 @@ fn hash_merged(m: &MergedDataFrame) -> (u64, usize) {
 fn main() {
     for &n in &[1usize, 2, 7, 64, 5000] {
         let (l, r) = build(n);
-        for (label, jt) in [("left", JoinType::Left), ("inner", JoinType::Inner), ("outer", JoinType::Outer)] {
+        for (label, jt) in [("left", JoinType::Left), ("inner", JoinType::Inner), ("outer", JoinType::Outer), ("right", JoinType::Right)] {
             let merged = merge_dataframes_on(&l, &r, &["key"], jt).unwrap();
             let (h, rows) = hash_merged(&merged);
             println!("n={n} {label}: rows={rows} fnv={h:016x}");

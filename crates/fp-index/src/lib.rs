@@ -2877,6 +2877,23 @@ impl Index {
                 "searchsorted: needle cannot be missing".to_owned(),
             ));
         }
+        if self.labels.has_lazy_int64_backing()
+            && let IndexLabel::Int64(needle) = value
+            && let Some(values) = self.labels.int64_view()
+        {
+            let mut lo = 0usize;
+            let mut hi = values.len();
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let go_right = values[mid] < *needle || (values[mid] == *needle && side == "right");
+                if go_right {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return Ok(lo);
+        }
         let mut lo = 0usize;
         let mut hi = self.labels.len();
         while lo < hi {
@@ -17797,6 +17814,51 @@ mod tests {
         assert_eq!(idx.searchsorted(&IndexLabel::Int64(2), "right").unwrap(), 3);
         assert_eq!(idx.searchsorted(&IndexLabel::Int64(0), "left").unwrap(), 0);
         assert_eq!(idx.searchsorted(&IndexLabel::Int64(6), "left").unwrap(), 4);
+    }
+
+    #[test]
+    fn int64_searchsorted_avoids_label_materialization_ymhb6() {
+        let typed = Index::from_i64_values(vec![1, 2, 2, 5]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(
+            typed.searchsorted(&IndexLabel::Int64(2), "left").unwrap(),
+            1
+        );
+        assert_eq!(
+            typed.searchsorted(&IndexLabel::Int64(2), "right").unwrap(),
+            3
+        );
+        assert_eq!(
+            typed.searchsorted(&IndexLabel::Int64(0), "left").unwrap(),
+            0
+        );
+        assert_eq!(
+            typed.searchsorted(&IndexLabel::Int64(6), "left").unwrap(),
+            4
+        );
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "searchsorted should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(1, 2, 4).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(
+            affine.searchsorted(&IndexLabel::Int64(4), "left").unwrap(),
+            2
+        );
+        assert_eq!(
+            affine.searchsorted(&IndexLabel::Int64(5), "left").unwrap(),
+            2
+        );
+        assert_eq!(
+            affine.searchsorted(&IndexLabel::Int64(5), "right").unwrap(),
+            3
+        );
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "searchsorted should not materialize affine Int64 labels"
+        );
     }
 
     #[test]

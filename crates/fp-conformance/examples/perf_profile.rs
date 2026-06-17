@@ -1819,9 +1819,24 @@ fn main() {
             // GEMM C = A(n x 256) · B(256 x 256) -> n x 256.
             let a = build_corr_frame(n, 256);
             let b = build_corr_frame(256, 256);
+            let dot_profile = std::env::var_os("FP_DOT_PROFILE").is_some();
             for _ in 0..iters {
+                let iter_start = std::time::Instant::now();
                 let out = a.dot(&b).expect("dot");
+                let after_dot = std::time::Instant::now();
                 sink = sink.wrapping_add(out.len());
+                let after_len = std::time::Instant::now();
+                drop(out);
+                let after_drop = std::time::Instant::now();
+                if dot_profile {
+                    eprintln!(
+                        "FP_DOT_PROFILE_OUTER dot={:?} len={:?} drop={:?} iter={:?}",
+                        after_dot.duration_since(iter_start),
+                        after_len.duration_since(after_dot),
+                        after_drop.duration_since(after_len),
+                        after_drop.duration_since(iter_start)
+                    );
+                }
             }
         }
         "df_corr_nan" => {

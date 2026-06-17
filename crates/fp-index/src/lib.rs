@@ -3341,6 +3341,9 @@ impl Index {
     /// Whether this index contains missing labels, matching `pd.Index.hasnans`.
     #[must_use]
     pub fn hasnans(&self) -> bool {
+        if self.labels.has_lazy_int64_backing() {
+            return false;
+        }
         self.labels.iter().any(IndexLabel::is_missing)
     }
 
@@ -17233,6 +17236,25 @@ mod tests {
         assert!(filled_empty.labels.int64_view().unwrap().is_empty());
         assert!(empty.labels.materialized.get().is_none());
         assert!(filled_empty.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn int64_hasnans_avoids_label_materialization_99qun() {
+        let typed = Index::from_i64_values(vec![7, 0, -3]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert!(!typed.hasnans());
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "hasnans should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(9, -3, 4).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert!(!affine.hasnans());
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "hasnans should not materialize affine Int64 labels"
+        );
     }
 
     #[test]

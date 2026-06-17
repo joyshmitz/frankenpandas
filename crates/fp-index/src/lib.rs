@@ -2846,6 +2846,20 @@ impl Index {
     /// but still does a linear scan — we match that behavior).
     #[must_use]
     pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        if self.labels.has_lazy_int64_backing()
+            && let IndexLabel::Int64(needle) = key
+            && let Some(values) = self.labels.int64_view()
+        {
+            let mut best = None;
+            for &value in values.iter() {
+                if value <= *needle {
+                    best = Some(value);
+                } else {
+                    break;
+                }
+            }
+            return best.map(IndexLabel::Int64);
+        }
         let mut best: Option<&IndexLabel> = None;
         for label in &self.labels {
             if label.is_missing() {
@@ -17805,6 +17819,40 @@ mod tests {
     fn index_asof_before_first_returns_none() {
         let idx = Index::from_i64(vec![5, 10]);
         assert_eq!(idx.asof(&IndexLabel::Int64(0)), None);
+    }
+
+    #[test]
+    fn int64_asof_avoids_label_materialization_1851g() {
+        let typed = Index::from_i64_values(vec![1, 3, 5, 7]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(
+            typed.asof(&IndexLabel::Int64(4)),
+            Some(IndexLabel::Int64(3))
+        );
+        assert_eq!(typed.asof(&IndexLabel::Int64(0)), None);
+        assert_eq!(
+            typed.asof(&IndexLabel::Int64(7)),
+            Some(IndexLabel::Int64(7))
+        );
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "asof should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(1, 2, 4).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(
+            affine.asof(&IndexLabel::Int64(6)),
+            Some(IndexLabel::Int64(5))
+        );
+        assert_eq!(
+            affine.asof(&IndexLabel::Int64(100)),
+            Some(IndexLabel::Int64(7))
+        );
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "asof should not materialize affine Int64 labels"
+        );
     }
 
     #[test]

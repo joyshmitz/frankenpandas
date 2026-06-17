@@ -2087,6 +2087,19 @@ impl Index {
         if self.labels.len() <= 1 {
             return true;
         }
+        // Affine Int64 backings (RangeIndex / unit / affine) are monotonic by
+        // construction: ascending iff the step is non-negative. O(1), no
+        // IndexLabel materialization (br-frankenpandas-k9tlb vein).
+        if let Some(affine) = self.labels.int64_affine_range() {
+            return affine.step >= 0;
+        }
+        // Typed non-affine Int64: scan the i64 view instead of the wider
+        // IndexLabel window, so we never materialize the label vector. All-Int64
+        // backings carry no missing labels and IndexLabel::Int64 Ord matches i64
+        // Ord, so this is bit-identical to the fallback.
+        if let Some(values) = self.labels.int64_view() {
+            return values.windows(2).all(|pair| pair[0] <= pair[1]);
+        }
         for pair in self.labels.windows(2) {
             if pair[0] > pair[1] {
                 return false;
@@ -2105,6 +2118,17 @@ impl Index {
     pub fn is_monotonic_decreasing(&self) -> bool {
         if self.labels.len() <= 1 {
             return true;
+        }
+        // Affine Int64 backings are monotonic by construction: descending iff the
+        // step is non-positive. O(1), no IndexLabel materialization
+        // (br-frankenpandas-k9tlb vein).
+        if let Some(affine) = self.labels.int64_affine_range() {
+            return affine.step <= 0;
+        }
+        // Typed non-affine Int64: scan the i64 view (no label materialization),
+        // bit-identical to the IndexLabel fallback for all-Int64 backings.
+        if let Some(values) = self.labels.int64_view() {
+            return values.windows(2).all(|pair| pair[0] >= pair[1]);
         }
         for pair in self.labels.windows(2) {
             if pair[0] < pair[1] {
@@ -18085,6 +18109,69 @@ mod tests {
         assert!(!empty.is_numeric());
         assert!(empty.is_object());
         assert!(empty.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn int64_monotonic_predicates_avoid_label_materialization_k9tlb() {
+        // Ascending affine range: O(1) via step sign, no materialization.
+        let asc = Index::new_known_unique_int64_affine_range(0, 2, 4).unwrap();
+        assert!(asc.labels.materialized.get().is_none());
+        assert!(asc.is_monotonic_increasing());
+        assert!(asc.is_monotonic());
+        assert!(!asc.is_monotonic_decreasing());
+        assert!(
+            asc.labels.materialized.get().is_none(),
+            "affine monotonic predicates must not materialize labels"
+        );
+
+        // Descending affine range.
+        let desc = Index::new_known_unique_int64_affine_range(12, -4, 4).unwrap();
+        assert!(desc.labels.materialized.get().is_none());
+        assert!(!desc.is_monotonic_increasing());
+        assert!(desc.is_monotonic_decreasing());
+        assert!(desc.labels.materialized.get().is_none());
+
+        // Typed non-affine Int64 that is neither ascending nor descending:
+        // scans the i64 view, still no label vector.
+        let unsorted = Index::from_i64_values(vec![4, 0, 7]);
+        assert!(unsorted.labels.materialized.get().is_none());
+        assert!(!unsorted.is_monotonic_increasing());
+        assert!(!unsorted.is_monotonic_decreasing());
+        assert!(
+            unsorted.labels.materialized.get().is_none(),
+            "typed Int64 monotonic predicates must not materialize labels"
+        );
+
+        let sorted = Index::from_i64_values(vec![-2, 0, 0, 4]);
+        assert!(sorted.is_monotonic_increasing());
+        assert!(!sorted.is_monotonic_decreasing());
+        assert!(sorted.labels.materialized.get().is_none());
+
+        let sorted_desc = Index::from_i64_values(vec![4, 0, 0, -2]);
+        assert!(!sorted_desc.is_monotonic_increasing());
+        assert!(sorted_desc.is_monotonic_decreasing());
+
+        // Single element / empty are trivially monotonic both ways.
+        let one = Index::from_i64_values(vec![7]);
+        assert!(one.is_monotonic_increasing() && one.is_monotonic_decreasing());
+        let empty = Index::from_i64_values(Vec::new());
+        assert!(empty.is_monotonic_increasing() && empty.is_monotonic_decreasing());
+
+        // Bit-identical to the object-label fallback path.
+        let obj = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(9),
+        ]);
+        assert_eq!(
+            obj.is_monotonic_increasing(),
+            Index::from_i64_values(vec![1, 3, 3, 9]).is_monotonic_increasing()
+        );
+        assert_eq!(
+            obj.is_monotonic_decreasing(),
+            Index::from_i64_values(vec![1, 3, 3, 9]).is_monotonic_decreasing()
+        );
     }
 
     #[test]

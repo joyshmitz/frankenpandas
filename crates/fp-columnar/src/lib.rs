@@ -9697,6 +9697,32 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    fn typed_bool_binary<F>(&self, other: &Self, op: F) -> Option<Self>
+    where
+        F: Fn(bool, bool) -> bool,
+    {
+        let left = self.as_bool_slice()?;
+        let right = other.as_bool_slice()?;
+        (left.len() == right.len()).then(|| {
+            Self::from_bool_values(
+                left.iter()
+                    .zip(right)
+                    .map(|(&left_value, &right_value)| op(left_value, right_value))
+                    .collect(),
+            )
+        })
+    }
+
+    fn typed_bool_unary<F>(&self, op: F) -> Option<Self>
+    where
+        F: Fn(bool) -> bool,
+    {
+        let data = self.as_bool_slice()?;
+        Some(Self::from_bool_values(
+            data.iter().map(|&value| op(value)).collect(),
+        ))
+    }
+
     /// Logical AND between two boolean columns.
     pub fn logical_and(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {
@@ -9704,6 +9730,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left && right) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -9732,6 +9761,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left || right) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -9759,6 +9791,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left ^ right) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -9780,6 +9815,9 @@ impl Column {
 
     /// Logical NOT (element-wise negation to boolean).
     pub fn logical_not(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_bool_unary(|value| !value) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -22522,6 +22560,74 @@ mod tests {
                 ScalarValues::LazyNullableFloat64 { .. }
             ));
             if let ScalarValues::LazyNullableFloat64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn logical_bool_ops_use_raw_buffers_without_scalar_materialization_el0g2() {
+            let left = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![true, false, true, false]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+            let right = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![true, true, false, false]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+
+            assert_eq!(
+                left.logical_and(&right).expect("and").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.logical_or(&right).expect("or").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.logical_xor(&right).expect("xor").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.logical_not().expect("not").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+
+            assert!(matches!(
+                &left.values,
+                ScalarValues::LazyAllValidBool { .. }
+            ));
+            assert!(matches!(
+                &right.values,
+                ScalarValues::LazyAllValidBool { .. }
+            ));
+            if let ScalarValues::LazyAllValidBool { values, .. } = &left.values {
+                assert!(values.get().is_none());
+            }
+            if let ScalarValues::LazyAllValidBool { values, .. } = &right.values {
                 assert!(values.get().is_none());
             }
         }

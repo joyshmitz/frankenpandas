@@ -24485,6 +24485,74 @@ mod tests {
         }
 
         #[test]
+        fn nan_to_num_with_values_matches_replacement_oracle_am707() {
+            // Differential vs replacement oracle (br-frankenpandas-am707).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(3935559000370003845)
+                    .wrapping_add(2691343689449507681);
+                *seed
+            }
+
+            fn replacement(seed: &mut u64) -> f64 {
+                let raw = (next(seed) % 200_001) as i64 - 100_000;
+                raw as f64 / 23.0
+            }
+
+            fn expected_value(value: &Scalar, nan: f64, posinf: f64, neginf: f64) -> f64 {
+                match value {
+                    Scalar::Float64(v) if v.is_nan() => nan,
+                    Scalar::Float64(v) if *v == f64::INFINITY => posinf,
+                    Scalar::Float64(v) if *v == f64::NEG_INFINITY => neginf,
+                    Scalar::Float64(v) => *v,
+                    Scalar::Null(_) => nan,
+                    other => panic!("unexpected value in oracle: {other:?}"),
+                }
+            }
+
+            let mut seed = 0xa070_7a7e_0f11_ca1e_u64;
+            for case in 0..260 {
+                let nan = replacement(&mut seed);
+                let posinf = replacement(&mut seed);
+                let neginf = replacement(&mut seed);
+                let len = (next(&mut seed) % 67 + 1) as usize;
+                let mut values = Vec::with_capacity(len);
+
+                for _ in 0..len {
+                    let selector = next(&mut seed) % 13;
+                    let raw = (next(&mut seed) % 1_000_001) as i64 - 500_000;
+                    let frac = (next(&mut seed) % 10_000) as f64 / 10_000.0;
+                    values.push(match selector {
+                        0 => Scalar::Null(NullKind::NaN),
+                        1 => Scalar::Float64(f64::NAN),
+                        2 => Scalar::Float64(f64::INFINITY),
+                        3 => Scalar::Float64(f64::NEG_INFINITY),
+                        _ => Scalar::Float64(raw as f64 / 31.0 + frac),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let result = input
+                    .nan_to_num_with_values(nan, posinf, neginf)
+                    .expect("nan_to_num_with_values");
+                assert_eq!(result.dtype(), DType::Float64);
+                assert_eq!(result.values().len(), values.len());
+
+                for (pos, (before, after)) in values.iter().zip(result.values()).enumerate() {
+                    let expected = expected_value(before, nan, posinf, neginf);
+                    match after {
+                        Scalar::Float64(got) => assert_eq!(
+                            *got, expected,
+                            "case={case} pos={pos}: got {got}, expected {expected}"
+                        ),
+                        other => panic!("case={case} pos={pos}: expected Float64, got {other:?}"),
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn rint_rounds_to_nearest_even() {
             let col = Column::from_values(vec![
                 Scalar::Float64(0.5),

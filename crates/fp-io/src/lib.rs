@@ -1843,6 +1843,27 @@ fn append_quarter_scaled_pandas_float(out: &mut String, scaled: i64) {
     out.push_str(std::str::from_utf8(&buf[start..end]).unwrap_or("0.0"));
 }
 
+fn append_csv_minimal_field(out: &mut String, field: &str, delim: u8, quote_empty_single: bool) {
+    if quote_empty_single && field.is_empty() {
+        out.push_str("\"\"");
+    } else if field
+        .bytes()
+        .any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
+    {
+        out.push('"');
+        for ch in field.chars() {
+            if ch == '"' {
+                out.push_str("\"\"");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('"');
+    } else {
+        out.push_str(field);
+    }
+}
+
 fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
     use std::fmt::Write as _;
 
@@ -1854,15 +1875,8 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         return None;
     }
     let delim_c = delim as char;
-    let needs_quote = |s: &str| {
-        s.bytes()
-            .any(|b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
-    };
 
     let headers: Vec<&String> = frame.column_names().into_iter().collect();
-    if options.header && headers.iter().any(|h| needs_quote(h)) {
-        return None;
-    }
 
     enum FastCol<'a> {
         F {
@@ -1912,11 +1926,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
             if i > 0 {
                 out.push(delim_c);
             }
-            if single_field && h.is_empty() {
-                out.push_str("\"\"");
-            } else {
-                out.push_str(h);
-            }
+            append_csv_minimal_field(&mut out, h.as_str(), delim, single_field);
         }
         out.push('\n');
     }
@@ -1960,28 +1970,9 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
                 FastCol::U(bytes, offsets) => {
                     let field = &bytes[offsets[r]..offsets[r + 1]];
-                    if single_field && field.is_empty() {
-                        // Sole empty string field -> `""` so read_csv round-trips '' (not a
-                        // blank line decoded as NaN). Multi-column empties stay bare.
-                        out.push_str("\"\"");
-                    } else if field
-                        .iter()
-                        .any(|&b| b == delim || b == b'"' || b == b'\n' || b == b'\r')
-                    {
-                        out.push('"');
-                        // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
-                        let s = std::str::from_utf8(field).unwrap_or("");
-                        for ch in s.chars() {
-                            if ch == '"' {
-                                out.push_str("\"\"");
-                            } else {
-                                out.push(ch);
-                            }
-                        }
-                        out.push('"');
-                    } else {
-                        out.push_str(std::str::from_utf8(field).unwrap_or(""));
-                    }
+                    // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+                    let field = std::str::from_utf8(field).unwrap_or("");
+                    append_csv_minimal_field(&mut out, field, delim, single_field);
                 }
             }
         }
@@ -15516,6 +15507,40 @@ mod tests {
             write_csv_string_with_options(&frame, &options).expect("write"),
             "1\n2\n"
         );
+    }
+
+    #[test]
+    fn to_csv_typed_quotes_header_names_without_fallback_ay42b() {
+        // br-frankenpandas-fp-io-csv-typed-quoted-header-fast-path-4d9vn-ay42b:
+        // emitted headers use the same QUOTE_MINIMAL rules as data cells, so
+        // typed columns with quoted names can still bypass the generic writer.
+        let mut columns = BTreeMap::new();
+        columns.insert("comma,name".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "quote\"name".to_string(),
+            Column::from_f64_values(vec![1.0, 2.5]),
+        );
+        columns.insert(
+            "line\nname".to_string(),
+            Column::from_utf8_contiguous(b"xy".to_vec(), vec![0, 1, 2]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec![
+                "comma,name".to_string(),
+                "quote\"name".to_string(),
+                "line\nname".to_string(),
+            ],
+        )
+        .unwrap();
+        let expected = "\"comma,name\",\"quote\"\"name\",\"line\nname\"\n1,1.0,x\n2,2.5,y\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(write_csv_string(&frame).expect("write"), expected);
     }
 
     #[test]

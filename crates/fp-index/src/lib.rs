@@ -19868,6 +19868,65 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_set_ops_match_set_oracle_npbx4() {
+        use std::collections::BTreeSet;
+
+        // Differential vs BTreeSet oracle (br-frankenpandas-npbx4): union /
+        // intersection / difference / symmetric_difference produce exactly the
+        // expected label set, with no duplicates. Order-independent (membership).
+        // Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0x5e70_b1c2_d3e4_f506;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        let mk = |vals: &[i64]| {
+            Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>())
+        };
+        let to_set = |idx: &Index| -> BTreeSet<i64> {
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(k) => *k,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        for iter in 0..1500u32 {
+            // Distinct unique label subsets of 0..10.
+            let a: Vec<i64> = (0..10i64).filter(|_| next() % 2 == 0).collect();
+            let b: Vec<i64> = (0..10i64).filter(|_| next() % 2 == 0).collect();
+            let ia = mk(&a);
+            let ib = mk(&b);
+            let aset: BTreeSet<i64> = a.iter().copied().collect();
+            let bset: BTreeSet<i64> = b.iter().copied().collect();
+            let ctx = format!("iter={iter} a={a:?} b={b:?}");
+
+            let inter = ia.intersection(&ib);
+            let exp: BTreeSet<i64> = aset.intersection(&bset).copied().collect();
+            assert_eq!(to_set(&inter), exp, "intersection {ctx}");
+            assert_eq!(inter.len(), exp.len(), "intersection dedup {ctx}");
+
+            let uni = ia.union(&ib);
+            let exp: BTreeSet<i64> = aset.union(&bset).copied().collect();
+            assert_eq!(to_set(&uni), exp, "union {ctx}");
+            assert_eq!(uni.len(), exp.len(), "union dedup {ctx}");
+
+            let diff = ia.difference(&ib);
+            let exp: BTreeSet<i64> = aset.difference(&bset).copied().collect();
+            assert_eq!(to_set(&diff), exp, "difference {ctx}");
+            assert_eq!(diff.len(), exp.len(), "difference dedup {ctx}");
+
+            let sym = ia.symmetric_difference(&ib);
+            let exp: BTreeSet<i64> = aset.symmetric_difference(&bset).copied().collect();
+            assert_eq!(to_set(&sym), exp, "symdiff {ctx}");
+            assert_eq!(sym.len(), exp.len(), "symdiff dedup {ctx}");
+        }
+    }
+
+    #[test]
     fn int64_index_fast_paths_match_materialized_fallback_yfyb9() {
         // Differential harness (br-frankenpandas-yfyb9): every Int64 fast path on
         // Index (min/max, argmin/argmax, is_monotonic_*, nunique, is_unique,

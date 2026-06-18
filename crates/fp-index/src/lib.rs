@@ -3444,6 +3444,12 @@ impl Index {
     /// one.
     pub fn item(&self) -> Result<IndexLabel, IndexError> {
         if self.len() == 1 {
+            if self.labels.has_lazy_int64_backing()
+                && let Some(values) = self.labels.int64_view()
+                && let Some(&value) = values.first()
+            {
+                return Ok(IndexLabel::Int64(value));
+            }
             Ok(self.labels[0].clone())
         } else {
             Err(IndexError::InvalidArgument(format!(
@@ -18121,6 +18127,25 @@ mod tests {
         assert_eq!(mixed.infer_objects(), mixed);
         assert!(ints.is_(&ints));
         assert!(!ints.is_(&Index::from_i64(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn int64_item_avoids_label_materialization_0633o() {
+        let typed = Index::from_i64_values(vec![42]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(typed.item().unwrap(), IndexLabel::Int64(42));
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "item should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(9, 3, 1).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(affine.item().unwrap(), IndexLabel::Int64(9));
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "item should not materialize affine Int64 labels"
+        );
     }
 
     #[test]

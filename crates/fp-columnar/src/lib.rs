@@ -9857,8 +9857,8 @@ impl Column {
             });
         }
 
-        // Typed fast path: both operands are all-valid contiguous Float64 (resp.
-        // Int64), so compare over the buffers and build the Bool result via
+        // Typed fast path: both operands are all-valid contiguous Float64,
+        // Int64, or Bool, so compare over the buffers and build the Bool result via
         // from_bool_values — no Scalar materialization or per-element dispatch.
         // Bit-identical to scalar_compare's same-dtype arm (the identical `a <op>
         // b`); all-valid inputs mean no Null branch, and the comparisons never
@@ -9885,6 +9885,18 @@ impl Column {
             let bools: Vec<bool> = match op {
                 ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
                 ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values(bools));
+        }
+        if let (Some(l), Some(r)) = (self.as_bool_slice(), right.as_bool_slice()) {
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a && !b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| !a && b).collect(),
                 ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
                 ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
                 ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
@@ -22690,6 +22702,86 @@ mod tests {
                 left.bitwise_not().expect("not").values(),
                 &[
                     Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+
+            assert!(matches!(
+                &left.values,
+                ScalarValues::LazyAllValidBool { values, .. } if values.get().is_none()
+            ));
+            assert!(matches!(
+                &right.values,
+                ScalarValues::LazyAllValidBool { values, .. } if values.get().is_none()
+            ));
+        }
+
+        #[test]
+        fn bool_comparison_ops_use_raw_buffers_without_scalar_materialization_v7rko() {
+            let left = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![false, false, true, true]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+            let right = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![false, true, false, true]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+
+            assert_eq!(
+                left.eq(&right).expect("eq").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                left.ne(&right).expect("ne").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.gt(&right).expect("gt").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.lt(&right).expect("lt").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.ge(&right).expect("ge").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                left.le(&right).expect("le").values(),
+                &[
+                    Scalar::Bool(true),
                     Scalar::Bool(true),
                     Scalar::Bool(false),
                     Scalar::Bool(true),

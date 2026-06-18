@@ -6152,6 +6152,41 @@ mod tests {
     }
 
     #[test]
+    fn query_str_boolean_filter_correctness_wo4wi() {
+        // End-to-end correctness oracle (br-frankenpandas-wo4wi): query_str must
+        // keep exactly the rows matching the boolean predicate. No rand, no mocks.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                (0..10).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("x")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    // Sentinel: any non-Int64 would fail the equality assert below.
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+
+        assert_eq!(kept("x < 2 or x > 7", &mut ledger), vec![0, 1, 8, 9], "or");
+        assert_eq!(kept("x > 2 and x < 6", &mut ledger), vec![3, 4, 5], "and");
+        assert_eq!(kept("x >= 5 and x <= 5", &mut ledger), vec![5], "single row");
+    }
+
+    #[test]
     fn query_str_chained_comparison_and_ops_match_pandas() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();

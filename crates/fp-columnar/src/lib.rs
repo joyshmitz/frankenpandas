@@ -23538,6 +23538,143 @@ mod tests {
         }
 
         #[test]
+        fn count_and_nunique_match_scalar_oracle_05112() {
+            // Differential vs independent Scalar scan oracle
+            // (br-frankenpandas-05112). Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *seed
+            }
+
+            fn same_unique_bucket(left: &Scalar, right: &Scalar) -> bool {
+                match (left, right) {
+                    (Scalar::Float64(left), Scalar::Float64(right)) => {
+                        let left = if *left == 0.0 { 0.0 } else { *left };
+                        let right = if *right == 0.0 { 0.0 } else { *right };
+                        left.to_bits() == right.to_bits()
+                    }
+                    _ => left == right,
+                }
+            }
+
+            fn expected_nunique(values: &[Scalar], dropna: bool) -> i64 {
+                let mut seen = Vec::<Scalar>::new();
+                let mut saw_missing = false;
+                for value in values {
+                    if value.is_missing() {
+                        saw_missing = true;
+                        continue;
+                    }
+                    if !seen
+                        .iter()
+                        .any(|existing| same_unique_bucket(existing, value))
+                    {
+                        seen.push(value.clone());
+                    }
+                }
+                let missing_bucket = i64::from(!dropna && saw_missing);
+                seen.len() as i64 + missing_bucket
+            }
+
+            fn assert_reducers(case: usize, family: &str, values: Vec<Scalar>) {
+                let input = Column::from_values(values.clone()).expect("column");
+                let expected_count = values.iter().filter(|value| !value.is_missing()).count();
+                assert_eq!(
+                    input.count(),
+                    expected_count,
+                    "case={case} family={family}: count mismatch for {values:?}"
+                );
+                assert_eq!(
+                    input.nunique(),
+                    Scalar::Int64(expected_nunique(&values, true)),
+                    "case={case} family={family}: nunique(dropna=true) mismatch for {values:?}"
+                );
+                assert_eq!(
+                    input.nunique_with_dropna(false),
+                    Scalar::Int64(expected_nunique(&values, false)),
+                    "case={case} family={family}: nunique(dropna=false) mismatch for {values:?}"
+                );
+            }
+
+            let all_missing = vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Timedelta64(i64::MIN),
+            ];
+            assert_reducers(usize::MAX, "all_missing", all_missing);
+
+            let mut seed = 0x0511_2c0a_1e5c_a1a5_u64;
+            for case in 0..180 {
+                let len = (next(&mut seed) % 67 + 1) as usize;
+
+                let mut floats = Vec::with_capacity(len);
+                floats.push(Scalar::Float64(0.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                    let value = match next(&mut seed) % 9 {
+                        0 => f64::NAN,
+                        1 => f64::INFINITY,
+                        2 => f64::NEG_INFINITY,
+                        3 => -0.0,
+                        4 => 0.0,
+                        _ => raw as f64 / 17.0,
+                    };
+                    floats.push(Scalar::Float64(value));
+                }
+                assert_reducers(case, "float", floats);
+
+                let mut ints = Vec::with_capacity(len);
+                ints.push(Scalar::Int64(case as i64 % 11 - 5));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 41) as i64 - 20;
+                    ints.push(match next(&mut seed) % 6 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        _ => Scalar::Int64(raw),
+                    });
+                }
+                assert_reducers(case, "int", ints);
+
+                let mut bools = Vec::with_capacity(len);
+                bools.push(Scalar::Bool(case & 1 == 0));
+                for _ in 1..len {
+                    bools.push(match next(&mut seed) % 5 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Bool(raw & 1 == 0),
+                    });
+                }
+                assert_reducers(case, "bool", bools);
+
+                let mut utf8 = Vec::with_capacity(len);
+                utf8.push(Scalar::Utf8(format!("s{}", case % 13)));
+                for pos in 1..len {
+                    utf8.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Utf8(format!("s{}_{}", raw, pos % 5)),
+                    });
+                }
+                assert_reducers(case, "utf8", utf8);
+
+                let mut timedeltas = Vec::with_capacity(len);
+                timedeltas.push(Scalar::Timedelta64(case as i64));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 97) as i64 - 48;
+                    timedeltas.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Timedelta64(i64::MIN),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+                assert_reducers(case, "timedelta", timedeltas);
+            }
+        }
+
+        #[test]
         fn count_uses_nullable_int64_validity_without_scalar_materialization_aed6d() {
             let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 3), (7, 1)]), 10);
             let col = Column::from_i64_values_with_validity((0_i64..10).collect(), validity);

@@ -13130,6 +13130,17 @@ mod tests {
     }
 
     #[test]
+    fn csv_per_column_dtype_inference_me2x3() {
+        // br-frankenpandas-me2x3: read_csv infers Int64 for all-int, Float64 for a
+        // column containing a decimal, Utf8 for text.
+        let df = read_csv_str("a,b,c\n1,1.5,x\n2,2.5,y\n3,3.5,z\n").expect("read");
+        assert_eq!(df.column("a").expect("a").dtype(), DType::Int64, "all-int -> Int64");
+        assert_eq!(df.column("b").expect("b").dtype(), DType::Float64, "decimal -> Float64");
+        assert_eq!(df.column("c").expect("c").dtype(), DType::Utf8, "text -> Utf8");
+        assert_eq!(df.len(), 3, "row count");
+    }
+
+    #[test]
     fn csv_header_only_zero_rows_yqfw0() {
         // br-frankenpandas-yqfw0: a header-only CSV parses to a 0-row frame that still
         // exposes the header columns.

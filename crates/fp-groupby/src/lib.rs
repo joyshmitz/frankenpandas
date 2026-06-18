@@ -2745,6 +2745,69 @@ mod tests {
     }
 
     #[test]
+    fn groupby_var_std_two_pass_oracle_7io1l() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-7io1l): groupby_var/std == per-group
+        // two-pass variance (ddof=1; NaN for n<2), std==sqrt(var). Seeded LCG, no mocks.
+        let mut st: u64 = 0x7a20_1c0d_2b3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let num = |s: &Scalar| -> f64 {
+            match s {
+                Scalar::Float64(x) => *x,
+                Scalar::Int64(x) => *x as f64,
+                _ => f64::NAN,
+            }
+        };
+        for iter in 0..800u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 4) as i64 - 1).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+            let keys = Series::from_values("k", idx.clone(), key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()).unwrap();
+            let values = Series::from_values("v", idx, val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()).unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v as f64);
+            }
+            let exp_var: Vec<f64> = groups
+                .values()
+                .map(|vs| {
+                    if vs.len() < 2 {
+                        f64::NAN
+                    } else {
+                        let m = vs.iter().sum::<f64>() / vs.len() as f64;
+                        vs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (vs.len() as f64 - 1.0)
+                    }
+                })
+                .collect();
+
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+            let var = groupby_var(&keys, &values, GroupByOptions::default(), &pol, &mut led).expect("var");
+            let std = groupby_std(&keys, &values, GroupByOptions::default(), &pol, &mut led).expect("std");
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            for (i, ev) in exp_var.iter().enumerate() {
+                let gv = num(&var.values()[i]);
+                let gs = num(&std.values()[i]);
+                if ev.is_nan() {
+                    assert!(gv.is_nan(), "var NaN {ctx} i={i}");
+                    assert!(gs.is_nan(), "std NaN {ctx} i={i}");
+                } else {
+                    assert!((gv - ev).abs() < 1e-7, "var {ctx} i={i}: {gv} vs {ev}");
+                    assert!((gs - ev.sqrt()).abs() < 1e-7, "std {ctx} i={i}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn groupby_median_matches_sorted_middle_oracle_k3awo() {
         use std::collections::BTreeMap;
 

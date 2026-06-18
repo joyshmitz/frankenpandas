@@ -22710,6 +22710,65 @@ mod tests {
         }
 
         #[test]
+        fn missing_reducers_match_scalar_oracle_8n9cp() {
+            // Differential vs any/all over Scalar::is_missing
+            // (br-frankenpandas-8n9cp). Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
+                *seed
+            }
+
+            let empty = Column::new(DType::Float64, Vec::new()).expect("empty");
+            assert!(!empty.has_any_missing());
+            assert!(!empty.hasnans());
+            assert!(empty.all_missing());
+
+            let mut seed = 0x8a11_a115_1d5d_0a7a_u64;
+            for case in 0..260 {
+                let len = (next(&mut seed) % 79 + 1) as usize;
+                let mut values = Vec::with_capacity(len);
+                for pos in 0..len {
+                    let raw = (next(&mut seed) % 1_000_001) as i64 - 500_000;
+                    let frac = (next(&mut seed) % 10_000) as f64 / 10_000.0;
+                    values.push(match next(&mut seed) % 10 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        2 => Scalar::Float64(f64::NAN),
+                        3 => Scalar::Float64(f64::INFINITY),
+                        4 => Scalar::Float64(f64::NEG_INFINITY),
+                        5 => Scalar::Float64(raw as f64 / 43.0 + frac),
+                        6 => Scalar::Int64(raw),
+                        7 => Scalar::Bool(raw & 1 == 0),
+                        8 => Scalar::Utf8(format!("m{case}_{pos}")),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let any_missing = values.iter().any(Scalar::is_missing);
+                let all_missing = values.iter().all(Scalar::is_missing);
+
+                assert_eq!(
+                    input.has_any_missing(),
+                    any_missing,
+                    "case={case}: has_any_missing mismatch for {values:?}"
+                );
+                assert_eq!(
+                    input.hasnans(),
+                    any_missing,
+                    "case={case}: hasnans mismatch for {values:?}"
+                );
+                assert_eq!(
+                    input.all_missing(),
+                    all_missing,
+                    "case={case}: all_missing mismatch for {values:?}"
+                );
+            }
+        }
+
+        #[test]
         fn isnull_notnull_use_nullable_int64_validity_without_scalar_materialization_nakgb() {
             let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2), (5, 1)]), 6);
             let col = Column::from_i64_values_with_validity((0_i64..6).collect(), validity);

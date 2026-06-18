@@ -4,6 +4,37 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.195 - MultiIndex nunique direct count
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `MultiIndex::nunique()` `unique().len()` materialization with
+  direct unique tuple counting, using packed `u64` identity keys when available
+  and `FxHashSet<Vec<IndexLabel>>` fallback when the mixed-radix key space
+  overflows.
+- Baseline comparator: current path builds the full unique `MultiIndex`
+  through duplicate-mask computation and position gathers just to observe its
+  length.
+- Graveyard mapping: semantic compression and count-only specialization:
+  retain only tuple identity keys required for cardinality, not the unique
+  output structure.
+- Alien-artifact proof obligation: `nunique` observes only tuple cardinality,
+  so first-seen unique ordering, names, and output-level construction are
+  unobservable. Missing labels remain part of the tuple identity through the same
+  `IndexLabel` equality/hash semantics used by `unique`.
+- Guard added: `multi_index_nunique_counts_without_unique_output_uza04195`,
+  covering the packed-key path and a 65-level fallback case that forces
+  mixed-radix overflow, both checked against `unique().len()`.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  `MultiIndex::nunique` on repeated mixed Utf8/Int64 tuple keys versus the
+  legacy pandas original and a pre-patch unique-output baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  `MultiIndex::nunique` above 0.1% self-time and direct key counting is not
+  dominated by unavoidable tuple/key construction.
+
 ## 2026-06-18 - br-frankenpandas-uza04.194 - MultiIndex tuple maps FxHashMap
 
 - Status: implemented, benchmark verdict pending batch-test.

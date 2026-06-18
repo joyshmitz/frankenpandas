@@ -15268,7 +15268,24 @@ impl MultiIndex {
     /// Number of unique tuples.
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.unique().len()
+        let len = self.len();
+        if len == 0 {
+            return 0;
+        }
+        if let Some(keys) = self.identity_packed_keys() {
+            let mut seen: FxHashSet<u64> =
+                FxHashSet::with_capacity_and_hasher(len, Default::default());
+            for key in keys {
+                seen.insert(key);
+            }
+            return seen.len();
+        }
+        let mut seen: FxHashSet<Vec<IndexLabel>> =
+            FxHashSet::with_capacity_and_hasher(len, Default::default());
+        for row in 0..len {
+            seen.insert(self.tuple_at(row));
+        }
+        seen.len()
     }
 
     /// Unsupported boolean reduction, matching `pd.MultiIndex.all()`.
@@ -27448,6 +27465,26 @@ mod tests {
                 (vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)], 1),
             ]
         );
+    }
+
+    #[test]
+    fn multi_index_nunique_counts_without_unique_output_uza04195() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["z".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["z".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        assert_eq!(mi.nunique(), 3);
+        assert_eq!(mi.nunique(), mi.unique().len());
+
+        let zero_row = vec![IndexLabel::Int64(0); 65];
+        let one_row = vec![IndexLabel::Int64(1); 65];
+        let wide = MultiIndex::from_tuples(vec![zero_row.clone(), one_row, zero_row]).unwrap();
+        assert_eq!(wide.nunique(), 2);
+        assert_eq!(wide.nunique(), wide.unique().len());
     }
 
     #[test]

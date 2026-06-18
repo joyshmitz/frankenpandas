@@ -13405,6 +13405,12 @@ pub struct MultiIndex {
     names: Vec<Option<String>>,
 }
 
+fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
+    nlevels
+        .saturating_mul(len)
+        .saturating_mul(std::mem::size_of::<isize>())
+}
+
 impl MultiIndex {
     /// Number of levels in this MultiIndex.
     #[must_use]
@@ -13923,26 +13929,28 @@ impl MultiIndex {
     /// additionally counts string bytes, mirroring `Index::memory_usage`.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        self.levels
+        let level_bytes = self
+            .levels
             .iter()
             .flatten()
-            .map(|label| match label {
-                IndexLabel::Int64(_)
-                | IndexLabel::Float64(_)
-                | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_)
-                | IndexLabel::Null(_) => 8,
-                IndexLabel::Bool(_) => 1,
-                IndexLabel::Utf8(value) => {
-                    if deep {
-                        std::mem::size_of::<String>() + value.len()
-                    } else {
-                        std::mem::size_of::<String>()
+            .fold(0usize, |total, label| {
+                total.saturating_add(match label {
+                    IndexLabel::Int64(_)
+                    | IndexLabel::Float64(_)
+                    | IndexLabel::Timedelta64(_)
+                    | IndexLabel::Datetime64(_)
+                    | IndexLabel::Null(_) => 8,
+                    IndexLabel::Bool(_) => 1,
+                    IndexLabel::Utf8(value) => {
+                        if deep {
+                            std::mem::size_of::<String>().saturating_add(value.len())
+                        } else {
+                            std::mem::size_of::<String>()
+                        }
                     }
-                }
-            })
-            .sum::<usize>()
-            + self.nlevels() * self.len() * std::mem::size_of::<isize>()
+                })
+            });
+        level_bytes.saturating_add(multi_index_codes_memory_usage(self.nlevels(), self.len()))
     }
 
     /// Shallow memory footprint, matching `pd.MultiIndex.nbytes`.
@@ -21045,6 +21053,22 @@ mod tests {
         assert_eq!(mi.levshape(), vec![1, 2]);
         assert!(mi.memory_usage(false) <= mi.memory_usage(true));
         assert_eq!(mi.nbytes(), mi.memory_usage(false));
+    }
+
+    #[test]
+    fn multi_index_memory_usage_saturates_code_bytes_uza04178() {
+        assert_eq!(
+            super::multi_index_codes_memory_usage(2, 3),
+            6 * std::mem::size_of::<isize>()
+        );
+        assert_eq!(
+            super::multi_index_codes_memory_usage(usize::MAX, 2),
+            usize::MAX
+        );
+        assert_eq!(
+            super::multi_index_codes_memory_usage(2, usize::MAX),
+            usize::MAX
+        );
     }
 
     #[test]

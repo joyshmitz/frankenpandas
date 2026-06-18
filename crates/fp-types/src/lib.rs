@@ -6366,6 +6366,164 @@ mod tests {
     }
 
     #[test]
+    fn nanvar_nanstd_nansem_match_numeric_and_timedelta_oracle_k7apg() {
+        // Differential vs independent variance/std/sem oracles
+        // (br-frankenpandas-k7apg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn numeric_samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect()
+        }
+
+        fn timedelta_samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn reductions_from_samples(samples: &[f64], ddof: usize) -> Option<(f64, f64, f64)> {
+            if samples.len() <= ddof {
+                return None;
+            }
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let sum_sq = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>();
+            let var = sum_sq / (samples.len() - ddof) as f64;
+            let std = var.sqrt();
+            let sem = std / (samples.len() as f64).sqrt();
+            Some((var, std, sem))
+        }
+
+        fn expected_numeric(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
+            let samples = numeric_samples(values);
+            let Some((var, std, sem)) = reductions_from_samples(&samples, ddof) else {
+                let missing = Scalar::Null(NullKind::NaN);
+                return (missing.clone(), missing.clone(), missing);
+            };
+            (Scalar::Float64(var), Scalar::Float64(std), Scalar::Float64(sem))
+        }
+
+        fn expected_timedelta(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
+            let samples = timedelta_samples(values);
+            if samples.is_empty() {
+                let missing = Scalar::Null(NullKind::NaN);
+                return (missing.clone(), missing.clone(), missing);
+            }
+            let Some((var, std, sem)) = reductions_from_samples(&samples, ddof) else {
+                let missing = Scalar::Timedelta64(i64::MIN);
+                return (missing.clone(), missing.clone(), missing);
+            };
+            (
+                Scalar::Timedelta64(var as i64),
+                Scalar::Timedelta64(std as i64),
+                Scalar::Timedelta64(sem as i64),
+            )
+        }
+
+        fn assert_reductions(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            ddof: usize,
+            expected: (Scalar, Scalar, Scalar),
+        ) {
+            let (expected_var, expected_std, expected_sem) = expected;
+            let actual_var = super::nanvar(values, ddof);
+            let actual_std = super::nanstd(values, ddof);
+            let actual_sem = super::nansem(values, ddof);
+            assert!(
+                actual_var.semantic_eq(&expected_var),
+                "case={case} family={family} ddof={ddof}: expected var {expected_var:?}, got {actual_var:?} for {values:?}"
+            );
+            assert!(
+                actual_std.semantic_eq(&expected_std),
+                "case={case} family={family} ddof={ddof}: expected std {expected_std:?}, got {actual_std:?} for {values:?}"
+            );
+            assert!(
+                actual_sem.semantic_eq(&expected_sem),
+                "case={case} family={family} ddof={ddof}: expected sem {expected_sem:?}, got {actual_sem:?} for {values:?}"
+            );
+        }
+
+        let numeric_all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_reductions(
+            usize::MAX,
+            "numeric_all_missing",
+            &numeric_all_missing,
+            0,
+            expected_numeric(&numeric_all_missing, 0),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_reductions(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            0,
+            expected_timedelta(&td_all_missing, 0),
+        );
+
+        let mut seed = 0x7a11_c0de_5eed_0421_u64;
+        for case in 0..240 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let ddof = (next(&mut seed) % 4) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Float64(case as f64 / 13.0));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 73.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_reductions(
+                case,
+                "numeric",
+                &numeric,
+                ddof,
+                expected_numeric(&numeric, ddof),
+            );
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_reductions(
+                case,
+                "timedelta",
+                &timedeltas,
+                ddof,
+                expected_timedelta(&timedeltas, ddof),
+            );
+        }
+    }
+
+    #[test]
     fn nanvar_population() {
         let vals = vec![
             Scalar::Float64(2.0),

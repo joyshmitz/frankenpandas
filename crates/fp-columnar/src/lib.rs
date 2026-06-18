@@ -11223,6 +11223,10 @@ impl Column {
 
     /// Per-row check for finite values (not NaN or infinity).
     pub fn isfinite(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.bool_values_from_f64(false, f64::is_finite) {
+            return Ok(Self::from_bool_values(out));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -11238,6 +11242,10 @@ impl Column {
 
     /// Per-row check for infinite values.
     pub fn isinf(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.bool_values_from_f64(false, f64::is_infinite) {
+            return Ok(Self::from_bool_values(out));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -11251,6 +11259,10 @@ impl Column {
 
     /// Per-row check for NaN values.
     pub fn isnan(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.bool_values_from_f64(true, f64::is_nan) {
+            return Ok(Self::from_bool_values(out));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -11261,6 +11273,33 @@ impl Column {
             })
             .collect();
         Self::new(DType::Bool, out)
+    }
+
+    fn bool_values_from_f64<F>(&self, invalid_value: bool, predicate: F) -> Option<Vec<bool>>
+    where
+        F: Fn(f64) -> bool,
+    {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+
+        if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+            return Some(
+                data.iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        if validity.get(idx) {
+                            predicate(*value)
+                        } else {
+                            invalid_value
+                        }
+                    })
+                    .collect(),
+            );
+        }
+
+        self.as_f64_slice()
+            .map(|data| data.iter().map(|&value| predicate(value)).collect())
     }
 
     /// Sample variance (ddof-parameterized).
@@ -22439,6 +22478,50 @@ mod tests {
                 ScalarValues::LazyAllValidFloat64 { .. }
             ));
             if let ScalarValues::LazyAllValidFloat64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn float64_predicate_masks_use_raw_validity_without_scalar_materialization_ti9f1() {
+            let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 1)]), 4);
+            let col = Column::from_f64_values_with_validity(
+                vec![1.0, 0.0, f64::NAN, f64::INFINITY],
+                validity,
+            );
+
+            assert_eq!(
+                col.isfinite().expect("isfinite").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                col.isinf().expect("isinf").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                col.isnan().expect("isnan").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyNullableFloat64 { .. }
+            ));
+            if let ScalarValues::LazyNullableFloat64 { values, .. } = &col.values {
                 assert!(values.get().is_none());
             }
         }

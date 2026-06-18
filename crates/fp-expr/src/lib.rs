@@ -6187,6 +6187,37 @@ mod tests {
     }
 
     #[test]
+    fn query_str_membership_filter_correctness_8e5vp() {
+        // End-to-end correctness (br-frankenpandas-8e5vp): in / not in membership.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                (0..7).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..7).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        assert_eq!(kept("a in [1, 3, 5]", &mut ledger), vec![1, 3, 5], "in");
+        assert_eq!(kept("a not in [0, 2, 4, 6]", &mut ledger), vec![1, 3, 5], "not in");
+    }
+
+    #[test]
     fn query_str_chained_comparison_and_ops_match_pandas() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();

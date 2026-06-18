@@ -19289,6 +19289,133 @@ mod tests {
         }
 
         #[test]
+        fn dropna_matches_order_preserving_scalar_oracle_vbbe4() {
+            // Differential vs scalar filter oracle (br-frankenpandas-vbbe4).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                *seed
+            }
+
+            fn assert_dropna(case: usize, family: &str, values: Vec<Scalar>) {
+                let input = Column::from_values(values).expect("column");
+                let expected = input
+                    .values()
+                    .iter()
+                    .filter(|value| !value.is_missing())
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                let dropped = input.dropna().expect("dropna");
+                assert_eq!(
+                    dropped.dtype(),
+                    input.dtype(),
+                    "case={case} family={family}: dtype changed"
+                );
+                assert_eq!(
+                    dropped.len(),
+                    expected.len(),
+                    "case={case} family={family}: length mismatch"
+                );
+                assert_eq!(
+                    dropped.count(),
+                    expected.len(),
+                    "case={case} family={family}: count mismatch"
+                );
+                assert!(
+                    dropped.values().iter().all(|value| !value.is_missing()),
+                    "case={case} family={family}: dropna left missing values in {:?}",
+                    dropped.values()
+                );
+                assert_eq!(
+                    dropped.values(),
+                    expected.as_slice(),
+                    "case={case} family={family}: order/value mismatch"
+                );
+            }
+
+            assert_dropna(
+                usize::MAX,
+                "all_float_missing",
+                vec![Scalar::Float64(f64::NAN), Scalar::Float64(f64::NAN)],
+            );
+            assert_dropna(
+                usize::MAX - 1,
+                "all_timedelta_missing",
+                vec![
+                    Scalar::Timedelta64(i64::MIN),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Timedelta64(i64::MIN),
+                ],
+            );
+
+            let mut seed = 0xd20f_ca55_0b5e_7a11_u64;
+            for case in 0..180 {
+                let len = (next(&mut seed) % 71 + 1) as usize;
+
+                let mut floats = Vec::with_capacity(len);
+                floats.push(Scalar::Float64(case as f64 / 3.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                    floats.push(match next(&mut seed) % 8 {
+                        0 | 1 => Scalar::Float64(f64::NAN),
+                        2 => Scalar::Float64(f64::INFINITY),
+                        3 => Scalar::Float64(f64::NEG_INFINITY),
+                        4 => Scalar::Float64(-0.0),
+                        _ => Scalar::Float64(raw as f64 / 29.0),
+                    });
+                }
+                assert_dropna(case, "float", floats);
+
+                let mut ints = Vec::with_capacity(len);
+                ints.push(Scalar::Int64(case as i64));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 59) as i64 - 29;
+                    ints.push(match next(&mut seed) % 6 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        _ => Scalar::Int64(raw),
+                    });
+                }
+                assert_dropna(case, "int", ints);
+
+                let mut bools = Vec::with_capacity(len);
+                bools.push(Scalar::Bool(case & 1 == 0));
+                for _ in 1..len {
+                    bools.push(match next(&mut seed) % 5 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Bool(raw & 1 == 1),
+                    });
+                }
+                assert_dropna(case, "bool", bools);
+
+                let mut utf8 = Vec::with_capacity(len);
+                utf8.push(Scalar::Utf8(format!("u{}", case % 17)));
+                for pos in 1..len {
+                    utf8.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Utf8(format!("u{}_{}", raw, pos % 11)),
+                    });
+                }
+                assert_dropna(case, "utf8", utf8);
+
+                let mut timedeltas = Vec::with_capacity(len);
+                timedeltas.push(Scalar::Timedelta64(case as i64 - 90));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 123) as i64 - 61;
+                    timedeltas.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Timedelta64(i64::MIN),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+                assert_dropna(case, "timedelta", timedeltas);
+            }
+        }
+
+        #[test]
         fn comparison_empty_columns() {
             let left = Column::from_values(vec![]).expect("left");
             let right = Column::from_values(vec![]).expect("right");

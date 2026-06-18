@@ -1656,6 +1656,126 @@ fn try_groupby_mean_numeric_counter(
     Some((out_index, out_values))
 }
 
+#[derive(Debug, Clone)]
+struct VarStdScalarAccumulator {
+    source_idx: usize,
+    sum: f64,
+    count: usize,
+    sum_sq: f64,
+}
+
+/// Numeric generic-key path for `groupby.var()` and `groupby.std()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanvar`/`nanstd` performs a two-pass
+/// numeric scan. This helper keeps the same group map and performs those two
+/// passes directly over the input rows, avoiding per-group value vectors while
+/// preserving the ddof=1 NaN boundary and output ordering. Timedelta and
+/// non-numeric values fall back to the existing vector path so dtype-specific
+/// pandas compatibility stays untouched.
+fn try_groupby_var_std_numeric_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Var | AggFunc::Std) {
+        return None;
+    }
+
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, VarStdScalarAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            VarStdScalarAccumulator {
+                source_idx: pos,
+                sum: 0.0,
+                count: 0,
+                sum_sq: 0.0,
+            }
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        let value = value.to_f64().ok()?;
+        entry.sum += value;
+        entry.count += 1;
+    }
+
+    for (key, value) in keys.iter().zip(values.iter()) {
+        if dropna && key.is_missing() {
+            continue;
+        }
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        let value = value.to_f64().ok()?;
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups
+            .get_mut(&key_id)
+            .expect("second pass references only first-pass groups");
+        let mean = entry.sum / entry.count as f64;
+        entry.sum_sq += (value - mean).powi(2);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if group.count <= 1 {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            let var = group.sum_sq / (group.count - 1) as f64;
+            Scalar::Float64(if matches!(func, AggFunc::Std) {
+                var.sqrt()
+            } else {
+                var
+            })
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
 fn update_min_max_scalar_slot(
     slot: &mut Option<Scalar>,
     invalid: &mut bool,
@@ -2054,6 +2174,21 @@ pub fn groupby_agg(
     if matches!(func, AggFunc::Mean)
         && let Some((out_index, out_values)) =
             try_groupby_mean_numeric_counter(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key var/std use the same two-pass numeric formula
+    // as nanvar/nanstd, but do not need a cloned Vec<Scalar> per group.
+    if matches!(func, AggFunc::Var | AggFunc::Std)
+        && let Some((out_index, out_values)) = try_groupby_var_std_numeric_counter(
+            key_vals,
+            val_vals,
+            func,
+            options.dropna,
+            options.sort,
+        )
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -5700,6 +5835,147 @@ mod tests {
 
         // var([10, 30], ddof=1) = ((10-20)^2 + (30-20)^2) / 1 = 200.0
         assert_eq!(out.values(), &[Scalar::Float64(200.0)]);
+    }
+
+    #[test]
+    fn groupby_var_std_utf8_keys_stream_numeric_counters_uza04202() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..7).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..7).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted_var = groupby_var(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let sorted_std = groupby_std(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_var.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(sorted_std.index().labels(), sorted_var.index().labels());
+        assert!(sorted_var.values()[0].is_missing());
+        assert_eq!(sorted_var.values()[1], Scalar::Float64(2.0));
+        assert!(sorted_var.values()[2].is_missing());
+        assert!(sorted_var.values()[3].is_missing());
+        let b_std = match sorted_std.values()[1] {
+            Scalar::Float64(v) => v,
+            _ => f64::NAN,
+        };
+        assert!((b_std - 2.0_f64.sqrt()).abs() < 1e-12);
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted_var =
+            groupby_var(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted_var.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(unsorted_var.values()[0], Scalar::Float64(2.0));
+        assert!(unsorted_var.values()[1].is_missing());
+    }
+
+    #[test]
+    fn groupby_var_std_timedelta_fallback_preserves_dtype_uza04202() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+            ],
+        )
+        .unwrap();
+
+        let var = groupby_var(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let std = groupby_std(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(var.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(std.index().labels(), var.index().labels());
+        assert_eq!(
+            var.values(),
+            &[
+                Scalar::Timedelta64(50),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT)
+            ]
+        );
+        assert_eq!(
+            std.values(),
+            &[
+                Scalar::Timedelta64(7),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT)
+            ]
+        );
     }
 
     #[test]

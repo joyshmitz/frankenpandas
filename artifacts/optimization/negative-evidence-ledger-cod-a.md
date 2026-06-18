@@ -94,3 +94,60 @@ retry failed levers without a concrete retry predicate.
   shows residual time in row-position collection or `take_rows_by_positions`;
   do not reintroduce a Bool Series or label-aligned `filter_rows` path for
   positional `dropna`.
+
+## 2026-06-18 - br-frankenpandas-uza04.202 - Generic groupby std/var counters
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: route generic-key `groupby_agg(Std|Var)` over a clone-free two-pass
+  numeric accumulator instead of building per-group `Vec<Scalar>` values and
+  then calling `nanvar`/`nanstd`.
+- Baseline comparator: dense Int64-key `Std`/`Var` already has a direct bucket
+  path, and generic-key `Mean`, `Count`, `Size`, `Min`, `Max`, `First`,
+  `Last`, `Sum`, and `Prod` already avoid group value vectors. Generic
+  string/object-key `Std`/`Var` was the remaining common numeric reducer still
+  paying row hash plus value clone plus per-group Vec allocation before the
+  same two-pass finite-number formula.
+- Graveyard mapping: loop fusion, cache-aware aggregation state, and
+  allocation elimination. The accumulator keeps one compact `(source_idx, sum,
+  count, sum_sq)` state per group, so hot realistic UTF-8-key groupby std/var
+  no longer round-trips every numeric value through scattered heap vectors.
+- Alien-artifact proof obligation: the first pass sums finite non-missing
+  numeric values in the same per-group encounter order as the old vector path;
+  the second pass accumulates squared deviations in the same order with the
+  same ddof=1 boundary. Timedelta and non-numeric values decline the fast path
+  so dtype-preserving and mixed-object fallback semantics stay owned by the
+  existing implementation.
+- Guard added:
+  `groupby_var_std_utf8_keys_stream_numeric_counters_uza04202`, covering
+  UTF-8 keys, null values, sorted output, first-seen output, singleton groups,
+  and all-missing groups; and
+  `groupby_var_std_timedelta_fallback_preserves_dtype_uza04202`, covering
+  Timedelta var/std fallback to `Timedelta64`/`NaT` outputs.
+- Bench guard added: `crates/fp-groupby/src/bin/groupby-bench.rs` now accepts
+  `--agg agg-var` and `--agg agg-std` so the batch runner can target the
+  dispatcher path against the legacy pandas original and pre-patch Vec
+  fallback.
+- Cass/ledger preflight: `cass status --json` reported an unhealthy, stale
+  index (`last_indexed_at=2026-03-12`); no cass result was trusted. Repo ledger
+  search showed prior cod-a keeps for generic groupby first/last, sum/prod,
+  and mean/count/min/max-style counters, and prior phantom/rejected string
+  groupby/factorization swings; this attempt deliberately targets only the
+  remaining generic `Std`/`Var` Vec fallback.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- UBS run: first bounded scan found one new critical from an explicit `panic!`
+  in the added test; the panic was removed. Rerun
+  `timeout 180s ubs crates/fp-groupby/src/lib.rs crates/fp-groupby/src/bin/groupby-bench.rs`
+  exited 0 with 0 critical findings and the pre-existing broad `fp-groupby`
+  warning inventory.
+- Benchmark verdict: pending. Required follow-up comparator is
+  `groupby-bench --agg agg-var` and `--agg agg-std` on realistic UTF-8-key
+  cardinalities versus legacy pandas original and a pre-patch per-group
+  `Vec<Scalar>` baseline, with golden digest unchanged.
+- Retry predicate if rejected: do not retry per-group `Std`/`Var` vector
+  elimination unless same-worker profiling shows residual self-time in the
+  fallback Vec materialization or the hash/group lookup itself; route any
+  remaining gap to a shared grouped-key primitive rather than another reducer
+  micro-specialization.

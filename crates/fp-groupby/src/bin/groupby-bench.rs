@@ -54,6 +54,8 @@ fn run_agg(
         "sum" => groupby_sum(keys, values, opts, &policy, &mut ledger)?,
         "agg-sum" => groupby_agg(keys, values, AggFunc::Sum, opts, &policy, &mut ledger)?,
         "agg-prod" => groupby_agg(keys, values, AggFunc::Prod, opts, &policy, &mut ledger)?,
+        "agg-var" => groupby_agg(keys, values, AggFunc::Var, opts, &policy, &mut ledger)?,
+        "agg-std" => groupby_agg(keys, values, AggFunc::Std, opts, &policy, &mut ledger)?,
         other => return Err(format!("unknown agg '{other}'").into()),
     };
     Ok(out)

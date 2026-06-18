@@ -2021,8 +2021,11 @@ impl Timestamp {
         if self.is_nat() || unit_nanos <= 0 {
             return Self::nat();
         }
+        let Some(nanos) = self.nanos.div_euclid(unit_nanos).checked_mul(unit_nanos) else {
+            return Self::nat();
+        };
         Self {
-            nanos: self.nanos.div_euclid(unit_nanos) * unit_nanos,
+            nanos,
             tz: self.tz.clone(),
         }
     }
@@ -9566,6 +9569,19 @@ mod tests {
         //   result = -2 * 60 = -120.
         let ts = Timestamp::from_nanos(-100);
         assert_eq!(ts.floor_to(60).nanos, -120);
+    }
+
+    #[test]
+    fn timestamp_floor_to_returns_nat_on_axis_underflow_30hdi() {
+        let ts = Timestamp::from_nanos(i64::MIN + 1);
+        assert!(ts.floor_to(10).is_nat());
+
+        let safe = Timestamp::from_nanos(i64::MIN + 10);
+        assert_eq!(safe.floor_to(10).nanos, i64::MIN + 10);
+
+        let tz = Timestamp::from_nanos_tz(-100, "UTC").floor_to(60);
+        assert_eq!(tz.nanos, -120);
+        assert_eq!(tz.tz.as_deref(), Some("UTC"));
     }
 
     #[test]

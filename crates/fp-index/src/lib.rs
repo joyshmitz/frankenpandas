@@ -11361,6 +11361,106 @@ impl CategoricalIndex {
         unique
     }
 
+    fn duplicated_by_hash(&self, keep: DuplicateKeep) -> Vec<bool> {
+        let n = self.labels.len();
+        let mut result = vec![false; n];
+        match keep {
+            DuplicateKeep::First | DuplicateKeep::Last => {
+                let mut seen: FxHashSet<&str> =
+                    FxHashSet::with_capacity_and_hasher(n, Default::default());
+                let mut mark = |i: usize| {
+                    if !seen.insert(self.labels[i].as_str()) {
+                        result[i] = true;
+                    }
+                };
+                if matches!(keep, DuplicateKeep::First) {
+                    for i in 0..n {
+                        mark(i);
+                    }
+                } else {
+                    for i in (0..n).rev() {
+                        mark(i);
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                let mut counts: FxHashMap<&str, u32> =
+                    FxHashMap::with_capacity_and_hasher(n, Default::default());
+                for label in &self.labels {
+                    *counts.entry(label.as_str()).or_insert(0) += 1;
+                }
+                for (i, label) in self.labels.iter().enumerate() {
+                    result[i] = counts[label.as_str()] > 1;
+                }
+            }
+        }
+        result
+    }
+
+    fn duplicated_by_category_rank(&self, keep: DuplicateKeep) -> Vec<bool> {
+        let n = self.labels.len();
+        let map = self.category_index_map();
+        let mut result = vec![false; n];
+        match keep {
+            DuplicateKeep::First | DuplicateKeep::Last => {
+                let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+                let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+                let mut mark = |i: usize| {
+                    let label = self.labels[i].as_str();
+                    let fresh = if let Some(rank) = map.get(label).copied() {
+                        mark_category_rank(&mut seen_ranks, rank)
+                    } else {
+                        invalid_seen.insert(label)
+                    };
+                    if !fresh {
+                        result[i] = true;
+                    }
+                };
+                if matches!(keep, DuplicateKeep::First) {
+                    for i in 0..n {
+                        mark(i);
+                    }
+                } else {
+                    for i in (0..n).rev() {
+                        mark(i);
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                let words = self.categories.len().div_ceil(64);
+                let mut seen_ranks = vec![0u64; words];
+                let mut duplicate_ranks = vec![0u64; words];
+                let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+                let mut invalid_duplicates: FxHashSet<&str> = FxHashSet::default();
+                for label in &self.labels {
+                    let label = label.as_str();
+                    if let Some(rank) = map.get(label).copied() {
+                        let word = rank >> 6;
+                        let bit = 1u64 << (rank & 63);
+                        if seen_ranks[word] & bit == 0 {
+                            seen_ranks[word] |= bit;
+                        } else {
+                            duplicate_ranks[word] |= bit;
+                        }
+                    } else if !invalid_seen.insert(label) {
+                        invalid_duplicates.insert(label);
+                    }
+                }
+                for (i, label) in self.labels.iter().enumerate() {
+                    let label = label.as_str();
+                    result[i] = if let Some(rank) = map.get(label).copied() {
+                        let word = rank >> 6;
+                        let bit = 1u64 << (rank & 63);
+                        duplicate_ranks[word] & bit != 0
+                    } else {
+                        invalid_duplicates.contains(label)
+                    };
+                }
+            }
+        }
+        result
+    }
+
     fn category_ranks_are_monotonic(
         &self,
         mut ordered: impl FnMut(Option<usize>, Option<usize>) -> bool,
@@ -12339,7 +12439,10 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.duplicated(keep)`.
     #[must_use]
     pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
-        self.to_index().duplicated(keep)
+        if self.category_rank_unique_scan_is_bounded() {
+            return self.duplicated_by_category_rank(keep);
+        }
+        self.duplicated_by_hash(keep)
     }
 
     /// Drop duplicate labels (keep first), matching
@@ -26903,6 +27006,83 @@ mod tests {
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert!(!sparse.is_unique());
         assert_eq!(sparse.nunique(), 2);
+    }
+
+    #[test]
+    fn categorical_index_duplicated_uses_rank_bitset_uza04198() {
+        fn assert_matches_flat(index: &super::CategoricalIndex) {
+            for keep in [
+                super::DuplicateKeep::First,
+                super::DuplicateKeep::Last,
+                super::DuplicateKeep::None,
+            ] {
+                assert_eq!(index.duplicated(keep), index.to_flat_index().duplicated(keep));
+            }
+        }
+
+        let categories = vec![
+            "low".to_owned(),
+            "med".to_owned(),
+            "high".to_owned(),
+            "unused".to_owned(),
+        ];
+        let repeated = super::CategoricalIndex::with_categories(
+            vec![
+                "low".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "med".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+            ],
+            categories,
+            true,
+        )
+        .expect("categorical index");
+        assert!(repeated.category_rank_unique_scan_is_bounded());
+        assert_eq!(
+            repeated.duplicated(super::DuplicateKeep::First),
+            vec![false, false, true, false, true, true]
+        );
+        assert_eq!(
+            repeated.duplicated(super::DuplicateKeep::Last),
+            vec![true, true, true, false, false, false]
+        );
+        assert_eq!(
+            repeated.duplicated(super::DuplicateKeep::None),
+            vec![true, true, true, false, true, true]
+        );
+        assert_matches_flat(&repeated);
+
+        let invalid = super::CategoricalIndex {
+            labels: vec![
+                "ghost".to_owned(),
+                "low".to_owned(),
+                "ghost".to_owned(),
+                "other".to_owned(),
+                "low".to_owned(),
+            ],
+            categories: vec!["low".to_owned()],
+            ordered: false,
+            name: None,
+        };
+        assert_matches_flat(&invalid);
+
+        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
+        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let sparse = super::CategoricalIndex {
+            labels: vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+            ],
+            categories: large_categories,
+            ordered: false,
+            name: None,
+        };
+        assert!(!sparse.category_rank_unique_scan_is_bounded());
+        assert_matches_flat(&sparse);
     }
 
     #[test]

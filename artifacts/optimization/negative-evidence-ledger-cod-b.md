@@ -4,6 +4,42 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.198 - CategoricalIndex duplicated rank bitset
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::duplicated(keep)` flat `Index`
+  materialization with direct duplicate-mask construction over category-rank
+  bitsets plus invalid-label fallback sets.
+- Baseline comparator: current path clones every categorical label into
+  `IndexLabel::Utf8`, builds a flat `Index`, then runs the generic duplicate
+  mask algorithm even though category ranks already provide compact valid-label
+  identity.
+- Graveyard mapping: bitmap membership and witness-carry specialization:
+  reuse the categorical dictionary as a semantic witness and compute duplicate
+  masks directly without constructing enum row labels.
+- Alien-artifact proof obligation: for valid labels, first-occurrence
+  `category_index_map` ranks preserve label equality; for impossible
+  deserialized labels, fallback string sets preserve old flat-index equality.
+  `keep=first`, `keep=last`, and `keep=false` all match the old flat
+  `Index::duplicated` masks, while oversized unused category universes fall back
+  to direct label hashing instead of O(k) bitset work.
+- Guard added:
+  `categorical_index_duplicated_uses_rank_bitset_uza04198`, checking all
+  duplicate keep modes against `to_flat_index().duplicated(...)` for repeated
+  valid labels, invalid labels, and oversized-category fallback.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `CategoricalIndex::duplicated` on low-cardinality realistic
+  categorical indexes across keep modes versus the legacy pandas original and
+  pre-patch flat-index materialization baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical duplicate masks above 0.1% self-time and allocation profiling
+  proves flat-index materialization, not category-map construction, is the
+  residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.197 - CategoricalIndex unique rank bitset
 
 - Status: implemented, benchmark verdict pending batch-test.

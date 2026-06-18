@@ -2071,6 +2071,29 @@ impl Index {
         // (uniqueness makes "first" the only one); unsorted `self` keeps the
         // hash path so a per-label scan never degrades to O(n·m).
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
+            if let (Some(labels), Some(targets)) =
+                (self.labels.int64_view(), target.labels.int64_view())
+            {
+                if !matches!(target.sort_order(), SortOrder::Unsorted) {
+                    let mut out = Vec::with_capacity(targets.len());
+                    let mut i = 0usize;
+                    for &target in targets.iter() {
+                        while i < labels.len() && labels[i] < target {
+                            i += 1;
+                        }
+                        if i < labels.len() && labels[i] == target {
+                            out.push(Some(i));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    return out;
+                }
+                return targets
+                    .iter()
+                    .map(|target| labels.binary_search(target).ok())
+                    .collect();
+            }
             let labels = self.labels();
             let targets = target.labels();
             if !matches!(target.sort_order(), SortOrder::Unsorted) {
@@ -19384,6 +19407,62 @@ mod tests {
             IndexLabel::Int64(2),
         ]);
         assert_eq!(obj.nunique(), 2);
+    }
+
+    #[test]
+    fn sorted_int64_get_indexer_avoids_label_materialization_codb() {
+        let source = Index::from_i64_values(vec![1, 3, 5, 9]).set_name("n");
+        let sorted_target = Index::from_i64_values(vec![0, 3, 3, 6, 9]);
+        let unsorted_target = Index::from_i64_values(vec![9, 1, 4, 5]);
+        assert!(source.labels.materialized.get().is_none());
+        assert!(sorted_target.labels.materialized.get().is_none());
+        assert!(unsorted_target.labels.materialized.get().is_none());
+
+        let sorted_actual = source.get_indexer(&sorted_target);
+        let unsorted_actual = source.get_indexer(&unsorted_target);
+
+        assert_eq!(sorted_actual, vec![None, Some(1), Some(1), None, Some(3)]);
+        assert_eq!(unsorted_actual, vec![Some(3), Some(0), None, Some(2)]);
+        assert!(
+            source.labels.materialized.get().is_none(),
+            "sorted Int64 source should stay on raw backing"
+        );
+        assert!(
+            sorted_target.labels.materialized.get().is_none(),
+            "sorted Int64 target should stay on raw backing"
+        );
+        assert!(
+            unsorted_target.labels.materialized.get().is_none(),
+            "unsorted Int64 target should stay on raw backing"
+        );
+
+        let materialized_source = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(9),
+        ]);
+        let materialized_sorted_target = Index::new(vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(9),
+        ]);
+        let materialized_unsorted_target = Index::new(vec![
+            IndexLabel::Int64(9),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(5),
+        ]);
+        assert_eq!(
+            sorted_actual,
+            materialized_source.get_indexer(&materialized_sorted_target)
+        );
+        assert_eq!(
+            unsorted_actual,
+            materialized_source.get_indexer(&materialized_unsorted_target)
+        );
     }
 
     #[test]

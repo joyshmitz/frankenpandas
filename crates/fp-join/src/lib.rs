@@ -1105,8 +1105,8 @@ fn insert_merged_output_column(
 
 fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> bool {
     if left_key.len() != right_key.len()
-        || left_key.dtype() != DType::Int64
-        || right_key.dtype() != DType::Int64
+        || !matches!(left_key.dtype(), DType::Int64)
+        || !matches!(right_key.dtype(), DType::Int64)
         || !left_key.validity().all()
         || !right_key.validity().all()
     {
@@ -8929,7 +8929,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", payload_name],
                 vec![
-                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
                     (
                         payload_name,
                         (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>(),
@@ -9008,7 +9011,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", pname],
                 vec![
-                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
                     // Distinct per-row payload (= row index) so mis-pairings are visible.
                     (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
                 ],
@@ -9091,7 +9097,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", pname],
                 vec![
-                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
                     (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
                 ],
             )
@@ -9191,7 +9200,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", pname],
                 vec![
-                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
                     (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
                 ],
             )
@@ -9267,7 +9279,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", pname],
                 vec![
-                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        "k",
+                        keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
                     (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
                 ],
             )
@@ -12270,9 +12285,9 @@ mod tests {
             // Naive reference: pandas inner merge is left-major, right-minor.
             let mut exp_a = Vec::new();
             let mut exp_b = Vec::new();
-            for (i, &left_key) in lk.iter().enumerate() {
-                for (j, &right_key) in rk.iter().enumerate() {
-                    if left_key == right_key {
+            for (i, &left_value) in lk.iter().enumerate() {
+                for (j, &right_value) in rk.iter().enumerate() {
+                    if left_value == right_value {
                         exp_a.push(Scalar::Int64(i as i64 + 1000));
                         exp_b.push(Scalar::Int64(j as i64 + 2000));
                     }
@@ -13310,6 +13325,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_validate_one_to_many_rejects_duplicate_left_keys_9hsb3() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("left_v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect_err("one_to_many must reject duplicate left keys");
+        assert!(format!("{err}").contains("left keys are not unique"));
+    }
+
+    #[test]
     fn merge_validate_many_to_one_rejects_duplicate_right_keys() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
@@ -13341,6 +13390,46 @@ mod tests {
         )
         .expect_err("many_to_one must reject duplicate right keys");
         assert!(format!("{err}").contains("right keys are not unique"));
+    }
+
+    #[test]
+    fn merge_validate_many_to_one_allows_duplicate_left_keys_9hsb3() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(20)],
+                ),
+            ],
+        )
+        .expect("left frame");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("right_v", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+        )
+        .expect("right frame");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToOne),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("many_to_one should allow duplicate left keys");
+        assert_eq!(merged.columns.get("id").expect("id").values().len(), 3);
     }
 
     #[test]

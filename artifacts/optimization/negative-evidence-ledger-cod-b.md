@@ -4,6 +4,40 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.197 - CategoricalIndex unique rank bitset
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::{is_unique,nunique}` full-label
+  `FxHashSet<&String>` construction with a bounded category-rank bitset scan and
+  invalid-label fallback set.
+- Baseline comparator: current uniqueness/cardinality paths hash every label
+  into a set even when realistic categorical indexes already carry a compact
+  category dictionary whose ranks are enough to identify valid labels.
+- Graveyard mapping: bitmap membership plus semantic compression: convert label
+  equality into category-rank bit tests for valid categorical domains, retaining
+  only one bit per category and short-circuiting `is_unique` on the first repeat.
+- Alien-artifact proof obligation: valid labels are first-occurrence category
+  ranks produced by the existing `category_index_map`; duplicate categories keep
+  first-rank semantics. Deserialized impossible labels are not dropped: they are
+  counted/probed in a fallback `FxHashSet<&str>`, preserving the old label-string
+  equality behavior. Oversized unused category universes fall back to the old
+  label-hash scan to avoid replacing an O(n) label path with O(k) metadata work.
+- Guard added:
+  `categorical_index_unique_nunique_use_rank_bitset_uza04197`, covering repeated
+  valid labels, unused categories, unique valid labels, invalid-label fallback,
+  and the oversized-category fallback path.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is a focused
+  `CategoricalIndex::{is_unique,nunique}` criterion lane over repeated
+  low-cardinality categorical indexes versus the legacy pandas original and a
+  pre-patch full-label hash-set baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical uniqueness/cardinality above 0.1% self-time and the residual is
+  proven to be label hashing rather than category-map construction.
+
 ## 2026-06-18 - br-frankenpandas-uza04.196 - CategoricalIndex monotonic rank scan
 
 - Status: implemented, benchmark verdict pending batch-test.

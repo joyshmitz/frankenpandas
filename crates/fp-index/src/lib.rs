@@ -10995,6 +10995,16 @@ pub struct CategoricalIndex {
     name: Option<String>,
 }
 
+fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
+    let word = rank >> 6;
+    let bit = 1u64 << (rank & 63);
+    let is_new = seen_ranks[word] & bit == 0;
+    if is_new {
+        seen_ranks[word] |= bit;
+    }
+    is_new
+}
+
 impl CategoricalIndex {
     #[must_use]
     pub fn from_values(labels: Vec<String>, ordered: bool) -> Self {
@@ -11167,8 +11177,13 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let unique: FxHashSet<&String> = self.labels.iter().collect();
-        unique.len() == self.labels.len()
+        if self.labels.len() <= 1 {
+            return true;
+        }
+        if self.category_rank_unique_scan_is_bounded() {
+            return self.labels_are_unique_by_category_rank();
+        }
+        self.labels_are_unique_by_hash()
     }
 
     #[must_use]
@@ -11193,7 +11208,13 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn nunique(&self) -> usize {
-        self.labels.iter().collect::<FxHashSet<_>>().len()
+        if self.labels.len() <= 1 {
+            return self.labels.len();
+        }
+        if self.category_rank_unique_scan_is_bounded() {
+            return self.unique_label_count_by_category_rank();
+        }
+        self.unique_label_count_by_hash()
     }
 
     #[must_use]
@@ -11283,6 +11304,61 @@ impl CategoricalIndex {
             map.entry(cat.as_str()).or_insert(i);
         }
         map
+    }
+
+    fn category_rank_unique_scan_is_bounded(&self) -> bool {
+        self.categories.len() <= self.labels.len().saturating_mul(16)
+    }
+
+    fn labels_are_unique_by_hash(&self) -> bool {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        for label in &self.labels {
+            if !seen.insert(label.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn unique_label_count_by_hash(&self) -> usize {
+        self.labels
+            .iter()
+            .map(String::as_str)
+            .collect::<FxHashSet<_>>()
+            .len()
+    }
+
+    fn labels_are_unique_by_category_rank(&self) -> bool {
+        let map = self.category_index_map();
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        for label in &self.labels {
+            if let Some(rank) = map.get(label.as_str()).copied() {
+                if !mark_category_rank(&mut seen_ranks, rank) {
+                    return false;
+                }
+            } else if !invalid_seen.insert(label.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn unique_label_count_by_category_rank(&self) -> usize {
+        let map = self.category_index_map();
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        let mut unique = 0usize;
+        for label in &self.labels {
+            if let Some(rank) = map.get(label.as_str()).copied() {
+                if mark_category_rank(&mut seen_ranks, rank) {
+                    unique += 1;
+                }
+            } else if invalid_seen.insert(label.as_str()) {
+                unique += 1;
+            }
+        }
+        unique
     }
 
     fn category_ranks_are_monotonic(
@@ -26761,6 +26837,72 @@ mod tests {
             invalid.is_monotonic_decreasing(),
             codes.windows(2).all(|window| window[0] >= window[1])
         );
+    }
+
+    #[test]
+    fn categorical_index_unique_nunique_use_rank_bitset_uza04197() {
+        let categories = vec![
+            "low".to_owned(),
+            "med".to_owned(),
+            "high".to_owned(),
+            "unused".to_owned(),
+        ];
+        let repeated = super::CategoricalIndex::with_categories(
+            vec![
+                "low".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "med".to_owned(),
+            ],
+            categories.clone(),
+            true,
+        )
+        .expect("categorical index");
+        assert!(repeated.category_rank_unique_scan_is_bounded());
+        assert!(!repeated.is_unique());
+        assert!(repeated.has_duplicates());
+        assert_eq!(repeated.nunique(), 3);
+
+        let unique = super::CategoricalIndex::with_categories(
+            vec!["high".to_owned(), "low".to_owned(), "med".to_owned()],
+            categories,
+            true,
+        )
+        .expect("categorical index");
+        assert!(unique.is_unique());
+        assert!(!unique.has_duplicates());
+        assert_eq!(unique.nunique(), 3);
+
+        let invalid = super::CategoricalIndex {
+            labels: vec![
+                "ghost".to_owned(),
+                "low".to_owned(),
+                "ghost".to_owned(),
+                "other".to_owned(),
+                "low".to_owned(),
+            ],
+            categories: vec!["low".to_owned()],
+            ordered: false,
+            name: None,
+        };
+        let mut oracle = std::collections::HashSet::<&str>::new();
+        for label in invalid.labels() {
+            oracle.insert(label.as_str());
+        }
+        assert_eq!(invalid.nunique(), oracle.len());
+        assert_eq!(invalid.is_unique(), oracle.len() == invalid.len());
+
+        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
+        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let sparse = super::CategoricalIndex {
+            labels: vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
+            categories: large_categories,
+            ordered: false,
+            name: None,
+        };
+        assert!(!sparse.category_rank_unique_scan_is_bounded());
+        assert!(!sparse.is_unique());
+        assert_eq!(sparse.nunique(), 2);
     }
 
     #[test]

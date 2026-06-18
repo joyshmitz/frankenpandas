@@ -9877,18 +9877,25 @@ impl RangeIndex {
         i64::try_from(value).expect("validated RangeIndex value bounds")
     }
 
-    fn contains_value(&self, value: i64) -> bool {
+    fn position_of_value(&self, value: i64) -> Option<usize> {
+        if self.step == 0 {
+            return None;
+        }
         let len = self.len();
         if len == 0 {
-            return false;
+            return None;
         }
         let offset = i128::from(value) - i128::from(self.start);
         let step = i128::from(self.step);
         if offset % step != 0 {
-            return false;
+            return None;
         }
         let position = offset / step;
-        position >= 0 && position < len as i128
+        (position >= 0 && position < len as i128).then_some(position as usize)
+    }
+
+    fn contains_value(&self, value: i64) -> bool {
+        self.position_of_value(value).is_some()
     }
 
     /// Positional first differences for RangeIndex values.
@@ -10697,20 +10704,9 @@ impl RangeIndex {
                 "get_loc: zero-step RangeIndex is invalid".to_owned(),
             ));
         }
-        let offset = i128::from(value) - i128::from(self.start);
-        let step = i128::from(self.step);
-        if offset % step != 0 {
-            return Err(IndexError::InvalidArgument(format!(
-                "get_loc: {value} not in RangeIndex"
-            )));
-        }
-        let pos = offset / step;
-        if pos < 0 || pos >= self.len() as i128 {
-            return Err(IndexError::InvalidArgument(format!(
-                "get_loc: {value} not in RangeIndex"
-            )));
-        }
-        Ok(pos as usize)
+        self.position_of_value(value).ok_or_else(|| {
+            IndexError::InvalidArgument(format!("get_loc: {value} not in RangeIndex"))
+        })
     }
 
     /// Set the index name, matching `pd.RangeIndex.rename(name)`.
@@ -10724,10 +10720,9 @@ impl RangeIndex {
     #[must_use]
     pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
         let indexer = (0..target.len())
-            .map(|position| {
-                self.get_loc(target.value_at(position))
-                    .map(|p| p as isize)
-                    .unwrap_or(-1)
+            .map(|position| match self.position_of_value(target.value_at(position)) {
+                Some(position) => position as isize,
+                None => -1,
             })
             .collect();
         (target.clone(), indexer)
@@ -10742,9 +10737,9 @@ impl RangeIndex {
         let mut positions = Vec::<isize>::new();
         let mut missing = Vec::<usize>::new();
         for (idx, target) in targets.iter().enumerate() {
-            match self.get_loc(*target) {
-                Ok(p) => positions.push(p as isize),
-                Err(_) => {
+            match self.position_of_value(*target) {
+                Some(position) => positions.push(position as isize),
+                None => {
                     positions.push(-1);
                     missing.push(idx);
                 }
@@ -10766,7 +10761,10 @@ impl RangeIndex {
     pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
         targets
             .iter()
-            .map(|&v| self.get_loc(v).map(|p| p as isize).unwrap_or(-1))
+            .map(|&value| match self.position_of_value(value) {
+                Some(position) => position as isize,
+                None => -1,
+            })
             .collect()
     }
 
@@ -23347,6 +23345,29 @@ mod tests {
         assert_eq!(desc.get_loc(2)?, 4);
         assert!(desc.get_loc(7).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn range_index_vectorized_indexers_match_get_loc_29u49() {
+        let source = super::RangeIndex::new(10, 0, -2).unwrap();
+
+        let targets = [10, 7, 2, 0, 6];
+        assert_eq!(source.get_indexer(&targets), vec![0, -1, 4, -1, 2]);
+        let (positions, missing) = source.get_indexer_non_unique(&targets);
+        assert_eq!(positions, vec![0, -1, 4, -1, 2]);
+        assert_eq!(missing, vec![1, 3]);
+
+        let target_index = super::RangeIndex::new(12, -2, -4).unwrap();
+        let (reindexed, indexer) = source.reindex(&target_index);
+        assert!(reindexed.identical(&target_index));
+        assert_eq!(indexer, vec![-1, 1, 3, -1]);
+
+        let missing_error = source.get_loc(7).unwrap_err();
+        assert!(matches!(
+            missing_error,
+            super::IndexError::InvalidArgument(ref msg)
+                if msg == "get_loc: 7 not in RangeIndex"
+        ));
     }
 
     #[test]

@@ -10463,8 +10463,7 @@ impl RangeIndex {
         F: FnOnce(Vec<i64>, Vec<i64>) -> Vec<i64>,
     {
         let values = op(self.values(), other.values());
-        let labels: Vec<IndexLabel> = values.into_iter().map(IndexLabel::Int64).collect();
-        let mut idx = Index::new(labels);
+        let mut idx = Index::from_i64_values(values);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             idx = idx.set_name(name);
         }
@@ -10507,13 +10506,12 @@ impl RangeIndex {
         // routing through set_op_via_int's shared-name logic.
         let right_set: FxHashSet<i64> = other.values().into_iter().collect();
         let mut seen = FxHashSet::<i64>::default();
-        let labels: Vec<IndexLabel> = self
+        let labels: Vec<i64> = self
             .values()
             .into_iter()
             .filter(|v| !right_set.contains(v) && seen.insert(*v))
-            .map(IndexLabel::Int64)
             .collect();
-        let mut idx = Index::new(labels);
+        let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
         }
@@ -24505,6 +24503,42 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn range_index_set_ops_keep_typed_backing_uza04168() {
+        let left = super::RangeIndex::new(0, 5, 1).unwrap().set_name("k");
+        let right = super::RangeIndex::new(2, 7, 1).unwrap().set_name("k");
+
+        let intersection = left.intersection(&right);
+        let union = left.union(&right);
+        let difference = left.difference(&right);
+        let symmetric = left.symmetric_difference(&right);
+
+        assert_eq!(intersection.name(), Some("k"));
+        assert_eq!(union.name(), Some("k"));
+        assert_eq!(difference.name(), Some("k"));
+        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(
+            intersection.labels.int64_view().unwrap().as_slice(),
+            &[2, 3, 4]
+        );
+        assert_eq!(
+            union.labels.int64_view().unwrap().as_slice(),
+            &[0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[0, 1]);
+        assert_eq!(
+            symmetric.labels.int64_view().unwrap().as_slice(),
+            &[0, 1, 5, 6]
+        );
+
+        for output in [&intersection, &union, &difference, &symmetric] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "RangeIndex set ops should keep typed Int64 output backing"
+            );
+        }
     }
 
     #[test]

@@ -1136,6 +1136,13 @@ fn insert_output_capacity(len: usize) -> usize {
         .expect("index insert output length overflow")
 }
 
+fn aggregate_output_capacity(lengths: impl IntoIterator<Item = usize>) -> usize {
+    lengths
+        .into_iter()
+        .try_fold(0usize, |total, len| total.checked_add(len))
+        .expect("index aggregate output length overflow")
+}
+
 fn checked_cartesian_product_len(
     lengths: impl IntoIterator<Item = usize>,
 ) -> Result<usize, IndexError> {
@@ -12672,7 +12679,7 @@ pub fn leapfrog_union(indexes: &[&Index]) -> Index {
         }
     }
 
-    let total: usize = sorted.iter().map(|s| s.len()).sum();
+    let total = aggregate_output_capacity(sorted.iter().map(Vec::len));
     let mut result = Vec::with_capacity(total);
 
     while let Some(std::cmp::Reverse((label, iter_idx, pos))) = heap.pop() {
@@ -25308,6 +25315,18 @@ mod tests {
     #[should_panic(expected = "index insert output length overflow")]
     fn index_insert_capacity_rejects_overflow_uza04183() {
         let _ = super::insert_output_capacity(usize::MAX);
+    }
+
+    #[test]
+    fn index_aggregate_capacity_checks_output_length_uza04185() {
+        assert_eq!(super::aggregate_output_capacity([2, 3, 4]), 9);
+        assert_eq!(super::aggregate_output_capacity([0, 0]), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "index aggregate output length overflow")]
+    fn index_aggregate_capacity_rejects_overflow_uza04185() {
+        let _ = super::aggregate_output_capacity([usize::MAX, 1]);
     }
 
     #[test]

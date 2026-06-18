@@ -5002,6 +5002,40 @@ mod tests {
 
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     #[test]
+    fn nancount_nunique_prod_any_all_mx60x() {
+        use super::{nanall, nanany, nancount, nannunique, nanprod};
+        // br-frankenpandas-mx60x: nancount/nannunique/nanprod/nanany/nanall skip NaN
+        // and match finite-only oracles. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e2a_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let asf = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        let asb = |sc: Scalar| -> bool { matches!(sc, Scalar::Bool(true)) };
+        for iter in 0..1000u32 {
+            let n = (next() % 10) as usize + 1;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 5) as f64 })
+                .collect();
+            let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.is_empty() {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let distinct: std::collections::HashSet<u64> = finite.iter().map(|x| x.to_bits()).collect();
+            let prod: f64 = finite.iter().product();
+            assert!((asf(nancount(&scalars)) - finite.len() as f64).abs() < 1e-9, "nancount iter={iter}");
+            assert!((asf(nannunique(&scalars)) - distinct.len() as f64).abs() < 1e-9, "nannunique iter={iter}");
+            assert!((asf(nanprod(&scalars)) - prod).abs() < 1e-7, "nanprod iter={iter}");
+            assert_eq!(asb(nanany(&scalars)), finite.iter().any(|&x| x != 0.0), "nanany iter={iter}");
+            assert_eq!(asb(nanall(&scalars)), finite.iter().all(|&x| x != 0.0), "nanall iter={iter}");
+        }
+    }
+
+    #[test]
     fn nan_reduction_kernels_skip_correctness_1uagc() {
         use super::{nanmax, nanmedian, nanmin, nansum};
         // br-frankenpandas-1uagc: nansum/nanmin/nanmax/nanmedian skip NaN and match

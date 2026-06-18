@@ -15728,6 +15728,8 @@ impl Column {
     /// Missing values pass through unchanged. Result dtype is Float64
     /// (via `infer_dtype`) to accommodate fractional clipping.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
+        let lower = lower.filter(|v| !v.is_nan());
+        let upper = upper.filter(|v| !v.is_nan());
         // Typed fast path: an all-valid numeric column clamps straight over its
         // contiguous buffer (output is always Float64), with no per-element
         // Scalar dispatch/clone or output Vec<Scalar>. Bit-identical — the scalar
@@ -19978,6 +19980,100 @@ mod tests {
             let c = col.clip(None, None).expect("clip");
             assert_eq!(c.values()[0], Scalar::Float64(-5.0));
             assert_eq!(c.values()[1], Scalar::Float64(10.0));
+        }
+
+        #[test]
+        fn clip_scalar_bounds_match_clamp_oracle_t3idc() {
+            // Differential vs clamp oracle (br-frankenpandas-t3idc). NaN bounds
+            // are absent bounds. Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(1181783497276652981)
+                    .wrapping_add(1013904223);
+                *seed
+            }
+
+            fn bound(seed: &mut u64) -> Option<f64> {
+                match next(seed) % 7 {
+                    0 => None,
+                    1 => Some(f64::NAN),
+                    _ => {
+                        let raw = (next(seed) % 20_001) as i64 - 10_000;
+                        Some(raw as f64 / 17.0)
+                    }
+                }
+            }
+
+            fn normalize(bound: Option<f64>) -> Option<f64> {
+                bound.filter(|v| !v.is_nan())
+            }
+
+            fn clamp_oracle(mut value: f64, lower: Option<f64>, upper: Option<f64>) -> f64 {
+                if let Some(lo) = lower
+                    && value < lo
+                {
+                    value = lo;
+                }
+                if let Some(hi) = upper
+                    && value > hi
+                {
+                    value = hi;
+                }
+                value
+            }
+
+            let mut seed = 0xc11f_0b0a_7e5d_1dc_u64;
+            for case in 0..220 {
+                let len = (next(&mut seed) % 61 + 1) as usize;
+                let mut lower = bound(&mut seed);
+                let mut upper = bound(&mut seed);
+                if let (Some(lo), Some(hi)) = (normalize(lower), normalize(upper))
+                    && lo > hi
+                {
+                    lower = Some(hi);
+                    upper = Some(lo);
+                }
+                let expected_lower = normalize(lower);
+                let expected_upper = normalize(upper);
+
+                let mut values = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let selector = next(&mut seed) % 43;
+                    let whole = (next(&mut seed) % 100_001) as i64 - 50_000;
+                    let frac = (next(&mut seed) % 1000) as f64 / 1000.0;
+                    values.push(match selector {
+                        0 => Scalar::Null(NullKind::NaN),
+                        1 => Scalar::Float64(f64::NAN),
+                        _ => Scalar::Float64(whole as f64 / 19.0 + frac),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let clipped = input.clip(lower, upper).expect("clip");
+                assert_eq!(clipped.dtype(), DType::Float64);
+                assert_eq!(clipped.values().len(), values.len());
+                for (pos, (before, after)) in values.iter().zip(clipped.values()).enumerate() {
+                    if before.is_missing() {
+                        assert!(
+                            after.is_missing(),
+                            "case={case} pos={pos}: missing became {after:?}"
+                        );
+                        continue;
+                    }
+
+                    let expected = match before {
+                        Scalar::Float64(v) => clamp_oracle(*v, expected_lower, expected_upper),
+                        other => panic!("unexpected non-float value: {other:?}"),
+                    };
+                    match after {
+                        Scalar::Float64(got) => assert_eq!(
+                            *got, expected,
+                            "case={case} pos={pos}: got {got}, expected {expected}"
+                        ),
+                        other => panic!("case={case} pos={pos}: expected Float64, got {other:?}"),
+                    }
+                }
+            }
         }
 
         #[test]

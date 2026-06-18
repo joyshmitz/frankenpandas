@@ -4833,6 +4833,65 @@ mod tests {
         }
     }
 
+    /// br-frankenpandas-e3sfq: infer_dtype drives Column/Series construction
+    /// dtype inference. Assert its homogeneous + mixed-coercion rules.
+    #[test]
+    fn infer_dtype_coercion_rules_e3sfq() {
+        use DType::{Bool, Float64, Int64, Null, Utf8};
+
+        // Empty and all-null infer to Null.
+        assert_eq!(infer_dtype(&[]), Ok(Null));
+        assert_eq!(
+            infer_dtype(&[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::NaN)]),
+            Ok(Null)
+        );
+
+        // Homogeneous slices infer to their own dtype (random, seeded LCG).
+        let mut s: u64 = 0x132d_a7e0_0e3f_c0de;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for _ in 0..600u32 {
+            let n = (next() % 6) as usize + 1;
+            let ints: Vec<Scalar> =
+                (0..n).map(|_| Scalar::Int64((next() % 9) as i64 - 4)).collect();
+            assert_eq!(infer_dtype(&ints), Ok(Int64));
+            let floats: Vec<Scalar> =
+                (0..n).map(|_| Scalar::Float64(f64::from((next() % 7) as i32))).collect();
+            assert_eq!(infer_dtype(&floats), Ok(Float64));
+            let bools: Vec<Scalar> = (0..n).map(|_| Scalar::Bool(next() % 2 == 0)).collect();
+            assert_eq!(infer_dtype(&bools), Ok(Bool));
+            let strs: Vec<Scalar> =
+                (0..n).map(|_| Scalar::Utf8(format!("s{}", next() % 4))).collect();
+            assert_eq!(infer_dtype(&strs), Ok(Utf8));
+        }
+
+        // Mixed-coercion rules.
+        assert_eq!(
+            infer_dtype(&[Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(2)]),
+            Ok(Int64),
+            "Int64 + nulls -> Int64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Int64(1), Scalar::Float64(2.5)]),
+            Ok(Float64),
+            "Int64 + Float64 -> Float64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Bool(true), Scalar::Int64(3)]),
+            Ok(Int64),
+            "Bool + Int64 -> Int64"
+        );
+        assert_eq!(
+            infer_dtype(&[Scalar::Utf8("a".into()), Scalar::Int64(3)]),
+            Ok(Utf8),
+            "Utf8 + Int64 -> Utf8 (object fallback)"
+        );
+    }
+
     /// br-frankenpandas-1ews0: missing_for_dtype is the canonical per-dtype
     /// missing sentinel (used by null-fill / with_validity / cast). Exhaustively
     /// assert it is always missing, and that casting any missing to any dtype

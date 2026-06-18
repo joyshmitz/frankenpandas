@@ -10544,14 +10544,15 @@ impl RangeIndex {
                 "get_loc: zero-step RangeIndex is invalid".to_owned(),
             ));
         }
-        let offset = value - self.start;
-        if offset.checked_rem_euclid(self.step) != Some(0) {
+        let offset = i128::from(value) - i128::from(self.start);
+        let step = i128::from(self.step);
+        if offset % step != 0 {
             return Err(IndexError::InvalidArgument(format!(
                 "get_loc: {value} not in RangeIndex"
             )));
         }
-        let pos = offset / self.step;
-        if pos < 0 || (pos as usize) >= self.len() {
+        let pos = offset / step;
+        if pos < 0 || pos >= self.len() as i128 {
             return Err(IndexError::InvalidArgument(format!(
                 "get_loc: {value} not in RangeIndex"
             )));
@@ -23099,6 +23100,30 @@ mod tests {
         assert_eq!(desc.get_loc(10)?, 0);
         assert_eq!(desc.get_loc(2)?, 4);
         assert!(desc.get_loc(7).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_get_loc_uses_wide_arithmetic_uza04172() -> Result<(), super::IndexError> {
+        let asc = super::RangeIndex::new(i64::MIN, i64::MIN + 10, 2).unwrap();
+        assert_eq!(asc.get_loc(i64::MIN)?, 0);
+        assert_eq!(asc.get_loc(i64::MIN + 8)?, 4);
+        let asc_missing = asc.get_loc(i64::MAX).unwrap_err();
+        assert!(matches!(
+            asc_missing,
+            super::IndexError::InvalidArgument(ref msg)
+                if msg == &format!("get_loc: {} not in RangeIndex", i64::MAX)
+        ));
+
+        let desc = super::RangeIndex::new(i64::MAX, i64::MAX - 10, -2).unwrap();
+        assert_eq!(desc.get_loc(i64::MAX)?, 0);
+        assert_eq!(desc.get_loc(i64::MAX - 8)?, 4);
+        let desc_missing = desc.get_loc(i64::MIN).unwrap_err();
+        assert!(matches!(
+            desc_missing,
+            super::IndexError::InvalidArgument(ref msg)
+                if msg == &format!("get_loc: {} not in RangeIndex", i64::MIN)
+        ));
         Ok(())
     }
 

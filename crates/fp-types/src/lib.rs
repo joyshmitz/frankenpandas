@@ -2626,6 +2626,17 @@ impl Timestamp {
         let us = microsecond.unwrap_or(cur_micro);
         let ns = nanosecond.unwrap_or(cur_nano);
 
+        if !(1..=12).contains(&mo)
+            || !(1..=days_in_month(y, mo as u32).unwrap_or(0) as i64).contains(&d)
+            || !(0..=23).contains(&h)
+            || !(0..=59).contains(&mi)
+            || !(0..=59).contains(&s)
+            || !(0..=999_999).contains(&us)
+            || !(0..=999).contains(&ns)
+        {
+            return Self::nat();
+        }
+
         let days_from_epoch = Self::days_from_ymd(y, mo, d);
         let secs = h * 3600 + mi * 60 + s;
         let total_nanos = days_from_epoch * Timedelta::NANOS_PER_DAY
@@ -9821,6 +9832,62 @@ mod tests {
 
         assert_eq!(Timestamp::nat().day_name(), "NaT");
         assert_eq!(Timestamp::nat().month_name(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_replace_validates_components_zw0y2() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789").unwrap();
+        let replaced = ts.replace(
+            Some(2024),
+            Some(2),
+            Some(29),
+            Some(23),
+            Some(59),
+            Some(58),
+            Some(987_654),
+            Some(321),
+        );
+        assert_eq!(replaced.year(), Some(2024));
+        assert_eq!(replaced.month(), Some(2));
+        assert_eq!(replaced.day(), Some(29));
+        assert_eq!(replaced.hour(), Some(23));
+        assert_eq!(replaced.minute(), Some(59));
+        assert_eq!(replaced.second(), Some(58));
+        assert_eq!(replaced.microsecond(), Some(987_654));
+        assert_eq!(replaced.nanosecond(), Some(321));
+
+        let tz = Timestamp::from_nanos_tz(ts.nanos, "UTC");
+        assert_eq!(
+            tz.replace(None, Some(2), Some(29), None, None, None, None, None)
+                .tz
+                .as_deref(),
+            Some("UTC")
+        );
+
+        assert!(ts
+            .replace(None, Some(13), None, None, None, None, None, None)
+            .is_nat());
+        assert!(ts
+            .replace(Some(2023), Some(2), Some(29), None, None, None, None, None)
+            .is_nat());
+        assert!(ts
+            .replace(None, None, None, Some(24), None, None, None, None)
+            .is_nat());
+        assert!(ts
+            .replace(None, None, None, None, Some(60), None, None, None)
+            .is_nat());
+        assert!(ts
+            .replace(None, None, None, None, None, Some(60), None, None)
+            .is_nat());
+        assert!(ts
+            .replace(None, None, None, None, None, None, Some(1_000_000), None)
+            .is_nat());
+        assert!(ts
+            .replace(None, None, None, None, None, None, None, Some(1_000))
+            .is_nat());
+        assert!(Timestamp::nat()
+            .replace(Some(2024), Some(1), Some(1), None, None, None, None, None)
+            .is_nat());
     }
 
     #[test]

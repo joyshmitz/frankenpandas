@@ -7245,6 +7245,177 @@ mod tests {
     }
 
     #[test]
+    fn nancumulative_matches_numeric_and_timedelta_oracle_k63oz() {
+        // Differential vs independent cumulative nanops oracles
+        // (br-frankenpandas-k63oz). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_vec(case: usize, family: &str, op: &str, actual: &[Scalar], expected: &[Scalar]) {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} family={family} op={op}: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} family={family} op={op} pos={pos}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+
+        fn expected_numeric(
+            values: &[Scalar],
+        ) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+            let mut sum = Vec::with_capacity(values.len());
+            let mut prod = Vec::with_capacity(values.len());
+            let mut max = Vec::with_capacity(values.len());
+            let mut min = Vec::with_capacity(values.len());
+            let mut running_sum = 0.0_f64;
+            let mut running_prod = 1.0_f64;
+            let mut running_max: Option<f64> = None;
+            let mut running_min: Option<f64> = None;
+
+            for value in values {
+                if value.is_missing() {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+                let Ok(value) = value.to_f64() else {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                };
+                if value.is_nan() {
+                    sum.push(Scalar::Null(NullKind::NaN));
+                    prod.push(Scalar::Null(NullKind::NaN));
+                    max.push(Scalar::Null(NullKind::NaN));
+                    min.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+                running_sum += value;
+                running_prod *= value;
+                running_max = Some(running_max.map_or(value, |current| current.max(value)));
+                running_min = Some(running_min.map_or(value, |current| current.min(value)));
+                sum.push(Scalar::Float64(running_sum));
+                prod.push(Scalar::Float64(running_prod));
+                max.push(Scalar::Float64(running_max.expect("initialized")));
+                min.push(Scalar::Float64(running_min.expect("initialized")));
+            }
+
+            (sum, prod, max, min)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+            let mut sum = Vec::with_capacity(values.len());
+            let mut max = Vec::with_capacity(values.len());
+            let mut min = Vec::with_capacity(values.len());
+            let mut running_sum = 0_i128;
+            let mut running_max: Option<i64> = None;
+            let mut running_min: Option<i64> = None;
+
+            for value in values {
+                if value.is_missing() {
+                    sum.push(Scalar::Null(NullKind::NaT));
+                    max.push(Scalar::Null(NullKind::NaT));
+                    min.push(Scalar::Null(NullKind::NaT));
+                    continue;
+                }
+                let Scalar::Timedelta64(ns) = value else {
+                    sum.push(Scalar::Null(NullKind::NaT));
+                    max.push(Scalar::Null(NullKind::NaT));
+                    min.push(Scalar::Null(NullKind::NaT));
+                    continue;
+                };
+                running_sum = running_sum.saturating_add(i128::from(*ns));
+                let clamped = running_sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                running_max = Some(running_max.map_or(*ns, |current| current.max(*ns)));
+                running_min = Some(running_min.map_or(*ns, |current| current.min(*ns)));
+                sum.push(Scalar::Timedelta64(clamped as i64));
+                max.push(Scalar::Timedelta64(running_max.expect("initialized")));
+                min.push(Scalar::Timedelta64(running_min.expect("initialized")));
+            }
+
+            (sum, max, min)
+        }
+
+        let mut seed = 0xc0de_c63a_5eed_0421_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 79.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            let (sum, prod, max, min) = expected_numeric(&numeric);
+            assert_vec(case, "numeric", "cumsum", &super::nancumsum(&numeric), &sum);
+            assert_vec(
+                case,
+                "numeric",
+                "cumprod",
+                &super::nancumprod(&numeric),
+                &prod,
+            );
+            assert_vec(case, "numeric", "cummax", &super::nancummax(&numeric), &max);
+            assert_vec(case, "numeric", "cummin", &super::nancummin(&numeric), &min);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            let (td_sum, td_max, td_min) = expected_timedelta(&timedeltas);
+            assert_vec(
+                case,
+                "timedelta",
+                "cumsum",
+                &super::nancumsum(&timedeltas),
+                &td_sum,
+            );
+            assert_vec(
+                case,
+                "timedelta",
+                "cummax",
+                &super::nancummax(&timedeltas),
+                &td_max,
+            );
+            assert_vec(
+                case,
+                "timedelta",
+                "cummin",
+                &super::nancummin(&timedeltas),
+                &td_min,
+            );
+        }
+    }
+
+    #[test]
     fn nanquantile_linear_interpolation_matches_numpy() {
         let values = vec![
             Scalar::Float64(1.0),

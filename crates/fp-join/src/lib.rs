@@ -8909,6 +8909,45 @@ mod tests {
     }
 
     #[test]
+    fn merge_overlapping_columns_suffixed_vb10q() {
+        // br-frankenpandas-vb10q: a non-key column present in both frames is
+        // suffixed _x (left) / _y (right) on merge.
+        let mk = |vfactor: i64| {
+            DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    ("k", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                    (
+                        "v",
+                        vec![
+                            Scalar::Int64(vfactor),
+                            Scalar::Int64(2 * vfactor),
+                            Scalar::Int64(3 * vfactor),
+                        ],
+                    ),
+                ],
+            )
+            .expect("frame")
+        };
+        let left = mk(10); // v = k*10
+        let right = mk(100); // v = k*100
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).expect("merge");
+
+        let keys = merged_values(&merged, "k").expect("k");
+        let vx = merged_values(&merged, "v_x").expect("v_x present");
+        let vy = merged_values(&merged, "v_y").expect("v_y present");
+        assert_eq!(keys.len(), 3);
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Int64(x) => *x,
+                _ => i64::MIN,
+            };
+            assert_eq!(vx[i], Scalar::Int64(k * 10), "v_x at key {k}");
+            assert_eq!(vy[i], Scalar::Int64(k * 100), "v_y at key {k}");
+        }
+    }
+
+    #[test]
     fn int64_join_row_count_matches_cardinality_invariant_ya1po() {
         use std::collections::BTreeMap;
 

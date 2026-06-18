@@ -4694,6 +4694,83 @@ mod tests {
         cast_scalar, common_dtype, infer_dtype,
     };
 
+    /// br-frankenpandas-ay8o9: Scalar::semantic_cmp underpins ALL ordering in
+    /// the library (sort, min/max, is_monotonic, searchsorted, groupby key
+    /// order) and is the reference the differential harnesses rely on. Property
+    /// test of its total-order axioms over finite/non-NaT same-dtype scalars,
+    /// plus the intentional NaN degeneracy. Deterministic seeded LCG — no rand
+    /// crate, no mocks.
+    #[test]
+    fn semantic_cmp_total_order_axioms_ay8o9() {
+        use std::cmp::Ordering;
+
+        let mut state: u64 = 0xc0ff_eeba_df00_d123;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..6000u32 {
+            let dt = next() % 4;
+            // Build a same-dtype, finite, non-NaT scalar from a random u32.
+            let mk = |r: u32| match dt {
+                0 => Scalar::Int64((r % 11) as i64 - 5),
+                // finite, in -5.0..=5.0 by 0.5 — no NaN/inf.
+                1 => Scalar::Float64(f64::from((r % 21) as i32 - 10) / 2.0),
+                2 => Scalar::Utf8(format!("s{}", r % 5)),
+                _ => Scalar::Bool(r % 2 == 0),
+            };
+            let a = mk(next());
+            let b = mk(next());
+            let c = mk(next());
+            let ctx = format!("iter={iter} a={a:?} b={b:?} c={c:?}");
+
+            // Reflexivity.
+            assert_eq!(a.semantic_cmp(&a), Ordering::Equal, "reflexive {ctx}");
+            // Antisymmetry.
+            assert_eq!(
+                a.semantic_cmp(&b),
+                b.semantic_cmp(&a).reverse(),
+                "antisymmetric {ctx}"
+            );
+            // le / ge / eq consistency with the ordering.
+            let ab = a.semantic_cmp(&b);
+            assert_eq!(a.semantic_le(&b), ab != Ordering::Greater, "le-consistent {ctx}");
+            assert_eq!(a.semantic_ge(&b), ab != Ordering::Less, "ge-consistent {ctx}");
+            assert_eq!(
+                a.semantic_le(&b) && a.semantic_ge(&b),
+                ab == Ordering::Equal,
+                "le&ge<=>eq {ctx}"
+            );
+            // Transitivity: a<=b && b<=c  =>  a<=c.
+            if a.semantic_cmp(&b) != Ordering::Greater
+                && b.semantic_cmp(&c) != Ordering::Greater
+            {
+                assert_ne!(
+                    a.semantic_cmp(&c),
+                    Ordering::Greater,
+                    "transitivity {ctx}"
+                );
+            }
+        }
+
+        // Pin the intentional NaN degeneracy: a Float64 NaN compares Equal to
+        // every finite Float64 (and to itself) — this is why ordering ops must
+        // treat NaN as missing rather than relying on semantic_cmp to order it.
+        let nan = Scalar::Float64(f64::NAN);
+        for v in [
+            Scalar::Float64(-3.5),
+            Scalar::Float64(0.0),
+            Scalar::Float64(7.25),
+        ] {
+            assert_eq!(nan.semantic_cmp(&v), Ordering::Equal, "NaN cmp finite");
+            assert_eq!(v.semantic_cmp(&nan), Ordering::Equal, "finite cmp NaN");
+        }
+        assert_eq!(nan.semantic_cmp(&nan), Ordering::Equal, "NaN cmp NaN");
+    }
+
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
     #[test]
     fn scalar_from_primitive_types() {

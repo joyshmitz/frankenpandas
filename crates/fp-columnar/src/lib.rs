@@ -19255,6 +19255,127 @@ mod tests {
         }
 
         #[test]
+        fn filter_by_mask_matches_scalar_oracle_7mlq1() {
+            // Differential vs scalar mask oracle (br-frankenpandas-7mlq1).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *seed
+            }
+
+            fn mask_values(seed: &mut u64, len: usize) -> Vec<Scalar> {
+                let mut mask = Vec::with_capacity(len);
+                for _ in 0..len {
+                    mask.push(match next(seed) % 5 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 | 2 => Scalar::Bool(false),
+                        _ => Scalar::Bool(true),
+                    });
+                }
+                mask
+            }
+
+            fn assert_filter(case: usize, family: &str, values: Vec<Scalar>, mask: Vec<Scalar>) {
+                let input = Column::from_values(values).expect("column");
+                let mask = Column::from_values(mask).expect("mask");
+                let expected = input
+                    .values()
+                    .iter()
+                    .zip(mask.values().iter())
+                    .filter_map(|(value, mask_value)| {
+                        matches!(mask_value, Scalar::Bool(true)).then_some(value.clone())
+                    })
+                    .collect::<Vec<_>>();
+
+                let filtered = input.filter_by_mask(&mask).expect("filter_by_mask");
+                assert_eq!(
+                    filtered.dtype(),
+                    input.dtype(),
+                    "case={case} family={family}: dtype changed"
+                );
+                assert_eq!(
+                    filtered.len(),
+                    expected.len(),
+                    "case={case} family={family}: length mismatch"
+                );
+                for (pos, (actual, expected)) in filtered.values().iter().zip(&expected).enumerate()
+                {
+                    assert!(
+                        actual.semantic_eq(expected),
+                        "case={case} family={family} pos={pos}: expected {expected:?}, got {actual:?}"
+                    );
+                }
+            }
+
+            let mut seed = 0x7f11_7e12_5ca1_ab1e_u64;
+            for case in 0..180 {
+                let len = (next(&mut seed) % 79 + 1) as usize;
+
+                let mut floats = Vec::with_capacity(len);
+                floats.push(Scalar::Float64(case as f64 / 7.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 12_001) as i64 - 6_000;
+                    floats.push(match next(&mut seed) % 8 {
+                        0 => Scalar::Float64(f64::NAN),
+                        1 => Scalar::Float64(f64::INFINITY),
+                        2 => Scalar::Float64(f64::NEG_INFINITY),
+                        3 => Scalar::Float64(-0.0),
+                        _ => Scalar::Float64(raw as f64 / 31.0),
+                    });
+                }
+                assert_filter(case, "float", floats, mask_values(&mut seed, len));
+
+                let mut ints = Vec::with_capacity(len);
+                ints.push(Scalar::Int64(case as i64));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 67) as i64 - 33;
+                    ints.push(match next(&mut seed) % 6 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        _ => Scalar::Int64(raw),
+                    });
+                }
+                assert_filter(case, "int", ints, mask_values(&mut seed, len));
+
+                let mut bools = Vec::with_capacity(len);
+                bools.push(Scalar::Bool(case & 1 == 0));
+                for _ in 1..len {
+                    bools.push(match next(&mut seed) % 5 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Bool(raw & 1 == 0),
+                    });
+                }
+                assert_filter(case, "bool", bools, mask_values(&mut seed, len));
+
+                let mut utf8 = Vec::with_capacity(len);
+                utf8.push(Scalar::Utf8(format!("mask{}", case % 23)));
+                for pos in 1..len {
+                    utf8.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Utf8(format!("mask{}_{}", raw, pos % 17)),
+                    });
+                }
+                assert_filter(case, "utf8", utf8, mask_values(&mut seed, len));
+
+                let mut timedeltas = Vec::with_capacity(len);
+                timedeltas.push(Scalar::Timedelta64(case as i64 - 45));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 181) as i64 - 90;
+                    timedeltas.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Timedelta64(i64::MIN),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+                assert_filter(case, "timedelta", timedeltas, mask_values(&mut seed, len));
+            }
+        }
+
+        #[test]
         fn fillna_replaces_missing() {
             let col = Column::from_values(vec![
                 Scalar::Int64(1),

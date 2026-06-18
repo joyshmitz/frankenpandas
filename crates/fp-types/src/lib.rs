@@ -5002,6 +5002,30 @@ mod tests {
 
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     #[test]
+    fn cast_scalar_float_to_int_truncates_toward_zero_u9lec() {
+        use super::cast_scalar;
+        // Property (br-frankenpandas-u9lec): Float64->Int64 truncates toward zero, not
+        // floor (-3.7 -> -3). Seeded LCG, no mocks.
+        let mut st: u64 = 0x4ca5_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        // Explicit negative-direction checks (the gotcha).
+        for (f, exp) in [(-3.7, -3i64), (3.7, 3), (-3.2, -3), (3.2, 3), (-0.9, 0), (0.9, 0), (-5.0, -5), (5.0, 5)] {
+            assert_eq!(cast_scalar(&Scalar::Float64(f), DType::Int64).unwrap(), Scalar::Int64(exp), "cast {f}");
+        }
+        // Property over random signed fractional values.
+        for _ in 0..3000u32 {
+            let v = (next() % 2_000_001) as f64 / 1000.0 - 1000.0; // [-1000, 1000]
+            let got = cast_scalar(&Scalar::Float64(v), DType::Int64).unwrap();
+            assert_eq!(got, Scalar::Int64(v.trunc() as i64), "trunc-toward-zero v={v}");
+        }
+    }
+
+    #[test]
     fn nancount_nunique_prod_any_all_mx60x() {
         use super::{nanall, nanany, nancount, nannunique, nanprod};
         // br-frankenpandas-mx60x: nancount/nannunique/nanprod/nanany/nanall skip NaN

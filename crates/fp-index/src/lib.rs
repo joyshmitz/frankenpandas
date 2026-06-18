@@ -3115,6 +3115,22 @@ impl Index {
     /// is preserved.
     #[must_use]
     pub fn putmask(&self, cond: &[bool], value: &IndexLabel) -> Self {
+        if let Some(values) = self.labels.int64_view()
+            && let IndexLabel::Int64(replacement) = value
+        {
+            let new_labels: Vec<i64> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &label)| {
+                    if cond.get(i).copied().unwrap_or(false) {
+                        *replacement
+                    } else {
+                        label
+                    }
+                })
+                .collect();
+            return self.propagate_name(Self::from_i64_values(new_labels));
+        }
         let new_labels: Vec<IndexLabel> = self
             .labels
             .iter()
@@ -3309,6 +3325,22 @@ impl Index {
     /// Matches `pd.Index.where(cond, other)`.
     #[must_use]
     pub fn where_cond(&self, cond: &[bool], other: &IndexLabel) -> Self {
+        if let Some(values) = self.labels.int64_view()
+            && let IndexLabel::Int64(replacement) = other
+        {
+            let new_labels: Vec<i64> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &label)| {
+                    if cond.get(i).copied().unwrap_or(false) {
+                        label
+                    } else {
+                        *replacement
+                    }
+                })
+                .collect();
+            return self.propagate_name(Self::from_i64_values(new_labels));
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -18177,6 +18209,53 @@ mod tests {
     }
 
     #[test]
+    fn int64_putmask_avoids_label_materialization_codb() {
+        let index = Index::from_i64_values(vec![1, 2, 3, 4]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let replaced = index.putmask(&[false, true, false, true], &IndexLabel::Int64(9));
+
+        assert_eq!(replaced.name(), Some("row"));
+        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[1, 9, 3, 9]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "typed Int64 putmask should keep typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(4),
+        ]);
+        assert_eq!(
+            replaced.labels(),
+            materialized
+                .putmask(&[false, true, false, true], &IndexLabel::Int64(9))
+                .labels()
+        );
+    }
+
+    #[test]
+    fn affine_int64_putmask_avoids_label_materialization_codb() {
+        let index = Index::new_known_unique_int64_affine_range(10, -2, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let replaced = index.putmask(&[true, false, true], &IndexLabel::Int64(5));
+
+        assert_eq!(replaced.name(), Some("axis"));
+        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[5, 8, 5, 4]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "affine Int64 putmask should gather raw values into typed output"
+        );
+    }
+
+    #[test]
     fn index_asof_finds_largest_not_exceeding() {
         let idx = Index::from_i64(vec![1, 3, 5, 7]);
         assert_eq!(idx.asof(&IndexLabel::Int64(4)), Some(IndexLabel::Int64(3)));
@@ -19156,6 +19235,56 @@ mod tests {
         let idx = Index::new(vec!["a".into(), "b".into()]).set_name("col");
         let result = idx.where_cond(&[true, false], &"Z".into());
         assert_eq!(result.name(), Some("col"));
+    }
+
+    #[test]
+    fn int64_where_cond_avoids_label_materialization_codb() {
+        let index = Index::from_i64_values(vec![4, 5, 6, 7]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let replaced = index.where_cond(&[true, false, true], &IndexLabel::Int64(-1));
+
+        assert_eq!(replaced.name(), Some("row"));
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[4, -1, 6, -1]
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "typed Int64 where should keep typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(7),
+        ]);
+        assert_eq!(
+            replaced.labels(),
+            materialized
+                .where_cond(&[true, false, true], &IndexLabel::Int64(-1))
+                .labels()
+        );
+    }
+
+    #[test]
+    fn affine_int64_where_cond_avoids_label_materialization_codb() {
+        let index = Index::new_known_unique_int64_affine_range(2, 3, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let replaced = index.where_cond(&[false, true, true, false], &IndexLabel::Int64(0));
+
+        assert_eq!(replaced.name(), Some("axis"));
+        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[0, 5, 8, 0]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "affine Int64 where should gather raw values into typed output"
+        );
     }
 
     #[test]

@@ -1703,10 +1703,7 @@ impl Timedelta {
         if unit_nanos == 0 {
             return Self::NAT;
         }
-        let negative = nanos < 0;
-        let abs_nanos = nanos.saturating_abs();
-        let floored = (abs_nanos / unit_nanos) * unit_nanos;
-        if negative { -floored } else { floored }
+        nanos.div_euclid(unit_nanos).saturating_mul(unit_nanos)
     }
 
     /// Rounds up to the nearest frequency unit.
@@ -1723,10 +1720,12 @@ impl Timedelta {
         if unit_nanos == 0 {
             return Self::NAT;
         }
-        let negative = nanos < 0;
-        let abs_nanos = nanos.saturating_abs();
-        let ceiled = ((abs_nanos + unit_nanos - 1) / unit_nanos) * unit_nanos;
-        if negative { -ceiled } else { ceiled }
+        let remainder = nanos.rem_euclid(unit_nanos);
+        if remainder == 0 {
+            nanos
+        } else {
+            nanos.saturating_add(unit_nanos - remainder)
+        }
     }
 
     /// Rounds to the nearest frequency unit.
@@ -7133,6 +7132,39 @@ mod tests {
 
         // Invalid freq returns NAT
         assert_eq!(Timedelta::floor(nanos, "invalid"), Timedelta::NAT);
+    }
+
+    #[test]
+    fn timedelta_floor_ceil_negative_use_euclidean_rounding_t79yh() {
+        use super::Timedelta;
+
+        assert_eq!(
+            Timedelta::floor(-1, "s"),
+            -Timedelta::NANOS_PER_SEC,
+            "floor(-1ns, 1s)"
+        );
+        assert_eq!(Timedelta::ceil(-1, "s"), 0, "ceil(-1ns, 1s)");
+        assert_eq!(
+            Timedelta::floor(-1_500_000_000, "s"),
+            -2 * Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::ceil(-1_500_000_000, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::floor(-Timedelta::NANOS_PER_SEC, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::ceil(-Timedelta::NANOS_PER_SEC, "s"),
+            -Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(Timedelta::floor(1_500_000_000, "s"), Timedelta::NANOS_PER_SEC);
+        assert_eq!(
+            Timedelta::ceil(1_500_000_000, "s"),
+            2 * Timedelta::NANOS_PER_SEC
+        );
     }
 
     #[test]

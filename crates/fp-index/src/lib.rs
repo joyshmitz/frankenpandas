@@ -2566,6 +2566,13 @@ impl Index {
     /// Matches `pd.Index.nunique(dropna=...)`.
     #[must_use]
     pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        // Affine Int64 (RangeIndex / unit / affine) is strictly monotonic, so all
+        // `len` labels are distinct, and an Int64 backing carries no missing
+        // labels — nunique == len for either dropna setting, with no IndexLabel
+        // materialization (br-frankenpandas-a55d8 vein).
+        if let Some(affine) = self.labels.int64_affine_range() {
+            return affine.len;
+        }
         self.unique()
             .labels
             .iter()
@@ -18349,6 +18356,32 @@ mod tests {
         assert_eq!(Index::from_i64_values(vec![7]).argmax(), Some(0));
         assert_eq!(Index::from_i64_values(Vec::new()).argmin(), None);
         assert_eq!(Index::from_i64_values(Vec::new()).argmax(), None);
+    }
+
+    #[test]
+    fn int64_nunique_avoid_label_materialization_a55d8() {
+        // Affine range: nunique == len for either dropna, no materialization.
+        let asc = Index::new_known_unique_int64_affine_range(0, 2, 5).unwrap();
+        assert!(asc.labels.materialized.get().is_none());
+        assert_eq!(asc.nunique(), 5);
+        assert_eq!(asc.nunique_with_dropna(false), 5);
+        assert!(
+            asc.labels.materialized.get().is_none(),
+            "affine nunique must not materialize labels"
+        );
+
+        // Descending affine and unit range behave the same.
+        let desc = Index::new_known_unique_int64_affine_range(20, -5, 4).unwrap();
+        assert_eq!(desc.nunique(), 4);
+        assert!(desc.labels.materialized.get().is_none());
+
+        // Equivalence vs the object-label path (with a duplicate).
+        let obj = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ]);
+        assert_eq!(obj.nunique(), 2);
     }
 
     #[test]

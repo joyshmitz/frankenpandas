@@ -10304,7 +10304,22 @@ impl RangeIndex {
     /// Drop range labels, returning a flat Index.
     #[must_use]
     pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
-        self.to_flat_index().drop(labels_to_drop)
+        let drop_set: FxHashSet<i64> = labels_to_drop
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        let labels = (0..self.len())
+            .map(|position| self.value_at(position))
+            .filter(|value| !drop_set.contains(value))
+            .collect();
+        let mut out = Index::from_i64_values(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
     }
 
     /// Join range labels with another flat Index.
@@ -24984,6 +24999,29 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert_eq!(empty.asof(&IndexLabel::Int64(0)), None);
+    }
+
+    #[test]
+    fn range_index_drop_filters_direct_values_ayakf() {
+        let range = super::RangeIndex::new(8, 0, -2).unwrap().set_name("r");
+        let dropped = range.drop(&[
+            IndexLabel::Int64(6),
+            IndexLabel::Utf8("6".to_owned()),
+            IndexLabel::Int64(2),
+        ]);
+
+        assert_eq!(dropped.name(), Some("r"));
+        assert_eq!(
+            dropped.labels.int64_view().unwrap().as_slice(),
+            &[8, 4]
+        );
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "RangeIndex::drop should keep typed Int64 output backing"
+        );
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty.drop(&[IndexLabel::Int64(0)]).is_empty());
     }
 
     #[test]

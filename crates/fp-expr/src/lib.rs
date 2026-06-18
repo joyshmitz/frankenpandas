@@ -6152,6 +6152,37 @@ mod tests {
     }
 
     #[test]
+    fn query_str_boolean_not_negation_flrzd() {
+        // br-frankenpandas-flrzd: query 'not' negation.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                (0..10).map(|i| (i as i64).into()).collect::<Vec<_>>(),
+                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<i64> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("x")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        assert_eq!(kept("not (x > 5)", &mut ledger), vec![0, 1, 2, 3, 4, 5], "not gt");
+        assert_eq!(kept("not (x < 3 or x > 7)", &mut ledger), vec![3, 4, 5, 6, 7], "not (or)");
+    }
+
+    #[test]
     fn query_str_boolean_filter_correctness_wo4wi() {
         // End-to-end correctness oracle (br-frankenpandas-wo4wi): query_str must
         // keep exactly the rows matching the boolean predicate. No rand, no mocks.

@@ -1867,9 +1867,6 @@ fn append_csv_minimal_field(out: &mut String, field: &str, delim: u8, quote_empt
 fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
     use std::fmt::Write as _;
 
-    if options.include_index {
-        return None;
-    }
     let delim = options.delimiter;
     if !delim.is_ascii() {
         return None;
@@ -1877,6 +1874,23 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
     let delim_c = delim as char;
 
     let headers: Vec<&String> = frame.column_names().into_iter().collect();
+    let n = frame.index().len();
+    let index_labels = if options.include_index {
+        if frame.row_multiindex().is_some() {
+            return None;
+        }
+        let labels = frame.index().labels();
+        if labels.len() != n
+            || labels
+                .iter()
+                .any(|label| !matches!(label, IndexLabel::Int64(_)))
+        {
+            return None;
+        }
+        Some(labels)
+    } else {
+        None
+    };
 
     enum FastCol<'a> {
         F {
@@ -1888,7 +1902,6 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // bytes[offsets[r]..offsets[r+1]].
         U(&'a [u8], &'a [usize]),
     }
-    let n = frame.index().len();
     let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name)?;
@@ -1918,21 +1931,34 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
     // csv QUOTE_MINIMAL (matched by the general WriterBuilder path) quotes a field
     // as `""` when it is the SOLE field in its record and would otherwise be empty,
     // so the line is not an ambiguous blank that read_csv decodes as zero fields.
-    // With no index written, a record has one field exactly when there is one column.
-    let single_field = cols.len() == 1;
-    let mut out = String::with_capacity(n.saturating_mul(headers.len()).saturating_mul(8) + 64);
+    // A record has one field when there is exactly one emitted index/column field.
+    let field_count = cols.len() + usize::from(options.include_index);
+    let single_field = field_count == 1;
+    let mut out = String::with_capacity(n.saturating_mul(field_count).saturating_mul(8) + 64);
     if options.header {
+        let mut wrote_field = false;
+        if options.include_index {
+            let index_header = resolve_csv_index_header(frame, options);
+            append_csv_minimal_field(&mut out, &index_header, delim, single_field);
+            wrote_field = true;
+        }
         for (i, h) in headers.iter().enumerate() {
-            if i > 0 {
+            if wrote_field || i > 0 {
                 out.push(delim_c);
             }
             append_csv_minimal_field(&mut out, h.as_str(), delim, single_field);
+            wrote_field = true;
         }
         out.push('\n');
     }
     for r in 0..n {
+        if let Some(labels) = index_labels
+            && let IndexLabel::Int64(v) = &labels[r]
+        {
+            let _ = write!(out, "{v}");
+        }
         for (c, col) in cols.iter().enumerate() {
-            if c > 0 {
+            if c > 0 || index_labels.is_some() {
                 out.push(delim_c);
             }
             match col {
@@ -15541,6 +15567,39 @@ mod tests {
             Some(expected)
         );
         assert_eq!(write_csv_string(&frame).expect("write"), expected);
+    }
+
+    #[test]
+    fn to_csv_typed_emits_int64_index_without_fallback_a2uli() {
+        // br-frankenpandas-fp-io-csv-typed-int64-index-fast-path-8m6qd-a2uli:
+        // a simple Int64 index can be emitted directly without forcing typed
+        // columns through per-cell Scalar materialization.
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "b".to_string(),
+            Column::from_f64_values(vec![1.0, 2.5]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![10, 20]).set_name("row,id"),
+            columns,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        };
+        let expected = "\"row,id\",a,b\n10,1,1.0\n20,2,2.5\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
     }
 
     #[test]

@@ -15403,17 +15403,16 @@ impl MultiIndex {
                 .take_existing_positions(&positions)
                 .set_names(self.shared_names(other)));
         }
-        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
-            .to_list()
-            .into_iter()
-            .map(|tuple| (tuple, ()))
-            .collect();
-        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
+        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
+            self.len(),
+            Default::default(),
+        );
         let tuples = self
             .to_list()
             .into_iter()
             .filter(|tuple| {
-                other_keys.contains_key(tuple) && seen.insert(tuple.clone(), ()).is_none()
+                other_keys.contains(tuple) && seen.insert(tuple.clone())
             })
             .collect();
         Self::from_tuples_with_names(tuples, self.shared_names(other))
@@ -15422,10 +15421,13 @@ impl MultiIndex {
     /// Tuple union preserving first-seen order from `self` then `other`.
     pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
-        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
+            combined_output_capacity(self.len(), other.len()),
+            Default::default(),
+        );
         let mut tuples = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for tuple in self.to_list().into_iter().chain(other.to_list()) {
-            if seen.insert(tuple.clone(), ()).is_none() {
+            if seen.insert(tuple.clone()) {
                 tuples.push(tuple);
             }
         }
@@ -15455,17 +15457,16 @@ impl MultiIndex {
                 .take_existing_positions(&positions)
                 .set_names(self.shared_names(other)));
         }
-        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
-            .to_list()
-            .into_iter()
-            .map(|tuple| (tuple, ()))
-            .collect();
-        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
+        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
+            self.len(),
+            Default::default(),
+        );
         let tuples = self
             .to_list()
             .into_iter()
             .filter(|tuple| {
-                !other_keys.contains_key(tuple) && seen.insert(tuple.clone(), ()).is_none()
+                !other_keys.contains(tuple) && seen.insert(tuple.clone())
             })
             .collect();
         Self::from_tuples_with_names(tuples, self.shared_names(other))
@@ -15474,25 +15475,20 @@ impl MultiIndex {
     /// Tuple symmetric difference preserving first-seen order.
     pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
-        let self_keys: HashMap<Vec<IndexLabel>, ()> = self
-            .to_list()
-            .into_iter()
-            .map(|tuple| (tuple, ()))
-            .collect();
-        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
-            .to_list()
-            .into_iter()
-            .map(|tuple| (tuple, ()))
-            .collect();
-        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let self_keys: FxHashSet<Vec<IndexLabel>> = self.to_list().into_iter().collect();
+        let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
+        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
+            combined_output_capacity(self.len(), other.len()),
+            Default::default(),
+        );
         let mut tuples = Vec::new();
         for tuple in self.to_list() {
-            if !other_keys.contains_key(&tuple) && seen.insert(tuple.clone(), ()).is_none() {
+            if !other_keys.contains(&tuple) && seen.insert(tuple.clone()) {
                 tuples.push(tuple);
             }
         }
         for tuple in other.to_list() {
-            if !self_keys.contains_key(&tuple) && seen.insert(tuple.clone(), ()).is_none() {
+            if !self_keys.contains(&tuple) && seen.insert(tuple.clone()) {
                 tuples.push(tuple);
             }
         }
@@ -21812,6 +21808,34 @@ mod tests {
                 .collect();
             assert_eq!(a.difference(&b).unwrap().to_list(), ref_diff, "diff {sa:?}");
         }
+    }
+
+    #[test]
+    fn multi_index_setop_generic_fallback_preserves_order_codb() {
+        // Force the generic Vec<IndexLabel> tuple-key path: 65 levels with
+        // multiple distinct values make mixed-radix u64 packing overflow.
+        let mk = |row_keys: &[i64]| {
+            let mut levels = Vec::with_capacity(65);
+            for level in 0..65 {
+                let column = row_keys
+                    .iter()
+                    .map(|key| IndexLabel::Utf8(format!("level-{level}:key-{key}")))
+                    .collect();
+                levels.push(column);
+            }
+            MultiIndex::from_arrays(levels).unwrap()
+        };
+
+        let left = mk(&[0, 1, 0, 2]);
+        let right = mk(&[1, 3, 2, 1]);
+
+        assert_eq!(left.intersection(&right).unwrap().to_list(), mk(&[1, 2]).to_list());
+        assert_eq!(left.union(&right).unwrap().to_list(), mk(&[0, 1, 2, 3]).to_list());
+        assert_eq!(left.difference(&right).unwrap().to_list(), mk(&[0]).to_list());
+        assert_eq!(
+            left.symmetric_difference(&right).unwrap().to_list(),
+            mk(&[0, 3]).to_list()
+        );
     }
 
     #[test]

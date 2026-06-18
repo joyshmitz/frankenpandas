@@ -4953,13 +4953,23 @@ mod tests {
         for &dt in &ALL {
             let m = Scalar::missing_for_dtype(dt);
             assert!(m.is_missing(), "missing_for_dtype({dt:?}) must be missing");
-            // cast_scalar's value.is_missing() branch returns missing_for_dtype(target).
             for &target in &ALL {
                 let cast = cast_scalar(&m, target).expect("cast of missing");
-                assert!(
-                    cast.is_missing(),
-                    "cast(missing {dt:?} -> {target:?}) must stay missing, got {cast:?}"
-                );
+                if target == DType::Utf8 {
+                    // Casting a missing value to string follows pandas astype(str):
+                    // it yields a string ("None"/"NaN"/"NaT"), NOT a missing value.
+                    assert!(
+                        matches!(cast, Scalar::Utf8(_)),
+                        "cast(missing {dt:?} -> Utf8) yields a string, got {cast:?}"
+                    );
+                } else {
+                    // Every other target preserves missingness via cast_scalar's
+                    // value.is_missing() -> missing_for_dtype(target) branch.
+                    assert!(
+                        cast.is_missing(),
+                        "cast(missing {dt:?} -> {target:?}) must stay missing, got {cast:?}"
+                    );
+                }
             }
         }
     }

@@ -5540,6 +5540,111 @@ mod tests {
         assert_eq!(kept[1], Scalar::Int64(3));
     }
 
+    #[test]
+    fn null_helpers_match_scalar_oracle_imt0c() {
+        // Differential vs independent scalar null-helper oracle
+        // (br-frankenpandas-imt0c). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_null_helpers(case: usize, values: &[Scalar], fill: &Scalar) {
+            let expected_missing = values.iter().filter(|value| value.is_missing()).count();
+            let expected_dropped = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .cloned()
+                .collect::<Vec<_>>();
+            let expected_filled = values
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        fill.clone()
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                super::count_na(values),
+                expected_missing,
+                "case={case}: count_na mismatch for {values:?}"
+            );
+
+            let dropped = super::dropna(values);
+            assert_eq!(
+                dropped.len(),
+                expected_dropped.len(),
+                "case={case}: dropna length mismatch for {values:?}"
+            );
+            for (pos, (actual, expected)) in
+                dropped.iter().zip(expected_dropped.iter()).enumerate()
+            {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} pos={pos}: dropna expected {expected:?}, got {actual:?}"
+                );
+            }
+
+            let filled = super::fill_na(values, fill);
+            assert_eq!(
+                filled.len(),
+                expected_filled.len(),
+                "case={case}: fill_na length mismatch for {values:?}"
+            );
+            for (pos, (actual, expected)) in filled.iter().zip(expected_filled.iter()).enumerate()
+            {
+                assert!(
+                    actual.semantic_eq(expected),
+                    "case={case} pos={pos}: fill_na expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+
+        let all_missing = [
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(f64::NAN),
+            Scalar::Timedelta64(i64::MIN),
+        ];
+        assert_null_helpers(usize::MAX, &all_missing, &Scalar::Utf8("filled".into()));
+
+        let mut seed = 0xc011_a7ed_0b5e_1a55_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                values.push(match next(&mut seed) % 11 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Timedelta64(i64::MIN),
+                    4 => Scalar::Bool(raw & 1 == 0),
+                    5 => Scalar::Int64(raw),
+                    6 => Scalar::Float64(raw as f64 / 37.0),
+                    7 => Scalar::Float64(if raw & 1 == 0 { 0.0 } else { -0.0 }),
+                    8 => Scalar::Utf8(format!("null_helper_{case}_{pos}")),
+                    9 => Scalar::Utf8(String::new()),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+
+            let fill = match case % 5 {
+                0 => Scalar::Bool(true),
+                1 => Scalar::Int64(-777),
+                2 => Scalar::Float64(12.5),
+                3 => Scalar::Utf8("filled".into()),
+                _ => Scalar::Timedelta64(123_456),
+            };
+            assert_null_helpers(case, &values, &fill);
+        }
+    }
+
     // ── Nanops ─────────────────────────────────────────────────────────
 
     #[test]

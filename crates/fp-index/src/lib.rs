@@ -15291,7 +15291,8 @@ impl MultiIndex {
     /// pandas' MultiIndex-level factorization behavior.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
-        let mut positions = HashMap::<Vec<IndexLabel>, isize>::new();
+        let mut positions: FxHashMap<Vec<IndexLabel>, isize> =
+            FxHashMap::with_capacity_and_hasher(self.len(), Default::default());
         let mut uniques = Vec::<Vec<IndexLabel>>::new();
         let mut codes = Vec::with_capacity(self.len());
         for tuple in self.to_list() {
@@ -15322,7 +15323,8 @@ impl MultiIndex {
     /// Count unique tuple occurrences, sorted by count descending then tuple.
     #[must_use]
     pub fn value_counts(&self) -> Vec<(Vec<IndexLabel>, usize)> {
-        let mut counts = HashMap::<Vec<IndexLabel>, usize>::new();
+        let mut counts: FxHashMap<Vec<IndexLabel>, usize> =
+            FxHashMap::with_capacity_and_hasher(self.len(), Default::default());
         for tuple in self.to_list() {
             *counts.entry(tuple).or_insert(0) += 1;
         }
@@ -27409,6 +27411,43 @@ mod tests {
         assert_eq!(empty.max(), None);
         assert_eq!(empty.argmin(), None);
         assert_eq!(empty.argmax(), None);
+    }
+
+    #[test]
+    fn multi_index_factorize_value_counts_fxhash_order_uza04194() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["z".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["z".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let (codes, uniques) = mi.factorize();
+        assert_eq!(codes, vec![0, 1, 0, 2, 1, 2, 3]);
+        assert_eq!(
+            uniques.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        assert_eq!(uniques.names(), mi.names());
+        assert_eq!(
+            mi.value_counts(),
+            vec![
+                (vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)], 2),
+                (vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)], 2),
+                (vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(2)], 2),
+                (vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)], 1),
+            ]
+        );
     }
 
     #[test]

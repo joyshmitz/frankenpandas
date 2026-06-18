@@ -4,6 +4,35 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.194 - MultiIndex tuple maps FxHashMap
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `MultiIndex::{factorize, value_counts}` tuple-key
+  `std::collections::HashMap` maps with capacity-sized `FxHashMap` maps.
+- Baseline comparator: current SipHash maps over `Vec<IndexLabel>` tuple keys
+  in repeated realistic MultiIndex factorization and tuple counting.
+- Graveyard mapping: Swiss Tables / fast non-cryptographic internal maps:
+  tuple keys are internal, non-adversarial benchmark/conformance data, and both
+  public outputs are order-defined outside hash-table iteration.
+- Alien-artifact proof obligation: factorize codes and uniques still follow
+  first-seen input row order; value_counts still sorts by count descending and
+  then tuple ordering, so map iteration order cannot leak into observable
+  output. MultiIndex names propagate unchanged.
+- Guard added: `multi_index_factorize_value_counts_fxhash_order_uza04194`,
+  covering duplicate tuple factorization, first-seen uniques, name propagation,
+  and count-tie sorting independent of hash iteration.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  `MultiIndex::factorize` and `MultiIndex::value_counts` on repeated mixed
+  Utf8/Int64 tuple keys versus the legacy pandas original and a pre-patch
+  SipHash baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows these
+  exact tuple map paths above 0.1% self-time and tuple cloning, not hashing, is
+  proven not to dominate the residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.155 - RangeIndex drop direct mask
 
 - Status: implemented, benchmark verdict pending batch-test.

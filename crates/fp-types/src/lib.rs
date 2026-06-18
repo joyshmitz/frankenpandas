@@ -8611,6 +8611,128 @@ mod tests {
     }
 
     #[test]
+    fn period_arithmetic_matches_seeded_oracles_bac28() {
+        use std::cmp::Ordering;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn freq_for(raw: u64) -> PeriodFreq {
+            match raw % 9 {
+                0 => PeriodFreq::Annual,
+                1 => PeriodFreq::Quarterly,
+                2 => PeriodFreq::Monthly,
+                3 => PeriodFreq::Weekly,
+                4 => PeriodFreq::Daily,
+                5 => PeriodFreq::Business,
+                6 => PeriodFreq::Hourly,
+                7 => PeriodFreq::Minutely,
+                _ => PeriodFreq::Secondly,
+            }
+        }
+
+        fn different_freq(freq: PeriodFreq) -> PeriodFreq {
+            match freq {
+                PeriodFreq::Annual => PeriodFreq::Quarterly,
+                PeriodFreq::Quarterly => PeriodFreq::Monthly,
+                PeriodFreq::Monthly => PeriodFreq::Weekly,
+                PeriodFreq::Weekly => PeriodFreq::Daily,
+                PeriodFreq::Daily => PeriodFreq::Business,
+                PeriodFreq::Business => PeriodFreq::Hourly,
+                PeriodFreq::Hourly => PeriodFreq::Minutely,
+                PeriodFreq::Minutely => PeriodFreq::Secondly,
+                PeriodFreq::Secondly => PeriodFreq::Annual,
+            }
+        }
+
+        fn assert_period_case(
+            case: usize,
+            freq: PeriodFreq,
+            ordinal: i64,
+            shift_by: i64,
+            other_ordinal: i64,
+        ) {
+            let period = Period::new(ordinal, freq);
+            let shifted = period.shift(shift_by);
+            assert_eq!(
+                shifted.ordinal,
+                ordinal.saturating_add(shift_by),
+                "case {case}: shift ordinal"
+            );
+            assert_eq!(shifted.freq, freq, "case {case}: shift freq");
+
+            let same_freq_other = Period::new(other_ordinal, freq);
+            assert_eq!(
+                period.diff(&same_freq_other),
+                Some(ordinal.saturating_sub(other_ordinal)),
+                "case {case}: same-freq diff"
+            );
+            assert_eq!(
+                period.cmp_same_freq(&same_freq_other),
+                Some(ordinal.cmp(&other_ordinal)),
+                "case {case}: same-freq cmp"
+            );
+
+            let cross_freq_other = Period::new(other_ordinal, different_freq(freq));
+            assert_eq!(
+                period.diff(&cross_freq_other),
+                None,
+                "case {case}: cross-freq diff"
+            );
+            assert_eq!(
+                period.cmp_same_freq(&cross_freq_other),
+                None,
+                "case {case}: cross-freq cmp"
+            );
+        }
+
+        assert_period_case(
+            usize::MAX,
+            PeriodFreq::Daily,
+            i64::MAX - 2,
+            10,
+            i64::MIN,
+        );
+        assert_period_case(
+            usize::MAX - 1,
+            PeriodFreq::Daily,
+            i64::MIN + 2,
+            -10,
+            i64::MAX,
+        );
+        assert_eq!(
+            Period::new(10, PeriodFreq::Monthly)
+                .cmp_same_freq(&Period::new(10, PeriodFreq::Monthly)),
+            Some(Ordering::Equal)
+        );
+
+        let mut seed = 0xbac2_8d1f_0d1c_5eed_u64;
+        for case in 0..260 {
+            let freq = freq_for(next(&mut seed));
+            let ordinal = match case % 53 {
+                0 => i64::MAX - (next(&mut seed) % 8) as i64,
+                1 => i64::MIN + (next(&mut seed) % 8) as i64,
+                _ => (next(&mut seed) % 200_001) as i64 - 100_000,
+            };
+            let shift_by = match case % 47 {
+                0 => 512,
+                1 => -512,
+                _ => (next(&mut seed) % 4097) as i64 - 2048,
+            };
+            let other_ordinal = match case % 41 {
+                0 => i64::MAX,
+                1 => i64::MIN,
+                _ => (next(&mut seed) % 200_001) as i64 - 100_000,
+            };
+            assert_period_case(case, freq, ordinal, shift_by, other_ordinal);
+        }
+    }
+
+    #[test]
     fn period_display_is_pandas_calendar_string() {
         // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
         assert_eq!(

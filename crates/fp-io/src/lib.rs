@@ -1864,9 +1864,26 @@ fn append_csv_minimal_field(out: &mut String, field: &str, delim: u8, quote_empt
     }
 }
 
-fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
-    use std::fmt::Write as _;
+fn append_i64_decimal(out: &mut String, value: i64) {
+    let mut n = value.unsigned_abs();
+    let mut buf = [0u8; 20];
+    let mut start = buf.len();
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        start -= 1;
+        buf[start] = b'-';
+    }
+    out.push_str(std::str::from_utf8(&buf[start..]).unwrap_or(""));
+}
 
+fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<String> {
     let delim = options.delimiter;
     if !delim.is_ascii() {
         return None;
@@ -1955,7 +1972,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         if let Some(labels) = index_labels
             && let IndexLabel::Int64(v) = &labels[r]
         {
-            let _ = write!(out, "{v}");
+            append_i64_decimal(&mut out, *v);
         }
         for (c, col) in cols.iter().enumerate() {
             if c > 0 || index_labels.is_some() {
@@ -1989,7 +2006,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 }
                 // Int64 uses Rust Display, exactly scalar_to_csv's `v.to_string()`.
                 FastCol::I(s) => {
-                    let _ = write!(out, "{}", s[r]);
+                    append_i64_decimal(&mut out, s[r]);
                 }
                 // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
                 // CSV-quoted only when it contains the delimiter, a quote, CR, or
@@ -15591,6 +15608,39 @@ mod tests {
             ..CsvWriteOptions::default()
         };
         let expected = "\"row,id\",a,b\n10,1,1.0\n20,2,2.5\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_int64_manual_decimal_boundaries_cnw1j() {
+        // br-frankenpandas-fp-io-csv-int64-manual-decimal-emitter-5p8kx-cnw1j:
+        // the stack decimal emitter must preserve Display bytes for every i64,
+        // including the unsigned_abs corner at i64::MIN.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".to_string(),
+            Column::from_i64_values(vec![i64::MIN, 0, i64::MAX]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![-1, 0, 1]),
+            columns,
+            vec!["v".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            index_label: Some("i".to_string()),
+            ..CsvWriteOptions::default()
+        };
+        let expected = "i,v\n-1,-9223372036854775808\n0,0\n1,9223372036854775807\n";
 
         assert_eq!(
             super::try_write_csv_typed(&frame, &options).as_deref(),

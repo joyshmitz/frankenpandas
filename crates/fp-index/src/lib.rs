@@ -1667,8 +1667,8 @@ impl Index {
     /// a dense bitset when the value span is bounded (the membership test then
     /// fits in L2: 1 bit/slot vs the 16-byte pointer-keyed map entry that also
     /// chases into the 32-byte enum vector), else an inline-key `FxHashSet<i64>`.
-    fn membership_filter_i64(a: &[i64], b: &[i64], keep_present: bool) -> Vec<IndexLabel> {
-        let mut out: Vec<IndexLabel> = Vec::new();
+    fn membership_filter_i64(a: &[i64], b: &[i64], keep_present: bool) -> Vec<i64> {
+        let mut out: Vec<i64> = Vec::new();
         if a.is_empty() {
             return out;
         }
@@ -1729,7 +1729,7 @@ impl Index {
                 None => seen_hash.insert(v),
             };
             if fresh {
-                out.push(IndexLabel::Int64(v));
+                out.push(v);
             }
         }
         out
@@ -1740,8 +1740,8 @@ impl Index {
     /// `union_with` `FxHashMap<&IndexLabel>` seen-set filter for all-Int64
     /// indexes, with INLINE `i64` dedup keys (dense bitset over the combined
     /// value span when bounded, else `FxHashSet<i64>`).
-    fn union_i64(a: &[i64], b: &[i64]) -> Vec<IndexLabel> {
-        let mut out: Vec<IndexLabel> = Vec::with_capacity(a.len() + b.len());
+    fn union_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+        let mut out: Vec<i64> = Vec::with_capacity(a.len() + b.len());
         // Combined span for the single shared dedup set over both inputs.
         let dense = if a.is_empty() {
             Self::i64_dense_span(b)
@@ -1787,7 +1787,7 @@ impl Index {
                 None => seen_hash.insert(v),
             };
             if fresh {
-                out.push(IndexLabel::Int64(v));
+                out.push(v);
             }
         }
         out
@@ -2349,7 +2349,8 @@ impl Index {
         // the enum vector — ~9× slower than pandas at 1M). Bit-identical:
         // self-order, first-occurrence dedup, same matched labels.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut result = Self::new(Self::membership_filter_i64(&a_i64, &b_i64, true));
+            let mut result =
+                Self::from_i64_values(Self::membership_filter_i64(&a_i64, &b_i64, true));
             result.name = self.shared_name(other);
             return result;
         }
@@ -2452,7 +2453,7 @@ impl Index {
         // into the 32-byte enum vector). Bit-identical: self-then-other order,
         // first-occurrence dedup.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut result = Self::new(Self::union_i64(&a_i64, &b_i64));
+            let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
             result.name = self.shared_name(other);
             return result;
         }
@@ -2482,7 +2483,7 @@ impl Index {
         // dedup instead of the pointer-keyed `FxHashMap<&IndexLabel>`.
         // Bit-identical: self-order, first-occurrence dedup, labels not in other.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            return self.propagate_name(Self::new(Self::membership_filter_i64(
+            return self.propagate_name(Self::from_i64_values(Self::membership_filter_i64(
                 &a_i64, &b_i64, false,
             )));
         }
@@ -2507,7 +2508,7 @@ impl Index {
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
             let mut labels = Self::membership_filter_i64(&a_i64, &b_i64, false);
             labels.extend(Self::membership_filter_i64(&b_i64, &a_i64, false));
-            let mut result = Self::new(labels);
+            let mut result = Self::from_i64_values(labels);
             result.name = self.shared_name(other);
             return result;
         }
@@ -17444,6 +17445,42 @@ mod tests {
                 labels_i64(&ia.symmetric_difference(&ib)),
                 symmetric_difference_ref(&a, &b),
                 "symmetric_difference iter={iter} a={a:?} b={b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsorted_int64_set_ops_keep_typed_backing_without_materializing_m8x4p() {
+        let left = Index::from_i64_values(vec![3, 1, 3, 2]).set_name("axis");
+        let right = Index::from_i64_values(vec![2, 4, 1]).set_name("axis");
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+
+        let intersection = left.intersection(&right);
+        let union = left.union_with(&right);
+        let difference = left.difference(&right);
+        let symmetric = left.symmetric_difference(&right);
+
+        assert_eq!(intersection.name(), Some("axis"));
+        assert_eq!(union.name(), Some("axis"));
+        assert_eq!(difference.name(), Some("axis"));
+        assert_eq!(symmetric.name(), Some("axis"));
+        assert_eq!(intersection.labels.int64_view().unwrap().as_slice(), &[1, 2]);
+        assert_eq!(union.labels.int64_view().unwrap().as_slice(), &[3, 1, 2, 4]);
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[3]);
+        assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[3, 4]);
+        assert!(
+            left.labels.materialized.get().is_none(),
+            "hash Int64 set ops should not materialize the left input"
+        );
+        assert!(
+            right.labels.materialized.get().is_none(),
+            "hash Int64 set ops should not materialize the right input"
+        );
+        for output in [&intersection, &union, &difference, &symmetric] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "Int64 set op output should stay typed"
             );
         }
     }

@@ -1801,6 +1801,80 @@ fn try_groupby_min_max_scalar_slot(
     Some((out_index, out_values))
 }
 
+/// Generic string/object-key path for `groupby.first()` and `groupby.last()`.
+///
+/// The generic fallback stores every non-missing value per group, then selects
+/// the first or last slot. This path keeps only that selected scalar while
+/// preserving the same group admission, ordering, label, and all-missing
+/// `Null(NaN)` behavior.
+fn try_groupby_first_last_scalar_slot(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::First | AggFunc::Last) {
+        return None;
+    }
+
+    let take_first = matches!(func, AggFunc::First);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Option<Scalar>)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, None)
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if !take_first || entry.1.is_none() {
+            entry.1 = Some(value.clone());
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, slot) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(slot.clone().unwrap_or(Scalar::Null(NullKind::NaN)));
+    }
+
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1884,6 +1958,23 @@ pub fn groupby_agg(
     if matches!(func, AggFunc::Min | AggFunc::Max)
         && let Some((out_index, out_values)) =
             try_groupby_min_max_scalar_slot(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key first/last only need one selected scalar per
+    // group, not a cloned value Vec. The dense Int64 route above remains first
+    // chance for small integer key domains.
+    if matches!(func, AggFunc::First | AggFunc::Last)
+        && let Some((out_index, out_values)) =
+            try_groupby_first_last_scalar_slot(
+                key_vals,
+                val_vals,
+                func,
+                options.dropna,
+                options.sort,
+            )
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -4669,6 +4760,164 @@ mod tests {
         // source Int64 dtype (no Float64 promotion).
         assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
         assert_eq!(out.name(), "last");
+    }
+
+    #[test]
+    fn groupby_first_last_utf8_keys_skip_missing_and_keep_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let first_sorted = groupby_first(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let last_sorted = groupby_last(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            last_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            &first_sorted.values()[..2],
+            &[Scalar::Int64(10), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            &last_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(2)]
+        );
+        assert!(first_sorted.values()[2].is_missing());
+        assert!(last_sorted.values()[2].is_missing());
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let first_unsorted = groupby_first(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let last_unsorted = groupby_last(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            last_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            &first_unsorted.values()[..2],
+            &[Scalar::Int64(1), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            &last_unsorted.values()[..2],
+            &[Scalar::Int64(2), Scalar::Int64(5)]
+        );
+        assert!(first_unsorted.values()[2].is_missing());
+        assert!(last_unsorted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn groupby_first_last_object_values_preserve_selected_scalar() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".into()), Scalar::Int64(7)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out_first = groupby_first(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let out_last = groupby_last(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out_first.values(), &[Scalar::Utf8("x".into())]);
+        assert_eq!(out_last.values(), &[Scalar::Int64(7)]);
     }
 
     #[test]

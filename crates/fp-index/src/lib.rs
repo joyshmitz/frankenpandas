@@ -4077,6 +4077,14 @@ impl Index {
         if periods == 0 {
             return out;
         }
+        if let Some(values) = self.labels.int64_view() {
+            for (position, slot) in out.iter_mut().enumerate().skip(periods) {
+                *slot = values[position]
+                    .checked_sub(values[position - periods])
+                    .map(IndexLabel::Int64);
+            }
+            return out;
+        }
         for (position, slot) in out.iter_mut().enumerate().skip(periods) {
             *slot = match (&self.labels[position], &self.labels[position - periods]) {
                 (IndexLabel::Int64(current), IndexLabel::Int64(previous)) => {
@@ -19771,6 +19779,37 @@ mod tests {
             datetimes.diff(1),
             vec![None, Some(IndexLabel::Timedelta64(15))]
         );
+    }
+
+    #[test]
+    fn int64_diff_avoids_label_materialization_codb() {
+        let index = Index::from_i64_values(vec![10, 13, 20, i64::MIN]).set_name("n");
+        assert!(index.labels.materialized.get().is_none());
+
+        let actual = index.diff(2);
+
+        assert_eq!(
+            actual,
+            vec![
+                None,
+                None,
+                Some(IndexLabel::Int64(10)),
+                None,
+            ]
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "raw Int64 diff should not materialize source labels"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(10),
+            IndexLabel::Int64(13),
+            IndexLabel::Int64(20),
+            IndexLabel::Int64(i64::MIN),
+        ])
+        .set_name("n");
+        assert_eq!(actual, materialized.diff(2));
     }
 
     #[test]

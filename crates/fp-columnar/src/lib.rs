@@ -11127,7 +11127,7 @@ impl Column {
         }
 
         if self.missingness_is_validity_only() {
-            let out: Vec<bool> = self.validity.bits().map(|valid| !valid).collect();
+            let out = Self::bool_values_from_validity(&self.validity, false, true);
             return Ok(Self::from_bool_values(out));
         }
 
@@ -11164,7 +11164,7 @@ impl Column {
         }
 
         if self.missingness_is_validity_only() {
-            let out: Vec<bool> = self.validity.bits().collect();
+            let out = Self::bool_values_from_validity(&self.validity, true, false);
             return Ok(Self::from_bool_values(out));
         }
 
@@ -11191,6 +11191,34 @@ impl Column {
                 | DType::Utf8
                 | DType::Interval
         )
+    }
+
+    fn bool_values_from_validity(
+        validity: &ValidityMask,
+        valid_value: bool,
+        invalid_value: bool,
+    ) -> Vec<bool> {
+        let len = validity.len();
+        if validity.all() {
+            return vec![valid_value; len];
+        }
+
+        if let Some(ranges) = &validity.invalid_ranges {
+            let mut out = vec![valid_value; len];
+            for &(start, run_len) in ranges.iter() {
+                if let Some(end) = start.checked_add(run_len)
+                    && let Some(span) = out.get_mut(start..end)
+                {
+                    span.fill(invalid_value);
+                }
+            }
+            return out;
+        }
+
+        validity
+            .bits()
+            .map(|valid| if valid { valid_value } else { invalid_value })
+            .collect()
     }
 
     /// Per-row check for finite values (not NaN or infinity).

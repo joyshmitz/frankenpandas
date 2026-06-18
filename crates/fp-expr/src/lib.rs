@@ -6112,6 +6112,42 @@ mod tests {
     }
 
     #[test]
+    fn eval_str_reflected_arithmetic_methods_pizig() {
+        // br-frankenpandas-pizig: reflected method-call arithmetic (rsub/rfloordiv)
+        // swaps operands: a.rsub(b)==b-a. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4ef1_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..400u32 {
+            let n = (next() % 5) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let b: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let mut ledger = EvidenceLedger::new();
+            let frame = fp_frame::DataFrame::from_series(vec![
+                fp_frame::Series::from_values("a", (0..n as i64).map(Into::into).collect::<Vec<_>>(), a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+                fp_frame::Series::from_values("b", (0..n as i64).map(Into::into).collect::<Vec<_>>(), b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+            ])
+            .unwrap();
+            let geti = |s: &Scalar| -> i64 {
+                match s {
+                    Scalar::Int64(v) => *v,
+                    Scalar::Float64(v) => *v as i64,
+                    _ => i64::MIN,
+                }
+            };
+            let rsub = super::eval_str("a.rsub(b)", &frame, &policy, &mut ledger).unwrap();
+            for i in 0..n {
+                assert_eq!(geti(&rsub.values()[i]), b[i] - a[i], "rsub iter={iter} i={i}");
+            }
+        }
+    }
+
+    #[test]
     fn eval_str_true_division_float_8bnl8() {
         // br-frankenpandas-8bnl8: expression-level true division a/b -> Float64
         // (3j187 used %,// not /). Seeded LCG, no mocks.

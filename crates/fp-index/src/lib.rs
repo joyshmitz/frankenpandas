@@ -3251,6 +3251,12 @@ impl Index {
     /// `self`.
     #[must_use]
     pub fn append(&self, other: &Self) -> Self {
+        if let (Some(left), Some(right)) = (self.labels.int64_view(), other.labels.int64_view()) {
+            let mut values = Vec::with_capacity(left.len() + right.len());
+            values.extend_from_slice(left.as_slice());
+            values.extend_from_slice(right.as_slice());
+            return self.propagate_name(Self::from_i64_values(values));
+        }
         let mut labels = self.labels().to_vec();
         labels.extend(other.labels.iter().cloned());
         self.propagate_name(Self::new(labels))
@@ -3263,10 +3269,22 @@ impl Index {
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
         if repeats == 0 {
+            if self.labels.int64_view().is_some() {
+                return self.propagate_name(Self::from_i64_values(Vec::new()));
+            }
             return self.propagate_name(Self::new(Vec::new()));
         }
         if repeats == 1 {
             return self.clone();
+        }
+        if let Some(values) = self.labels.int64_view() {
+            let mut out = Vec::with_capacity(values.len() * repeats);
+            for &value in values.iter() {
+                for _ in 0..repeats {
+                    out.push(value);
+                }
+            }
+            return self.propagate_name(Self::from_i64_values(out));
         }
         let mut out = Vec::with_capacity(self.labels.len() * repeats);
         for label in &self.labels {
@@ -17864,6 +17882,52 @@ mod tests {
     }
 
     #[test]
+    fn int64_append_preserves_typed_backing_codb() {
+        let left = Index::from_i64_values(vec![1, 2, 3]).set_name("row");
+        let right = Index::from_i64_values(vec![4, 5]);
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+
+        let appended = left.append(&right);
+
+        assert_eq!(appended.name(), Some("row"));
+        assert_eq!(
+            appended.labels.int64_view().unwrap().as_slice(),
+            &[1, 2, 3, 4, 5]
+        );
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+        assert!(
+            appended.labels.materialized.get().is_none(),
+            "Int64 append should keep typed output backing"
+        );
+    }
+
+    #[test]
+    fn affine_int64_append_preserves_typed_backing_codb() {
+        let left = Index::new_known_unique_int64_affine_range(10, -2, 3)
+            .unwrap()
+            .set_name("axis");
+        let right = Index::new_known_unique_int64_affine_range(1, 3, 3).unwrap();
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+
+        let appended = left.append(&right);
+
+        assert_eq!(appended.name(), Some("axis"));
+        assert_eq!(
+            appended.labels.int64_view().unwrap().as_slice(),
+            &[10, 8, 6, 1, 4, 7]
+        );
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+        assert!(
+            appended.labels.materialized.get().is_none(),
+            "affine Int64 append should gather raw values into typed output"
+        );
+    }
+
+    #[test]
     fn index_repeat_duplicates_each_label() {
         let idx = Index::from_i64(vec![1, 2, 3]).set_name("k");
         let result = idx.repeat(2);
@@ -17893,6 +17957,43 @@ mod tests {
         let idx = Index::from_i64(vec![1, 2]);
         let result = idx.repeat(1);
         assert_eq!(result.labels(), idx.labels());
+    }
+
+    #[test]
+    fn int64_repeat_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![2, 4, 6]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let repeated = index.repeat(3);
+
+        assert_eq!(repeated.name(), Some("row"));
+        assert_eq!(
+            repeated.labels.int64_view().unwrap().as_slice(),
+            &[2, 2, 2, 4, 4, 4, 6, 6, 6]
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            repeated.labels.materialized.get().is_none(),
+            "typed Int64 repeat should keep typed output backing"
+        );
+    }
+
+    #[test]
+    fn affine_int64_repeat_zero_preserves_empty_typed_backing_codb() {
+        let index = Index::new_known_unique_int64_affine_range(3, 5, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let repeated = index.repeat(0);
+
+        assert_eq!(repeated.name(), Some("axis"));
+        assert!(repeated.labels.int64_view().unwrap().is_empty());
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            repeated.labels.materialized.get().is_none(),
+            "zero-repeat Int64 output should stay typed-empty"
+        );
     }
 
     #[test]

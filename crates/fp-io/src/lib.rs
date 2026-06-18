@@ -2010,7 +2010,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                         write_pandas_float(&mut out, v);
                     }
                 }
-                // Int64 uses Rust Display, exactly scalar_to_csv's `v.to_string()`.
+                // Int64 formats via the hand-rolled append_i64_decimal fast path
+                // (byte-identical to Rust Display / scalar_to_csv's `v.to_string()`,
+                // but writes straight into `out` with no temporary String alloc — so
+                // this is already optimal; don't "speed it up" with to_string/itoa).
                 FastCol::I(s) => {
                     append_i64_decimal(&mut out, s[r]);
                 }

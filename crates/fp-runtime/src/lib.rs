@@ -967,6 +967,43 @@ mod tests {
         }
     }
 
+    /// br-frankenpandas-bhlwt: push_decode_proof_capped keeps a bounded history,
+    /// evicting oldest first (defensive bounded recovery).
+    #[test]
+    fn raptorq_decode_proof_cap_fifo_bhlwt() {
+        let mut env = RaptorQEnvelope::from_source_bytes("p", "t", b"x", 1);
+        let cap = super::MAX_DECODE_PROOFS;
+        let total = cap + 5;
+        for i in 0..total {
+            env.push_decode_proof_capped(super::DecodeProof {
+                ts_unix_ms: i as u64,
+                reason: "scrub".to_owned(),
+                recovered_blocks: i as u32,
+                proof_hash: "sha256:deadbeef".to_owned(),
+            });
+        }
+        // Never exceeds the cap.
+        assert_eq!(env.decode_proofs.len(), cap, "history capped at MAX_DECODE_PROOFS");
+        // Oldest-first eviction: the retained window is the newest `cap` entries.
+        assert_eq!(
+            env.decode_proofs.first().unwrap().recovered_blocks,
+            (total - cap) as u32,
+            "oldest evicted; first retained is seq=overflow"
+        );
+        assert_eq!(
+            env.decode_proofs.last().unwrap().recovered_blocks,
+            (total - 1) as u32,
+            "newest retained"
+        );
+        // Retained sequence is contiguous and strictly increasing.
+        assert!(
+            env.decode_proofs
+                .windows(2)
+                .all(|w| w[1].recovered_blocks == w[0].recovered_blocks + 1),
+            "retained window is contiguous"
+        );
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     struct StructuredTestLog {
         packet_id: String,

@@ -2718,6 +2718,16 @@ impl Index {
     /// Matches `pd.Index.astype(str)`.
     #[must_use]
     pub fn astype_str(&self) -> Self {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return self.propagate_name(Self::new(
+                values
+                    .iter()
+                    .map(|value| IndexLabel::Utf8(value.to_string()))
+                    .collect(),
+            ));
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -17580,6 +17590,60 @@ mod tests {
         let str_idx = idx.astype_str();
         assert_eq!(str_idx.labels()[0], IndexLabel::Utf8("1".into()));
         assert_eq!(str_idx.labels()[1], IndexLabel::Utf8("2".into()));
+    }
+
+    #[test]
+    fn typed_int64_astype_str_avoids_source_materialization_codb() {
+        let index = Index::from_i64_values(vec![7, -5, 0]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let str_idx = index.astype_str();
+
+        assert_eq!(str_idx.name(), Some("row"));
+        assert_eq!(
+            str_idx.labels(),
+            &[
+                IndexLabel::Utf8("7".into()),
+                IndexLabel::Utf8("-5".into()),
+                IndexLabel::Utf8("0".into()),
+            ]
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "astype_str should stringify raw Int64 values without materializing source labels"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(7),
+            IndexLabel::Int64(-5),
+            IndexLabel::Int64(0),
+        ])
+        .set_name("row");
+        assert_eq!(str_idx.labels(), materialized.astype_str().labels());
+    }
+
+    #[test]
+    fn affine_int64_astype_str_avoids_source_materialization_codb() {
+        let index = Index::new_known_unique_int64_affine_range(4, -3, 3)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let str_idx = index.astype_str();
+
+        assert_eq!(str_idx.name(), Some("axis"));
+        assert_eq!(
+            str_idx.labels(),
+            &[
+                IndexLabel::Utf8("4".into()),
+                IndexLabel::Utf8("1".into()),
+                IndexLabel::Utf8("-2".into()),
+            ]
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "affine astype_str should not materialize source labels"
+        );
     }
 
     #[test]

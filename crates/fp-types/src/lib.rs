@@ -4833,6 +4833,41 @@ mod tests {
         }
     }
 
+    /// br-frankenpandas-1ews0: missing_for_dtype is the canonical per-dtype
+    /// missing sentinel (used by null-fill / with_validity / cast). Exhaustively
+    /// assert it is always missing, and that casting any missing to any dtype
+    /// stays missing.
+    #[test]
+    fn missing_for_dtype_always_missing_1ews0() {
+        const ALL: [DType; 13] = [
+            DType::Null,
+            DType::Bool,
+            DType::BoolNullable,
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Float64,
+            DType::Utf8,
+            DType::Categorical,
+            DType::Timedelta64,
+            DType::Datetime64,
+            DType::Period,
+            DType::Interval,
+            DType::Sparse,
+        ];
+        for &dt in &ALL {
+            let m = Scalar::missing_for_dtype(dt);
+            assert!(m.is_missing(), "missing_for_dtype({dt:?}) must be missing");
+            // cast_scalar's value.is_missing() branch returns missing_for_dtype(target).
+            for &target in &ALL {
+                let cast = cast_scalar(&m, target).expect("cast of missing");
+                assert!(
+                    cast.is_missing(),
+                    "cast(missing {dt:?} -> {target:?}) must stay missing, got {cast:?}"
+                );
+            }
+        }
+    }
+
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     /// behind astype/promotion. Property test of its confirmed identity +
     /// numeric/bool coercion rules over random scalars. Deterministic seeded LCG.

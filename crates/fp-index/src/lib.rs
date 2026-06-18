@@ -18562,6 +18562,62 @@ mod tests {
     }
 
     #[test]
+    fn int64_affine_lookup_fast_paths_match_materialized_q70pn() {
+        // Differential harness (br-frankenpandas-q70pn): affine Int64 lookup fast
+        // paths (searchsorted arithmetic ymhb6, asof 1851g/4jr8s, affine get_loc/
+        // position) must agree with the materialized binary-search/linear fallback
+        // for every query. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..2000u32 {
+            // Ascending affine range (step > 0) so searchsorted/asof are valid.
+            let len = (next() % 9) as usize + 1;
+            let start = (next() % 11) as i64 - 5;
+            let step = (next() % 4) as i64 + 1; // 1..=4
+            let Some(affine) = Index::new_known_unique_int64_affine_range(start, step, len) else {
+                continue;
+            };
+            let vals: Vec<i64> = (0..len as i64).map(|i| start + step * i).collect();
+            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+
+            // Query span: below min, exact elements, between elements, above max.
+            let lo = start - 2;
+            let hi = start + step * (len as i64 - 1) + 2;
+            for q in lo..=hi {
+                let label = IndexLabel::Int64(q);
+                let ctx = format!("iter={iter} start={start} step={step} len={len} q={q}");
+
+                assert_eq!(affine.get_loc(&label), mat.get_loc(&label), "get_loc {ctx}");
+                assert_eq!(affine.position(&label), mat.position(&label), "position {ctx}");
+                assert_eq!(affine.asof(&label), mat.asof(&label), "asof {ctx}");
+                for side in ["left", "right"] {
+                    assert_eq!(
+                        affine.searchsorted(&label, side).unwrap(),
+                        mat.searchsorted(&label, side).unwrap(),
+                        "searchsorted side={side} {ctx}"
+                    );
+                }
+            }
+
+            // get_indexer over a small mixed target (present + absent keys).
+            let targ_vals: Vec<i64> = (0..4).map(|_| (next() % 14) as i64 - 6).collect();
+            let target =
+                Index::new(targ_vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            assert_eq!(
+                affine.get_indexer(&target),
+                mat.get_indexer(&target),
+                "get_indexer iter={iter} targ={targ_vals:?}"
+            );
+        }
+    }
+
+    #[test]
     fn int64_index_fast_paths_match_materialized_fallback_yfyb9() {
         // Differential harness (br-frankenpandas-yfyb9): every Int64 fast path on
         // Index (min/max, argmin/argmax, is_monotonic_*, nunique, is_unique,

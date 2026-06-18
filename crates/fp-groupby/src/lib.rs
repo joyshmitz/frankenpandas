@@ -2711,6 +2711,66 @@ mod tests {
     }
 
     #[test]
+    fn dense_int64_groupby_sparse_keys_matches_oracle_u4c5a() {
+        use std::collections::BTreeMap;
+
+        // Oracle (br-frankenpandas-u4c5a): widely-spread keys exceed the dense
+        // histogram threshold, exercising the sparse/hash grouping path. It must
+        // match the same BTreeMap oracle as the dense path. Seeded LCG, no mocks.
+        const WIDE_KEYS: [i64; 6] = [0, 1, -1, 1_000_000, -500_000, 7];
+        let mut st: u64 = 0x5a2e_5e00_4c5a_d00d;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+
+        for iter in 0..1000u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n)
+                .map(|_| WIDE_KEYS[(next() as usize) % WIDE_KEYS.len()])
+                .collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_sum: Vec<Scalar> =
+                groups.values().map(|vs| Scalar::Int64(vs.iter().sum())).collect();
+            let exp_count: Vec<Scalar> =
+                groups.values().map(|vs| Scalar::Int64(vs.len() as i64)).collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?}");
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+            let sum = groupby_sum(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("sum");
+            assert_eq!(sum.index().labels(), exp_keys, "sparse sum keys {ctx}");
+            assert_eq!(sum.values(), exp_sum.as_slice(), "sparse sum vals {ctx}");
+            let cnt = groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("count");
+            assert_eq!(cnt.values(), exp_count.as_slice(), "sparse count vals {ctx}");
+        }
+    }
+
+    #[test]
     fn groupby_sum_concatenates_string_values_like_pandas() {
         // pandas df.groupby(k)['s'].sum() concatenates object/string values per
         // group (skipna), matching Series::sum (br-f031e). Previously the f64

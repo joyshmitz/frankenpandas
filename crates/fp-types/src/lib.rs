@@ -4771,6 +4771,68 @@ mod tests {
         assert_eq!(nan.semantic_cmp(&nan), Ordering::Equal, "NaN cmp NaN");
     }
 
+    /// br-frankenpandas-be314: common_dtype is the dtype-promotion lattice
+    /// underpinning every binary op, alignment, and concat (dtype coercion is a
+    /// crown-jewel correctness area). Exhaustively (all 13x13 DType pairs) assert
+    /// its lattice axioms — an asymmetric arm would make df1+df2 and df2+df1
+    /// disagree on dtype.
+    #[test]
+    fn common_dtype_lattice_axioms_be314() {
+        const ALL: [DType; 13] = [
+            DType::Null,
+            DType::Bool,
+            DType::BoolNullable,
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Float64,
+            DType::Utf8,
+            DType::Categorical,
+            DType::Timedelta64,
+            DType::Datetime64,
+            DType::Period,
+            DType::Interval,
+            DType::Sparse,
+        ];
+
+        for &a in &ALL {
+            // Idempotence: a promoted with itself is itself.
+            assert_eq!(common_dtype(a, a), Ok(a), "idempotent {a:?}");
+            // Null is the identity element of the promotion lattice.
+            assert_eq!(common_dtype(DType::Null, a), Ok(a), "null-left identity {a:?}");
+            assert_eq!(common_dtype(a, DType::Null), Ok(a), "null-right identity {a:?}");
+
+            for &b in &ALL {
+                // Commutativity: same Ok value AND same ok-ness. An asymmetric
+                // match arm would make binary-op output dtype order-dependent.
+                assert_eq!(
+                    common_dtype(a, b).ok(),
+                    common_dtype(b, a).ok(),
+                    "commutative value {a:?},{b:?}"
+                );
+                assert_eq!(
+                    common_dtype(a, b).is_ok(),
+                    common_dtype(b, a).is_ok(),
+                    "commutative ok-ness {a:?},{b:?}"
+                );
+            }
+        }
+
+        // Associativity over the Ok-closed subset: when both nestings succeed,
+        // promotion order must not change the result.
+        for &a in &ALL {
+            for &b in &ALL {
+                for &c in &ALL {
+                    if let (Ok(ab), Ok(bc)) = (common_dtype(a, b), common_dtype(b, c))
+                        && let (Ok(left), Ok(right)) =
+                            (common_dtype(ab, c), common_dtype(a, bc))
+                    {
+                        assert_eq!(left, right, "associative {a:?},{b:?},{c:?}");
+                    }
+                }
+            }
+        }
+    }
+
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
     #[test]
     fn scalar_from_primitive_types() {

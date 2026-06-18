@@ -10308,6 +10308,24 @@ impl Column {
                 right: other.dtype,
             });
         }
+        // perf: typed buffer concat for the ubiquitous all-valid Int64/Float64
+        // case — extend the contiguous i64/f64 buffers directly instead of cloning
+        // a 32 B Scalar per row through `self.values` + re-validating in `Self::new`.
+        // as_i64_slice/as_f64_slice are Some only when BOTH columns are all-valid of
+        // that dtype, so from_i64_values/from_f64_values are bit-identical to the
+        // Scalar path (same dtype + no missing => same logical values).
+        if let (Some(a), Some(b)) = (self.as_i64_slice(), other.as_i64_slice()) {
+            let mut out = Vec::with_capacity(a.len() + b.len());
+            out.extend_from_slice(a);
+            out.extend_from_slice(b);
+            return Ok(Self::from_i64_values(out));
+        }
+        if let (Some(a), Some(b)) = (self.as_f64_slice(), other.as_f64_slice()) {
+            let mut out = Vec::with_capacity(a.len() + b.len());
+            out.extend_from_slice(a);
+            out.extend_from_slice(b);
+            return Ok(Self::from_f64_values(out));
+        }
         let mut values = Vec::with_capacity(self.values.len() + other.values.len());
         values.extend_from_slice(&self.values);
         values.extend_from_slice(&other.values);

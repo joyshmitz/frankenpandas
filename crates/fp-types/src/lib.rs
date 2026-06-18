@@ -5665,6 +5665,126 @@ mod tests {
     }
 
     #[test]
+    fn nansum_nanmean_match_numeric_and_timedelta_oracle_1xmi7() {
+        // Differential vs independent sum/mean oracles
+        // (br-frankenpandas-1xmi7). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> (Scalar, Scalar) {
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    sum += value;
+                    count += 1;
+                }
+            }
+            let mean = if count == 0 {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(sum / count as f64)
+            };
+            (Scalar::Float64(sum), mean)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> (Scalar, Scalar) {
+            let mut sum = 0_i128;
+            let mut count = 0_i128;
+            for value in values {
+                if let Scalar::Timedelta64(ns) = value
+                    && !value.is_missing()
+                {
+                    sum += i128::from(*ns);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return (Scalar::Float64(0.0), Scalar::Null(NullKind::NaN));
+            }
+            let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            (Scalar::Timedelta64(sum as i64), Scalar::Timedelta64(mean as i64))
+        }
+
+        fn assert_sum_mean(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            expected_sum: Scalar,
+            expected_mean: Scalar,
+        ) {
+            let actual_sum = super::nansum(values);
+            let actual_mean = super::nanmean(values);
+            assert!(
+                actual_sum.semantic_eq(&expected_sum),
+                "case={case} family={family}: expected sum {expected_sum:?}, got {actual_sum:?} for {values:?}"
+            );
+            assert!(
+                actual_mean.semantic_eq(&expected_mean),
+                "case={case} family={family}: expected mean {expected_mean:?}, got {actual_mean:?} for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        let (sum, mean) = expected_numeric(&all_missing);
+        assert_sum_mean(usize::MAX, "numeric_all_missing", &all_missing, sum, mean);
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        let (sum, mean) = expected_timedelta(&td_all_missing);
+        assert_sum_mean(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            sum,
+            mean,
+        );
+
+        let mut seed = 0x511d_ed5a_7a11_1a55_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 257),
+                    5 => Scalar::Float64(raw as f64 / 67.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            let (sum, mean) = expected_numeric(&numeric);
+            assert_sum_mean(case, "numeric", &numeric, sum, mean);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            let (sum, mean) = expected_timedelta(&timedeltas);
+            assert_sum_mean(case, "timedelta", &timedeltas, sum, mean);
+        }
+    }
+
+    #[test]
     fn nannunique_merges_negative_zero_and_zero() {
         let vals = vec![
             Scalar::Float64(-0.0),

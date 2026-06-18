@@ -13130,6 +13130,17 @@ mod tests {
     }
 
     #[test]
+    fn csv_header_only_zero_rows_yqfw0() {
+        // br-frankenpandas-yqfw0: a header-only CSV parses to a 0-row frame that still
+        // exposes the header columns.
+        let df = read_csv_str("a,b\n").expect("read header-only");
+        assert_eq!(df.len(), 0, "no data rows; df={df:?}");
+        assert!(df.column("a").is_some(), "column a present");
+        assert!(df.column("b").is_some(), "column b present");
+        assert_eq!(df.column("a").unwrap().values().len(), 0, "column a empty");
+    }
+
+    #[test]
     fn csv_embedded_newline_in_quoted_field_ftqon() {
         // br-frankenpandas-ftqon: a quoted field containing a newline parses as ONE
         // multiline value (RFC4180), not two rows; and round-trips.

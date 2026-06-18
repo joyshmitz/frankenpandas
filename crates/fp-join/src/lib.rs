@@ -8909,6 +8909,58 @@ mod tests {
     }
 
     #[test]
+    fn right_join_null_fill_multiset_7je8m() {
+        use std::collections::HashMap;
+        // Differential (br-frankenpandas-7je8m): RIGHT join preserves every right row;
+        // matched left payload cross-product else null. (key, lv-or-None, rv) multiset
+        // vs oracle. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f54;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<i64> = (0..ln).map(|_| (next() % 4) as i64).collect();
+            let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
+            let rk: Vec<i64> = (0..rn).map(|_| (next() % 4) as i64).collect();
+            let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
+            let left = DataFrame::from_dict(&["k", "lv"], vec![
+                ("k", lk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
+            ]).unwrap();
+            let right = DataFrame::from_dict(&["k", "rv"], vec![
+                ("k", rk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
+            ]).unwrap();
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Right).unwrap();
+
+            let ks = merged_values(&merged, "k").unwrap();
+            let lvs = merged_values(&merged, "lv").unwrap();
+            let rvs = merged_values(&merged, "rv").unwrap();
+            let ki = |v: &Scalar| -> i64 { match v { Scalar::Int64(x) => *x, Scalar::Float64(x) => *x as i64, _ => i64::MIN } };
+            let kopt = |v: &Scalar| -> Option<i64> { if v.is_missing() { None } else { Some(ki(v)) } };
+            let mut got: Vec<(i64, Option<i64>, i64)> = (0..ks.len()).map(|i| (ki(&ks[i]), kopt(&lvs[i]), ki(&rvs[i]))).collect();
+            // Oracle.
+            let mut lby: HashMap<i64, Vec<i64>> = HashMap::new();
+            for i in 0..ln { lby.entry(lk[i]).or_default().push(lv[i]); }
+            let mut exp: Vec<(i64, Option<i64>, i64)> = Vec::new();
+            for i in 0..rn {
+                match lby.get(&rk[i]) {
+                    Some(lvals) => for &a in lvals { exp.push((rk[i], Some(a), rv[i])); },
+                    None => exp.push((rk[i], None, rv[i])),
+                }
+            }
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "right join multiset iter={iter}");
+        }
+    }
+
+    #[test]
     fn inner_join_utf8_value_multiset_fr4ns() {
         use std::collections::HashMap;
         // Differential (br-frankenpandas-fr4ns): inner join on Utf8 keys; the (key,

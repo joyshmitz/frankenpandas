@@ -884,6 +884,53 @@ mod tests {
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
     const REPLAY_PREFIX: &str = "cargo test -p fp-runtime --";
 
+    /// br-frankenpandas-01gdm: semantic_fingerprint_bytes underpins reproducibility
+    /// ledgers / RaptorQ provenance. Known-answer SHA-256 vectors prove it's the
+    /// real hash (not a stub), plus determinism, format, and builder equivalence.
+    #[test]
+    fn semantic_fingerprint_sha256_known_answers_01gdm() {
+        // Standard SHA-256 known-answer vectors.
+        assert_eq!(
+            super::semantic_fingerprint_bytes(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            super::semantic_fingerprint_bytes(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // Format: "sha256:" + 64 lowercase hex chars; deterministic.
+        let f = super::semantic_fingerprint_bytes(b"frankenpandas");
+        assert!(f.starts_with("sha256:"), "prefix");
+        assert_eq!(f.len(), 7 + 64, "length");
+        assert!(
+            f[7..].bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "lowercase hex"
+        );
+        assert_eq!(f, super::semantic_fingerprint_bytes(b"frankenpandas"), "deterministic");
+
+        // Distinctness on a small sample (no collisions).
+        let inputs: [&[u8]; 5] = [b"a", b"b", b"ab", b"ba", b""];
+        for (i, x) in inputs.iter().enumerate() {
+            for (j, y) in inputs.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        super::semantic_fingerprint_bytes(x),
+                        super::semantic_fingerprint_bytes(y),
+                        "distinct {i} vs {j}"
+                    );
+                }
+            }
+        }
+
+        // Builder (chunked update) == one-shot over the concatenation.
+        let mut b = super::SemanticFingerprintBuilder::new();
+        b.update(b"hello");
+        b.update(b" ");
+        b.update(b"world");
+        assert_eq!(b.finish(), super::semantic_fingerprint_bytes(b"hello world"));
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     struct StructuredTestLog {
         packet_id: String,

@@ -10217,13 +10217,20 @@ impl RangeIndex {
     /// One-column row materialization, matching `pd.RangeIndex.to_frame(index=False)`.
     #[must_use]
     pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
-        self.to_flat_index().to_frame()
+        (0..self.len())
+            .map(|position| vec![IndexLabel::Int64(self.value_at(position))])
+            .collect()
     }
 
     /// Series-shaped materialization using range labels as both index and values.
     #[must_use]
     pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
-        self.to_flat_index().to_series()
+        (0..self.len())
+            .map(|position| {
+                let label = IndexLabel::Int64(self.value_at(position));
+                (label.clone(), label)
+            })
+            .collect()
     }
 
     /// Whether any range label coerces to true.
@@ -25053,6 +25060,32 @@ mod tests {
         let (empty_sorted, empty_order) = empty.sortlevel();
         assert!(empty_sorted.is_empty());
         assert!(empty_order.is_empty());
+    }
+
+    #[test]
+    fn range_index_frame_series_views_materialize_directly_u2jv1() {
+        let descending = super::RangeIndex::new(6, 0, -2).unwrap();
+
+        assert_eq!(
+            descending.to_frame(),
+            vec![
+                vec![IndexLabel::Int64(6)],
+                vec![IndexLabel::Int64(4)],
+                vec![IndexLabel::Int64(2)]
+            ]
+        );
+        assert_eq!(
+            descending.to_series(),
+            vec![
+                (IndexLabel::Int64(6), IndexLabel::Int64(6)),
+                (IndexLabel::Int64(4), IndexLabel::Int64(4)),
+                (IndexLabel::Int64(2), IndexLabel::Int64(2))
+            ]
+        );
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty.to_frame().is_empty());
+        assert!(empty.to_series().is_empty());
     }
 
     #[test]

@@ -5001,6 +5001,27 @@ mod tests {
     }
 
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
+    #[test]
+    fn nanskew_nankurt_min_sample_and_known_xybnq() {
+        // br-frankenpandas-xybnq: guard nanskew/nankurt min-sample-size (NaN below
+        // threshold) + known pandas G1/G2 values (the f4dc5540 inline-copy bug area).
+        use super::{nankurt, nanskew};
+        let f = |xs: &[f64]| -> Vec<Scalar> { xs.iter().map(|&x| Scalar::Float64(x)).collect() };
+        let val = |s: Scalar| -> Option<f64> { if s.is_missing() { None } else { s.to_f64().ok() } };
+
+        // skew needs >= 3 observations.
+        assert_eq!(val(nanskew(&f(&[1.0, 2.0]))), None, "skew n=2 -> NaN");
+        let sym = val(nanskew(&f(&[1.0, 2.0, 3.0]))).expect("skew n=3");
+        assert!(sym.abs() < 1e-9, "symmetric skew ~0, got {sym}");
+        let right = val(nanskew(&f(&[1.0, 1.0, 1.0, 5.0]))).expect("skew n=4");
+        assert!(right > 0.0, "right-skewed -> positive skew, got {right}");
+
+        // kurt needs >= 4 observations.
+        assert_eq!(val(nankurt(&f(&[1.0, 2.0, 3.0]))), None, "kurt n=3 -> NaN");
+        let k = val(nankurt(&f(&[1.0, 2.0, 3.0, 4.0, 5.0]))).expect("kurt n=5");
+        assert!((k - (-1.2)).abs() < 1e-6, "pandas kurt([1..5]) == -1.2, got {k}");
+    }
+
     /// behind astype/promotion. Property test of its confirmed identity +
     /// numeric/bool coercion rules over random scalars. Deterministic seeded LCG.
     #[test]

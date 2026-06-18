@@ -6134,6 +6134,118 @@ mod tests {
     }
 
     #[test]
+    fn nanmedian_matches_numeric_and_timedelta_oracle_oabhi() {
+        // Differential vs independent sort-based median oracles
+        // (br-frankenpandas-oabhi). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut finite = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .filter(|value| !value.is_nan())
+                .collect::<Vec<_>>();
+            if finite.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            finite.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            let mid = finite.len() / 2;
+            if finite.len().is_multiple_of(2) {
+                Scalar::Float64((finite[mid - 1] + finite[mid]) / 2.0)
+            } else {
+                Scalar::Float64(finite[mid])
+            }
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            let mut finite = values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if finite.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            finite.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            let mid = finite.len() / 2;
+            let median = if finite.len().is_multiple_of(2) {
+                (finite[mid - 1] + finite[mid]) / 2.0
+            } else {
+                finite[mid]
+            };
+            Scalar::Timedelta64(median as i64)
+        }
+
+        fn assert_median(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanmedian(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        assert_median(
+            usize::MAX,
+            "numeric_all_missing",
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+            Scalar::Null(NullKind::NaN),
+        );
+        assert_median(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0x0ab1_1eda_57a7_15e5_u64;
+        for case in 0..220 {
+            let len = (next(&mut seed) % 79 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 110));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 61.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_median(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 110));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_median(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
+    }
+
+    #[test]
     fn nanvar_population() {
         let vals = vec![
             Scalar::Float64(2.0),

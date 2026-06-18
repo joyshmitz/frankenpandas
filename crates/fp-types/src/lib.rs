@@ -10057,6 +10057,121 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_parse_matches_seeded_iso_component_oracle_1u7a0() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3935559000370003845)
+                .wrapping_add(2691343689449507681);
+            *seed
+        }
+
+        fn leap(year: i64) -> bool {
+            (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        }
+
+        fn month_len(year: i64, month: u32) -> u32 {
+            match month {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 if leap(year) => 29,
+                2 => 28,
+                _ => 0,
+            }
+        }
+
+        fn assert_components(
+            case: usize,
+            text: &str,
+            year: i64,
+            month: u32,
+            day: u32,
+            hour: u32,
+            minute: u32,
+            second: u32,
+            nanos: u64,
+        ) {
+            let ts = Timestamp::parse(text).expect("seeded valid timestamp");
+            assert_eq!(ts.year(), Some(year), "case {case}: year");
+            assert_eq!(ts.month(), Some(month as i64), "case {case}: month");
+            assert_eq!(ts.day(), Some(day as i64), "case {case}: day");
+            assert_eq!(ts.hour(), Some(hour as i64), "case {case}: hour");
+            assert_eq!(
+                ts.minute(),
+                Some(minute as i64),
+                "case {case}: minute"
+            );
+            assert_eq!(
+                ts.second(),
+                Some(second as i64),
+                "case {case}: second"
+            );
+            assert_eq!(
+                ts.microsecond(),
+                Some((nanos / 1000) as i64),
+                "case {case}: microsecond"
+            );
+            assert_eq!(
+                ts.nanosecond(),
+                Some((nanos % 1000) as i64),
+                "case {case}: nanosecond"
+            );
+        }
+
+        assert!(Timestamp::parse("NaT").expect("NaT parses").is_nat());
+        assert!(Timestamp::parse("nAt").expect("mixed-case NaT parses").is_nat());
+        assert!(Timestamp::parse("1900-02-29").is_err());
+        assert!(Timestamp::parse("2001-04-31").is_err());
+        assert!(Timestamp::parse("2024-00-15").is_err());
+
+        assert_components(usize::MAX, "2000-02-29", 2000, 2, 29, 0, 0, 0, 0);
+        assert_components(
+            usize::MAX - 1,
+            "2024-02-29T23:59:59.000000001",
+            2024,
+            2,
+            29,
+            23,
+            59,
+            59,
+            1,
+        );
+
+        let mut seed = 0x15e0_1d50_1f0a_cade_u64;
+        for case in 0..260 {
+            let year = 1900 + (next(&mut seed) % 201) as i64;
+            let month = 1 + (next(&mut seed) % 12) as u32;
+            let day = 1 + (next(&mut seed) % month_len(year, month) as u64) as u32;
+            let hour = (next(&mut seed) % 24) as u32;
+            let minute = (next(&mut seed) % 60) as u32;
+            let second = (next(&mut seed) % 60) as u32;
+            let nanos = next(&mut seed) % 1_000_000_000;
+
+            match case % 4 {
+                0 => {
+                    let text = format!("{year:04}-{month:02}-{day:02}");
+                    assert_components(case, &text, year, month, day, 0, 0, 0, 0);
+                }
+                1 => {
+                    let text =
+                        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}");
+                    assert_components(case, &text, year, month, day, hour, minute, second, 0);
+                }
+                2 => {
+                    let text =
+                        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}");
+                    assert_components(case, &text, year, month, day, hour, minute, second, 0);
+                }
+                _ => {
+                    let text = format!(
+                        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}"
+                    );
+                    assert_components(case, &text, year, month, day, hour, minute, second, nanos);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn period_parse_annual() {
         let p = Period::parse("2024").unwrap();
         assert_eq!(p.freq(), PeriodFreq::Annual);

@@ -4,6 +4,40 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.201 - CategoricalIndex factorize rank codes
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::factorize()` full-label hash code assignment
+  with rank-indexed code vectors for bounded valid category domains plus
+  invalid-label fallback codes.
+- Baseline comparator: current `factorize` hashes every label string into a
+  first-seen position map, even when valid categorical labels can be mapped to
+  compact dictionary ranks and assigned codes through a dense vector.
+- Graveyard mapping: semantic compression and dictionary-coded execution:
+  factorize over category ranks rather than repeated string identities, while
+  keeping string fallback only for impossible deserialized labels or sparse
+  oversized category universes.
+- Alien-artifact proof obligation: codes still encode first-seen label order,
+  not category order; unique labels are pushed when each label first appears;
+  invalid labels share codes by string equality; categories, ordered flag, and
+  name propagate unchanged. Oversized category domains fall back to direct label
+  hashing to avoid O(k) metadata work.
+- Guard added: `categorical_index_factorize_uses_rank_codes_uza04201`, checking
+  first-seen codes, unique-label output, metadata propagation, invalid-label
+  fallback, and oversized-category fallback against a local hash-oracle.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `CategoricalIndex::factorize` on repeated low-cardinality
+  realistic categorical indexes versus the legacy pandas original and a
+  pre-patch full-label hash-code baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical factorization above 0.1% self-time and allocation profiling proves
+  per-label hash code assignment, not unique-label output cloning, is the
+  residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.200 - CategoricalIndex value_counts rank counts
 
 - Status: implemented, benchmark verdict pending batch-test.

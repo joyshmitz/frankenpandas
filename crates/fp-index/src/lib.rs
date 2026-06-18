@@ -9977,11 +9977,8 @@ impl RangeIndex {
                 });
             }
         }
-        let labels: Vec<IndexLabel> = positions
-            .iter()
-            .map(|&p| IndexLabel::Int64(values[p]))
-            .collect();
-        let mut idx = Index::new(labels);
+        let labels: Vec<i64> = positions.iter().map(|&p| values[p]).collect();
+        let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
         }
@@ -9996,10 +9993,10 @@ impl RangeIndex {
         let mut labels = Vec::with_capacity(self.len() * repeats);
         for value in self.values() {
             for _ in 0..repeats {
-                labels.push(IndexLabel::Int64(value));
+                labels.push(value);
             }
         }
-        let mut idx = Index::new(labels);
+        let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
         }
@@ -24444,6 +24441,32 @@ mod tests {
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.values().is_empty());
+    }
+
+    #[test]
+    fn range_index_take_repeat_keep_typed_backing_uza04166() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(2, 11, 3).unwrap().set_name("r");
+
+        let taken = range.take(&[2, 0, 2])?;
+        assert_eq!(taken.name(), Some("r"));
+        assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[8, 2, 8]);
+        assert!(
+            taken.labels.materialized.get().is_none(),
+            "RangeIndex::take should keep typed Int64 output backing"
+        );
+
+        let repeated = range.repeat(2);
+        assert_eq!(repeated.name(), Some("r"));
+        assert_eq!(
+            repeated.labels.int64_view().unwrap().as_slice(),
+            &[2, 2, 5, 5, 8, 8]
+        );
+        assert!(
+            repeated.labels.materialized.get().is_none(),
+            "RangeIndex::repeat should keep typed Int64 output backing"
+        );
+
+        Ok(())
     }
 
     #[test]

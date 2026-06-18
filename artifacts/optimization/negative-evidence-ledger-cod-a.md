@@ -50,3 +50,47 @@ retry failed levers without a concrete retry predicate.
   profiling shows `Series::astype` above 0.1% self-time and batch evidence
   proves the residual is scalar materialization or constructor coercion rather
   than unavoidable target column allocation.
+
+## 2026-06-18 - br-frankenpandas-9bccl - DataFrame.dropna positional gather
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: make row-wise `DataFrame::dropna_with_options` and
+  `DataFrame::dropna_with_threshold` collect kept row positions directly and
+  call `take_rows_by_positions_unchecked`, bypassing temporary Bool `Series`
+  construction, index-label materialization, and `filter_rows` label-alignment.
+- Baseline comparator: previous row-wise `dropna` converted each positional
+  keep decision into a Bool Series with cloned index labels, then routed through
+  `filter_rows`. On duplicate indexes that route is semantically risky because
+  `filter_rows` intentionally aligns by label and uses the first matching data
+  position for duplicate labels; `dropna` needs row-position semantics.
+- Graveyard mapping: certified rewrite pipeline plus SoA/columnar execution.
+  The rewrite is accepted only because the equivalence domain is explicit:
+  kept positions are exactly the true entries of the old positional mask before
+  label alignment. Column data already lives in per-column storage, and
+  `take_rows_by_positions_unchecked` is the established typed gather primitive.
+- Alien-artifact proof obligation: row order, duplicate labels, index name,
+  column order, dtype, missing-value policy (`how=any`, `how=all`, threshold,
+  subset validation), and row MultiIndex projection must be preserved. The only
+  intended behavior change is replacing accidental duplicate-label mask
+  alignment with pandas-compatible positional `dropna` selection.
+- Guard added:
+  `dataframe_dropna_duplicate_index_uses_positional_rows_9bccl` and
+  `dataframe_dropna_threshold_duplicate_index_uses_positional_rows_9bccl`,
+  covering duplicate row labels, positional row retention, threshold/subset
+  behavior, and index-name preservation.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-frame`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- UBS run: `timeout 180s ubs crates/fp-frame/src/lib.rs` timed out with exit
+  124 after entering the Rust scan and emitted no completed finding, matching
+  the known broad `fp-frame` scanner backlog/stall behavior documented in
+  `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`.
+- Benchmark verdict: pending. Required follow-up comparator is a focused
+  `DataFrame.dropna` row-wise workload with duplicate-index and mostly-valid
+  realistic frames versus legacy pandas original and pre-patch mask/filter_rows
+  baseline.
+- Retry predicate if rejected: only revisit this family if same-host profiling
+  shows residual time in row-position collection or `take_rows_by_positions`;
+  do not reintroduce a Bool Series or label-aligned `filter_rows` path for
+  positional `dropna`.

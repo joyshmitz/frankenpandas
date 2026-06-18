@@ -1932,6 +1932,38 @@ impl Index {
         out
     }
 
+    /// Count distinct raw `i64` labels without constructing owned
+    /// `IndexLabel::Int64` uniques. Int64 labels are never missing, so this is
+    /// valid for both `dropna` modes.
+    fn nunique_i64(vals: &[i64]) -> usize {
+        let dense = Self::i64_dense_span(vals);
+        match dense {
+            Some((min, span)) => {
+                let mut seen_bits = vec![0u64; span.div_ceil(64)];
+                let mut count = 0usize;
+                for &v in vals {
+                    let s = (v - min) as usize;
+                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                    if seen_bits[w] & bit == 0 {
+                        seen_bits[w] |= bit;
+                        count += 1;
+                    }
+                }
+                count
+            }
+            None => {
+                let mut seen = FxHashSet::<i64>::with_capacity_and_hasher(
+                    vals.len(),
+                    Default::default(),
+                );
+                for &v in vals {
+                    seen.insert(v);
+                }
+                seen.len()
+            }
+        }
+    }
+
     /// `duplicated` mask over raw `i64` keys — bit-identical to the
     /// `FxHashMap<&IndexLabel>` path for all-Int64 indexes, with inline `i64`
     /// keys (dense bitsets when the value span is bounded, else hash sets).
@@ -2615,6 +2647,9 @@ impl Index {
         // materialization (br-frankenpandas-a55d8 vein).
         if let Some(affine) = self.labels.int64_affine_range() {
             return affine.len;
+        }
+        if let Some(values) = self.labels.int64_view() {
+            return Self::nunique_i64(&values);
         }
         self.unique()
             .labels
@@ -17509,6 +17544,46 @@ mod tests {
     fn index_nunique() {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 1_i64.into()]);
         assert_eq!(idx.nunique(), 2);
+    }
+
+    #[test]
+    fn typed_int64_nunique_counts_without_label_materialization_codb() {
+        let index = Index::from_i64_values(vec![3, 1, 3, 2, 1, 4]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.nunique(), 4);
+        assert_eq!(index.nunique_with_dropna(false), 4);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "typed Int64 nunique should count raw values without materializing labels"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(4),
+        ]);
+        assert_eq!(index.nunique(), materialized.nunique());
+        assert_eq!(
+            index.nunique_with_dropna(false),
+            materialized.nunique_with_dropna(false)
+        );
+    }
+
+    #[test]
+    fn sparse_int64_nunique_counts_without_label_materialization_codb() {
+        let index = Index::from_i64_values(vec![0, 1_000_000, -500_000, 0, 1_000_000]);
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.nunique(), 3);
+        assert_eq!(index.nunique_with_dropna(false), 3);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "wide-span Int64 nunique should use raw hash keys without materializing labels"
+        );
     }
 
     #[test]

@@ -1121,6 +1121,11 @@ fn fixed_width_label_memory_usage(len: usize, width: usize) -> usize {
     len.saturating_mul(width)
 }
 
+fn repeat_output_capacity(len: usize, repeats: usize) -> usize {
+    len.checked_mul(repeats)
+        .expect("index repeat output length overflow")
+}
+
 fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
     values.into_iter().fold(0usize, usize::saturating_add)
 }
@@ -3494,7 +3499,7 @@ impl Index {
             return self.clone();
         }
         if let Some(values) = self.labels.int64_view() {
-            let mut out = Vec::with_capacity(values.len() * repeats);
+            let mut out = Vec::with_capacity(repeat_output_capacity(values.len(), repeats));
             for &value in values.iter() {
                 for _ in 0..repeats {
                     out.push(value);
@@ -3502,7 +3507,7 @@ impl Index {
             }
             return self.propagate_name(Self::from_i64_values(out));
         }
-        let mut out = Vec::with_capacity(self.labels.len() * repeats);
+        let mut out = Vec::with_capacity(repeat_output_capacity(self.labels.len(), repeats));
         for label in &self.labels {
             for _ in 0..repeats {
                 out.push(label.clone());
@@ -5411,7 +5416,7 @@ impl DatetimeIndex {
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
-        let mut out = Vec::with_capacity(self.len() * repeats);
+        let mut out = Vec::with_capacity(repeat_output_capacity(self.len(), repeats));
         for label in self.index.labels() {
             if let IndexLabel::Datetime64(n) = label {
                 for _ in 0..repeats {
@@ -7714,7 +7719,7 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.repeat()`.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
-        let mut out = Vec::with_capacity(self.len() * repeats);
+        let mut out = Vec::with_capacity(repeat_output_capacity(self.len(), repeats));
         for label in self.index.labels() {
             if let IndexLabel::Timedelta64(n) = label {
                 for _ in 0..repeats {
@@ -8603,7 +8608,7 @@ impl PeriodIndex {
     /// `pd.PeriodIndex.repeat()`.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
-        let mut out = Vec::with_capacity(self.values.len() * repeats);
+        let mut out = Vec::with_capacity(repeat_output_capacity(self.values.len(), repeats));
         for &period in &self.values {
             for _ in 0..repeats {
                 out.push(period);
@@ -10028,7 +10033,7 @@ impl RangeIndex {
     /// contiguous range.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Index {
-        let mut labels = Vec::with_capacity(self.len() * repeats);
+        let mut labels = Vec::with_capacity(repeat_output_capacity(self.len(), repeats));
         for position in 0..self.len() {
             let value = self.value_at(position);
             for _ in 0..repeats {
@@ -11907,7 +11912,7 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.repeat(repeats)`.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
-        let mut labels = Vec::with_capacity(self.labels.len() * repeats);
+        let mut labels = Vec::with_capacity(repeat_output_capacity(self.labels.len(), repeats));
         for label in &self.labels {
             for _ in 0..repeats {
                 labels.push(label.clone());
@@ -15302,7 +15307,7 @@ impl MultiIndex {
         }
         let mut levels = Vec::with_capacity(self.nlevels());
         for level in &self.levels {
-            let mut repeated = Vec::with_capacity(level.len() * repeats);
+            let mut repeated = Vec::with_capacity(repeat_output_capacity(level.len(), repeats));
             for label in level {
                 for _ in 0..repeats {
                     repeated.push(label.clone());
@@ -25230,6 +25235,18 @@ mod tests {
 
         let different_step = super::RangeIndex::new(0, 6, 3).unwrap();
         assert!(!same_values_a.equals(&different_step));
+    }
+
+    #[test]
+    fn index_repeat_capacity_checks_output_length_uza04182() {
+        assert_eq!(super::repeat_output_capacity(3, 4), 12);
+        assert_eq!(super::repeat_output_capacity(0, usize::MAX), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "index repeat output length overflow")]
+    fn index_repeat_capacity_rejects_overflow_uza04182() {
+        let _ = super::repeat_output_capacity(usize::MAX, 2);
     }
 
     #[test]

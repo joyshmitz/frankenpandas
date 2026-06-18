@@ -6222,6 +6222,33 @@ mod tests {
     }
 
     #[test]
+    fn query_str_parenthesized_boolean_rnyb3() {
+        // br-frankenpandas-rnyb3: parenthesized boolean grouping '(a>2) and (b<8)'.
+        let mut st: u64 = 0x4c02_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..300u32 {
+            let n = (next() % 8) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 8) as i64).collect();
+            let b: Vec<i64> = (0..n).map(|_| (next() % 12) as i64).collect();
+            let mut ledger = EvidenceLedger::new();
+            let col = |name: &str, v: &[i64]| {
+                fp_frame::Series::from_values(name, (0..n as i64).map(Into::into).collect::<Vec<_>>(), v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap()
+            };
+            let frame = fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b)]).unwrap();
+            let out = super::query_str("(a > 2) and (b < 8)", &frame, &policy, &mut ledger).unwrap();
+            let got: Vec<i64> = out.column("a").unwrap().values().iter().map(|s| match s { Scalar::Int64(x) => *x, _ => i64::MIN }).collect();
+            let exp: Vec<i64> = (0..n).filter(|&i| a[i] > 2 && b[i] < 8).map(|i| a[i]).collect();
+            assert_eq!(got, exp, "paren query iter={iter}");
+        }
+    }
+
+    #[test]
     fn query_str_compound_arith_comparison_1l96h() {
         // br-frankenpandas-1l96h: query 'a + b > c' (arithmetic sub-expr then
         // comparison). Seeded LCG, no mocks.

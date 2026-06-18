@@ -18562,6 +18562,90 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_fast_paths_match_materialized_fallback_yfyb9() {
+        // Differential harness (br-frankenpandas-yfyb9): every Int64 fast path on
+        // Index (min/max, argmin/argmax, is_monotonic_*, nunique, is_unique,
+        // has_duplicates, hasnans, dtype predicates) must agree between a LAZY
+        // representation (from_i64_values / affine constructor => fast path) and a
+        // MATERIALIZED one (Index::new of IndexLabel::Int64 => fallback path) of
+        // the SAME values. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0xd1b5_4a32_d192_ed03;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let materialized = |vals: &[i64]| {
+            Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>())
+        };
+        let assert_agree = |lazy: &Index, mat: &Index, ctx: &str| {
+            assert_eq!(lazy.len(), mat.len(), "len {ctx}");
+            assert_eq!(lazy.min(), mat.min(), "min {ctx}");
+            assert_eq!(lazy.max(), mat.max(), "max {ctx}");
+            assert_eq!(lazy.argmin(), mat.argmin(), "argmin {ctx}");
+            assert_eq!(lazy.argmax(), mat.argmax(), "argmax {ctx}");
+            assert_eq!(
+                lazy.is_monotonic_increasing(),
+                mat.is_monotonic_increasing(),
+                "mono_inc {ctx}"
+            );
+            assert_eq!(
+                lazy.is_monotonic_decreasing(),
+                mat.is_monotonic_decreasing(),
+                "mono_dec {ctx}"
+            );
+            assert_eq!(lazy.nunique(), mat.nunique(), "nunique {ctx}");
+            assert_eq!(lazy.is_unique(), mat.is_unique(), "is_unique {ctx}");
+            assert_eq!(
+                lazy.has_duplicates(),
+                mat.has_duplicates(),
+                "has_duplicates {ctx}"
+            );
+            assert_eq!(lazy.hasnans(), mat.hasnans(), "hasnans {ctx}");
+            assert_eq!(lazy.inferred_type(), mat.inferred_type(), "inferred_type {ctx}");
+            assert_eq!(lazy.dtype(), mat.dtype(), "dtype {ctx}");
+            assert_eq!(lazy.is_integer(), mat.is_integer(), "is_integer {ctx}");
+            assert_eq!(lazy.is_numeric(), mat.is_numeric(), "is_numeric {ctx}");
+        };
+
+        // Typed Int64 (from_i64_values, fast path) vs materialized fallback.
+        for iter in 0..2500u32 {
+            let len = (next() % 13) as usize;
+            let force_sorted = next() % 3 == 0;
+            let mut vals: Vec<i64> = (0..len).map(|_| (next() % 9) as i64 - 4).collect();
+            if force_sorted {
+                vals.sort_unstable();
+            }
+            let lazy = Index::from_i64_values(vals.clone());
+            let mat = materialized(&vals);
+            assert_agree(&lazy, &mat, &format!("typed iter={iter} vals={vals:?}"));
+        }
+
+        // Affine Int64 ranges (fast path) vs materialized fallback.
+        for iter in 0..1500u32 {
+            let len = (next() % 10) as usize;
+            let start = (next() % 13) as i64 - 6;
+            // Non-zero step for len > 1 (affine constructor requires it).
+            let step = {
+                let s = (next() % 7) as i64 - 3;
+                if s == 0 { 1 } else { s }
+            };
+            let Some(lazy) = Index::new_known_unique_int64_affine_range(start, step, len) else {
+                continue;
+            };
+            let vals: Vec<i64> = (0..len as i64).map(|i| start + step * i).collect();
+            let mat = materialized(&vals);
+            assert_agree(
+                &lazy,
+                &mat,
+                &format!("affine iter={iter} start={start} step={step} len={len}"),
+            );
+        }
+    }
+
+    #[test]
     fn index_a31qh_factorize_reindex_and_non_unique_indexer() {
         let idx = Index::new(vec![
             IndexLabel::Utf8("a".into()),

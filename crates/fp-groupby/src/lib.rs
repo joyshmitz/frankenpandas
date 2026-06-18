@@ -1875,6 +1875,112 @@ fn try_groupby_first_last_scalar_slot(
     Some((out_index, out_values))
 }
 
+#[derive(Debug, Clone)]
+struct SumProdScalarAccumulator {
+    source_idx: usize,
+    sum: i128,
+    prod_i128: Option<i128>,
+    prod_f64: f64,
+}
+
+/// Generic string/object-key path for integer/bool `groupby.sum()` and
+/// `groupby.prod()`.
+///
+/// The fallback already has dtype-preserving branches for Int64/Bool values,
+/// but it reaches them only after building a per-group `Vec<Scalar>`. This
+/// helper streams the same i128 sum/product state per group and keeps the same
+/// f64 product fallback witness for integer overflow.
+fn try_groupby_sum_prod_integer_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    value_dtype: DType,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Sum | AggFunc::Prod)
+        || !matches!(value_dtype, DType::Int64 | DType::Bool)
+    {
+        return None;
+    }
+
+    let take_sum = matches!(func, AggFunc::Sum);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, SumProdScalarAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            SumProdScalarAccumulator {
+                source_idx: pos,
+                sum: 0,
+                prod_i128: Some(1),
+                prod_f64: 1.0,
+            }
+        });
+
+        let value_i128 = match value {
+            Scalar::Int64(x) => i128::from(*x),
+            Scalar::Bool(b) => i128::from(u8::from(*b)),
+            _ => continue,
+        };
+        if take_sum {
+            entry.sum += value_i128;
+        } else {
+            entry.prod_i128 = entry.prod_i128.and_then(|prod| prod.checked_mul(value_i128));
+            entry.prod_f64 *= value_i128 as f64;
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if take_sum {
+            match i64::try_from(group.sum) {
+                Ok(sum) => Scalar::Int64(sum),
+                Err(_) => Scalar::Float64(group.sum as f64),
+            }
+        } else {
+            match group.prod_i128.and_then(|prod| i64::try_from(prod).ok()) {
+                Some(prod) => Scalar::Int64(prod),
+                None => Scalar::Float64(group.prod_f64),
+            }
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1905,6 +2011,7 @@ pub fn groupby_agg(
     // Record an admission decision for policy observability without altering
     // the current groupby output behavior.
     let _ = policy.decide_join_admission(key_vals.len(), ledger);
+    let value_dtype = values.column().dtype();
 
     let agg_name = match func {
         AggFunc::Sum => "sum",
@@ -1980,6 +2087,23 @@ pub fn groupby_agg(
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
 
+    // Generic string/object-key integer sum/prod only need streaming
+    // accumulators, not a cloned value Vec. Other value dtypes stay on the
+    // fallback path for float, timedelta, string, and mixed-object semantics.
+    if matches!(func, AggFunc::Sum | AggFunc::Prod)
+        && let Some((out_index, out_values)) = try_groupby_sum_prod_integer_counter(
+            key_vals,
+            val_vals,
+            func,
+            value_dtype,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
     // Dense 2-D seen-bitset distinct count for bounded Int64 keys+values.
     if matches!(func, AggFunc::Nunique)
         && let Some((out_index, out_values)) =
@@ -2034,7 +2158,6 @@ pub fn groupby_agg(
     let mut out_values = Vec::with_capacity(ordering.len());
     // Per br-frankenpandas-l75ms: keep groupby_agg(Sum) consistent with the
     // dedicated groupby_sum — pandas preserves the integer dtype for sum.
-    let value_dtype = values.column().dtype();
 
     for key in &ordering {
         let (source_idx, vals, total_count) = groups
@@ -4944,6 +5067,197 @@ mod tests {
 
         assert_eq!(agg.index().labels(), dedicated.index().labels());
         assert_eq!(agg.values(), dedicated.values());
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_utf8_keys_stream_integer_slots() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_sorted.values(),
+            &[Scalar::Int64(15), Scalar::Int64(5), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            prod_sorted.values(),
+            &[Scalar::Int64(50), Scalar::Int64(6), Scalar::Int64(1)]
+        );
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let sum_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_unsorted.values(),
+            &[Scalar::Int64(5), Scalar::Int64(15), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            prod_unsorted.values(),
+            &[Scalar::Int64(6), Scalar::Int64(50), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_bool_and_prod_overflow_preserve_fallbacks() {
+        let bool_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let bool_values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let bool_sum = groupby_agg(
+            &bool_keys,
+            &bool_values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let bool_prod = groupby_agg(
+            &bool_keys,
+            &bool_values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(bool_sum.values(), &[Scalar::Int64(1), Scalar::Int64(1)]);
+        assert_eq!(bool_prod.values(), &[Scalar::Int64(0), Scalar::Int64(1)]);
+
+        let overflow_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let overflow_values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(i64::MAX), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let overflow_prod = groupby_agg(
+            &overflow_keys,
+            &overflow_values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            overflow_prod.values(),
+            &[Scalar::Float64((i64::MAX as f64) * 2.0)]
+        );
     }
 
     #[test]

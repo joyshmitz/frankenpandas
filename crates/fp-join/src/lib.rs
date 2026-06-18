@@ -8909,6 +8909,49 @@ mod tests {
     }
 
     #[test]
+    fn inner_join_utf8_keys_jlf8d() {
+        use std::collections::HashMap;
+        // br-frankenpandas-jlf8d: inner join on Utf8 keys (general/hash path).
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["k", "lv"],
+            vec![
+                ("k", vec![s("a"), s("b"), s("c")]),
+                ("lv", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["k", "rv"],
+            vec![
+                ("k", vec![s("b"), s("c"), s("d")]),
+                ("rv", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .expect("right");
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).expect("merge");
+
+        let keys = merged_values(&merged, "k").expect("k");
+        let lv = merged_values(&merged, "lv").expect("lv");
+        let rv = merged_values(&merged, "rv").expect("rv");
+        let exp_lv: HashMap<&str, i64> = [("b", 2), ("c", 3)].into_iter().collect();
+        let exp_rv: HashMap<&str, i64> = [("b", 10), ("c", 20)].into_iter().collect();
+        assert_eq!(keys.len(), 2, "inner keys = {{b,c}}");
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Utf8(x) => x.as_str(),
+                _ => "?",
+            };
+            let geti = |s: &Scalar| match s {
+                Scalar::Int64(v) => *v,
+                _ => i64::MIN,
+            };
+            assert_eq!(geti(&lv[i]), exp_lv[k], "lv at {k}");
+            assert_eq!(geti(&rv[i]), exp_rv[k], "rv at {k}");
+        }
+    }
+
+    #[test]
     fn merge_indicator_column_d3ec6() {
         use std::collections::BTreeSet;
         // br-frankenpandas-d3ec6: outer-join indicator marks left_only/both/right_only.

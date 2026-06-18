@@ -15449,6 +15449,47 @@ mod tests {
     }
 
     #[test]
+    fn to_csv_typed_mixed_columns_quote_alt_delimiter_property_7q396() {
+        // Code-first property guard (br-frankenpandas-fp-io-csv-typed-writer-quote-property-7q396):
+        // all-valid typed Int64/Float64 plus contiguous Utf8 must stay byte-exact
+        // under QUOTE_MINIMAL when the delimiter changes and Utf8 cells contain
+        // delimiter, quote, and newline characters.
+        let mut columns = BTreeMap::new();
+        columns.insert("i".to_string(), Column::from_i64_values(vec![-1, 0, 42, 7]));
+        columns.insert(
+            "f".to_string(),
+            Column::from_f64_values(vec![1.0, 2.5, -0.0, 3.25]),
+        );
+
+        let text = b"plainsemi;colonquote\"meline\nbreak".to_vec();
+        let offsets = vec![0, 5, 15, 23, 33];
+        let utf8 = Column::from_utf8_contiguous(text, offsets);
+        assert!(utf8.as_utf8_contiguous().is_some());
+        columns.insert("s".to_string(), utf8);
+
+        let frame = DataFrame::new_with_column_order(
+            Index::new((0..4).map(IndexLabel::Int64).collect()),
+            columns,
+            vec!["i".to_string(), "f".to_string(), "s".to_string()],
+        )
+        .unwrap();
+        let out = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                delimiter: b';',
+                include_index: false,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("typed csv write");
+
+        assert_eq!(
+            out,
+            "i;f;s\n-1;1.0;plain\n0;2.5;\"semi;colon\"\n42;-0.0;\"quote\"\"me\"\n7;3.25;\"line\nbreak\"\n"
+        );
+    }
+
+    #[test]
     fn test_csv_capacity_hint_reasonable() {
         // Generate a ~1MB CSV and verify it parses correctly.
         // The capacity hint (input.len / (cols*8)) should avoid excessive reallocs.

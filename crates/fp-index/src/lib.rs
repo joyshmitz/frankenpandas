@@ -3169,6 +3169,12 @@ impl Index {
     /// that need ownership without manually cloning via `labels()`.
     #[must_use]
     pub fn to_list(&self) -> Vec<IndexLabel> {
+        if let Some(values) = self.labels.int64_view() {
+            return values
+                .iter()
+                .map(|&value| IndexLabel::Int64(value))
+                .collect();
+        }
         self.labels().to_vec()
     }
 
@@ -18969,6 +18975,32 @@ mod tests {
             ]
         );
         assert!(affine.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn int64_list_aliases_avoid_source_materialization_codb() {
+        let index = Index::from_i64_values(vec![4, 0, -2]).set_name("row");
+        let expected = vec![
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(-2),
+        ];
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.to_list(), expected);
+        assert_eq!(index.tolist(), expected);
+        assert_eq!(index.to_numpy(), expected);
+        assert_eq!(index.array(), expected);
+        assert_eq!(index.values(), expected);
+        assert_eq!(index.ravel(), expected);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "to_list aliases should materialize owned labels without caching source labels"
+        );
+
+        let materialized = Index::new(expected);
+        assert_eq!(index.to_list(), materialized.to_list());
+        assert_eq!(index.to_numpy(), materialized.to_numpy());
     }
 
     #[test]

@@ -1136,6 +1136,16 @@ fn insert_output_capacity(len: usize) -> usize {
         .expect("index insert output length overflow")
 }
 
+fn checked_cartesian_product_len(
+    lengths: impl IntoIterator<Item = usize>,
+) -> Result<usize, IndexError> {
+    lengths.into_iter().try_fold(1usize, |total, len| {
+        total.checked_mul(len).ok_or_else(|| {
+            IndexError::InvalidArgument("MultiIndex product cardinality overflow".to_owned())
+        })
+    })
+}
+
 fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
     values.into_iter().fold(0usize, usize::saturating_add)
 }
@@ -15666,7 +15676,7 @@ impl MultiIndex {
         }
 
         // Compute total size of the Cartesian product.
-        let total: usize = iterables.iter().map(Vec::len).product();
+        let total = checked_cartesian_product_len(iterables.iter().map(Vec::len))?;
         if total == 0 {
             let nlevels = iterables.len();
             return Ok(Self {
@@ -21008,6 +21018,21 @@ mod tests {
 
         assert_eq!(mi.nlevels(), 2);
         assert_eq!(mi.len(), 6); // 2 * 3
+    }
+
+    #[test]
+    fn multi_index_product_cardinality_rejects_overflow_uza04184() {
+        assert_eq!(
+            super::checked_cartesian_product_len([2, 3, 4]).unwrap(),
+            24
+        );
+        assert_eq!(super::checked_cartesian_product_len([usize::MAX, 0]).unwrap(), 0);
+        let err = super::checked_cartesian_product_len([usize::MAX, 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(message)
+                if message == "MultiIndex product cardinality overflow"
+        ));
     }
 
     #[test]

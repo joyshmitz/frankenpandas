@@ -9837,6 +9837,20 @@ impl RangeIndex {
             .expect("validated RangeIndex value bounds")
     }
 
+    fn contains_value(&self, value: i64) -> bool {
+        let len = self.len();
+        if len == 0 {
+            return false;
+        }
+        let offset = i128::from(value) - i128::from(self.start);
+        let step = i128::from(self.step);
+        if offset % step != 0 {
+            return false;
+        }
+        let position = offset / step;
+        position >= 0 && position < len as i128
+    }
+
     /// Positional first differences for RangeIndex values.
     #[must_use]
     pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
@@ -10215,13 +10229,14 @@ impl RangeIndex {
     /// Whether any range label coerces to true.
     #[must_use]
     pub fn any(&self) -> bool {
-        self.to_flat_index().any()
+        let len = self.len();
+        len != 0 && (len != 1 || self.start != 0)
     }
 
     /// Whether all range labels coerce to true.
     #[must_use]
     pub fn all(&self) -> bool {
-        self.to_flat_index().all()
+        !self.contains_value(0)
     }
 
     /// Get labels for a level. RangeIndex is flat and only accepts level 0.
@@ -24869,6 +24884,29 @@ mod tests {
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.isin(&[5]).is_empty());
+    }
+
+    #[test]
+    fn range_index_any_all_closed_form_taw0w() {
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert!(!empty.any());
+        assert!(empty.all());
+
+        let singleton_zero = super::RangeIndex::new(0, 1, 1).unwrap();
+        assert!(!singleton_zero.any());
+        assert!(!singleton_zero.all());
+
+        let ascending_with_zero = super::RangeIndex::new(-2, 3, 1).unwrap();
+        assert!(ascending_with_zero.any());
+        assert!(!ascending_with_zero.all());
+
+        let descending_with_zero = super::RangeIndex::new(4, -2, -2).unwrap();
+        assert!(descending_with_zero.any());
+        assert!(!descending_with_zero.all());
+
+        let nonzero = super::RangeIndex::new(2, 8, 2).unwrap();
+        assert!(nonzero.any());
+        assert!(nonzero.all());
     }
 
     #[test]

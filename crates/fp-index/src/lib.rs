@@ -10500,18 +10500,24 @@ impl RangeIndex {
     /// `pd.RangeIndex.where(cond, other)`. Returns flat Index because
     /// the result is generally not a contiguous range.
     pub fn r#where(&self, cond: &[bool], other: i64) -> Result<Index, IndexError> {
-        let values = self.values();
-        if cond.len() != values.len() {
+        let len = self.len();
+        if cond.len() != len {
             return Err(IndexError::LengthMismatch {
-                expected: values.len(),
+                expected: len,
                 actual: cond.len(),
                 context: "where: cond length must match index length".to_owned(),
             });
         }
-        let labels: Vec<i64> = values
-            .into_iter()
-            .zip(cond.iter())
-            .map(|(v, &keep)| if keep { v } else { other })
+        let labels: Vec<i64> = cond
+            .iter()
+            .enumerate()
+            .map(|(position, &keep)| {
+                if keep {
+                    self.value_at(position)
+                } else {
+                    other
+                }
+            })
             .collect();
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
@@ -10523,18 +10529,24 @@ impl RangeIndex {
     /// Replace positions where `mask` is `true` with `value`, matching
     /// `pd.RangeIndex.putmask(mask, value)`.
     pub fn putmask(&self, mask: &[bool], value: i64) -> Result<Index, IndexError> {
-        let values = self.values();
-        if mask.len() != values.len() {
+        let len = self.len();
+        if mask.len() != len {
             return Err(IndexError::LengthMismatch {
-                expected: values.len(),
+                expected: len,
                 actual: mask.len(),
                 context: "putmask: mask length must match index length".to_owned(),
             });
         }
-        let labels: Vec<i64> = values
-            .into_iter()
-            .zip(mask.iter())
-            .map(|(v, &replace)| if replace { value } else { v })
+        let labels: Vec<i64> = mask
+            .iter()
+            .enumerate()
+            .map(|(position, &replace)| {
+                if replace {
+                    value
+                } else {
+                    self.value_at(position)
+                }
+            })
             .collect();
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
@@ -24768,6 +24780,51 @@ mod tests {
             masked.labels.materialized.get().is_none(),
             "RangeIndex::putmask should keep typed Int64 output backing"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_where_putmask_use_direct_values_k1xts() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
+
+        let replaced = range.r#where(&[true, false, true], 99)?;
+        assert_eq!(replaced.name(), Some("r"));
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[9, 99, 1]
+        );
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "RangeIndex::where should mask direct i64 labels into typed backing"
+        );
+
+        let masked = range.putmask(&[false, true, false], -7)?;
+        assert_eq!(masked.name(), Some("r"));
+        assert_eq!(masked.labels.int64_view().unwrap().as_slice(), &[9, -7, 1]);
+        assert!(
+            masked.labels.materialized.get().is_none(),
+            "RangeIndex::putmask should mask direct i64 labels into typed backing"
+        );
+
+        let where_err = range.r#where(&[true], 0).unwrap_err();
+        assert!(matches!(
+            where_err,
+            super::IndexError::LengthMismatch {
+                expected: 3,
+                actual: 1,
+                ..
+            }
+        ));
+        let putmask_err = range.putmask(&[false, true], 0).unwrap_err();
+        assert!(matches!(
+            putmask_err,
+            super::IndexError::LengthMismatch {
+                expected: 3,
+                actual: 2,
+                ..
+            }
+        ));
 
         Ok(())
     }

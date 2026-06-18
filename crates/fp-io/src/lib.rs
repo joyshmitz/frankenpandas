@@ -1860,7 +1860,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
     };
 
     let headers: Vec<&String> = frame.column_names().into_iter().collect();
-    if headers.iter().any(|h| needs_quote(h)) {
+    if options.header && headers.iter().any(|h| needs_quote(h)) {
         return None;
     }
 
@@ -15486,6 +15486,35 @@ mod tests {
         assert_eq!(
             out,
             "i;f;s\n-1;1.0;plain\n0;2.5;\"semi;colon\"\n42;-0.0;\"quote\"\"me\"\n7;3.25;\"line\nbreak\"\n"
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_headerless_keeps_fast_path_for_quoted_column_name_up3yf() {
+        // br-frankenpandas-fp-io-csv-headerless-quoted-name-typed-fast-pat-up3yf:
+        // a quoted column name is unobservable when header=false, so it must not
+        // force the all-valid typed writer off the fast path.
+        let mut columns = BTreeMap::new();
+        columns.insert("needs,quote".to_string(), Column::from_i64_values(vec![1, 2]));
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            columns,
+            vec!["needs,quote".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            header: false,
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some("1\n2\n")
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            "1\n2\n"
         );
     }
 

@@ -8908,6 +8908,84 @@ mod tests {
         assert_eq!(order, ["k", "zebra", "apple", "mango"]);
     }
 
+    #[test]
+    fn int64_join_row_count_matches_cardinality_invariant_ya1po() {
+        use std::collections::BTreeMap;
+
+        // Metamorphic harness (br-frankenpandas-ya1po): merge_dataframes row count
+        // must equal the pandas-standard cardinality per join type — an
+        // ordering-independent invariant guarding the dense/direct-address Int64
+        // join fast paths. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0xa5a5_5a5a_dead_beef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], payload_name: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", payload_name],
+                vec![
+                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (
+                        payload_name,
+                        (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>(),
+                    ),
+                ],
+            )
+            .expect("frame")
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            // Small key range so many-to-many (duplicate-key) joins are common.
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 4) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let mut lc: BTreeMap<i64, i64> = BTreeMap::new();
+            let mut rc: BTreeMap<i64, i64> = BTreeMap::new();
+            for &k in &lk {
+                *lc.entry(k).or_default() += 1;
+            }
+            for &k in &rk {
+                *rc.entry(k).or_default() += 1;
+            }
+            let mut all_keys: Vec<i64> = lc.keys().chain(rc.keys()).copied().collect();
+            all_keys.sort_unstable();
+            all_keys.dedup();
+
+            let g = |k: i64, m: &BTreeMap<i64, i64>| m.get(&k).copied().unwrap_or(0);
+            let inner: i64 = all_keys.iter().map(|&k| g(k, &lc) * g(k, &rc)).sum();
+            let left_exp: i64 = lc.iter().map(|(&k, &l)| l * g(k, &rc).max(1)).sum();
+            let right_exp: i64 = rc.iter().map(|(&k, &r)| r * g(k, &lc).max(1)).sum();
+            let outer: i64 = all_keys
+                .iter()
+                .map(|&k| {
+                    let (l, r) = (g(k, &lc), g(k, &rc));
+                    if l > 0 && r > 0 { l * r } else { l + r }
+                })
+                .sum();
+
+            let ctx = format!("iter={iter} lk={lk:?} rk={rk:?}");
+            for (jt, exp) in [
+                (JoinType::Inner, inner),
+                (JoinType::Left, left_exp),
+                (JoinType::Right, right_exp),
+                (JoinType::Outer, outer),
+            ] {
+                let merged = merge_dataframes(&left, &right, "k", jt).expect("merge");
+                let rows = merged_values(&merged, "k").expect("key col").len() as i64;
+                assert_eq!(rows, exp, "{jt:?} row count {ctx}");
+            }
+        }
+    }
+
     fn merged_values<'a>(
         merged: &'a MergedDataFrame,
         name: &str,

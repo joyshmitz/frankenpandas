@@ -9818,6 +9818,17 @@ impl RangeIndex {
         values
     }
 
+    fn value_at(&self, position: usize) -> i64 {
+        let offset = i64::try_from(position).expect("validated RangeIndex value bounds");
+        let delta = self
+            .step
+            .checked_mul(offset)
+            .expect("validated RangeIndex value bounds");
+        self.start
+            .checked_add(delta)
+            .expect("validated RangeIndex value bounds")
+    }
+
     /// Positional first differences for RangeIndex values.
     #[must_use]
     pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
@@ -10065,12 +10076,11 @@ impl RangeIndex {
         if len == 0 {
             return None;
         }
-        let values = self.values();
         let mid = len / 2;
         if len % 2 == 1 {
-            Some(values[mid] as f64)
+            Some(self.value_at(mid) as f64)
         } else {
-            Some((values[mid - 1] as f64 + values[mid] as f64) / 2.0)
+            Some((self.value_at(mid - 1) as f64 + self.value_at(mid) as f64) / 2.0)
         }
     }
 
@@ -23048,6 +23058,12 @@ mod tests {
         assert_eq!(one.median(), Some(5.0));
         assert_eq!(one.var(), None);
         assert_eq!(one.std(), None);
+
+        let descending = super::RangeIndex::new(9, 0, -4).unwrap();
+        assert_eq!(descending.median(), Some(5.0));
+
+        let even_step = super::RangeIndex::new(2, 14, 3).unwrap();
+        assert_eq!(even_step.median(), Some(6.5));
 
         // Empty: all None.
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();

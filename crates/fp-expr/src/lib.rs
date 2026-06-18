@@ -6218,6 +6218,43 @@ mod tests {
     }
 
     #[test]
+    fn eval_query_with_locals_substitution_0qyro() {
+        // End-to-end (br-frankenpandas-0qyro): @local scalar bindings substitute
+        // into eval/query (the BTreeMap key omits the leading '@').
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut offset = std::collections::BTreeMap::new();
+        offset.insert("offset".to_string(), Scalar::Int64(100));
+        let r = super::eval_str_with_locals("a + @offset", &frame, &offset, &policy, &mut ledger)
+            .unwrap();
+        assert_eq!(
+            r.values(),
+            &[Scalar::Int64(110), Scalar::Int64(120), Scalar::Int64(130)],
+            "a + @offset"
+        );
+
+        let mut lo = std::collections::BTreeMap::new();
+        lo.insert("lo".to_string(), Scalar::Int64(15));
+        let q = super::query_str_with_locals("a > @lo", &frame, &lo, &policy, &mut ledger).unwrap();
+        let kept: Vec<_> = q.column("a").unwrap().values().to_vec();
+        assert_eq!(
+            kept,
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+            "a > @lo keeps {{20,30}}"
+        );
+    }
+
+    #[test]
     fn query_str_chained_comparison_and_ops_match_pandas() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();

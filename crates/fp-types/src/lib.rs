@@ -2680,9 +2680,13 @@ impl Timestamp {
 
         let base = if sub_nanos == 0 {
             format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
+        } else if sub_nanos % 1_000 == 0 {
+            format!(
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{:06}",
+                sub_nanos / 1_000
+            )
         } else {
-            let micros = sub_nanos / 1000;
-            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}")
+            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{sub_nanos:09}")
         };
         match &self.tz {
             Some(tz) if tz == "UTC" => format!("{base}+00:00"),
@@ -9733,7 +9737,7 @@ mod tests {
     fn timestamp_isoformat_pre_epoch_subsecond_uses_floor_day_263m5() {
         assert_eq!(
             Timestamp::from_nanos(-1).isoformat(),
-            "1969-12-31T23:59:59.999999"
+            "1969-12-31T23:59:59.999999999"
         );
         assert_eq!(
             Timestamp::from_nanos(-Timedelta::NANOS_PER_SEC).isoformat(),
@@ -9745,7 +9749,27 @@ mod tests {
         );
         assert_eq!(
             Timestamp::from_nanos_tz(-1, "UTC").isoformat(),
-            "1969-12-31T23:59:59.999999+00:00"
+            "1969-12-31T23:59:59.999999999+00:00"
+        );
+    }
+
+    #[test]
+    fn timestamp_isoformat_preserves_nanosecond_fraction_4r99y() {
+        assert_eq!(
+            Timestamp::from_nanos(123_456_789).isoformat(),
+            "1970-01-01T00:00:00.123456789"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(123_456_000).isoformat(),
+            "1970-01-01T00:00:00.123456"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(123_000_000).isoformat(),
+            "1970-01-01T00:00:00.123000"
+        );
+        assert_eq!(
+            Timestamp::from_nanos_tz(1, "UTC").isoformat(),
+            "1970-01-01T00:00:00.000000001+00:00"
         );
     }
 

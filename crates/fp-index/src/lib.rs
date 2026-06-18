@@ -8336,7 +8336,8 @@ impl PeriodIndex {
         } else {
             0
         };
-        self.values.len() * std::mem::size_of::<Period>() + name_bytes
+        fixed_width_label_memory_usage(self.values.len(), std::mem::size_of::<Period>())
+            .saturating_add(name_bytes)
     }
 
     #[must_use]
@@ -16528,6 +16529,14 @@ mod tests {
         assert_eq!(period.rename_index(None).name(), None);
         assert!(period.nbytes() <= period.memory_usage(true));
         assert_eq!(period.to_index().name(), Some("period"));
+
+        let period_width = std::mem::size_of::<Period>();
+        assert_eq!(period.nbytes(), 3 * period_width);
+        assert_eq!(period.memory_usage(true), 3 * period_width + "period".len());
+        assert_eq!(
+            super::fixed_width_label_memory_usage(usize::MAX, period_width),
+            usize::MAX
+        );
 
         let categorical = CategoricalIndex::from_values(
             vec!["low".to_owned(), "high".to_owned(), "low".to_owned()],

@@ -2496,6 +2496,26 @@ impl Index {
     /// Matches `pd.Index.argmin()`.
     #[must_use]
     pub fn argmin(&self) -> Option<usize> {
+        // Affine Int64 (RangeIndex / unit / affine): the minimum sits at a known
+        // end — index 0 when ascending (step >= 0), len-1 when descending. O(1),
+        // no IndexLabel materialization (br-frankenpandas-ikbh9 vein).
+        if let Some(affine) = self.labels.int64_affine_range() {
+            return (affine.len > 0)
+                .then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
+        }
+        // Lazy typed/strided Int64: scan the i64 view with the identical min_by
+        // (last-of-equal) tie-break — bit-identical, no label vector. Guarded by
+        // has_lazy_int64_backing so already-materialized indexes keep the label
+        // iter and avoid an extra i64 allocation (matches any()/all()).
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.cmp(b))
+                .map(|(i, _)| i);
+        }
         self.labels
             .iter()
             .enumerate()
@@ -2508,6 +2528,24 @@ impl Index {
     /// Matches `pd.Index.argmax()`.
     #[must_use]
     pub fn argmax(&self) -> Option<usize> {
+        // Affine Int64: the maximum sits at a known end — index len-1 when
+        // ascending (step >= 0), 0 when descending. O(1), no materialization
+        // (br-frankenpandas-ikbh9 vein).
+        if let Some(affine) = self.labels.int64_affine_range() {
+            return (affine.len > 0)
+                .then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
+        }
+        // Lazy typed/strided Int64: scan the i64 view with the identical max_by
+        // (last-of-equal) tie-break — bit-identical, no label vector.
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.cmp(b))
+                .map(|(i, _)| i);
+        }
         self.labels
             .iter()
             .enumerate()
@@ -18258,6 +18296,59 @@ mod tests {
             obj.is_monotonic_decreasing(),
             Index::from_i64_values(vec![1, 3, 3, 9]).is_monotonic_decreasing()
         );
+    }
+
+    #[test]
+    fn int64_argminmax_avoid_label_materialization_ikbh9() {
+        // Ascending affine [0,2,4,6]: argmin=0, argmax=len-1. O(1), no materialization.
+        let asc = Index::new_known_unique_int64_affine_range(0, 2, 4).unwrap();
+        assert!(asc.labels.materialized.get().is_none());
+        assert_eq!(asc.argmin(), Some(0));
+        assert_eq!(asc.argmax(), Some(3));
+        assert!(
+            asc.labels.materialized.get().is_none(),
+            "affine argmin/argmax must not materialize labels"
+        );
+
+        // Descending affine [12,8,4,0]: argmin at the end, argmax at the front.
+        let desc = Index::new_known_unique_int64_affine_range(12, -4, 4).unwrap();
+        assert!(desc.labels.materialized.get().is_none());
+        assert_eq!(desc.argmin(), Some(3));
+        assert_eq!(desc.argmax(), Some(0));
+        assert!(desc.labels.materialized.get().is_none());
+
+        // Typed Int64 with ties. Rust's min_by returns the FIRST of equal
+        // minima, max_by the LAST of equal maxima — the i64-view fast path must
+        // match exactly. [3,1,1,2] -> min 1 first at idx 1; max 3 unique at idx 0.
+        let tied = Index::from_i64_values(vec![3, 1, 1, 2]);
+        assert!(tied.labels.materialized.get().is_none());
+        assert_eq!(tied.argmin(), Some(1));
+        assert_eq!(tied.argmax(), Some(0));
+        assert!(
+            tied.labels.materialized.get().is_none(),
+            "typed Int64 argmin/argmax must not materialize labels"
+        );
+
+        // Bit-identical to the object-label path (which also has ties).
+        let obj = Index::new(vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ]);
+        assert_eq!(obj.argmin(), tied.argmin());
+        assert_eq!(obj.argmax(), tied.argmax());
+
+        // Tied maxima: [5,2,5,1] -> max 5 at idx 0,2 -> max_by last = 2; min 1 at idx 3.
+        let tied_max = Index::from_i64_values(vec![5, 2, 5, 1]);
+        assert_eq!(tied_max.argmax(), Some(2));
+        assert_eq!(tied_max.argmin(), Some(3));
+
+        // Single element and empty.
+        assert_eq!(Index::from_i64_values(vec![7]).argmin(), Some(0));
+        assert_eq!(Index::from_i64_values(vec![7]).argmax(), Some(0));
+        assert_eq!(Index::from_i64_values(Vec::new()).argmin(), None);
+        assert_eq!(Index::from_i64_values(Vec::new()).argmax(), None);
     }
 
     #[test]

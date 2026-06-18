@@ -10569,7 +10569,13 @@ impl RangeIndex {
     /// Returns `(target.clone(), indexer)`.
     #[must_use]
     pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
-        let indexer = self.get_indexer(&target.values());
+        let indexer = (0..target.len())
+            .map(|position| {
+                self.get_loc(target.value_at(position))
+                    .map(|p| p as isize)
+                    .unwrap_or(-1)
+            })
+            .collect();
         (target.clone(), indexer)
     }
 
@@ -22997,6 +23003,11 @@ mod tests {
         let r_target = super::RangeIndex::new(2, 6, 1).unwrap();
         let (_, r_indexer) = r.reindex(&r_target);
         assert_eq!(r_indexer, vec![2, 3, 4, -1]);
+
+        let descending_target = super::RangeIndex::new(6, -3, -3).unwrap().set_name("target");
+        let (reindexed, descending_indexer) = r.reindex(&descending_target);
+        assert!(reindexed.identical(&descending_target));
+        assert_eq!(descending_indexer, vec![-1, 3, 0]);
     }
 
     #[test]

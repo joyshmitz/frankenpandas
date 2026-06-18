@@ -22650,6 +22650,66 @@ mod tests {
         }
 
         #[test]
+        fn null_predicates_match_scalar_oracle_zvykt() {
+            // Differential vs Scalar::is_missing oracle (br-frankenpandas-zvykt).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *seed
+            }
+
+            let mut seed = 0x5a17_1e55_0b5e_7a11_u64;
+            for case in 0..260 {
+                let len = (next(&mut seed) % 73 + 1) as usize;
+                let mut values = Vec::with_capacity(len);
+                for pos in 0..len {
+                    let raw = (next(&mut seed) % 1_000_001) as i64 - 500_000;
+                    let frac = (next(&mut seed) % 10_000) as f64 / 10_000.0;
+                    values.push(match next(&mut seed) % 10 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        2 => Scalar::Float64(f64::NAN),
+                        3 => Scalar::Float64(f64::INFINITY),
+                        4 => Scalar::Float64(f64::NEG_INFINITY),
+                        5 => Scalar::Float64(raw as f64 / 41.0 + frac),
+                        6 => Scalar::Int64(raw),
+                        7 => Scalar::Bool(raw & 1 == 0),
+                        8 => Scalar::Utf8(format!("v{case}_{pos}")),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let is_null = input.isnull().expect("isnull");
+                let is_na = input.isna().expect("isna");
+                let not_null = input.notnull().expect("notnull");
+                let not_na = input.notna().expect("notna");
+
+                assert_eq!(is_null.dtype(), DType::Bool);
+                assert_eq!(is_na.values(), is_null.values());
+                assert_eq!(not_na.values(), not_null.values());
+                assert_eq!(is_null.values().len(), values.len());
+                assert_eq!(not_null.values().len(), values.len());
+
+                for (pos, value) in values.iter().enumerate() {
+                    let missing = value.is_missing();
+                    assert_eq!(
+                        is_null.values()[pos],
+                        Scalar::Bool(missing),
+                        "case={case} pos={pos}: isnull mismatch for {value:?}"
+                    );
+                    assert_eq!(
+                        not_null.values()[pos],
+                        Scalar::Bool(!missing),
+                        "case={case} pos={pos}: notnull mismatch for {value:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn isnull_notnull_use_nullable_int64_validity_without_scalar_materialization_nakgb() {
             let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2), (5, 1)]), 6);
             let col = Column::from_i64_values_with_validity((0_i64..6).collect(), validity);

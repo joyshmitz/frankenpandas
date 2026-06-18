@@ -8095,6 +8095,30 @@ impl Column {
     /// missing value seen.
     #[must_use]
     pub fn has_any_missing(&self) -> bool {
+        if self.dtype == DType::Float64 {
+            if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                return data
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, value)| !validity.get(idx) || value.is_nan());
+            }
+            if let Some(data) = self.as_f64_slice() {
+                return data.iter().any(|value| value.is_nan());
+            }
+        }
+
+        if matches!(
+            self.dtype,
+            DType::Bool
+                | DType::BoolNullable
+                | DType::Int64
+                | DType::Int64Nullable
+                | DType::Utf8
+                | DType::Interval
+        ) {
+            return self.validity.count_invalid() > 0;
+        }
+
         self.values.iter().any(Scalar::is_missing)
     }
 
@@ -8111,6 +8135,30 @@ impl Column {
     /// convention.
     #[must_use]
     pub fn all_missing(&self) -> bool {
+        if self.dtype == DType::Float64 {
+            if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                return data
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, value)| !validity.get(idx) || value.is_nan());
+            }
+            if let Some(data) = self.as_f64_slice() {
+                return data.iter().all(|value| value.is_nan());
+            }
+        }
+
+        if matches!(
+            self.dtype,
+            DType::Bool
+                | DType::BoolNullable
+                | DType::Int64
+                | DType::Int64Nullable
+                | DType::Utf8
+                | DType::Interval
+        ) {
+            return self.validity.count_valid() == 0;
+        }
+
         self.values.iter().all(Scalar::is_missing)
     }
 
@@ -19169,6 +19217,54 @@ mod tests {
             assert!(with_null.has_any_missing());
             assert_eq!(with_null.hasnans(), with_null.has_any_missing());
             assert_eq!(with_null.nbytes(), with_null.memory_usage(false));
+        }
+
+        #[test]
+        fn missingness_probes_use_nullable_int64_validity_without_scalar_materialization_eo8jv() {
+            let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 2), (5, 1)]), 6);
+            let mixed = Column::from_i64_values_with_validity((10_i64..16).collect(), validity);
+
+            assert!(mixed.has_any_missing());
+            assert_eq!(mixed.hasnans(), mixed.has_any_missing());
+            assert!(!mixed.all_missing());
+            if let ScalarValues::LazyNullableInt64 { values, .. } = &mixed.values {
+                assert!(values.get().is_none());
+            }
+
+            let all_invalid =
+                Column::from_i64_values_with_validity(vec![0, 0, 0], ValidityMask::all_invalid(3));
+            assert!(all_invalid.has_any_missing());
+            assert!(all_invalid.all_missing());
+            if let ScalarValues::LazyNullableInt64 { values, .. } = &all_invalid.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn missingness_probes_float64_raw_path_checks_nan_eo8jv() {
+            let mixed = Column {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64(vec![1.0, f64::NAN, f64::INFINITY]),
+                validity: ValidityMask::all_valid(3),
+                data: None,
+            };
+            assert!(mixed.has_any_missing());
+            assert!(!mixed.all_missing());
+            if let ScalarValues::LazyAllValidFloat64 { values, .. } = &mixed.values {
+                assert!(values.get().is_none());
+            }
+
+            let all_nan = Column {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64(vec![f64::NAN, f64::NAN]),
+                validity: ValidityMask::all_valid(2),
+                data: None,
+            };
+            assert!(all_nan.has_any_missing());
+            assert!(all_nan.all_missing());
+            if let ScalarValues::LazyAllValidFloat64 { values, .. } = &all_nan.values {
+                assert!(values.get().is_none());
+            }
         }
 
         #[test]

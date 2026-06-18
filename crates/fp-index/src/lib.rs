@@ -3848,6 +3848,31 @@ impl Index {
     /// ordinal positions are returned separately.
     #[must_use]
     pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
+        if let (Some(source), Some(targets)) =
+            (self.labels.int64_view(), target.labels.int64_view())
+        {
+            let mut positions = FxHashMap::<i64, Vec<usize>>::default();
+            for (position, &label) in source.iter().enumerate() {
+                positions.entry(label).or_default().push(position);
+            }
+
+            let mut indexer = Vec::new();
+            let mut missing = Vec::new();
+            for (target_position, &label) in targets.iter().enumerate() {
+                if let Some(source_positions) = positions.get(&label) {
+                    indexer.extend(
+                        source_positions
+                            .iter()
+                            .map(|position| isize::try_from(*position).unwrap_or(isize::MAX)),
+                    );
+                } else {
+                    indexer.push(-1);
+                    missing.push(target_position);
+                }
+            }
+            return (indexer, missing);
+        }
+
         let mut positions = FxHashMap::<IndexLabel, Vec<usize>>::default();
         for (position, label) in self.labels.iter().enumerate() {
             positions.entry(label.clone()).or_default().push(position);
@@ -19589,6 +19614,44 @@ mod tests {
         let (reindexed, positions) = idx.reindex(&target);
         assert_eq!(reindexed, target);
         assert_eq!(positions, vec![Some(0), None, Some(1)]);
+    }
+
+    #[test]
+    fn int64_get_indexer_non_unique_avoids_label_materialization_codb() {
+        let source = Index::from_i64_values(vec![4, 2, 4, 7, 2]).set_name("source");
+        let target = Index::from_i64_values(vec![2, 5, 4, 2]);
+        assert!(source.labels.materialized.get().is_none());
+        assert!(target.labels.materialized.get().is_none());
+
+        let actual = source.get_indexer_non_unique(&target);
+
+        assert_eq!(actual, (vec![1, 4, -1, 0, 2, 1, 4], vec![1]));
+        assert!(
+            source.labels.materialized.get().is_none(),
+            "raw Int64 source positions should not materialize labels"
+        );
+        assert!(
+            target.labels.materialized.get().is_none(),
+            "raw Int64 targets should not materialize labels"
+        );
+
+        let materialized_source = Index::new(vec![
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(7),
+            IndexLabel::Int64(2),
+        ]);
+        let materialized_target = Index::new(vec![
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(2),
+        ]);
+        assert_eq!(
+            actual,
+            materialized_source.get_indexer_non_unique(&materialized_target)
+        );
     }
 
     #[test]

@@ -479,6 +479,17 @@ impl Int64AffineLabels {
         labels
     }
 
+    fn value_at(self, position: usize) -> i64 {
+        let offset = i64::try_from(position).expect("validated Int64 affine range length");
+        let delta = self
+            .step
+            .checked_mul(offset)
+            .expect("validated Int64 affine range end");
+        self.start
+            .checked_add(delta)
+            .expect("validated Int64 affine range end")
+    }
+
     fn position(self, target: i64) -> Option<usize> {
         if self.len == 0 {
             return None;
@@ -2479,16 +2490,48 @@ impl Index {
     ///
     /// Matches `pd.Index.min()`.
     #[must_use]
-    pub fn min(&self) -> Option<&IndexLabel> {
-        self.labels.iter().min()
+    pub fn min(&self) -> Option<IndexLabel> {
+        // Affine Int64 ranges have their minimum at a known endpoint; return an
+        // owned scalar without forcing the lazy label vector.
+        if let Some(affine) = self.labels.int64_affine_range() {
+            if affine.len == 0 {
+                return None;
+            }
+            let position = if affine.step >= 0 { 0 } else { affine.len - 1 };
+            return Some(IndexLabel::Int64(affine.value_at(position)));
+        }
+        // Lazy typed/strided Int64: scan raw i64 values and return the same
+        // scalar the IndexLabel fallback would have yielded, without materializing.
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values.iter().copied().min().map(IndexLabel::Int64);
+        }
+        self.labels.iter().min().cloned()
     }
 
     /// Maximum label.
     ///
     /// Matches `pd.Index.max()`.
     #[must_use]
-    pub fn max(&self) -> Option<&IndexLabel> {
-        self.labels.iter().max()
+    pub fn max(&self) -> Option<IndexLabel> {
+        // Affine Int64 ranges have their maximum at the opposite endpoint from
+        // min(); no IndexLabel materialization needed.
+        if let Some(affine) = self.labels.int64_affine_range() {
+            if affine.len == 0 {
+                return None;
+            }
+            let position = if affine.step >= 0 { affine.len - 1 } else { 0 };
+            return Some(IndexLabel::Int64(affine.value_at(position)));
+        }
+        // Lazy typed/strided Int64: scan raw i64 values and return an owned
+        // scalar, preserving fallback ordering semantics for all-Int64 labels.
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values.iter().copied().max().map(IndexLabel::Int64);
+        }
+        self.labels.iter().max().cloned()
     }
 
     /// Position of the minimum label.
@@ -17200,8 +17243,8 @@ mod tests {
     #[test]
     fn index_min_max_int() {
         let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()]);
-        assert_eq!(idx.min(), Some(&IndexLabel::Int64(1)));
-        assert_eq!(idx.max(), Some(&IndexLabel::Int64(3)));
+        assert_eq!(idx.min(), Some(IndexLabel::Int64(1)));
+        assert_eq!(idx.max(), Some(IndexLabel::Int64(3)));
         assert_eq!(idx.argmin(), Some(1));
         assert_eq!(idx.argmax(), Some(0));
     }
@@ -17209,8 +17252,8 @@ mod tests {
     #[test]
     fn index_min_max_utf8() {
         let idx = Index::new(vec!["c".into(), "a".into(), "b".into()]);
-        assert_eq!(idx.min(), Some(&IndexLabel::Utf8("a".into())));
-        assert_eq!(idx.max(), Some(&IndexLabel::Utf8("c".into())));
+        assert_eq!(idx.min(), Some(IndexLabel::Utf8("a".into())));
+        assert_eq!(idx.max(), Some(IndexLabel::Utf8("c".into())));
         assert_eq!(idx.argmin(), Some(1));
         assert_eq!(idx.argmax(), Some(0));
     }
@@ -18356,6 +18399,48 @@ mod tests {
         assert_eq!(Index::from_i64_values(vec![7]).argmax(), Some(0));
         assert_eq!(Index::from_i64_values(Vec::new()).argmin(), None);
         assert_eq!(Index::from_i64_values(Vec::new()).argmax(), None);
+    }
+
+    #[test]
+    fn int64_minmax_avoid_label_materialization_uza04151() {
+        // Ascending affine [0,2,4,6]: min/max are closed-form endpoints.
+        let asc = Index::new_known_unique_int64_affine_range(0, 2, 4).unwrap();
+        assert!(asc.labels.materialized.get().is_none());
+        assert_eq!(asc.min(), Some(IndexLabel::Int64(0)));
+        assert_eq!(asc.max(), Some(IndexLabel::Int64(6)));
+        assert!(
+            asc.labels.materialized.get().is_none(),
+            "affine min/max must not materialize labels"
+        );
+
+        // Descending affine [12,8,4,0]: min/max swap endpoints.
+        let desc = Index::new_known_unique_int64_affine_range(12, -4, 4).unwrap();
+        assert!(desc.labels.materialized.get().is_none());
+        assert_eq!(desc.min(), Some(IndexLabel::Int64(0)));
+        assert_eq!(desc.max(), Some(IndexLabel::Int64(12)));
+        assert!(desc.labels.materialized.get().is_none());
+
+        // Lazy typed Int64 scans the raw i64 view, preserving scalar results.
+        let typed = Index::from_i64_values(vec![5, 2, 5, 1]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(typed.min(), Some(IndexLabel::Int64(1)));
+        assert_eq!(typed.max(), Some(IndexLabel::Int64(5)));
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "typed Int64 min/max must not materialize labels"
+        );
+
+        let obj = Index::new(vec![
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(1),
+        ]);
+        assert_eq!(obj.min(), typed.min());
+        assert_eq!(obj.max(), typed.max());
+
+        assert_eq!(Index::from_i64_values(Vec::new()).min(), None);
+        assert_eq!(Index::from_i64_values(Vec::new()).max(), None);
     }
 
     #[test]

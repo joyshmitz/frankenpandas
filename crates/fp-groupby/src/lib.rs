@@ -2438,6 +2438,73 @@ mod tests {
     }
 
     #[test]
+    fn dense_int64_groupby_first_last_matches_handcomputed_oracle_ypgw6() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-ypgw6): groupby_first/last carry
+        // ROW-ORDER (positional) semantics distinct from the reductions covered by
+        // k3zcv. Assert they equal a hand-computed grouping that preserves row
+        // order. Deterministic seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0x6b1e_55ed_a17a_c0de;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 41) as i64 - 20).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            // Independent oracle: group rows by key (ascending = pandas default),
+            // preserving ROW ORDER within each group.
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_first: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs[0]))
+                .collect();
+            let exp_last: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.last().unwrap()))
+                .collect();
+            let exp_keys: Vec<IndexLabel> =
+                groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+
+            let f = groupby_first(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("first");
+            assert_eq!(f.index().labels(), exp_keys, "first keys {ctx}");
+            assert_eq!(f.values(), exp_first.as_slice(), "first vals {ctx}");
+
+            let l = groupby_last(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("last");
+            assert_eq!(l.values(), exp_last.as_slice(), "last vals {ctx}");
+        }
+    }
+
+    #[test]
     fn groupby_sum_concatenates_string_values_like_pandas() {
         // pandas df.groupby(k)['s'].sum() concatenates object/string values per
         // group (skipna), matching Series::sum (br-f031e). Previously the f64

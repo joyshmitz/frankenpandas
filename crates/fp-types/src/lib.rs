@@ -8701,6 +8701,63 @@ mod tests {
         assert_eq!(r[1023].ordinal, 1023);
     }
 
+    #[test]
+    fn period_range_matches_seeded_ordinal_oracle_z3zh2() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn freq_for(raw: u64) -> PeriodFreq {
+            match raw % 9 {
+                0 => PeriodFreq::Annual,
+                1 => PeriodFreq::Quarterly,
+                2 => PeriodFreq::Monthly,
+                3 => PeriodFreq::Weekly,
+                4 => PeriodFreq::Daily,
+                5 => PeriodFreq::Business,
+                6 => PeriodFreq::Hourly,
+                7 => PeriodFreq::Minutely,
+                _ => PeriodFreq::Secondly,
+            }
+        }
+
+        fn assert_oracle_case(case: usize, start: Period, periods: usize) {
+            let got = period_range(start, periods);
+            assert_eq!(got.len(), periods, "case {case}: length");
+
+            for (position, period) in got.iter().enumerate() {
+                let expected_ordinal = start.ordinal.saturating_add(position as i64);
+                assert_eq!(
+                    period.ordinal, expected_ordinal,
+                    "case {case}: ordinal at {position}"
+                );
+                assert_eq!(period.freq, start.freq, "case {case}: freq at {position}");
+            }
+        }
+
+        assert_oracle_case(usize::MAX, Period::new(42, PeriodFreq::Monthly), 0);
+        assert_oracle_case(
+            usize::MAX - 1,
+            Period::new(i64::MAX - 3, PeriodFreq::Daily),
+            8,
+        );
+
+        let mut seed = 0x9e21_0d1c_5eed_0421_u64;
+        for case in 0..260 {
+            let freq = freq_for(next(&mut seed));
+            let periods = (next(&mut seed) % 80) as usize;
+            let start_ordinal = if case % 37 == 0 {
+                i64::MAX - 7
+            } else {
+                (next(&mut seed) % 20_001) as i64 - 10_000
+            };
+            assert_oracle_case(case, Period::new(start_ordinal, freq), periods);
+        }
+    }
+
     // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
 
     use super::{TypeError, interval_range_by_periods, interval_range_by_step};

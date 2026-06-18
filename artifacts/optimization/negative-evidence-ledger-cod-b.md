@@ -4,6 +4,38 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.155 - RangeIndex drop direct mask
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `RangeIndex::drop(labels)` `FxHashSet<i64>` construction and
+  per-range-value hash probes with direct drop-position marking through
+  `RangeIndex::position_of_value`.
+- Baseline comparator: current RangeIndex drop path, which hashes every Int64
+  drop label, ignores non-Int64 labels, then probes the set once per range
+  position before building the typed Int64 result.
+- Graveyard mapping: bitset/bitmap marking plus algebraic RangeIndex
+  specialization: use the compact `(start, step, len)` witness to map a label
+  directly to an output position instead of paying hash-table allocation and
+  probe cache misses.
+- Alien-artifact proof obligation: duplicate labels collapse to the same
+  dropped position; missing labels leave the mask unchanged; non-Int64 labels
+  remain ignored; output order, name propagation, empty-range behavior, and typed
+  Int64 backing stay identical to the previous implementation.
+- Guard added: `range_index_drop_marks_positions_without_hash_uza04155`,
+  covering descending ranges, duplicate drop labels, non-Int64 labels, misses,
+  empty ranges, name preservation, and typed Int64 output backing.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  `RangeIndex::drop` on 1M-row ascending/descending ranges with small and large
+  label-drop lists versus the legacy pandas original and a pre-patch hash-probe
+  baseline.
+- Retry predicate if rejected: only revisit if a same-host benchmark shows
+  `RangeIndex::drop` above 0.1% self-time and allocation profiling proves the
+  residual is position-mask allocation rather than typed `Index` construction.
+
 ## 2026-06-18 - br-frankenpandas-uza04.188 - MultiIndex tuple set-op FxHashSet
 
 - Status: implemented, benchmark verdict pending batch-test.

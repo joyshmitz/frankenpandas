@@ -10482,16 +10482,17 @@ impl RangeIndex {
     /// Drop range labels, returning a flat Index.
     #[must_use]
     pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
-        let drop_set: FxHashSet<i64> = labels_to_drop
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Int64(value) => Some(*value),
-                _ => None,
-            })
-            .collect();
-        let labels = (0..self.len())
-            .map(|position| self.value_at(position))
-            .filter(|value| !drop_set.contains(value))
+        let len = self.len();
+        let mut drop_positions = vec![false; len];
+        for label in labels_to_drop {
+            if let IndexLabel::Int64(value) = label
+                && let Some(position) = self.position_of_value(*value)
+            {
+                drop_positions[position] = true;
+            }
+        }
+        let labels = (0..len)
+            .filter_map(|position| (!drop_positions[position]).then_some(self.value_at(position)))
             .collect();
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
@@ -26091,6 +26092,33 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.drop(&[IndexLabel::Int64(0)]).is_empty());
+    }
+
+    #[test]
+    fn range_index_drop_marks_positions_without_hash_uza04155() {
+        let range = super::RangeIndex::new(9, -3, -3).unwrap().set_name("r");
+        let dropped = range.drop(&[
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(6),
+            IndexLabel::Utf8("6".to_owned()),
+            IndexLabel::Int64(99),
+            IndexLabel::Int64(0),
+        ]);
+
+        assert_eq!(dropped.name(), Some("r"));
+        assert_eq!(
+            dropped.labels.int64_view().unwrap().as_slice(),
+            &[9, 3]
+        );
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "RangeIndex::drop should write a typed Int64 result without object materialization"
+        );
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty
+            .drop(&[IndexLabel::Int64(0), IndexLabel::Utf8("0".to_owned())])
+            .is_empty());
     }
 
     #[test]

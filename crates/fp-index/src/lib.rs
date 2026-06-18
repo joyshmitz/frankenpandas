@@ -10283,7 +10283,16 @@ impl RangeIndex {
     /// Nearest preceding-or-equal range label lookup.
     #[must_use]
     pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
-        self.to_flat_index().asof(key)
+        let mut best = None;
+        for position in 0..self.len() {
+            let label = IndexLabel::Int64(self.value_at(position));
+            if label.cmp(key).is_le() {
+                best = Some(label);
+            } else {
+                break;
+            }
+        }
+        best
     }
 
     /// Locate nearest preceding-or-equal range positions for each target label.
@@ -24955,6 +24964,26 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.map(|label| label.clone()).is_empty());
+    }
+
+    #[test]
+    fn range_index_asof_scans_direct_labels_ue0y9() {
+        let ascending = super::RangeIndex::new(2, 10, 2).unwrap();
+        assert_eq!(
+            ascending.asof(&IndexLabel::Int64(7)),
+            Some(IndexLabel::Int64(6))
+        );
+        assert_eq!(ascending.asof(&IndexLabel::Int64(1)), None);
+        assert_eq!(
+            ascending.asof(&IndexLabel::Utf8("x".to_owned())),
+            Some(IndexLabel::Int64(8))
+        );
+
+        let descending = super::RangeIndex::new(8, 0, -2).unwrap();
+        assert_eq!(descending.asof(&IndexLabel::Int64(7)), None);
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.asof(&IndexLabel::Int64(0)), None);
     }
 
     #[test]

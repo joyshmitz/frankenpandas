@@ -19994,6 +19994,46 @@ mod tests {
     }
 
     #[test]
+    fn int64_get_indexer_non_unique_ohq9e() {
+        use std::collections::HashMap;
+        // Differential (br-frankenpandas-ohq9e): get_indexer_non_unique on a
+        // non-unique source. Per target label: all source positions concatenated
+        // (source order), else -1 + record missing target pos. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4e57_0b1c_2d3e_4f52;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..800u32 {
+            let sn = (next() % 10) as usize + 1;
+            let source: Vec<i64> = (0..sn).map(|_| (next() % 4) as i64).collect(); // dups
+            let tn = (next() % 6) as usize + 1;
+            let target: Vec<i64> = (0..tn).map(|_| (next() % 6) as i64).collect(); // some absent
+            let src_idx = Index::new(source.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let tgt_idx = Index::new(target.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let (indexer, missing) = src_idx.get_indexer_non_unique(&tgt_idx);
+
+            // Oracle.
+            let mut positions: HashMap<i64, Vec<usize>> = HashMap::new();
+            for (p, &l) in source.iter().enumerate() { positions.entry(l).or_default().push(p); }
+            let mut exp_idx: Vec<isize> = Vec::new();
+            let mut exp_missing: Vec<usize> = Vec::new();
+            for (tp, &l) in target.iter().enumerate() {
+                if let Some(ps) = positions.get(&l) {
+                    exp_idx.extend(ps.iter().map(|&p| p as isize));
+                } else {
+                    exp_idx.push(-1);
+                    exp_missing.push(tp);
+                }
+            }
+            assert_eq!(indexer, exp_idx, "indexer iter={iter} src={source:?} tgt={target:?}");
+            assert_eq!(missing, exp_missing, "missing iter={iter}");
+        }
+    }
+
+    #[test]
     fn int64_index_append_concat_qveej() {
         // Differential (br-frankenpandas-qveej): append concatenates labels in order
         // with no dedup (npbx4 was union/dedup). Seeded LCG, no mocks.

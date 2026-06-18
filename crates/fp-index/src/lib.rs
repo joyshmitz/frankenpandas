@@ -19994,6 +19994,40 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_append_concat_qveej() {
+        // Differential (br-frankenpandas-qveej): append concatenates labels in order
+        // with no dedup (npbx4 was union/dedup). Seeded LCG, no mocks.
+        let mut s: u64 = 0xa99e_0d1c_2b3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let to_vec = |idx: &Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(k) => *k,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        for iter in 0..1000u32 {
+            let na = (next() % 6) as usize;
+            let nb = (next() % 6) as usize;
+            let a: Vec<i64> = (0..na).map(|_| (next() % 6) as i64).collect();
+            let b: Vec<i64> = (0..nb).map(|_| (next() % 6) as i64).collect();
+            let ia = Index::new(a.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let ib = Index::new(b.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let app = ia.append(&ib);
+            let mut exp = a.clone();
+            exp.extend_from_slice(&b);
+            assert_eq!(to_vec(&app), exp, "append iter={iter} a={a:?} b={b:?}");
+        }
+    }
+
+    #[test]
     fn int64_index_get_indexer_nonaffine_miaf7() {
         use std::collections::HashMap;
 

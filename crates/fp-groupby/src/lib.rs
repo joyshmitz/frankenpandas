@@ -2568,6 +2568,68 @@ mod tests {
     }
 
     #[test]
+    fn dense_int64_groupby_prod_matches_handcomputed_oracle_ybda2() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-ybda2): groupby_prod (dense Prod
+        // streaming path ab5a2aba) must equal a hand-computed per-group product.
+        // Tiny values (0..=2) keep products well within i64 (no overflow).
+        // Deterministic seeded LCG — no rand, no mocks.
+        let mut state: u64 = 0x70d_face_b00c_1357u64.wrapping_mul(5);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 3) as i64).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            let mut groups: BTreeMap<i64, i64> = BTreeMap::new();
+            let mut keys_seen: BTreeMap<i64, ()> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                keys_seen.entry(*k).or_default();
+                let e = groups.entry(*k).or_insert(1);
+                *e *= *v;
+            }
+            let exp_keys: Vec<IndexLabel> =
+                keys_seen.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_prod: Vec<Scalar> =
+                groups.values().map(|&p| Scalar::Int64(p)).collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let mut led = EvidenceLedger::new();
+            let out = groupby_prod(
+                &keys,
+                &values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut led,
+            )
+            .expect("prod");
+            assert_eq!(out.index().labels(), exp_keys, "prod keys {ctx}");
+            assert_eq!(out.values(), exp_prod.as_slice(), "prod vals {ctx}");
+        }
+    }
+
+    #[test]
     fn groupby_sum_concatenates_string_values_like_pandas() {
         // pandas df.groupby(k)['s'].sum() concatenates object/string values per
         // group (skipna), matching Series::sum (br-f031e). Previously the f64

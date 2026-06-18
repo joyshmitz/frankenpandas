@@ -1126,6 +1126,16 @@ fn repeat_output_capacity(len: usize, repeats: usize) -> usize {
         .expect("index repeat output length overflow")
 }
 
+fn combined_output_capacity(left: usize, right: usize) -> usize {
+    left.checked_add(right)
+        .expect("index combined output length overflow")
+}
+
+fn insert_output_capacity(len: usize) -> usize {
+    len.checked_add(1)
+        .expect("index insert output length overflow")
+}
+
 fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
     values.into_iter().fold(0usize, usize::saturating_add)
 }
@@ -1754,7 +1764,8 @@ impl Index {
     /// indexes, with INLINE `i64` dedup keys (dense bitset over the combined
     /// value span when bounded, else `FxHashSet<i64>`).
     fn union_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
-        let mut out: Vec<i64> = Vec::with_capacity(a.len() + b.len());
+        let combined_capacity = combined_output_capacity(a.len(), b.len());
+        let mut out: Vec<i64> = Vec::with_capacity(combined_capacity);
         // Combined span for the single shared dedup set over both inputs.
         let dense = if a.is_empty() {
             Self::i64_dense_span(b)
@@ -1784,7 +1795,7 @@ impl Index {
         if let Some((_, span)) = dense {
             seen_bits = vec![0u64; span.div_ceil(64)];
         } else {
-            seen_hash.reserve(a.len() + b.len());
+            seen_hash.reserve(combined_capacity);
         }
         for &v in a.iter().chain(b.iter()) {
             let fresh = match dense {
@@ -2471,7 +2482,10 @@ impl Index {
             return result;
         }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
-        let mut labels = Vec::with_capacity(self.labels.len() + other.labels.len());
+        let mut labels = Vec::with_capacity(combined_output_capacity(
+            self.labels.len(),
+            other.labels.len(),
+        ));
         for label in self.labels.iter().chain(other.labels.iter()) {
             if seen.insert(label, ()).is_none() {
                 labels.push(label.clone());
@@ -3429,7 +3443,7 @@ impl Index {
         if let Some(values) = self.labels.int64_view()
             && let IndexLabel::Int64(value) = &item
         {
-            let mut out = Vec::with_capacity(values.len() + 1);
+            let mut out = Vec::with_capacity(insert_output_capacity(values.len()));
             let (head, tail) = values.split_at(loc);
             out.extend_from_slice(head);
             out.push(*value);
@@ -3473,7 +3487,7 @@ impl Index {
     #[must_use]
     pub fn append(&self, other: &Self) -> Self {
         if let (Some(left), Some(right)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut values = Vec::with_capacity(left.len() + right.len());
+            let mut values = Vec::with_capacity(combined_output_capacity(left.len(), right.len()));
             values.extend_from_slice(left.as_slice());
             values.extend_from_slice(right.as_slice());
             return self.propagate_name(Self::from_i64_values(values));
@@ -10723,7 +10737,7 @@ impl RangeIndex {
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
         let mut seen = FxHashSet::<i64>::default();
-        let mut labels = Vec::with_capacity(self.len().saturating_add(other.len()));
+        let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             let value = self.value_at(position);
             if seen.insert(value) {
@@ -10812,7 +10826,7 @@ impl RangeIndex {
                 length: len,
             });
         }
-        let mut labels = Vec::with_capacity(len.saturating_add(1));
+        let mut labels = Vec::with_capacity(insert_output_capacity(len));
         for position in 0..loc {
             labels.push(self.value_at(position));
         }
@@ -10833,7 +10847,7 @@ impl RangeIndex {
     /// the index name when both operands share it.
     #[must_use]
     pub fn append(&self, other: &Self) -> Index {
-        let mut labels = Vec::with_capacity(self.len().saturating_add(other.len()));
+        let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             labels.push(self.value_at(position));
         }
@@ -12510,7 +12524,8 @@ fn align_union_i64(
         right_pos.entry(v).or_insert(i);
     }
 
-    let mut union_vals = Vec::with_capacity(left_vals.len() + right_vals.len());
+    let mut union_vals =
+        Vec::with_capacity(combined_output_capacity(left_vals.len(), right_vals.len()));
     union_vals.extend_from_slice(left_vals);
     for &v in right_vals {
         if !left_set.contains(&v) {
@@ -12559,7 +12574,10 @@ pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
     let left_positions_map = left.position_map_first_ref();
     let right_positions_map = right.position_map_first_ref();
 
-    let mut union_labels = Vec::with_capacity(left.labels.len() + right.labels.len());
+    let mut union_labels = Vec::with_capacity(combined_output_capacity(
+        left.labels.len(),
+        right.labels.len(),
+    ));
     union_labels.extend(left.labels.iter().cloned());
     for label in &right.labels {
         if !left_positions_map.contains_key(&label) {
@@ -15388,7 +15406,7 @@ impl MultiIndex {
     pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
         let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
-        let mut tuples = Vec::with_capacity(self.len() + other.len());
+        let mut tuples = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for tuple in self.to_list().into_iter().chain(other.to_list()) {
             if seen.insert(tuple.clone(), ()).is_none() {
                 tuples.push(tuple);
@@ -17739,7 +17757,7 @@ mod tests {
 
         fn union_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
             let mut seen = std::collections::BTreeSet::new();
-            let mut out = Vec::with_capacity(a.len() + b.len());
+            let mut out = Vec::with_capacity(super::combined_output_capacity(a.len(), b.len()));
             push_first_seen(a, &mut seen, &mut out);
             push_first_seen(b, &mut seen, &mut out);
             out
@@ -25247,6 +25265,24 @@ mod tests {
     #[should_panic(expected = "index repeat output length overflow")]
     fn index_repeat_capacity_rejects_overflow_uza04182() {
         let _ = super::repeat_output_capacity(usize::MAX, 2);
+    }
+
+    #[test]
+    fn index_combined_capacity_checks_output_length_uza04183() {
+        assert_eq!(super::combined_output_capacity(3, 4), 7);
+        assert_eq!(super::insert_output_capacity(3), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "index combined output length overflow")]
+    fn index_combined_capacity_rejects_overflow_uza04183() {
+        let _ = super::combined_output_capacity(usize::MAX, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "index insert output length overflow")]
+    fn index_insert_capacity_rejects_overflow_uza04183() {
+        let _ = super::insert_output_capacity(usize::MAX);
     }
 
     #[test]

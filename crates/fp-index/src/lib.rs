@@ -3205,6 +3205,14 @@ impl Index {
                 length: self.labels.len(),
             });
         }
+        if let Some(values) = self.labels.int64_view() {
+            let mut out = Vec::with_capacity(values.len() - 1);
+            let (head, deleted_and_tail) = values.split_at(loc);
+            let (_, tail) = deleted_and_tail.split_at(1);
+            out.extend_from_slice(head);
+            out.extend_from_slice(tail);
+            return Ok(self.propagate_name(Self::from_i64_values(out)));
+        }
         let mut labels = self.labels().to_vec();
         labels.remove(loc);
         Ok(self.propagate_name(Self::new(labels)))
@@ -17579,6 +17587,40 @@ mod tests {
             &[IndexLabel::Int64(10), IndexLabel::Int64(30)]
         );
         assert_eq!(result.name(), Some("k"));
+    }
+
+    #[test]
+    fn typed_int64_delete_avoids_label_materialization_uza04150() {
+        let index = Index::from_i64_values(vec![10, 20, 30, 40]).set_name("rows");
+        assert!(index.labels.materialized.get().is_none());
+
+        let result = index.delete(2).unwrap();
+
+        assert_eq!(result.name(), Some("rows"));
+        assert_eq!(result.labels.int64_view().unwrap().as_slice(), &[10, 20, 40]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            result.labels.materialized.get().is_none(),
+            "typed Int64 delete should keep typed output backing"
+        );
+    }
+
+    #[test]
+    fn affine_int64_delete_avoids_label_materialization_uza04150() {
+        let index = Index::new_known_unique_int64_affine_range(2, 3, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let result = index.delete(1).unwrap();
+
+        assert_eq!(result.name(), Some("axis"));
+        assert_eq!(result.labels.int64_view().unwrap().as_slice(), &[2, 8, 11]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            result.labels.materialized.get().is_none(),
+            "affine Int64 delete should rebuild typed output without materializing labels"
+        );
     }
 
     #[test]

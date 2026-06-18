@@ -10051,7 +10051,7 @@ impl RangeIndex {
     /// Empty returns clone of self.
     #[must_use]
     pub fn sort_values(&self) -> Self {
-        if self.is_empty() || self.step >= 0 {
+        if self.len() <= 1 || self.step >= 0 {
             return self.clone();
         }
         let len = self.len();
@@ -23510,6 +23510,16 @@ mod tests {
         let zero_step = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(zero_step.sort_values().equals(&zero_step));
         assert!(zero_step.sort().equals(&zero_step));
+    }
+
+    #[test]
+    fn range_index_sort_values_keeps_singleton_min_step_uza04177() {
+        let singleton = super::RangeIndex::new(0, i64::MIN, i64::MIN)
+            .unwrap()
+            .set_name("row");
+
+        assert_eq!(singleton.len(), 1);
+        assert_eq!(singleton.sort_values(), singleton);
     }
 
     #[test]

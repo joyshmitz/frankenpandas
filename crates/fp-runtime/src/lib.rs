@@ -1004,6 +1004,35 @@ mod tests {
         );
     }
 
+    /// br-frankenpandas-mbjpj: RuntimePolicy security mandates — strict fail-closes
+    /// unknown features; hardened caps oversized joins (bounded recovery).
+    #[test]
+    fn runtime_policy_failclosed_and_join_cap_mbjpj() {
+        // Configuration.
+        let s = RuntimePolicy::strict();
+        assert_eq!(s.mode, RuntimeMode::Strict);
+        assert!(s.fail_closed_unknown_features);
+        assert_eq!(s.hardened_join_row_cap, None);
+        let h = RuntimePolicy::hardened(Some(10));
+        assert_eq!(h.mode, RuntimeMode::Hardened);
+        assert!(!h.fail_closed_unknown_features);
+        assert_eq!(h.hardened_join_row_cap, Some(10));
+        assert_eq!(RuntimePolicy::default().mode, RuntimeMode::Strict, "default is strict");
+
+        // Fail-closed: strict mode rejects unknown features and records the decision.
+        let mut led = EvidenceLedger::new();
+        let action =
+            RuntimePolicy::strict().decide_unknown_feature("widget", "no handler", &mut led);
+        assert_eq!(action, DecisionAction::Reject, "strict fail-closes unknown features");
+        assert_eq!(led.records().len(), 1, "decision recorded");
+
+        // Bounded recovery: hardened mode repairs (caps) an over-cap join.
+        let mut led2 = EvidenceLedger::new();
+        let over = RuntimePolicy::hardened(Some(10)).decide_join_admission(1_000, &mut led2);
+        assert_eq!(over, DecisionAction::Repair, "hardened caps over-cap joins");
+        assert_eq!(led2.records().len(), 1, "join decision recorded");
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     struct StructuredTestLog {
         packet_id: String,

@@ -2,8 +2,8 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 27/30 realistic ops faster (median ≈2.8× among wins); 3 losses,
-0 neutral rows, all with documented fix paths; 0 perf-lever regressions.** Conformance:
+**Perf vs pandas 2.2.3: 27/32 realistic ops faster (median ≈2.8× among wins); 3 losses,
+2 neutral rows, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
 the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — every typed-lever
@@ -24,7 +24,9 @@ conformance guard passes by execution. Current dcfv8 gate also has `fp-conforman
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
   allocator-sensitive on the plain glibc path; max/min
   still trail pandas after the manual 8-lane accumulator, and safe `std::simd`
-  i64x8/i64x4 probes were measured and reverted as regressions. All gaps are tracked.
+  i64x8/i64x4 probes were measured and reverted as regressions; Series add/mul now has a
+  kept morsel-sweep lever that makes both arithmetic rows near-parity pinned, with mul
+  faster unpinned and add still threshold-sensitive. All gaps are tracked.
 - **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
   process-boundary allocator: 5 broad smoke wins (up to 3.35×), neutral control lanes, and
   no confirmed regression above 5% after paired reruns of the initially suspicious rows.
@@ -47,7 +49,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | std / var | 2M int64 | 11.3× | 🟢 |
 | sum | 2M int64 | 1.27× | 🟢 |
 | max / min | 2M int64 | 0.57× / 0.57× rerun | 🟡 8-lane chunked accumulator remains best safe-Rust path; safe `std::simd` i64x8/i64x4 rejected |
-| Series add / mul | 2M f64 same-index | ~0.10× local pandas sanity; latest no-ship candidate fell to 0.046× add / 0.084× best-case mul vs pandas | 🔴 unresolved; finite-witness no-scan, safe `std::simd` f64x8, zero-fill removal, and discard-ledger probes rejected |
+| Series add / mul | 2M f64 same-index | pinned add 1.01× neutral, mul 0.96× neutral; unpinned add 0.88× loss, mul 1.19× win | 🟡 tycz7 kept disjoint morsel sweep; FP-side add/mul ~6.0×/5.6× faster, add remains threshold-sensitive |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
@@ -65,8 +67,9 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 27/32 measured ops faster than pandas; 5 losses (max, min, concat, add, mul),
-0 neutral rows; 0 shipped regressions; 8 reverted/no-ship SIMD, allocation, or ~0-gain attempts.**
+**Score: 27/32 measured ops faster than pandas; 3 losses (max, min, concat),
+2 neutral rows (add, mul pinned); 0 shipped regressions; 8 reverted/no-ship SIMD, allocation,
+or ~0-gain attempts.**
 
 Median win among the 27 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
@@ -74,9 +77,12 @@ remains a confirmed **column-rebuild** loss; ffill was the same class until skw2
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
 RangeIndex indexers were a separate vectorized-engine gap after `29u49`; `uza04.159`
 closed it with arithmetic bulk membership and an exact reindex lattice path.
-The latest `38xpk` Series add/mul pass added two more measured no-ships:
-push-output zero-fill removal regressed public add/mul to 17.595/17.546 ms,
-and discard-ledger fast return regressed add to ~31.5 ms with unstable mul.
+The latest `tycz7` Series add/mul pass kept a disjoint morsel sweep in
+`apply_f64_slices_nan_tracked`: public add/mul improved from 16.56/16.40 ms to
+2.76/2.91 ms pinned, while preserving focused conformance. Add is neutral pinned
+(1.01×) but still loses in the unpinned sanity row (0.88×), and mul is neutral pinned /
+a small win unpinned. The prior `38xpk`
+push-output zero-fill and discard-ledger probes remain measured no-ships.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
@@ -85,7 +91,9 @@ to actionable; dcfv8's no-scan shift path now flips shift to 1.40× faster under
 and skw2c's validity-run ffill path flips ffill to 1.41× faster. concat (0.46×) still trails
 pandas because fp's column-rebuild construction is still heavier than numpy's pooled/in-place
 memmove/concatenate; max/min
-still need target-specific SIMD beyond current safe `std::simd` lowering. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
+still need target-specific SIMD beyond current safe `std::simd` lowering; Series add/mul
+still need durable numpy-class vectorization or output materialization work to move from
+near-parity to clear wins. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
 and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by
 weakening the retained public `get_loc` error semantics.
 

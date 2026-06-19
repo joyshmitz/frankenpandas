@@ -52,9 +52,12 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | DataFrame.transpose (bench_df) | 2000×10 f64 | 0.036 ms | 1.47 ms | **0.025× (40× slower)** | 🔴 LOSS — Scalar gather-based; NICHE (transpose of large frames pathological/rare), low priority |
 | Series.where (identity + typed select, whident) | 2M f64, 50% cond, scalar other | 4.17 ms | 16.96 ms | **0.25× (4.1× slower)** | ✅ IMPROVED from 96× LOSS (402ms)! killed unconditional align()/reindex pathology (identity fast path) + typed f64 select = ~24× FP-side. Bit-identical, conformance green (23 tests). Residual 4× = output-alloc floor (mimalloc) |
 | Series.mask (identity + typed select, whident) | 2M f64, 50% cond, scalar other | 3.58 ms | 16.25 ms | **0.22× (4.5× slower)** | ✅ IMPROVED from 110× LOSS (395ms)! same two-stage fix as where; bit-identical, conformance green |
-| Series + Series add same-index (bench_binop_cc) | 2M f64 | 1.16 ms | 15.36 ms | **0.076× (13.2× slower)** | 🔴 LOSS — already typed (aligned_binary_f64_same_positions identity path) but the NaN-tracking fused sweep (apply_f64_slices_nan_tracked, fp-columnar) doesn't vectorize like numpy AVX. Filed for fp-columnar owners |
-| Series * Series mul same-index (bench_binop_cc) | 2M f64 | 1.10 ms | 15.28 ms | **0.072× (13.9× slower)** | 🔴 LOSS — same fp-columnar arithmetic-SIMD ceiling as add |
-| Series > Series gt same-index (bench_binop_cc) | 2M f64 | 0.71 ms | 0.96 ms | **0.74× (1.35× slower)** | ➖ NEAR-PARITY — comparison vectorizes cleanly (no NaN-tracking); contrast with add/mul shows the nan-tracking is the arithmetic bottleneck |
+| Series + Series add same-index morsel sweep (tycz7) | 2M f64, best-of-50 pinned median rerun | 2.78 ms | 2.76 ms | **1.01× near-parity** | ✅ KEEP / ➖ neutral pinned — disjoint scoped morsels cut FP add 16.56→2.76 ms (~6.0× FP-side). Unpinned exact-code row: pandas 2.65 ms vs FP 3.00 ms = 0.88× loss, so add remains threshold-sensitive and routed deeper |
+| Series * Series mul same-index morsel sweep (tycz7) | 2M f64, best-of-50 pinned median rerun | 2.80 ms | 2.91 ms | **0.96× near-parity** | ✅ KEEP / ➖ neutral pinned — FP mul 16.40→2.91 ms (5.6× FP-side). Unpinned exact-code row flips: pandas 3.45 ms vs FP 2.89 ms = 1.19× faster |
+| Series > Series gt same-index tycz7 rerun | 2M f64, best-of-50 pinned median rerun | 2.18 ms | 1.03 ms | **2.12× faster** | ✅ STILL WIN — comparison path was not the target and stayed within prior FP noise. Unpinned exact-code row: pandas 3.18 ms vs FP 1.37 ms = 2.33× |
+| Series + Series add same-index (pre-tycz7 baseline, bench_binop_cc) | 2M f64 | 1.16 ms | 15.36 ms | **0.076× (13.2× slower)** | superseded loss row — already typed, but single monolithic NaN-tracking fused sweep did not vectorize like numpy AVX |
+| Series * Series mul same-index (pre-tycz7 baseline, bench_binop_cc) | 2M f64 | 1.10 ms | 15.28 ms | **0.072× (13.9× slower)** | superseded loss row — same fp-columnar arithmetic-SIMD ceiling as add |
+| Series > Series gt same-index (pre-tycz7 baseline, bench_binop_cc) | 2M f64 | 0.71 ms | 0.96 ms | **0.74× (1.35× slower)** | superseded near-parity row — comparison vectorizes cleanly; tycz7 rerun is now a clear win on this host |
 | Series.replace Float64 (repf, bench_replace_cc) | 2M f64, 3-entry replacement set | 29.72 ms | 4.65 ms | **6.4× faster** | ✅ FIXED — was 2.4× LOSS (72ms)! 3-stage: as_f64_slice input → from_f64_values output → direct `==` scan for small sets. ⚠️ PARITY-FIX (not bit-transparent): the general path routes Float64 keys through semantic_eq's 1e-14 RELATIVE tolerance, but pandas replace is EXACT (1.0+5e-15 not matched by {1.0:x}, verified) — repf uses exact `==`, matching pandas. Conformance green (49). Introduces a typed-vs-scalar inconsistency (scalar-backed path still tolerant) — see tolerance-bug row below |
 | Series.map Float64 (repf sister, bench_map_cc) | 2M f64, 50-entry full-coverage map | 26.05 ms | 21.5 ms | **1.21× faster** | ✅ FIXED — was 7.4× LOSS (192.7ms)! typed Float64 path (as_f64_slice + splitmix key map + full-coverage from_f64_values output), sister to repf. ⚠️ PARITY-FIX: exact Float-Float key matching (all-Float64-keys-on-Float64-column ⇒ no cross-type) = pandas-faithful (pandas map EXACT, 1.0+5e-15→nan). 8.9× FP-side, conformance green (34 map tests). SYSTEMIC residual: the scalar-backed / cross-type / non-Float64-column paths still use semantic_eq's 1e-14 tolerance — that's an fp-types-level latent bug (huge blast radius), NOT fixable as a targeted lever |
 | Series.combine_first (cmbf, bench_combine_cc) | 2M f64 same index, self ~50% NaN, other fills | 3.08 ms | 18.8 ms | **0.16× (6.1× slower)** | ✅ IMPROVED from 52× LOSS (161ms)! typed identity fast path: same-index + Float64 self (as_f64_slice_with_validity) + all-valid Float64 other ⇒ out[i] = self-present ? self : other, via from_f64_values — skips reindex clones + BOTH values() materializes + Vec<Scalar>. 8.6× FP-side, bit-identical (sv&&!is_nan == !is_missing; other all-valid ⇒ no both-missing), conformance green (14 tests). Residual 6.1× = output-alloc/select floor (mimalloc, like where/mask) |
@@ -375,6 +378,47 @@ fresh same-worker win.
 measured, reverted before commit, and routed to deeper structural work
 (output construction / owned-column materialization), not another semantic
 witness or safe portable-SIMD retry.
+
+### Kept: Series add/mul same-index disjoint morsel sweep (tycz7)
+
+Target: public `Series::add` / `Series::mul`, 2M Float64 same Int64 index,
+best-of-50 release benchmark via `bench_binop_cc`; pandas oracle is pandas 2.2.3.
+The lever came from the graveyard/vectorized-execution playbook: split the large
+`apply_f64_slices_nan_tracked` output buffer into disjoint scoped thread morsels instead
+of one monolithic arithmetic sweep, capped at 8 workers and gated to `len >= 1 << 20`.
+No unsafe code and no semantic shortcut.
+
+Isomorphism proof: the same per-position helper computes each output element; the
+partition is contiguous and disjoint, so every index is written exactly once in the same
+location. The only reductions are `input_nan |= chunk_input_nan` and
+`output_nan |= chunk_output_nan`, which are associative/commutative booleans. Output order,
+NaN/inf behavior, and witness booleans are unchanged. Focused guard
+`apply_f64_slices_parallel_matches_serial_nan_tracking` compares every output bit against
+the serial helper with both input-NaN and output-NaN cases.
+
+Same-worker FP baseline before the lever, pinned CPU 7: **add 16.558 ms, mul 16.403 ms,
+gt 0.996 ms**. Exact-code pinned best-of-50 confirmation samples after the final
+`expect` cleanup: add **2.534 / 2.949 / 2.764 ms**, mul **2.848 / 2.912 / 2.915 ms**,
+gt **0.984 / 1.039 / 1.028 ms**; use the conservative middle sample as the release row.
+That is about **6.0x faster add**, **5.6x faster mul**, and neutral/no-regression for gt
+inside FrankenPandas. Matching pinned pandas 2.2.3 best-of-50: **add 2.784 ms,
+mul 2.798 ms, gt 2.182 ms**. Pinned head-to-head ratio (pandas / FP): **add 1.01x
+neutral, mul 0.96x neutral, gt 2.12x win**. Exact-code unpinned FP rerun
+**add 3.000 ms, mul 2.892 ms, gt 1.365 ms** versus saved unpinned pandas
+**add 2.650 ms, mul 3.449 ms, gt 3.181 ms** gives **add 0.88x loss, mul 1.19x win,
+gt 2.33x win**. Verdict at a 5% threshold: pinned **1 win / 0 losses / 2 neutral**;
+unpinned **2 wins / 1 loss / 0 neutral**. KEEP: add/mul had huge same-worker FP-side
+gains and no focused conformance regression, but add remains threshold-sensitive rather
+than a durable pandas win.
+
+Verification: `rch exec -- cargo build --release -p fp-frame --example bench_binop_cc`,
+`rch exec -- cargo check -p fp-columnar --all-targets`, `rch exec -- cargo clippy
+-p fp-columnar --all-targets -- -D warnings`, and focused conformance tests for the
+new helper plus `aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf`,
+`apply_f64_slices_matches_fn_pointer_per_element_f64simd`,
+`series_add_emits_alignment_semantic_witness_tn6qb3`, and
+`series_add_aligns_on_union_index` all passed. `perf stat` was attempted for hardware
+counters but blocked by `perf_event_paranoid=4`, so this row uses timing proof only.
 
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator

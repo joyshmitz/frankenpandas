@@ -1588,7 +1588,67 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
 #[inline]
 fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<f64>, bool, bool) {
     debug_assert_eq!(a.len(), b.len());
+    const PARALLEL_MIN_LEN: usize = 1 << 20;
+    const PARALLEL_MAX_CHUNKS: usize = 8;
+
     let mut data = vec![0.0_f64; a.len()];
+
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(PARALLEL_MAX_CHUNKS)
+        .min(a.len().max(1));
+    if a.len() >= PARALLEL_MIN_LEN && worker_count >= 2 {
+        let chunk_len = a.len().div_ceil(worker_count);
+        let mut chunks = Vec::with_capacity(worker_count);
+        let mut rest = data.as_mut_slice();
+        let mut start = 0usize;
+        while start < a.len() {
+            let end = (start + chunk_len).min(a.len());
+            let (chunk, tail) = rest.split_at_mut(end - start);
+            chunks.push((start, chunk));
+            rest = tail;
+            start = end;
+        }
+
+        let (input_nan, output_nan) = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunks.len());
+            for (start, chunk) in chunks {
+                let end = start + chunk.len();
+                let a = &a[start..end];
+                let b = &b[start..end];
+                handles
+                    .push(scope.spawn(move || apply_f64_slices_nan_tracked_into(op, a, b, chunk)));
+            }
+
+            let mut input_nan = false;
+            let mut output_nan = false;
+            for handle in handles {
+                let (chunk_input_nan, chunk_output_nan) = match handle.join() {
+                    Ok(result) => result,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                };
+                input_nan |= chunk_input_nan;
+                output_nan |= chunk_output_nan;
+            }
+            (input_nan, output_nan)
+        });
+
+        return (data, input_nan, output_nan);
+    }
+
+    let (input_nan, output_nan) = apply_f64_slices_nan_tracked_into(op, a, b, &mut data);
+    (data, input_nan, output_nan)
+}
+
+#[inline]
+fn apply_f64_slices_nan_tracked_into(
+    op: ArithmeticOp,
+    a: &[f64],
+    b: &[f64],
+    data: &mut [f64],
+) -> (bool, bool) {
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(a.len(), data.len());
     let mut input_nan = false;
     let mut output_nan = false;
 
@@ -1613,7 +1673,7 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
         ArithmeticOp::FloorDiv => sweep!(python_floor_div_f64),
     }
 
-    (data, input_nan, output_nan)
+    (input_nan, output_nan)
 }
 
 fn unit_range_len(start: i64, end: i64) -> Option<usize> {
@@ -18049,6 +18109,28 @@ mod tests {
     }
 
     #[test]
+    fn apply_f64_slices_parallel_matches_serial_nan_tracking() {
+        let n = (1usize << 20) + 17;
+        let mut a: Vec<f64> = (0..n).map(|i| i as f64 * 0.25 + 1.0).collect();
+        let mut b: Vec<f64> = (0..n).map(|i| i as f64 * 0.125 - 7.0).collect();
+        a[1024] = f64::NAN;
+        a[n - 3] = f64::INFINITY;
+        b[n - 3] = f64::INFINITY;
+
+        let (got, got_input_nan, got_output_nan) =
+            super::apply_f64_slices_nan_tracked(ArithmeticOp::Sub, &a, &b);
+        let mut expected = vec![0.0_f64; n];
+        let (expected_input_nan, expected_output_nan) =
+            super::apply_f64_slices_nan_tracked_into(ArithmeticOp::Sub, &a, &b, &mut expected);
+
+        assert_eq!(got_input_nan, expected_input_nan);
+        assert_eq!(got_output_nan, expected_output_nan);
+        for i in 0..n {
+            assert_eq!(got[i].to_bits(), expected[i].to_bits(), "i={i}");
+        }
+    }
+
+    #[test]
     fn aligned_binary_f64_same_positions_matches_identity_alignment() {
         let left = Column::new(
             DType::Float64,
@@ -19594,12 +19676,7 @@ mod tests {
                         _ => Scalar::Timedelta64(raw),
                     });
                 }
-                assert_fillna(
-                    case,
-                    "timedelta",
-                    timedeltas,
-                    Scalar::Timedelta64(123_456),
-                );
+                assert_fillna(case, "timedelta", timedeltas, Scalar::Timedelta64(123_456));
             }
         }
 
@@ -19624,7 +19701,9 @@ mod tests {
             // Differential vs scalar filter oracle (br-frankenpandas-vbbe4).
             // Seeded LCG, no mocks.
             fn next(seed: &mut u64) -> u64 {
-                *seed = seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                *seed = seed
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
                 *seed
             }
 

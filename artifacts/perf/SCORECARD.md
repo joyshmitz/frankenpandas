@@ -20,12 +20,38 @@ matrix.
 |------|----------------:|----------------:|---------------------------:|-------------------|------------------|
 | 100k | 2 / 8 | 6 / 8 | 3.804x faster | `groupby_transform_mean` 4.586x, `groupby_count` 3.155x | Keep cluster; rerun high-CV rows |
 | 1M | 3 / 8 | 5 / 8 | 4.345x faster | `groupby_agg_multi` 6.291x, `groupby_transform_mean_str` 2.178x, `groupby_count` 5.988x | Keep cluster; rerun high-CV rows |
-| Combined accepted | 5 / 16 | 11 / 16 | 4.120x faster | No accepted neutral/slower rows | No revert |
+| 2M focused nunique | 1 / 1 | 0 / 1 | 2.895x faster | `groupby_agg_nunique_utf8_float64` 2.895x | Keep `br-frankenpandas-uza04.204` |
+| Combined accepted | 6 / 17 | 11 / 16 plus 2 high-CV nunique diagnostics | 3.860x faster | No accepted neutral/slower rows | No revert |
 
 Release-readiness impact: GroupBy moves from stale "slower" evidence to
-partial measured wins on realistic 100k/1M workloads, but the category is not
-fully validated because 11 of 16 rows were rejected by the harness high-CV
-filter. Overall release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+partial measured wins on realistic 100k/1M workloads, plus a CV-gated 2M
+`agg-nunique` win for `br-frankenpandas-uza04.204`. The category is still not
+fully validated because 11 of the original 16 harness rows were rejected by the
+high-CV filter and the 100k/1M nunique diagnostics also dropped. Overall release
+readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+
+### 2026-06-19 Cod-a Focused Nunique Proof - `br-frankenpandas-uza04.204`
+
+Comparator: pandas 2.2.3 / numpy 2.4.3. Workload: `groupby_agg_nunique_utf8_float64`,
+2M rows, 1000 UTF8 keys, Float64 values, NaN every 37th row, `sort=True`, `dropna=True`.
+FP command: `groupby-bench --agg agg-nunique --key-kind utf8 --value-kind float64
+--rows 2000000 --key-cardinality 1000 --iters 20`, run under `taskset -c 7` from
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`.
+
+| Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 100k | 4.438 ms | 7.821 ms | 1.762x | 12.91% | 13.55% | DROPPED_HIGH_CV |
+| 1M | 27.287 ms | 84.292 ms | 3.089x | 5.52% | 6.35% | DROPPED_HIGH_CV |
+| 2M | 53.117 ms | 153.747 ms | 2.895x | 2.68% | 0.95% | FASTER / ACCEPTED |
+
+Guards:
+- RCH build: `cargo build --profile release-perf -p fp-groupby --bin groupby-bench`
+  on worker `vmi1149989`, exit 0.
+- Local clean-worktree timing build: same target dir, exit 0.
+- RCH Criterion guard: `cargo bench -p fp-conformance --bench vs_pandas -- groupby/`
+  on worker `vmi1227854`, exit 0.
+- Focused conformance guard:
+  `cargo test -p fp-groupby groupby_nunique_utf8_keys_borrowed_sets_uza04204`, exit 0.
 
 Artifacts:
 - `artifacts/perf/cod-a-groupby-gauntlet-a7287a4d.md`

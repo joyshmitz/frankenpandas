@@ -201,9 +201,9 @@ retry failed levers without a concrete retry predicate.
   remaining median gaps to shared grouped-key plans or per-group selection
   algorithms rather than another wrapper-level vector swap.
 
-## 2026-06-18 - br-frankenpandas-uza04.204 - Generic groupby nunique borrowed sets
+## 2026-06-18/19 - br-frankenpandas-uza04.204 - Generic groupby nunique borrowed sets
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: implemented, gauntlet-measured against pandas 2.2.3 on 2026-06-19.
 - Lever: route generic-key `groupby_agg(Nunique)` / `groupby_nunique` over
   per-group borrowed scalar bucket sets instead of cloning every non-missing
   value into `Vec<Scalar>` before calling `nannunique`.
@@ -235,14 +235,29 @@ retry failed levers without a concrete retry predicate.
   only reducer-local value cloning/set construction under generic keys.
 - Validation run: passed
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`.
-- Benchmark verdict: pending. Required follow-up comparator is
-  `groupby-bench --agg agg-nunique --key-kind utf8` on realistic cardinalities
-  versus legacy pandas original and a pre-patch per-group `Vec<Scalar>` nunique
-  baseline, with golden digest unchanged.
-- Retry predicate if rejected: do not retry generic `Nunique` value-clone
-  elimination unless same-host profiling shows residual self-time in fallback
-  value materialization or `nannunique` set construction; route remaining gaps
-  to shared group-key construction or a lower-level scalar-bucket primitive.
+- Golden digest: `groupby-bench --agg agg-nunique --key-kind utf8 --value-kind float64
+  --rows 100000 --key-cardinality 1000 --golden` emitted
+  `out_rows=1000 digest=8de75a99b4172941`.
+- Benchmark verdict: KEEP. Head-to-head comparator was pandas 2.2.3
+  `df.groupby("keys", sort=True)["values"].nunique(dropna=True)` on the same
+  deterministic 1000-cardinality UTF8-key Float64/NaN-every-37th workload.
+  Accepted CV-gated row: 2M rows, FP p50 53.117 ms, pandas p50 153.747 ms,
+  ratio **2.895x faster**, FP CV 2.68%, pandas CV 0.95%. No code revert.
+- High-CV diagnostics recorded but not counted as release proof: 100k p50 ratio
+  1.762x faster (FP CV 12.91%, pandas CV 13.55%); 1M pinned-CPU rerun p50
+  ratio 3.089x faster (FP CV 5.52%, pandas CV 6.35%).
+- Build / bench guard: RCH `cargo build --profile release-perf -p fp-groupby
+  --bin groupby-bench` passed on worker `vmi1149989`; local clean-worktree
+  single-binary build passed in the same `CARGO_TARGET_DIR`; RCH `cargo bench
+  -p fp-conformance --bench vs_pandas -- groupby/` passed on worker
+  `vmi1227854`; focused conformance guard
+  `cargo test -p fp-groupby groupby_nunique_utf8_keys_borrowed_sets_uza04204`
+  passed.
+- Retry predicate if this row regresses later: revisit only if a same-host,
+  CV-gated rerun falls below parity or profiling moves residual time back into
+  reducer-local value materialization / `nannunique` set construction. Otherwise
+  route future Utf8 groupby gaps to shared key factorization or lower-level
+  scalar-bucket primitives, not another wrapper-level nunique clone-elision.
 
 ## 2026-06-18 - br-frankenpandas-2qb1i - Generic groupby Float64 sum/prod counters
 

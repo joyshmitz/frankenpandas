@@ -16,9 +16,14 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | std / var | 2M int64 | 11.3× | 🟢 |
 | sum | 2M int64 | 1.27× | 🟢 |
 | max / min | 2M int64 | 0.19× / 0.20× | 🔴 lose to numpy SIMD |
+| reset_index | 1M int64-indexed | 5.1× | 🟢 |
+| concat | 8×125k Int64 | 0.041× | 🔴 24× slower (structural) |
 
-**Score: 7/9 measured ops faster than pandas; 2 losses (max/min vs numpy SIMD);
-0 regressions; 1 reverted ~0-gain attempt (branchless max/min fold).**
+**Score: 8/11 measured ops faster than pandas; 3 losses (max, min, concat);
+0 regressions; 1 reverted ~0-gain attempt.**
+
+Top gaps to close: **concat (24× — structural construction overhead)** and **max/min
+(~5× — needs SIMD)**. Both are kernel/structural, not 1-line code-first fixes.
 
 Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging* pandas
 before this session's levers (value_counts 0.62×, sort 0.91× per the perf-frontier notes)

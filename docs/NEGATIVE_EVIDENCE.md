@@ -26,6 +26,19 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | max typed Int64 (4qs3h) | 2M int64 | 219 µs | 1.15 ms | **0.19× (5.2× SLOWER)** | ⚠️ KEEP (beats old fp Scalar path) but LOSES to numpy SIMD — gap |
 | min typed Int64 (4qs3h) | 2M int64 | 230 µs | 1.17 ms | **0.20× (5.1× SLOWER)** | ⚠️ KEEP but LOSES to numpy SIMD — gap |
 
+| reset_index typed Int64 idx→col (bp6k7) | 1M int64-indexed, 2 cols | 1.93 ms | 0.38 ms | **5.1× faster** | ✅ KEEP — Index::from_i64_values |
+| concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path) but BIG LOSS vs pandas |
+
+### Gap: concat 24× slower than pandas (biggest gap found)
+pandas `pd.concat` of Int64 series ≈ a single `np.concatenate` (flat int64 memcpy, 281µs/1M).
+fp's path has structural overhead: per-series `as_i64_slice` (may materialize the typed
+buffer from the Scalars variant on first call), `extend_from_slice` into a fresh Vec<i64>,
+`Column::from_i64_values` (validity init), then `Series::new`. The typed lever is NOT a
+regression (≥ the old Scalar concat, bit-transparent) so not reverted, but concat is fp's
+weakest realistic op. FIX (future, structural — not a 1-line code-first change): pre-size +
+single typed buffer build, avoid double as_i64_slice, ensure from_values yields a
+typed-backed column so as_i64_slice is a cheap ref. Recorded as the top perf gap.
+
 ### Gap: max/min lose to numpy SIMD (~5×)
 fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)
 vs numpy's SIMD max. NOT a regression (the typed lever beats old fp's Scalar iteration), so

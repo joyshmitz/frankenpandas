@@ -20,9 +20,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.041× | 🔴 24× slower (structural) |
 | shift | 2M, p=1 | 0.082× | 🔴 12× slower (structural) |
+| groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
+| groupby.sum utf8 key | 1M, 1000 keys | 0.56× | 🔴 1.78× slower (Utf8 hashing) |
 
-**Score: 9/13 measured ops faster than pandas; 4 losses (max, min, concat, shift);
-0 regressions; 2 reverted ~0-gain attempts.**
+**Score: 10/15 measured ops faster than pandas; 5 losses (max, min, concat, shift,
+utf8-groupby); 0 regressions; 2 reverted ~0-gain attempts.**
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild

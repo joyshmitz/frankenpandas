@@ -65,6 +65,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | loc[[labels]] unsorted Int64 | 2M f64 shuffled unique idx, select 1000 | 13.7× | 🟢 flipped from 5147× SLOWER; 2pvdg identity-cached i64→pos hashtable |
 | loc[[labels]] Utf8 index | 2M f64 string idx, select 1000 | 7.9× | 🟢 flipped from 2029× SLOWER; sfsx4 identity-cached String→pos hashtable |
 | loc[[ts]] Datetime64 index | 2M f64 1-min DatetimeIndex, select 1000 | 67.6× | 🟢 flipped from 1173× SLOWER; recbe identity-cached ns→pos hashtable |
+| get_indexer unsorted Utf8 (repeated) | 1M unsorted Utf8 self, 1000 targets | 4.1× | 🟢 flipped from 744× SLOWER; c90bo routes core reindex/align/join resolver through cached loc lookups |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |

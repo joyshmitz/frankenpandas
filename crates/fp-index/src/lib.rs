@@ -2329,6 +2329,21 @@ impl Index {
         {
             return Self::get_indexer_i64(&self_i64, &target_i64);
         }
+        // Unsorted UNIQUE non-Int64 self: route through the identity-cached
+        // position lookups (the loc batch resolvers) so repeated
+        // reindex/align/join against the same index don't rebuild the
+        // pointer-key `FxHashMap<&IndexLabel, usize>` each call — pandas caches
+        // its index engine for exactly this repeated-alignment pattern.
+        // Bit-identical: get_indexer self is unique, so first-occurrence ==
+        // only-occurrence == `position_map_first_ref().get()`; a duplicate or
+        // non-Utf8/non-Datetime self returns `None` from the resolvers and
+        // falls through to the unchanged map path.
+        if let Some(resolved) = self.unique_utf8_positions(target.labels()) {
+            return resolved;
+        }
+        if let Some(resolved) = self.unique_datetime64_positions(target.labels()) {
+            return resolved;
+        }
         let map = self.position_map_first_ref();
         target
             .labels
@@ -16683,6 +16698,36 @@ mod tests {
             IndexLabel::Int64(5),
         ]);
         assert!(dup.unsorted_unique_int64_positions(&[IndexLabel::Int64(5)]).is_none());
+    }
+
+    #[test]
+    fn get_indexer_unsorted_unique_utf8_matches_map_path() {
+        // Unsorted unique Utf8 self now routes through the cached resolver; the
+        // result must equal first-occurrence positions (None for absent).
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("beta".to_owned()),
+            IndexLabel::Utf8("alpha".to_owned()),
+            IndexLabel::Utf8("gamma".to_owned()),
+        ]);
+        let target = Index::new(vec![
+            IndexLabel::Utf8("gamma".to_owned()),
+            IndexLabel::Utf8("alpha".to_owned()),
+            IndexLabel::Utf8("missing".to_owned()),
+            IndexLabel::Utf8("beta".to_owned()),
+        ]);
+        assert_eq!(
+            idx.get_indexer(&target),
+            vec![Some(2), Some(1), None, Some(0)]
+        );
+
+        // Duplicate self keeps first-occurrence semantics via the map fallback.
+        let dup = Index::new(vec![
+            IndexLabel::Utf8("x".to_owned()),
+            IndexLabel::Utf8("y".to_owned()),
+            IndexLabel::Utf8("x".to_owned()),
+        ]);
+        let t2 = Index::new(vec![IndexLabel::Utf8("x".to_owned())]);
+        assert_eq!(dup.get_indexer(&t2), vec![Some(0)]);
     }
 
     use super::{

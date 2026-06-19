@@ -495,6 +495,59 @@ fn utf8_position_lookup_cached(
     guard.entry(identity).or_insert(result).clone()
 }
 
+/// First-occurrence `Datetime64-ns -> position` lookup tables for unique
+/// all-Datetime64 indexes (the common pandas time-series index), cached by
+/// runtime label identity. `Datetime64(i64)` is ns-backed, so this mirrors the
+/// Int64 lookup but reads the `Datetime64` label variant. The value is
+/// `Option`: `None` records "not all Datetime64" so the warm path stays O(1).
+#[allow(clippy::type_complexity)]
+static INDEX_DATETIME_POS_LOOKUP_CACHE: OnceLock<
+    Mutex<FxHashMap<u64, Option<Arc<FxHashMap<i64, usize>>>>>,
+> = OnceLock::new();
+
+const INDEX_DATETIME_POS_LOOKUP_CACHE_MAX: usize = 64;
+
+/// Build-or-fetch the cached first-occurrence ns->position table for a
+/// Datetime64 index lineage. Returns `None` (and caches that verdict) when the
+/// index is not entirely Datetime64. Caller has proven uniqueness, so first ==
+/// only occurrence.
+fn datetime64_position_lookup_cached(
+    identity: u64,
+    index_labels: &[IndexLabel],
+) -> Option<Arc<FxHashMap<i64, usize>>> {
+    let cache = INDEX_DATETIME_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(existing) = cache
+        .lock()
+        .expect("index datetime position lookup cache poisoned")
+        .get(&identity)
+        .cloned()
+    {
+        return existing;
+    }
+    let mut map: FxHashMap<i64, usize> = FxHashMap::default();
+    map.reserve(index_labels.len());
+    let mut all_datetime = true;
+    for (pos, label) in index_labels.iter().enumerate() {
+        match label {
+            IndexLabel::Datetime64(ns) => {
+                map.insert(*ns, pos);
+            }
+            _ => {
+                all_datetime = false;
+                break;
+            }
+        }
+    }
+    let result = if all_datetime { Some(Arc::new(map)) } else { None };
+    let mut guard = cache
+        .lock()
+        .expect("index datetime position lookup cache poisoned");
+    if guard.len() >= INDEX_DATETIME_POS_LOOKUP_CACHE_MAX {
+        guard.clear();
+    }
+    guard.entry(identity).or_insert(result).clone()
+}
+
 /// Shared contiguous-Utf8 label backing: a byte buffer + `n+1` offsets, row `i`
 /// being `bytes[offsets[i]..offsets[i+1]]` (br-frankenpandas-nbspq).
 type Utf8LabelBacking = (Arc<[u8]>, Arc<[usize]>);
@@ -2372,6 +2425,35 @@ impl Index {
                 .iter()
                 .map(|label| match label {
                     IndexLabel::Utf8(value) => lookup.get(value.as_str()).copied(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolve a list-like selector against a unique all-Datetime64 index using
+    /// a first-occurrence ns->position hashtable cached by the index's runtime
+    /// label identity, instead of rebuilding the per-call pointer-key
+    /// `FxHashMap<&IndexLabel, Vec<usize>>`. This is the time-series `loc[[ts]]`
+    /// fast path.
+    ///
+    /// Returns `None` (caller keeps its duplicate-aware fallback) when the index
+    /// has duplicate labels or is not entirely Datetime64. The index is unique
+    /// here, so each requested label yields at most one position; missing or
+    /// non-Datetime64 selectors map to `None` and callers preserve their own
+    /// fail-closed error surface.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn unique_datetime64_positions(&self, labels: &[IndexLabel]) -> Option<Vec<Option<usize>>> {
+        if self.has_duplicates() {
+            return None;
+        }
+        let lookup = datetime64_position_lookup_cached(self.label_identity, self.labels())?;
+        Some(
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Datetime64(ns) => lookup.get(ns).copied(),
                     _ => None,
                 })
                 .collect(),

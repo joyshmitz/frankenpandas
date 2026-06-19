@@ -61,6 +61,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | Series.map Float64 | 2M f64, 50-entry zero-based full-coverage map | 0.68×; FP-side 21.33→17.92 ms | 🔴 still 1.48× slower; kept 0jdij dense direct-address map, residual output/key-guard cost tracked |
 | Series.combine_first | 2M f64 same-index, ~50% NaN fill | 0.41× local; rch hz2 FP-side 1.05× keep | 🔴 still 2.44× slower; grtx1 skips a redundant Float64 validity rescan but output allocation/select remains |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
+| loc[[labels]] sorted Int64 | 2M f64 step-2 idx, select 1000 | 1.58× | 🟢 flipped from 5340× SLOWER; 0pkt2 cached int64_view + binary-search batch resolver |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |

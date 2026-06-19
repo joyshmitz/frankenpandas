@@ -1501,16 +1501,19 @@ impl Index {
         {
             return SortOrder::AscendingInt64;
         }
-        if let Some(values) = self.labels.int64_view() {
-            return if values.len() <= 1 || values.windows(2).all(|pair| pair[0] < pair[1]) {
-                SortOrder::AscendingInt64
-            } else {
-                SortOrder::Unsorted
-            };
-        }
         *self
             .sort_order_cache
-            .get_or_init(|| detect_sort_order(self.labels()))
+            .get_or_init(|| {
+                if let Some(values) = self.labels.int64_view() {
+                    if values.len() <= 1 || values.windows(2).all(|pair| pair[0] < pair[1]) {
+                        SortOrder::AscendingInt64
+                    } else {
+                        SortOrder::Unsorted
+                    }
+                } else {
+                    detect_sort_order(self.labels())
+                }
+            })
     }
 
     /// Returns `true` if this index is sorted (strictly ascending, no duplicates).
@@ -2182,6 +2185,35 @@ impl Index {
             .iter()
             .map(|label| map.get(label).copied())
             .collect()
+    }
+
+    /// Resolve a list-like label selector against a strictly ascending all-Int64
+    /// index without building the duplicate-expansion map.
+    ///
+    /// `SortOrder::AscendingInt64` is strict, so the index is unique and each
+    /// requested label can yield at most one position. Missing or non-Int64
+    /// requested labels are represented as `None`; callers preserve their own
+    /// fail-closed error surface. Returns `None` only when this index is not a
+    /// sorted unique Int64 index and the duplicate-aware fallback must run.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn sorted_unique_int64_positions(
+        &self,
+        labels: &[IndexLabel],
+    ) -> Option<Vec<Option<usize>>> {
+        if !matches!(self.sort_order(), SortOrder::AscendingInt64) {
+            return None;
+        }
+        let values = self.labels.int64_view()?;
+        Some(
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(value) => values.binary_search(value).ok(),
+                    _ => None,
+                })
+                .collect(),
+        )
     }
 
     #[must_use]

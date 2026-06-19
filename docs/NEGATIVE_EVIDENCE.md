@@ -34,6 +34,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
 | shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |
 | ffill typed Float64 (as_f64_slice_with_validity) | 2M f64, ~10% NaN | 2.79 ms | 18.43 ms | **0.15× (6.6× SLOWER)** | ⚠️ KEEP but LOSS — confirms column-rebuild pattern |
+| shift + mimalloc global allocator (EXPERIMENT) | 2M f64, periods=1 | 0.74 ms | 3.98 ms | **0.19× (5.4× slower)** | 🚀 2.3× faster than glibc-malloc shift; mimalloc generalizes (3nah5) |
+| ffill + mimalloc global allocator (EXPERIMENT) | 2M f64, ~10% NaN | 2.79 ms | 6.62 ms | **0.42× (2.4× slower)** | 🚀 2.8× faster than glibc-malloc ffill; mimalloc generalizes (3nah5) |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
@@ -170,6 +172,17 @@ binary (fp-python cdylib) + benchmark harnesses — a workspace coordination dec
 with fp-groupby/fp-join arena allocators), filed as a high-priority bead, not imposed
 unilaterally. Dead ends still recorded: typed-backing and validity-init tweaks don't help;
 the lever is the allocator, not the column build.
+
+**GENERALIZES (measured) — mimalloc helps the whole rebuild-class, not just concat.** Ran the
+same shift/ffill workloads under mimalloc (`bench_rebuild_mimalloc`): shift 9.01 → 3.98 ms
+(2.3×, gap 12× → 5.4×), ffill 18.43 → 6.62 ms (2.8×, gap 6.6× → 2.4×). Smaller than concat's
+13× because concat is ~93% allocation while shift/ffill also do a full per-element transform
+pass (allocation is ~half their cost) — so the allocator fixes the alloc half and the rebuild
+floor remains. Net: a pooling global allocator is a clear win across all three rebuild-class
+losses (concat 13×, ffill 2.8×, shift 2.3×), strongest where allocation dominates. Strengthens
+bead 3nah5 — `#[global_allocator]` is SAFE Rust (no unsafe), so unlike the AVX2 SIMD lever it
+is compatible with this codebase; only the workspace-coordination (arena interaction, re-
+baselining) blocks unilateral adoption.
 
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator

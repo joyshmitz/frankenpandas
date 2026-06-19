@@ -3,7 +3,6 @@ name = "fp-python"
 description = "PyO3 Python bindings for FrankenPandas — import frankenpandas from Python"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

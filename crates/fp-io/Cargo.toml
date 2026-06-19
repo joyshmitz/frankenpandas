@@ -3,7 +3,6 @@ name = "fp-io"
 description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, ORC, HDF5, Excel, Feather, Arrow IPC, Pickle, Stata, SQL (SqlConnection with SQLite default backend)."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

@@ -2,8 +2,8 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 24/30 realistic ops faster (median ≈2.8× among wins); 5 losses and
-1 neutral row, all with documented fix paths; 0 perf-lever regressions.** Conformance:
+**Perf vs pandas 2.2.3: 27/30 realistic ops faster (median ≈2.8× among wins); 3 losses,
+0 neutral rows, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
 the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — every typed-lever
@@ -15,16 +15,15 @@ conformance guard passes by execution. Current dcfv8 gate also has `fp-conforman
   groupby median Utf8-key (1.80–2.63×),
   groupby std/var Utf8-key (1.22–1.34×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
-  slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×) —
+  slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×),
+  RangeIndex bulk indexers (2.64–51.5×) —
   fp beats pandas wherever typed access unlocks a cheaper algorithm.
 - **Known gaps before "faster than pandas everywhere":** concat was narrowed by the 3nah5
   mimalloc boundary allocator (24× slower -> 2.15× slower) but still needs a reused-buffer
   or chunk/view path; ffill now flips to 1.41× faster via skw2c validity-run bulk fill;
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
   allocator-sensitive on the plain glibc path; max/min
-  (5×) need SIMD; small/miss-heavy
-  RangeIndex indexers still trail pandas despite the exception-allocation fix. All gaps
-  are tracked.
+  (5×) need SIMD. All gaps are tracked.
 - **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
   process-boundary allocator: 5 broad smoke wins (up to 3.35×), neutral control lanes, and
   no confirmed regression above 5% after paired reruns of the initially suspicious rows.
@@ -61,19 +60,18 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | groupby.agg(std) utf8 key | 100k/1M/2M, 1000 keys | 1.34× / 1.23× / 1.34× | 🟢 CV-gated accepted |
 | set_index int col | 1M, 2 cols | 6.5× | 🟢 |
 | RangeIndex.asof | 4,096 scalar probes, 100k/1M rows | 3,840× / 16,031× | 🟢 |
-| RangeIndex.get_indexer miss-heavy | 100k targets | 0.83× | 🔴 1.21× slower; 3.82× faster than legacy get_loc-loop model |
-| RangeIndex.reindex all-miss | 100k / 1M targets | 0.86× / 1.07× | 🔴 100k slower; 1M neutral; keep vs legacy model |
+| RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
+| RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 24/30 measured ops faster than pandas; 5 losses (max, min, concat,
-RangeIndex.get_indexer 100k, RangeIndex.reindex 100k), 1 neutral
-(RangeIndex.reindex 1M); 0 regressions; 2 reverted ~0-gain attempts.**
+**Score: 27/30 measured ops faster than pandas; 3 losses (max, min, concat),
+0 neutral rows; 0 regressions; 2 reverted ~0-gain attempts.**
 
-Median win among the 24 ≈ 2.8×; the losses are kernel/structural or pandas-vectorized-engine
-gaps with documented fix paths — none are code-first fp-frame regressions. concat
+Median win among the 27 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
-the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs. The RangeIndex indexer loss is different:
-`29u49` removed a real FP-side exception-allocation cost, but pandas still wins on the
-100k vectorized indexer rows.
+the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
+RangeIndex indexers were a separate vectorized-engine gap after `29u49`; `uza04.159`
+closed it with arithmetic bulk membership and an exact reindex lattice path.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
@@ -83,9 +81,8 @@ and skw2c's validity-run ffill path flips ffill to 1.41× faster. concat (0.46×
 pandas because fp's column-rebuild construction is still heavier than numpy's pooled/in-place
 memmove/concatenate; max/min
 still need SIMD. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
-and the remaining RangeIndex
-indexer loss is a separate vectorized-engine gap, not a regression of the retained FP-side
-miss-allocation lever.
+and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by
+weakening the retained public `get_loc` error semantics.
 
 Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging* pandas
 before this session's levers (value_counts 0.62×, sort 0.91× per the perf-frontier notes)
@@ -112,7 +109,7 @@ and are now ahead — the FxHash-over-khash and zero-copy-gather/slice veins fli
 ## Pending measurement
 
 Remaining code-first lanes are now narrower: cod-b's categorical-index family and RangeIndex
-helpers other than `29u49`/`jlv2o` still need focused Criterion/pandas rows, and cod-a's
+helpers other than `jlv2o`/`uza04.159` still need focused Criterion/pandas rows, and cod-a's
 groupby ledger has high-CV rows to rerun. Already measured rows above should not be treated
 as pending.
 

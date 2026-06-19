@@ -88,9 +88,10 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | fillna(value) (sweep bench_misc) | 2M f64, ~10% NaN | 2.53 ms | 4.48 ms | **0.57× (1.77× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable) |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
 | RangeIndex.asof closed-form (jlv2o) | 1M rows, 4,096 scalar probes | 1,050.29 ms | 65.52 µs | **16,031× faster** | ✅ KEEP — lookup no longer scales with range length |
-| RangeIndex.get_indexer miss-heavy (29u49) | 100k targets, 15/16 misses | 1.110 ms | 1.344 ms | **0.83× (1.21× SLOWER)** | ⚠️ KEEP vs legacy — 3.82× faster than get_loc-loop model, but pandas gap remains |
-| RangeIndex.reindex all-miss (29u49) | 100k target RangeIndex | 0.990 ms | 1.150 ms | **0.86× (1.16× SLOWER)** | ⚠️ KEEP vs legacy — 4.64× faster than get_loc-loop model, but pandas gap remains |
-| RangeIndex.reindex all-miss (29u49) | 1M target RangeIndex | 13.13 ms | 12.28 ms | 1.07× faster | NEUTRAL — below 10% margin; 4.11× faster than legacy model |
+| RangeIndex.get_indexer miss-heavy arithmetic bulk (uza04.159) | 100k targets, 15/16 misses | 0.777 ms | 0.295 ms | **2.64× faster** | ✅ KEEP — same-host local pandas p50 vs FP Criterion mean; flips prior 0.83× loss |
+| RangeIndex.get_indexer miss-heavy arithmetic bulk (uza04.159) | 1M targets, 15/16 misses | 10.493 ms | 2.911 ms | **3.61× faster** | ✅ KEEP — batched pandas p50 CV 5.71%; FP local Criterion |
+| RangeIndex.reindex all-miss arithmetic lattice (uza04.159) | 100k target RangeIndex | 0.666 ms | 18.45 µs | **36.1× faster** | ✅ KEEP — exact lattice all-miss fast path; flips prior 0.86× loss |
+| RangeIndex.reindex all-miss arithmetic lattice (uza04.159) | 1M target RangeIndex | 9.597 ms | 0.187 ms | **51.5× faster** | ✅ KEEP — flips prior neutral 1.07× row into a decisive win |
 | groupby.sum Int64 key (dense grouping) | 1M rows, 1000 keys | 13.26 ms | 2.44 ms | **5.4× faster** | ✅ KEEP — int64_dense_grouping |
 | groupby.sum Utf8 key clone-free counter (uza04.193) | 1M rows, 1000 keys, Float64 values, NaN every 37th | 32.946 ms | 15.141 ms | **2.18× faster** | ✅ VERIFIED KEEP — previous row was 0.56×/1.78× slower; public `groupby_sum` and `groupby_agg(Sum)` share digest `7fb4fd07f6f8bdf2`; pandas CV 3.17%, FP public-sum CV ~0.7% |
 | groupby.prod Utf8 key clone-free counter (uza04.193) | 1M rows, 1000 keys, Float64 values, NaN every 37th | 32.988 ms | 13.001 ms | **2.54× faster** | ✅ VERIFIED KEEP — same streaming product counter family; pandas CV 3.51%, FP public-prod CV <1%; focused fallback/overflow/timedelta guards green |
@@ -113,7 +114,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | groupby.agg(median) Utf8 key (uza04.203) | 1M rows, 1000 keys, pinned CPU run | 49.83 ms | 19.90 ms | 2.50× faster | DROPPED_HIGH_CV — FP CV 6.62%, pandas CV 1.08% |
 | groupby.agg(std) Utf8 key (uza04.202) | 2M rows, 1000 keys, first pinned run | 55.94 ms | 58.57 ms | 0.96× | DROPPED_HIGH_CV — FP CV 12.39%, pandas CV 0.86%; superseded by batched accepted rerun |
 | groupby.agg(std) Utf8 key (uza04.202) | 2M rows, 1000 keys, 10 iters/sample rerun | 85.26 ms | 56.87 ms | 1.50× faster | DROPPED_HIGH_CV — FP CV 1.24%, pandas CV 5.92%; superseded by 20-iter accepted rerun |
-| RangeIndex.get_indexer miss-heavy (29u49) | 1M targets, 15/16 misses | 16.43 ms | 10.74 ms | 1.53× faster | DROPPED_HIGH_CV — pandas CV 5.40%; FP-side legacy speedup 4.65× |
+| RangeIndex.get_indexer miss-heavy (29u49) | 1M targets, 15/16 misses | 16.43 ms | 10.74 ms | 1.53× faster | DROPPED_HIGH_CV — pandas CV 5.40%; superseded by accepted `uza04.159` batched local row |
 
 ### Win: groupby std/var generic-key clone-free counters
 The `uza04.202` lever removes per-group `Vec<Scalar>` materialization from generic-key
@@ -136,23 +137,24 @@ Artifacts: `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json`,
 `artifacts/bench/gauntlet_cod_b_range_asof_criterion_local.txt`, and
 `artifacts/bench/gauntlet_cod_b_range_asof_pandas.json`.
 
-### Mixed: RangeIndex miss-heavy bulk indexers
-The `29u49` lever removes per-miss `IndexError` string allocation from
-`RangeIndex::{get_indexer,get_indexer_non_unique,reindex}` by keeping public errors at
-`get_loc` and using an internal `Option<usize>` lookup in bulk kernels. Focused Criterion
-confirms the current path is not a ~0-gain lever: it is 3.82× faster than the get_loc-loop
-legacy model for 100k miss-heavy `get_indexer`, 4.64× faster for 100k all-miss `reindex`,
-and 4.11× faster for 1M all-miss `reindex`.
+### Win: RangeIndex bulk indexers arithmetic lattice
+The `uza04.159` lever keeps the public `get_loc` error contract intact while moving bulk
+indexers onto the affine witness: `get_indexer`/`get_indexer_non_unique` reuse one source
+length and a bounded i64 membership check, and `reindex(RangeIndex)` emits the indexer by
+source-position arithmetic when the target lies on the source lattice. The old `29u49`
+exception-allocation fix was a real FP-side improvement but still left accepted pandas
+losses; this follow-up closes the vectorized RangeIndex gap.
 
-Against pandas, however, the accepted release rows are not wins: 100k `get_indexer` is 1.21×
-slower, 100k `reindex` is 1.16× slower, and 1M `reindex` is only 1.07× faster so it is
-classified as neutral. No revert: the FP-side gain is large and behavior-guarded, but this
-does not close the pandas gap. Next retry should target output vector allocation / pandas'
-vectorized RangeIndex engine rather than reintroducing exception-driven miss handling.
-Artifacts: `artifacts/bench/gauntlet_cod_b_range_indexers_vs_pandas.json`,
-`artifacts/bench/gauntlet_cod_b_range_indexers_criterion_local.txt`, and
-`artifacts/bench/gauntlet_cod_b_range_indexers_criterion_rch.txt`, and
-`artifacts/bench/gauntlet_cod_b_range_indexers_pandas.json`.
+Same-host local head-to-head against pandas 2.2.3 now wins all accepted rows: 100k
+miss-heavy `get_indexer` is 2.64x faster (0.777 ms pandas p50 vs 0.295 ms FP Criterion
+mean), 1M miss-heavy `get_indexer` is 3.61x faster, 100k all-miss `reindex` is 36.1x
+faster, and 1M all-miss `reindex` is 51.5x faster. Same-worker `rch` Criterion on `ovh-b`
+also proved the lever delta against the pre-change path: `get_indexer` improved 4.0x at
+both 100k and 1M targets, while all-miss `reindex` improved 75.7x at 100k and 32.2x at
+1M. No revert: the lever is behavior-guarded by the RangeIndex sweep, including
+descending ranges, partial lattices, all-miss targets, and full-width i64 arithmetic.
+Artifacts updated in the Criterion tree under
+`/data/projects/.rch-targets/frankenpandas-cod-b/criterion/range_index_indexers/`.
 
 ### Win: clone-free generic `groupby.sum`/`prod` on Utf8 keys (br-frankenpandas-uza04.193)
 **VERIFIED after code-first commit.** The implementation had already landed and was reset

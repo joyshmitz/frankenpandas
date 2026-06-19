@@ -9909,11 +9909,32 @@ impl RangeIndex {
     }
 
     fn position_of_value(&self, value: i64) -> Option<usize> {
+        self.position_of_value_with_len(value, self.len())
+    }
+
+    fn position_of_value_with_len(&self, value: i64, len: usize) -> Option<usize> {
         if self.step == 0 {
             return None;
         }
-        let len = self.len();
         if len == 0 {
+            return None;
+        }
+        if let Some((first, last)) = self.first_last_for_len(len) {
+            let lower = first.min(last);
+            let upper = first.max(last);
+            if value < lower || value > upper {
+                return None;
+            }
+            if let Some(offset) = value.checked_sub(self.start)
+                && let Some(0) = offset.checked_rem(self.step)
+                && let Some(position) = offset.checked_div(self.step)
+                && position >= 0
+            {
+                let position = position as usize;
+                if position < len {
+                    return Some(position);
+                }
+            }
             return None;
         }
         let offset = i128::from(value) - i128::from(self.start);
@@ -9923,6 +9944,50 @@ impl RangeIndex {
         }
         let position = offset / step;
         (position >= 0 && position < len as i128).then_some(position as usize)
+    }
+
+    fn first_last_for_len(&self, len: usize) -> Option<(i64, i64)> {
+        if len == 0 {
+            return None;
+        }
+        let last_offset = len - 1;
+        let last = i128::from(self.start) + (last_offset as i128) * i128::from(self.step);
+        let last = i64::try_from(last).ok()?;
+        Some((self.start, last))
+    }
+
+    fn range_target_indexer(&self, target: &Self, source_len: usize) -> Option<Vec<isize>> {
+        let target_len = target.len();
+        if target_len == 0 {
+            return Some(Vec::new());
+        }
+        if source_len == 0 {
+            return Some(vec![-1; target_len]);
+        }
+
+        let source_step = i128::from(self.step);
+        let target_step = i128::from(target.step);
+        let first_offset = i128::from(target.start) - i128::from(self.start);
+        if target_step % source_step != 0 {
+            return None;
+        }
+        if first_offset % source_step != 0 {
+            return Some(vec![-1; target_len]);
+        }
+
+        let mut source_position = first_offset / source_step;
+        let source_position_step = target_step / source_step;
+        let source_len = source_len as i128;
+        let mut indexer = Vec::with_capacity(target_len);
+        for _ in 0..target_len {
+            if (0..source_len).contains(&source_position) {
+                indexer.push(source_position as isize);
+            } else {
+                indexer.push(-1);
+            }
+            source_position += source_position_step;
+        }
+        Some(indexer)
     }
 
     fn contains_value(&self, value: i64) -> bool {
@@ -10248,7 +10313,7 @@ impl RangeIndex {
             return None;
         }
         let (first, last) = self.first_last()?;
-        Some((first as f64 + last as f64) / 2.0)
+        Some((i128::from(first) + i128::from(last)) as f64 / 2.0)
     }
 
     /// Binary-search insertion position, matching
@@ -10763,10 +10828,16 @@ impl RangeIndex {
     /// Returns `(target.clone(), indexer)`.
     #[must_use]
     pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
+        let source_len = self.len();
+        if let Some(indexer) = self.range_target_indexer(target, source_len) {
+            return (target.clone(), indexer);
+        }
         let indexer = (0..target.len())
-            .map(|position| match self.position_of_value(target.value_at(position)) {
-                Some(position) => position as isize,
-                None => -1,
+            .map(|position| {
+                match self.position_of_value_with_len(target.value_at(position), source_len) {
+                    Some(position) => position as isize,
+                    None => -1,
+                }
             })
             .collect();
         (target.clone(), indexer)
@@ -10778,10 +10849,11 @@ impl RangeIndex {
     /// none.
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
+        let source_len = self.len();
         let mut positions = Vec::<isize>::new();
         let mut missing = Vec::<usize>::new();
         for (idx, target) in targets.iter().enumerate() {
-            match self.position_of_value(*target) {
+            match self.position_of_value_with_len(*target, source_len) {
                 Some(position) => positions.push(position as isize),
                 None => {
                     positions.push(-1);
@@ -10803,12 +10875,15 @@ impl RangeIndex {
     /// `pd.RangeIndex.get_indexer(targets)`. Closed-form per target.
     #[must_use]
     pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
+        let source_len = self.len();
         targets
             .iter()
-            .map(|&value| match self.position_of_value(value) {
-                Some(position) => position as isize,
-                None => -1,
-            })
+            .map(
+                |&value| match self.position_of_value_with_len(value, source_len) {
+                    Some(position) => position as isize,
+                    None => -1,
+                },
+            )
             .collect()
     }
 
@@ -23742,6 +23817,47 @@ mod tests {
             super::IndexError::InvalidArgument(ref msg)
                 if msg == "get_loc: 7 not in RangeIndex"
         ));
+    }
+
+    #[test]
+    fn range_index_reindex_uses_arithmetic_lattice_fast_path_codb159() {
+        let source = super::RangeIndex::new(0, 10, 2).unwrap();
+
+        let all_miss_target = super::RangeIndex::new(1, 11, 2).unwrap();
+        let (reindexed, indexer) = source.reindex(&all_miss_target);
+        assert!(reindexed.identical(&all_miss_target));
+        assert_eq!(indexer, vec![-1, -1, -1, -1, -1]);
+
+        let aligned_target = super::RangeIndex::new(4, 12, 2).unwrap();
+        let (reindexed, indexer) = source.reindex(&aligned_target);
+        assert!(reindexed.identical(&aligned_target));
+        assert_eq!(indexer, vec![2, 3, 4, -1]);
+
+        let descending_source = super::RangeIndex::new(10, 0, -2).unwrap();
+        let descending_target = super::RangeIndex::new(8, -4, -4).unwrap();
+        let (reindexed, indexer) = descending_source.reindex(&descending_target);
+        assert!(reindexed.identical(&descending_target));
+        assert_eq!(indexer, vec![1, 3, -1]);
+
+        let partial_lattice_target = super::RangeIndex::new(0, 10, 2).unwrap();
+        let wide_step_source = super::RangeIndex::new(0, 12, 4).unwrap();
+        let (reindexed, indexer) = wide_step_source.reindex(&partial_lattice_target);
+        assert!(reindexed.identical(&partial_lattice_target));
+        assert_eq!(indexer, vec![0, -1, 1, -1, 2]);
+    }
+
+    #[test]
+    fn range_index_bulk_indexers_reuse_source_len_without_extreme_overflow_codb159() {
+        let source = super::RangeIndex::new(i64::MIN, i64::MIN + 10, 2).unwrap();
+        assert_eq!(
+            source.get_indexer(&[i64::MIN, i64::MIN + 8, i64::MAX]),
+            vec![0, 4, -1]
+        );
+
+        let (positions, missing) =
+            source.get_indexer_non_unique(&[i64::MIN, i64::MIN + 1, i64::MIN + 8, i64::MAX]);
+        assert_eq!(positions, vec![0, -1, 4, -1]);
+        assert_eq!(missing, vec![1, 3]);
     }
 
     #[test]

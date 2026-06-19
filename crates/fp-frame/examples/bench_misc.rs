@@ -63,8 +63,11 @@ fn main() {
     let nlargest = best(iters, || {
         std::hint::black_box(s.nlargest(20).expect("nlargest"));
     });
+    let nsmallest = best(iters, || {
+        std::hint::black_box(s.nsmallest(20).expect("nsmallest"));
+    });
 
     println!(
-        "misc n={n}: rank={rank}ns diff={diff}ns cumsum={cumsum}ns cummax={cummax}ns fillna={fillna}ns clip={clip}ns nlargest={nlargest}ns"
+        "misc n={n}: rank={rank}ns diff={diff}ns cumsum={cumsum}ns cummax={cummax}ns fillna={fillna}ns clip={clip}ns nlargest={nlargest}ns nsmallest={nsmallest}ns"
     );
 }

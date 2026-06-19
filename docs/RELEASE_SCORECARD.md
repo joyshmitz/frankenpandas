@@ -47,7 +47,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | std / var | 2M int64 | 11.3× | 🟢 |
 | sum | 2M int64 | 1.27× | 🟢 |
 | max / min | 2M int64 | 0.57× / 0.57× rerun | 🟡 8-lane chunked accumulator remains best safe-Rust path; safe `std::simd` i64x8/i64x4 rejected |
-| Series add / mul | 2M f64 same-index | 0.14× local pandas sanity; rch same-worker finite-witness probe 1.016× / 1.007× vs fp baseline | 🔴 unresolved; finite-witness no-scan and safe `std::simd` f64x8 probes rejected as ~0/regression |
+| Series add / mul | 2M f64 same-index | ~0.10× local pandas sanity; latest no-ship candidate fell to 0.046× add / 0.084× best-case mul vs pandas | 🔴 unresolved; finite-witness no-scan, safe `std::simd` f64x8, zero-fill removal, and discard-ledger probes rejected |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
@@ -66,7 +66,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
 **Score: 27/32 measured ops faster than pandas; 5 losses (max, min, concat, add, mul),
-0 neutral rows; 0 shipped regressions; 6 reverted/no-ship SIMD or ~0-gain attempts.**
+0 neutral rows; 0 shipped regressions; 8 reverted/no-ship SIMD, allocation, or ~0-gain attempts.**
 
 Median win among the 27 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
@@ -74,6 +74,9 @@ remains a confirmed **column-rebuild** loss; ffill was the same class until skw2
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
 RangeIndex indexers were a separate vectorized-engine gap after `29u49`; `uza04.159`
 closed it with arithmetic bulk membership and an exact reindex lattice path.
+The latest `38xpk` Series add/mul pass added two more measured no-ships:
+push-output zero-fill removal regressed public add/mul to 17.595/17.546 ms,
+and discard-ledger fast return regressed add to ~31.5 ms with unstable mul.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild

@@ -329,6 +329,51 @@ work and cod-b RangeIndex children, so cod-a did not edit that surface. Current
 valid route ratio: **2 wins / 1 loss / 0 neutral**, with the loss routed to
 existing index owners.
 
+### Reverted/no-ship: Series add/mul same-index deeper probes (38xpk)
+
+Target: public `Series::add` / `Series::mul`, 2M Float64 same Int64 index,
+best-of-30 release benchmark via `bench_binop_cc`; pandas oracle is pandas 2.2.3.
+Saved FP baseline for this pass: **add 16.563 ms, mul 16.361 ms, gt 1.054 ms**.
+Initial pandas sanity: **add 1.686 ms, mul 1.659 ms, gt 0.946 ms**. Current
+baseline status remains a red loss, about **0.10x pandas** for add/mul.
+
+**FIX ATTEMPT (REVERTED): zero-fill removal in `apply_f64_slices_nan_tracked`.**
+The allocator-style hypothesis was that `Vec::with_capacity` plus `push`
+would skip the output `vec![0.0; len]` initialization and remove wasted memory
+bandwidth. Focused conformance stayed green:
+`fp-columnar apply_f64_slices_matches_fn_pointer_per_element_f64simd --release`
+and `fp-columnar aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf --release`
+both passed on `rch` hz2; golden checksums were unchanged (`add=7f49e78bce11291f`,
+`mul=151f386c9e49d432`). Measurement rejected it: columnar add regressed
+**2.945 -> 4.099 ms** while columnar mul improved **4.468 -> 3.814 ms**; public
+Series add/mul both regressed **16.563/16.361 -> 17.595/17.546 ms**. Versus
+pandas, the candidate was only **0.096x add / 0.095x mul**. Conclusion: the
+push-based construction likely blocked the better store/vectorization shape;
+do not retry push-output construction for this hot f64 binary kernel without
+new codegen evidence.
+
+**FIX ATTEMPT (REVERTED): discard-ledger fast return for public arithmetic.**
+The public wrappers already disable semantic witnesses, so the next hypothesis
+was to skip runtime decision-record allocation for throwaway ledgers while
+preserving strict/hardened actions. Focused checks were green before timing:
+`fp-runtime discard_audit_ledger_preserves_policy_actions_without_records_38xpk --release`
+passed on hz2, `fp-frame series_add_emits_alignment_semantic_witness_tn6qb3 --release`
+passed on vmi1149989, and `fp-frame series_add_aligns_on_union_index --release`
+passed on hz2. Measurement rejected it decisively. Candidate samples:
+**add 31.745 / 31.466 / 31.486 ms**, **mul 16.208 / 30.587 / 31.492 ms**,
+**gt 0.974 / 1.113 / 1.098 ms**. Same-session pandas sanity improved to
+**add 1.436 ms, mul 1.367 ms, gt 0.771 ms**, so the candidate fell to about
+**0.046x add** and at best **0.084x mul** versus pandas, with repeated mul
+samples near **0.043x**. Conclusion: the extra branch/API shape perturbed
+codegen enough to swamp the small record-allocation saving; do not add a
+discard-audit fast path to `EvidenceLedger` for public arithmetic without a
+fresh same-worker win.
+
+38xpk verdict: **0 wins / 2 losses / 0 neutral** this pass. Both losses were
+measured, reverted before commit, and routed to deeper structural work
+(output construction / owned-column materialization), not another semantic
+witness or safe portable-SIMD retry.
+
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator
 (`i64_slice_max_simd`/`i64_slice_min_simd`): process 8 independent `max`/`min` lanes per

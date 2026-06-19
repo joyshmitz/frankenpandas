@@ -35,6 +35,9 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | str.len (sweep bench_str) | 1M strings | 164.0 ms | 7.77 ms | **21.1× faster** | ✅ contiguous-Utf8 apply_str_int |
 | str.contains (sweep bench_str) | 1M strings | 150.8 ms | 7.90 ms | **19.1× faster** | ✅ vectorized memmem literal searcher |
 | DataFrame.sum(axis=1) Float64 (rrf64) | 500k×10 f64 | 40.19 ms | 7.11 ms | **5.65× faster** | ✅ FIXED — was 4.4× LOSS (175.9 ms)! typed reduce_rows_f64 (per-col as_f64_slice accumulate) vs Scalar per-row gather = 24.7× FP-side. Bit-identical (column-order f64 sum, no-NaN gated), conformance 79/79 |
+| DataFrame.min(axis=1) Float64 (rrf64) | 500k×10 f64 | 38.73 ms | 7.50 ms | **5.16× faster** | ✅ FIXED — reduce_rows_f64, was Scalar fallback; bit-identical (79 axis1 tests) |
+| DataFrame.max(axis=1) Float64 (rrf64) | 500k×10 f64 | 38.93 ms | 7.37 ms | **5.28× faster** | ✅ FIXED — reduce_rows_f64 |
+| DataFrame.prod(axis=1) Float64 (rrf64) | 500k×10 f64 | 71.13 ms | 7.34 ms | **9.69× faster** | ✅ FIXED — reduce_rows_f64 |
 | DataFrame.transpose (bench_df) | 2000×10 f64 | 0.036 ms | 1.47 ms | **0.025× (40× slower)** | 🔴 LOSS — Scalar gather-based; NICHE (transpose of large frames pathological/rare), low priority |
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
 | shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |

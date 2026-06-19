@@ -44,6 +44,16 @@ fn main() {
     let sum_axis1 = best(iters, || {
         std::hint::black_box(df.sum_axis1().expect("sum_axis1"));
     });
+    let min_axis1 = best(iters, || {
+        std::hint::black_box(df.min_axis1().expect("min_axis1"));
+    });
+    let max_axis1 = best(iters, || {
+        std::hint::black_box(df.max_axis1().expect("max_axis1"));
+    });
+    let prod_axis1 = best(iters, || {
+        std::hint::black_box(df.prod_axis1().expect("prod_axis1"));
+    });
+    println!("df_axis1 min={min_axis1}ns max={max_axis1}ns prod={prod_axis1}ns");
     // transpose: small frame (transpose of 500k rows -> 500k cols is pathological; use a slice)
     let small = df.head(2000).expect("head");
     let transpose = best(iters, || {

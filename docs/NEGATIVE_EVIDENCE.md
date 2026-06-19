@@ -192,6 +192,18 @@ bead 3nah5 — `#[global_allocator]` is SAFE Rust (no unsafe), so unlike the AVX
 is compatible with this codebase; only the workspace-coordination (arena interaction, re-
 baselining) blocks unilateral adoption.
 
+**ADOPTION VERIFY (cod-a exact-parent A/B).** Compared the `250bfbf2^` parent binary against
+`250bfbf2` (`release-perf`, local executable after `rch` build proof; both pinned with
+`taskset -c 7`). Broad `fp-bench` smoke found strong allocator wins where result materialization
+dominates: `cumsum` 51.48 → 17.99 ms (2.86×), `value_counts` 71.32 → 36.20 ms (1.97×),
+`filter_bool_mask` 34.67 → 15.93 ms (2.18×), `loc_labels` 0.332 → 0.232 ms (1.43×), and
+`join_outer` 5.59 → 1.67 ms (3.35×). Neutral controls: `drop_duplicates` +3.5%,
+`rolling_mean_w10` -4.3%, `rolling_std_w50` +0.5%, `ewm_mean` +0.1%, `join_inner` -8.4%,
+and `str_value_counts` +2.5% (several high-CV, not release proof). Apparent regressions were
+rerun in five paired batches and did not clear the rollback bar: `groupby_mean_float64` +1.7%,
+`groupby_mean_str` +1.7%, `groupby_transform_mean` +4.1%, `csv_write` +4.8%. Verdict:
+KEEP. No confirmed regression above 5%; no semantic code path changed.
+
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator
 (`i64_slice_max_simd`/`i64_slice_min_simd`): process 8 independent `max`/`min` lanes per

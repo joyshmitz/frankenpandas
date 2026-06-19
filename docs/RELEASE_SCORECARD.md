@@ -22,6 +22,9 @@ conformance guard passes by execution.
   (5×) need SIMD; utf8 groupby (1.8×) needs key-factorize→dense; small/miss-heavy
   RangeIndex indexers still trail pandas despite the exception-allocation fix. All gaps
   are tracked.
+- **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
+  process-boundary allocator: 5 broad smoke wins (up to 3.35×), neutral control lanes, and
+  no confirmed regression above 5% after paired reruns of the initially suspicious rows.
 - **Conformance debt:** down to 1 failure (`j9w3s` groupby-prod dtype, cod-b) from 6 (bug cosyd).
 
 

@@ -40,11 +40,23 @@ Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging*
 before this session's levers (value_counts 0.62×, sort 0.91× per the perf-frontier notes)
 and are now ahead — the FxHash-over-khash and zero-copy-gather/slice veins flipped them.
 
-## Conformance
+## Conformance (MEASURED — `rch exec -- cargo test --release -p fp-frame --tests`)
 
-- All shipped levers were designed bit-transparent and are covered by no-mock conformance
-  guards (`crates/fp-frame/tests/*_conformance.rs`) asserting typed-path == Scalar-path /
-  cross-dtype equality. Conformance/main green throughout.
+- **3073 passed / 6 failed.** All **15 typed-lever conformance guards PASS** → no recent perf
+  lever regressed (bit-transparency verified by execution, not just compilation).
+- The 6 failures are **behavioral/parity/math-golden, NOT perf-lever regressions** (surfaced
+  by the first real suite run — several are early cargo-check-only tests whose expectations
+  were never executed):
+  - `series_acosh_golden_basic`, `series_arccosh_golden_basic` — math goldens (not perf-related).
+  - `series_agg_size_any_all_tt0bx` — agg of mixed Int64+Bool: the result Column coerces
+    Bool→Int64 ([3,1,0,3]); test expected pandas object-dtype Bool ([3,True,False,3]). Real
+    parity gap (mixed-agg object dtype), not a perf lever.
+  - `dataframe_set_index_rejects_null_labels_oeirt` — Float64-NaN key via the Float64Index
+    path (i10en) isn't rejected; unrelated to the Int64 set_index lever (p9omo).
+  - `dataframe_groupby_prod_preserves_int64_j9w3s` — groupby prod returns Float64(6.0) vs
+    Int64(6); dtype-preservation gap.
+- ACTION: these need owner fixes (parity/golden), tracked separately; perf levers are clean.
+  Did NOT revert any perf lever (none caused these).
 
 ## Pending measurement
 

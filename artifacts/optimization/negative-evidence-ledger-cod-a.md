@@ -152,9 +152,9 @@ retry failed levers without a concrete retry predicate.
   remaining gap to a shared grouped-key primitive rather than another reducer
   micro-specialization.
 
-## 2026-06-18 - br-frankenpandas-uza04.203 - Generic groupby median numeric vectors
+## 2026-06-18/19 - br-frankenpandas-uza04.203 - Generic groupby median numeric vectors
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: implemented, gauntlet-measured against pandas 2.2.3 on 2026-06-19.
 - Lever: route generic-key `groupby_agg(Median)` / `groupby_median` over
   per-group `Vec<f64>` numeric value vectors instead of cloning every
   non-missing value into per-group `Vec<Scalar>` and then allocating a second
@@ -191,15 +191,30 @@ retry failed levers without a concrete retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is
-  `groupby-bench --agg agg-median --key-kind utf8` on realistic cardinalities
-  versus legacy pandas original and a pre-patch per-group `Vec<Scalar>` median
-  baseline, with golden digest unchanged.
-- Retry predicate if rejected: do not retry scalar-clone elimination for median
-  unless same-host profiling shows residual self-time in the generic median
-  fallback's `Vec<Scalar>` materialization or `collect_finite` allocation; route
-  remaining median gaps to shared grouped-key plans or per-group selection
-  algorithms rather than another wrapper-level vector swap.
+- Golden digest: `groupby-bench --agg agg-median --key-kind utf8 --value-kind float64
+  --rows 100000 --key-cardinality 1000 --golden` emitted
+  `out_rows=1000 digest=427ec92527f4043d`.
+- Benchmark verdict: KEEP. Head-to-head comparator was pandas 2.2.3
+  `df.groupby("keys", sort=True)["values"].median()` on the same deterministic
+  1000-cardinality UTF8-key Float64/NaN-every-37th workload. Accepted CV-gated
+  rows: 100k rows, FP p50 2.101 ms, pandas p50 5.527 ms, ratio **2.631x
+  faster**, FP CV 1.48%, pandas CV 4.56%; 2M rows, FP p50 42.975 ms, pandas
+  p50 77.171 ms, ratio **1.796x faster**, FP CV 3.21%, pandas CV 1.06%. No
+  code revert.
+- High-CV diagnostic recorded but not counted as release proof: 1M p50 ratio
+  2.504x faster (FP CV 6.62%, pandas CV 1.08%).
+- Build / bench guard: RCH `cargo build --profile release-perf -p fp-groupby
+  --bin groupby-bench` passed on worker `hz2`; local clean-worktree single-binary
+  build passed in the same `CARGO_TARGET_DIR`; focused conformance guard
+  `cargo test -p fp-groupby groupby_median_utf8_keys_numeric_vectors_uza04203`
+  passed; RCH `cargo bench -p fp-conformance --bench vs_pandas -- groupby/`
+  passed on worker `vmi1227854`.
+- Retry predicate if this row regresses later: revisit median clone-elision only
+  if a same-host, CV-gated rerun falls below parity or profiling moves residual
+  time back into the generic median fallback's `Vec<Scalar>` materialization or
+  `collect_finite` allocation. Otherwise route future median gaps to shared
+  grouped-key plans or per-group selection algorithms, not another wrapper-level
+  vector swap.
 
 ## 2026-06-18/19 - br-frankenpandas-uza04.204 - Generic groupby nunique borrowed sets
 

@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 13/19 realistic ops faster (median ≈5× among wins); 6 losses, all
+**Perf vs pandas 2.2.3: 14/20 realistic ops faster (median ≈5× among wins); 6 losses, all
 kernel/structural with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -10,13 +10,14 @@ the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — eve
 conformance guard passes by execution.
 
 - **Ship-ready strengths:** value_counts (2.6×), drop_duplicates (2.0×), groupby int-key
-  (5.4×), groupby nunique Utf8-key (2.89×), reset/set_index (5–6.5×), std/var (11×),
-  str case (6.5×), head/tail (17×), slice/filter/sort/sum (1.2–1.3×),
-  RangeIndex.asof scalar lookup (3,840–16,031×) — fp beats pandas wherever typed access
-  unlocks a cheaper algorithm.
-- **Known gaps before "faster than pandas everywhere":** concat (24×) + shift (12×) need a
-  kernel-level single-pass column builder (avoid rebuild); max/min (5×) need SIMD; utf8
-  groupby (1.8×) needs key-factorize→dense. All 4 are kernel/structural, tracked.
+  (5.4×), groupby nunique Utf8-key (2.89×), groupby median Utf8-key (1.80–2.63×),
+  reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
+  slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×) —
+  fp beats pandas wherever typed access unlocks a cheaper algorithm.
+- **Known gaps before "faster than pandas everywhere":** concat (24×), shift (12×), and
+  ffill (6.6×) need a kernel-level single-pass column builder (avoid rebuild); max/min
+  (5×) need SIMD; utf8 groupby (1.8×) needs key-factorize→dense. All 6 are
+  kernel/structural, tracked.
 - **Conformance debt:** down to 1 failure (`j9w3s` groupby-prod dtype, cod-b) from 6 (bug cosyd).
 
 
@@ -44,21 +45,22 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
 | groupby.sum utf8 key | 1M, 1000 keys | 0.56× | 🔴 1.78× slower (Utf8 hashing) |
 | groupby.agg(nunique) utf8 key | 2M, 1000 keys | 2.89× | 🟢 CV-gated accepted |
+| groupby.agg(median) utf8 key | 100k/2M, 1000 keys | 2.63× / 1.80× | 🟢 CV-gated accepted |
 | set_index int col | 1M, 2 cols | 6.5× | 🟢 |
 | RangeIndex.asof | 4,096 scalar probes, 100k/1M rows | 3,840× / 16,031× | 🟢 |
 
-**Score: 13/19 measured ops faster than pandas; 6 losses (max, min, concat, shift, ffill,
+**Score: 14/20 measured ops faster than pandas; 6 losses (max, min, concat, shift, ffill,
 utf8-groupby); 0 regressions; 2 reverted ~0-gain attempts.**
 
-Median win among the 13 ≈ 5×; the 6 losses are all kernel/structural (SIMD, column-rebuild,
+Median win among the 14 ≈ 5×; the 6 losses are all kernel/structural (SIMD, column-rebuild,
 Utf8-factorize) with documented fix paths — none are code-first fp-frame regressions. ffill
 joins shift/concat as a confirmed **column-rebuild** loss (typed path, but rebuilds a fresh
 Column + re-inits validity vs pandas' in-place fill).
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
-the whole Column (concat 24×, shift 12×) — fp's column-rebuild construction is heavier than
-numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. All 4 losses are
+the whole Column (concat 24×, shift 12×, ffill 6.6×) — fp's column-rebuild construction is heavier than
+numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. All 6 losses are
 kernel/structural, not code-first.
 
 Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging* pandas

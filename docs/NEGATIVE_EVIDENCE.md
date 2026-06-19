@@ -40,6 +40,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | groupby.sum Int64 key (dense grouping) | 1M rows, 1000 keys | 13.26 ms | 2.44 ms | **5.4× faster** | ✅ KEEP — int64_dense_grouping |
 | groupby.sum Utf8 key (build_groups FxHash buguz) | 1M rows, 1000 keys | 31.10 ms | 55.33 ms | **0.56× (1.78× SLOWER)** | ⚠️ KEEP (FxHash ≥ SipHash) but LOSS — Utf8 ScalarKey hashing |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 153.75 ms | 53.12 ms | **2.89× faster** | ✅ KEEP — CV-gated accepted; FP CV 2.68%, pandas CV 0.95% |
+| groupby.agg(median) Utf8 key (uza04.203) | 100k rows, 1000 keys, Float64 values, NaN every 37th | 5.53 ms | 2.10 ms | **2.63× faster** | ✅ KEEP — CV-gated accepted; FP CV 1.48%, pandas CV 4.56% |
+| groupby.agg(median) Utf8 key (uza04.203) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 77.17 ms | 42.98 ms | **1.80× faster** | ✅ KEEP — CV-gated accepted; FP CV 3.21%, pandas CV 1.06% |
 
 ### High-CV directional rows (not release proof)
 
@@ -47,6 +49,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 |---|---|---:|---:|---:|---|
 | groupby.agg(nunique) Utf8 key (uza04.204) | 100k rows, 1000 keys | 7.82 ms | 4.44 ms | 1.76× faster | DROPPED_HIGH_CV — FP CV 12.91%, pandas CV 13.55% |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 1M rows, 1000 keys, pinned CPU rerun | 84.29 ms | 27.29 ms | 3.09× faster | DROPPED_HIGH_CV — FP CV 5.52%, pandas CV 6.35% |
+| groupby.agg(median) Utf8 key (uza04.203) | 1M rows, 1000 keys, pinned CPU run | 49.83 ms | 19.90 ms | 2.50× faster | DROPPED_HIGH_CV — FP CV 6.62%, pandas CV 1.08% |
 
 ### Win: RangeIndex.asof closed-form scalar lookup
 The `jlv2o` lever changes ascending `RangeIndex::asof(Int64)` from direct label scanning
@@ -65,9 +68,10 @@ hashing + `ScalarKey::Utf8` (holds a `&str`/owned), Vec<usize> accumulation, the
 FxHash lever (buguz) beat SipHash but the path still loses to pandas' factorize-then-aggregate
 on object keys. Not a regression (kept). FIX: factorize Utf8 keys to dense codes once (like
 the Int64 dense path), then group on codes — a bigger algorithmic change, cod-b's groupby
-domain. Int64-key groupby already wins 5.4× via the dense path, and the later `Nunique`
-value-clone elimination lane wins 2.89× on a 2M-row CV-gated workload. The remaining Utf8
-gap is reducer-specific: plain sum/mean-style Utf8 grouping still needs factorize→dense.
+domain. Int64-key groupby already wins 5.4× via the dense path; later value-lane clone
+elimination wins for `Nunique` (2.89× on a 2M-row CV-gated workload) and `Median`
+(1.80× on a 2M-row CV-gated workload). The remaining Utf8 gap is reducer-specific:
+plain sum/mean-style Utf8 grouping still needs factorize→dense.
 
 ### Gap: shift/concat/ffill structural — column-rebuild vs in-place (6.6–24× slower)
 **ffill (2M f64, ~10% NaN) confirms the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**

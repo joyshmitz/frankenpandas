@@ -21,14 +21,39 @@ matrix.
 | 100k | 2 / 8 | 6 / 8 | 3.804x faster | `groupby_transform_mean` 4.586x, `groupby_count` 3.155x | Keep cluster; rerun high-CV rows |
 | 1M | 3 / 8 | 5 / 8 | 4.345x faster | `groupby_agg_multi` 6.291x, `groupby_transform_mean_str` 2.178x, `groupby_count` 5.988x | Keep cluster; rerun high-CV rows |
 | 2M focused nunique | 1 / 1 | 0 / 1 | 2.895x faster | `groupby_agg_nunique_utf8_float64` 2.895x | Keep `br-frankenpandas-uza04.204` |
-| Combined accepted | 6 / 17 | 11 / 16 plus 2 high-CV nunique diagnostics | 3.860x faster | No accepted neutral/slower rows | No revert |
+| Focused median | 2 / 3 | 1 / 3 | 2.174x faster | `groupby_agg_median_utf8_float64` 2.631x at 100k, 1.796x at 2M | Keep `br-frankenpandas-uza04.203` |
+| Combined accepted | 8 / 20 | 14 high-CV diagnostics total | 3.342x faster | No accepted neutral/slower rows | No revert |
 
 Release-readiness impact: GroupBy moves from stale "slower" evidence to
 partial measured wins on realistic 100k/1M workloads, plus a CV-gated 2M
-`agg-nunique` win for `br-frankenpandas-uza04.204`. The category is still not
+`agg-nunique` win for `br-frankenpandas-uza04.204` and CV-gated 100k/2M
+`agg-median` wins for `br-frankenpandas-uza04.203`. The category is still not
 fully validated because 11 of the original 16 harness rows were rejected by the
-high-CV filter and the 100k/1M nunique diagnostics also dropped. Overall release
-readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+high-CV filter and focused nunique/median diagnostics also dropped. Overall
+release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+
+### 2026-06-19 Cod-a Focused Median Proof - `br-frankenpandas-uza04.203`
+
+Comparator: pandas 2.2.3 / numpy 2.4.3. Workload: `groupby_agg_median_utf8_float64`,
+UTF8 keys, Float64 values, NaN every 37th row, `sort=True`.
+FP command: `groupby-bench --agg agg-median --key-kind utf8 --value-kind float64`,
+run under `taskset -c 7` from
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`.
+
+| Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 100k | 2.101 ms | 5.527 ms | 2.631x | 1.48% | 4.56% | FASTER / ACCEPTED |
+| 1M | 19.903 ms | 49.835 ms | 2.504x | 6.62% | 1.08% | DROPPED_HIGH_CV |
+| 2M | 42.975 ms | 77.171 ms | 1.796x | 3.21% | 1.06% | FASTER / ACCEPTED |
+
+Guards:
+- RCH build: `cargo build --profile release-perf -p fp-groupby --bin groupby-bench`
+  on worker `hz2`, exit 0.
+- Local clean-worktree timing build: same target dir, exit 0.
+- Focused conformance guard:
+  `cargo test -p fp-groupby groupby_median_utf8_keys_numeric_vectors_uza04203`, exit 0.
+- RCH Criterion guard: `cargo bench -p fp-conformance --bench vs_pandas -- groupby/`
+  on worker `vmi1227854`, exit 0.
 
 ### 2026-06-19 Cod-a Focused Nunique Proof - `br-frankenpandas-uza04.204`
 

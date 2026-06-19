@@ -224,6 +224,45 @@ rerun in five paired batches and did not clear the rollback bar: `groupby_mean_f
 `groupby_mean_str` +1.7%, `groupby_transform_mean` +4.1%, `csv_write` +4.8%. Verdict:
 KEEP. No confirmed regression above 5%; no semantic code path changed.
 
+### Win: clone-free generic `groupby.mean` on Utf8 keys (br-frankenpandas-uza04.189) — 2.80x vs pandas
+**VERIFIED after code-first commit.** The implementation landed earlier in
+`1f5681ec` and was left open pending honest vs-pandas proof. Current cod-a
+verification rebuilt `fp-groupby` per-crate with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`:
+`rch exec -- cargo build -p fp-groupby --profile release-perf --bin groupby-bench`
+passed on worker `hz2`; local release-perf binary was then rebuilt because RCH
+retrieved only metadata, not the runnable bench executable.
+
+Head-to-head fixture: 1,000,000 rows, 1,000 Utf8 groups (`key_000000`...),
+Float64 values, every 37th value missing, `sort=True`. FP command:
+`taskset -c 7 groupby-bench --agg mean --key-kind utf8 --value-kind float64
+--rows 1000000 --key-cardinality 1000`. Long FP batches were 14.961, 14.711,
+13.514 ms/op (median 14.711 ms). Matching pandas 2.2.3 fixture batches were
+40.998, 41.270, 41.230, 40.817, 42.377 ms/op (median 41.230 ms, batch CV
+1.47%). Verdict: **41.230 / 14.711 = 2.80x faster than pandas** (2.73x even
+against FP's slowest long batch). Golden digest:
+`ca3d3a8a70a57dd9` for the FP output (`out_rows=1000`).
+
+Conformance guard:
+`rch exec -- cargo test -p fp-groupby groupby_mean_utf8_counter_path_preserves_null_and_order_semantics --release`
+passed on worker `vmi1149989` (1 passed, 0 failed). Semantics preserved: null
+skipping, sorted output order, and first-seen `sort=false` ordering are covered
+by the focused guard. This closes the pending code-first bead as a real measured
+win. Remaining Utf8 groupby loss is narrower: `groupby.sum` over Utf8 keys is
+still tracked separately; do not generalize this mean win to that row.
+
+**Route ledger for this pass.** `vs_pandas_harness.py` routing with the current
+cod-a `fp-bench` binary found many high-CV rows and one valid owner-conflicting
+loss. Dropped as non-evidence: dataframe_ops 100k/1M all workloads; IO
+`csv_read`/`csv_write` at 100k; `groupby_mean_str` 100k/1M; strings
+`str_value_counts`/`str_groupby_sum` 1M; `range_index_take_arithmetic` 100k/1M;
+`reindex` 100k/1M. Valid rows: `groupby_transform_mean_str` 1M was already a
+win at 3.65x; `affine_index_take_arithmetic` 100k was a real loss at 0.879x
+(FP 6.956 ms, pandas 6.112 ms), but it maps to active `cc` `Index::take`
+work and cod-b RangeIndex children, so cod-a did not edit that surface. Current
+valid route ratio: **2 wins / 1 loss / 0 neutral**, with the loss routed to
+existing index owners.
+
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator
 (`i64_slice_max_simd`/`i64_slice_min_simd`): process 8 independent `max`/`min` lanes per

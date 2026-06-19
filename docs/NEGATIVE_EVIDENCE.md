@@ -27,7 +27,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | min typed Int64 (4qs3h) | 2M int64 | 230 µs | 1.17 ms | **0.20× (5.1× SLOWER)** | ⚠️ KEEP but LOSES to numpy SIMD — gap |
 
 | reset_index typed Int64 idx→col (bp6k7) | 1M int64-indexed, 2 cols | 1.93 ms | 0.38 ms | **5.1× faster** | ✅ KEEP — Index::from_i64_values |
-| concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path) but BIG LOSS vs pandas |
+| concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path); 24× is glibc-malloc-bound — see mimalloc row |
+| concat + mimalloc global allocator (EXPERIMENT) | 8×125k Int64, ignore_index | 0.28 ms | 0.52 ms | **0.54× (1.86× slower)** | 🚀 13× faster than glibc-malloc concat — allocator is the floor; adopt workspace-wide (bead) |
 
 | str.lower/upper contiguous (apply_str_utf8) | 1M strings | 84.04 ms | 12.88 ms | **6.5× faster** | ✅ KEEP — contiguous buf + ASCII in-place |
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
@@ -135,10 +136,22 @@ is RESULT CONSTRUCTION** — allocating + filling a fresh 8 MB `Vec<i64>` (clone
 page faults) for the output column. `Index::new_known_unique_int64_unit_range`, `Series::new`,
 and `ValidityMask::all_valid` are all verified O(1) (affine labels + preset caches; empty
 words vec; len-only check). pandas' `np.concatenate` (281µs) wins via numpy's optimized
-allocator/memcpy (no per-page first-touch cost, buffer reuse). FIX would need a custom
-allocator / huge-page / buffer-pool in the columnar kernel — out of safe code-first scope and
-NOT closable by any column-build or backing change. Dead ends recorded: don't retry typed-
-backing or validity-init tweaks for concat; the cost is the fresh-allocation page-fault floor.
+allocator/memcpy (no per-page first-touch cost, buffer reuse).
+
+**FIX CONFIRMED — pooling global allocator (mimalloc) recovers 13×.** The predicted
+allocator fix was tested: `bench_concat_mimalloc` runs the identical 1M/k=8 concat with
+mimalloc as `#[global_allocator]`. Result: **6.69 ms (system glibc malloc) → 0.52 ms
+(mimalloc) = 12.9× faster.** That flips concat from **24× slower than pandas → 1.86× slower**
+(0.52 ms vs pandas 0.28 ms). So the rebuild-class "structural loss" was ~93% the glibc
+malloc large-allocation cost (mmap threshold → fresh mmap + kernel zero-fill + first-touch
+faults per call), NOT anything in fp's column/index/Series logic. **This is the single
+highest-leverage lever found in the gauntlet**: a pooling global allocator should recover a
+large fraction of concat/shift/ffill (all rebuild-class, all allocation-bound) at once,
+workspace-wide. ACTION: adopt mimalloc/jemalloc as the global allocator for the user-facing
+binary (fp-python cdylib) + benchmark harnesses — a workspace coordination decision (interacts
+with fp-groupby/fp-join arena allocators), filed as a high-priority bead, not imposed
+unilaterally. Dead ends still recorded: typed-backing and validity-init tweaks don't help;
+the lever is the allocator, not the column build.
 
 ### Gap: max/min lose to numpy SIMD (~5×)
 fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)

@@ -2,16 +2,18 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 27/32 realistic ops faster (median ≈2.8× among wins); 3 losses,
+**Perf vs pandas 2.2.3: 29/34 realistic ops faster (median ≈2.8× among wins); 3 losses,
 2 neutral rows, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
 the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — every typed-lever
 conformance guard passes by execution. Current dcfv8 gate also has `fp-conformance --lib
---tests` green.
+--tests` green; the `uza04.191` groupby min/max verification has focused `fp-groupby`
+release tests green.
 
 - **Ship-ready strengths:** value_counts (2.6×), drop_duplicates (2.0×), groupby int-key
-  (5.4×), groupby sum/prod Utf8-key (2.18×/2.54×), groupby mean Utf8-key (2.80×), groupby nunique Utf8-key (2.89×),
+  (5.4×), groupby sum/prod Utf8-key (2.18×/2.54×), groupby min/max Utf8-key (2.60×/2.54×),
+  groupby mean Utf8-key (2.80×), groupby nunique Utf8-key (2.89×),
   groupby median Utf8-key (1.80–2.63×),
   groupby std/var Utf8-key (1.22–1.34×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
@@ -58,6 +60,8 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
 | groupby.mean utf8 key | 1M, 1000 keys | 2.80× | 🟢 clone-free streaming sum/count counters |
 | groupby.sum utf8 key | 1M, 1000 keys | 2.18× | 🟢 clone-free streaming sum counter; was 0.56× |
+| groupby.min utf8 key | 1M, 1000 keys | 2.60× | 🟢 clone-free streaming extremum slot |
+| groupby.max utf8 key | 1M, 1000 keys | 2.54× | 🟢 clone-free streaming extremum slot |
 | groupby.agg(nunique) utf8 key | 2M, 1000 keys | 2.89× | 🟢 CV-gated accepted |
 | groupby.agg(median) utf8 key | 100k/2M, 1000 keys | 2.63× / 1.80× | 🟢 CV-gated accepted |
 | groupby.agg(var) utf8 key | 100k/1M/2M, 1000 keys | 1.29× / 1.22× / 1.30× | 🟢 CV-gated accepted |
@@ -67,16 +71,19 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 27/32 measured ops faster than pandas; 3 losses (max, min, concat),
+**Score: 29/34 measured ops faster than pandas; 3 losses (max, min, concat),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 8 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 27 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 29 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
 RangeIndex indexers were a separate vectorized-engine gap after `29u49`; `uza04.159`
 closed it with arithmetic bulk membership and an exact reindex lattice path.
+The `uza04.191` groupby min/max verification closes two more generic-key extremum rows:
+streaming scalar slots beat pandas 2.2.3 by 2.60×/2.54× on 1M Utf8-key Float64 groups,
+with golden digests `def13b65b5e3a35d` and `6d20c5176a43035d`.
 The latest `tycz7` Series add/mul pass kept a disjoint morsel sweep in
 `apply_f64_slices_nan_tracked`: public add/mul improved from 16.56/16.40 ms to
 2.76/2.91 ms pinned, while preserving focused conformance. Add is neutral pinned

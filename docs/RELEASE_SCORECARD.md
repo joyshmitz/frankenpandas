@@ -2,8 +2,8 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 14/20 realistic ops faster (median ≈5× among wins); 6 losses, all
-kernel/structural with documented fix paths; 0 perf-lever regressions.** Conformance:
+**Perf vs pandas 2.2.3: 14/23 realistic ops faster (median ≈5× among wins); 8 losses and
+1 neutral row, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
 the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — every typed-lever
@@ -16,8 +16,9 @@ conformance guard passes by execution.
   fp beats pandas wherever typed access unlocks a cheaper algorithm.
 - **Known gaps before "faster than pandas everywhere":** concat (24×), shift (12×), and
   ffill (6.6×) need a kernel-level single-pass column builder (avoid rebuild); max/min
-  (5×) need SIMD; utf8 groupby (1.8×) needs key-factorize→dense. All 6 are
-  kernel/structural, tracked.
+  (5×) need SIMD; utf8 groupby (1.8×) needs key-factorize→dense; small/miss-heavy
+  RangeIndex indexers still trail pandas despite the exception-allocation fix. All gaps
+  are tracked.
 - **Conformance debt:** down to 1 failure (`j9w3s` groupby-prod dtype, cod-b) from 6 (bug cosyd).
 
 
@@ -48,20 +49,26 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | groupby.agg(median) utf8 key | 100k/2M, 1000 keys | 2.63× / 1.80× | 🟢 CV-gated accepted |
 | set_index int col | 1M, 2 cols | 6.5× | 🟢 |
 | RangeIndex.asof | 4,096 scalar probes, 100k/1M rows | 3,840× / 16,031× | 🟢 |
+| RangeIndex.get_indexer miss-heavy | 100k targets | 0.83× | 🔴 1.21× slower; 3.82× faster than legacy get_loc-loop model |
+| RangeIndex.reindex all-miss | 100k / 1M targets | 0.86× / 1.07× | 🔴 100k slower; 1M neutral; keep vs legacy model |
 
-**Score: 14/20 measured ops faster than pandas; 6 losses (max, min, concat, shift, ffill,
-utf8-groupby); 0 regressions; 2 reverted ~0-gain attempts.**
+**Score: 14/23 measured ops faster than pandas; 8 losses (max, min, concat, shift, ffill,
+utf8-groupby, RangeIndex.get_indexer 100k, RangeIndex.reindex 100k), 1 neutral
+(RangeIndex.reindex 1M); 0 regressions; 2 reverted ~0-gain attempts.**
 
-Median win among the 14 ≈ 5×; the 6 losses are all kernel/structural (SIMD, column-rebuild,
-Utf8-factorize) with documented fix paths — none are code-first fp-frame regressions. ffill
-joins shift/concat as a confirmed **column-rebuild** loss (typed path, but rebuilds a fresh
-Column + re-inits validity vs pandas' in-place fill).
+Median win among the 14 ≈ 5×; the losses are kernel/structural or pandas-vectorized-engine
+gaps with documented fix paths — none are code-first fp-frame regressions. ffill joins
+shift/concat as a confirmed **column-rebuild** loss (typed path, but rebuilds a fresh Column
++ re-inits validity vs pandas' in-place fill). The RangeIndex indexer loss is different:
+`29u49` removed a real FP-side exception-allocation cost, but pandas still wins on the
+100k vectorized indexer rows.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
 the whole Column (concat 24×, shift 12×, ffill 6.6×) — fp's column-rebuild construction is heavier than
-numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. All 6 losses are
-kernel/structural, not code-first.
+numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. The RangeIndex
+indexer loss is a separate vectorized-engine gap, not a regression of the retained FP-side
+miss-allocation lever.
 
 Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging* pandas
 before this session's levers (value_counts 0.62×, sort 0.91× per the perf-frontier notes)
@@ -87,9 +94,10 @@ and are now ahead — the FxHash-over-khash and zero-copy-gather/slice veins fli
 
 ## Pending measurement
 
-Remaining code-first lanes are now narrower: cod-b's categorical-index family and older
-RangeIndex helpers still need focused Criterion/pandas rows, and cod-a's groupby ledger has
-high-CV rows to rerun. Already measured rows above should not be treated as pending.
+Remaining code-first lanes are now narrower: cod-b's categorical-index family and RangeIndex
+helpers other than `29u49`/`jlv2o` still need focused Criterion/pandas rows, and cod-a's
+groupby ledger has high-CV rows to rerun. Already measured rows above should not be treated
+as pending.
 
 ## Method / infra
 

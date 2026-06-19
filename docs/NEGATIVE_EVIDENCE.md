@@ -37,6 +37,9 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
 | RangeIndex.asof closed-form (jlv2o) | 1M rows, 4,096 scalar probes | 1,050.29 ms | 65.52 µs | **16,031× faster** | ✅ KEEP — lookup no longer scales with range length |
+| RangeIndex.get_indexer miss-heavy (29u49) | 100k targets, 15/16 misses | 1.110 ms | 1.344 ms | **0.83× (1.21× SLOWER)** | ⚠️ KEEP vs legacy — 3.82× faster than get_loc-loop model, but pandas gap remains |
+| RangeIndex.reindex all-miss (29u49) | 100k target RangeIndex | 0.990 ms | 1.150 ms | **0.86× (1.16× SLOWER)** | ⚠️ KEEP vs legacy — 4.64× faster than get_loc-loop model, but pandas gap remains |
+| RangeIndex.reindex all-miss (29u49) | 1M target RangeIndex | 13.13 ms | 12.28 ms | 1.07× faster | NEUTRAL — below 10% margin; 4.11× faster than legacy model |
 | groupby.sum Int64 key (dense grouping) | 1M rows, 1000 keys | 13.26 ms | 2.44 ms | **5.4× faster** | ✅ KEEP — int64_dense_grouping |
 | groupby.sum Utf8 key (build_groups FxHash buguz) | 1M rows, 1000 keys | 31.10 ms | 55.33 ms | **0.56× (1.78× SLOWER)** | ⚠️ KEEP (FxHash ≥ SipHash) but LOSS — Utf8 ScalarKey hashing |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 153.75 ms | 53.12 ms | **2.89× faster** | ✅ KEEP — CV-gated accepted; FP CV 2.68%, pandas CV 0.95% |
@@ -50,6 +53,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | groupby.agg(nunique) Utf8 key (uza04.204) | 100k rows, 1000 keys | 7.82 ms | 4.44 ms | 1.76× faster | DROPPED_HIGH_CV — FP CV 12.91%, pandas CV 13.55% |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 1M rows, 1000 keys, pinned CPU rerun | 84.29 ms | 27.29 ms | 3.09× faster | DROPPED_HIGH_CV — FP CV 5.52%, pandas CV 6.35% |
 | groupby.agg(median) Utf8 key (uza04.203) | 1M rows, 1000 keys, pinned CPU run | 49.83 ms | 19.90 ms | 2.50× faster | DROPPED_HIGH_CV — FP CV 6.62%, pandas CV 1.08% |
+| RangeIndex.get_indexer miss-heavy (29u49) | 1M targets, 15/16 misses | 16.43 ms | 10.74 ms | 1.53× faster | DROPPED_HIGH_CV — pandas CV 5.40%; FP-side legacy speedup 4.65× |
 
 ### Win: RangeIndex.asof closed-form scalar lookup
 The `jlv2o` lever changes ascending `RangeIndex::asof(Int64)` from direct label scanning
@@ -61,6 +65,24 @@ is both behavior-guarded and decisively faster than pandas on the targeted workl
 Artifacts: `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json`,
 `artifacts/bench/gauntlet_cod_b_range_asof_criterion_local.txt`, and
 `artifacts/bench/gauntlet_cod_b_range_asof_pandas.json`.
+
+### Mixed: RangeIndex miss-heavy bulk indexers
+The `29u49` lever removes per-miss `IndexError` string allocation from
+`RangeIndex::{get_indexer,get_indexer_non_unique,reindex}` by keeping public errors at
+`get_loc` and using an internal `Option<usize>` lookup in bulk kernels. Focused Criterion
+confirms the current path is not a ~0-gain lever: it is 3.82× faster than the get_loc-loop
+legacy model for 100k miss-heavy `get_indexer`, 4.64× faster for 100k all-miss `reindex`,
+and 4.11× faster for 1M all-miss `reindex`.
+
+Against pandas, however, the accepted release rows are not wins: 100k `get_indexer` is 1.21×
+slower, 100k `reindex` is 1.16× slower, and 1M `reindex` is only 1.07× faster so it is
+classified as neutral. No revert: the FP-side gain is large and behavior-guarded, but this
+does not close the pandas gap. Next retry should target output vector allocation / pandas'
+vectorized RangeIndex engine rather than reintroducing exception-driven miss handling.
+Artifacts: `artifacts/bench/gauntlet_cod_b_range_indexers_vs_pandas.json`,
+`artifacts/bench/gauntlet_cod_b_range_indexers_criterion_local.txt`, and
+`artifacts/bench/gauntlet_cod_b_range_indexers_criterion_rch.txt`, and
+`artifacts/bench/gauntlet_cod_b_range_indexers_pandas.json`.
 
 ### Gap: Utf8 groupby 1.78× slower than pandas
 fp groups Utf8 keys via `build_groups` → `FxHashMap<ScalarKey, Vec<usize>>`: per-row String

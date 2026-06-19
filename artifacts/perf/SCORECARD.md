@@ -109,6 +109,34 @@ Evidence artifacts:
 - `artifacts/bench/gauntlet_cod_b_range_asof_pandas.json`
 - `artifacts/optimization/negative-evidence-ledger-cod-b.md`
 
+## 2026-06-19 Cod-b Gauntlet Refresh - RangeIndex Miss-Heavy Indexers
+
+Release-readiness score for this cluster: **2/5**.
+
+- Bead: `br-frankenpandas-29u49`.
+- pandas oracle: 2.2.3 public `RangeIndex.get_indexer` and `RangeIndex.reindex`.
+- FrankenPandas profile: focused `fp-index` Criterion bench with a bench-local
+  legacy model that calls public `get_loc` for every target miss.
+- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- Decision: keep the `position_of_value` bulk-kernel path because it is a large
+  FP-side improvement over the legacy error-allocation model, but do not count it
+  as pandas-ready. The accepted pandas rows are loss/loss/neutral.
+
+| Workload | Rows | FP median | pandas median | Ratio vs pandas | FP vs legacy model | Verdict | Action |
+|---|---:|---:|---:|---:|---:|---|---|
+| `get_indexer`, 15/16 misses | 100k | 1.344 ms | 1.110 ms | 0.825x | 3.82x faster | SLOWER | Keep `29u49`; target output/vectorized path next |
+| `get_indexer`, 15/16 misses | 1M | 10.744 ms | 16.435 ms | 1.530x | 4.65x faster | DROPPED_HIGH_CV | pandas CV 5.40% |
+| `reindex`, all misses | 100k | 1.150 ms | 0.990 ms | 0.860x | 4.64x faster | SLOWER | Keep `29u49`; pandas gap remains |
+| `reindex`, all misses | 1M | 12.285 ms | 13.127 ms | 1.069x | 4.11x faster | NEUTRAL | Keep; below 10% margin |
+
+Evidence artifacts:
+
+- `artifacts/bench/gauntlet_cod_b_range_indexers_vs_pandas.json`
+- `artifacts/bench/gauntlet_cod_b_range_indexers_criterion_local.txt`
+- `artifacts/bench/gauntlet_cod_b_range_indexers_criterion_rch.txt`
+- `artifacts/bench/gauntlet_cod_b_range_indexers_pandas.json`
+- `artifacts/optimization/negative-evidence-ledger-cod-b.md`
+
 ## 2026-06-18/19 Gauntlet Refresh: Range/affine `Index::take`
 
 Release-readiness score for this cluster: **2/5**.

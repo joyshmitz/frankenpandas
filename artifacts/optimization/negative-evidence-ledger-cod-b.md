@@ -542,9 +542,9 @@ retry predicate.
   above 0.1% self-time and the residual is arithmetic membership rather than
   typed `Index` construction or output allocation.
 
-## 2026-06-18 - br-frankenpandas-29u49 - RangeIndex miss-heavy indexers
+## 2026-06-18/19 - br-frankenpandas-29u49 - RangeIndex miss-heavy indexers
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: measured; keep as FP-side improvement, not pandas-ready.
 - Lever: add internal `RangeIndex::position_of_value` and route
   `RangeIndex::{get_indexer, get_indexer_non_unique, reindex}` through it instead
   of calling public `get_loc` for every target.
@@ -565,12 +565,34 @@ retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is criterion
-  miss-heavy `RangeIndex::get_indexer`/`reindex` on 1M targets versus the legacy
-  pandas original and a pre-patch `get_loc` error-allocation baseline.
+- Benchmark verdict: accepted mixed evidence. Focused Criterion measured the
+  current bulk path against a bench-local legacy model that calls public
+  `get_loc` for every target and maps misses to `-1`. pandas 2.2.3 public API
+  timings used prebuilt target objects so construction stayed outside the timed
+  window, matching the Criterion setup.
+
+| Workload | Rows | Current FP median | Legacy model median | pandas median | Ratio vs pandas | FP speedup vs legacy | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `get_indexer`, 15/16 misses | 100k | 1.344 ms | 5.139 ms | 1.110 ms | 0.825x | 3.82x | SLOWER_THAN_PANDAS |
+| `get_indexer`, 15/16 misses | 1M | 10.744 ms | 49.907 ms | 16.435 ms | 1.530x | 4.65x | DROPPED_HIGH_CV (pandas CV 5.40%) |
+| `reindex`, all misses | 100k | 1.150 ms | 5.341 ms | 0.990 ms | 0.860x | 4.64x | SLOWER_THAN_PANDAS |
+| `reindex`, all misses | 1M | 12.285 ms | 50.447 ms | 13.127 ms | 1.069x | 4.11x | NEUTRAL_VS_PANDAS |
+
+- Decision: no revert. This is not a ~0-gain optimization: the retained path is
+  3.82x-4.65x faster than the legacy error-allocation model. It is also not a
+  pandas-domination result; pandas still wins the accepted 100k rows and the 1M
+  reindex row is inside the neutral band. The next useful lever is output/vector
+  allocation or pandas-style vectorized engine behavior, not returning to
+  exception-driven misses.
+- Artifacts:
+  `artifacts/bench/gauntlet_cod_b_range_indexers_vs_pandas.json`,
+  `artifacts/bench/gauntlet_cod_b_range_indexers_criterion_local.txt`,
+  `artifacts/bench/gauntlet_cod_b_range_indexers_criterion_rch.txt`,
+  `artifacts/bench/gauntlet_cod_b_range_indexers_pandas.json`.
 - Retry predicate if rejected: only revisit if a same-host benchmark shows these
   vectorized RangeIndex indexers above 0.1% self-time and allocation profiling
-  confirms miss-error construction is still material.
+  confirms residual output allocation or pandas-style vectorization, not
+  miss-error construction, is still material.
 
 ## 2026-06-18 - br-frankenpandas-ruthb - RangeIndex isin direct mask
 

@@ -181,7 +181,20 @@ shrinking the pandas gap from ~5× to 1.63×/1.86×. BIT-IDENTICAL (integer max/
 associative + commutative, so lane reordering can't change the result) — conformance green
 (reductions_typed_conformance 3/3, 11 reduction lib tests pass), no golden regen. KEPT.
 Remaining ~1.7× to numpy is the AVX2/AVX512 i64-max instruction the baseline build doesn't
-emit; closing it needs `#[target_feature(enable="avx2")]` on the helper (follow-up).
+emit.
+
+**FIX ATTEMPT (REVERTED): explicit AVX2 via `#[target_feature(enable="avx2")]`.** Added an
+`unsafe` AVX2-compiled wrapper (`i64_max_avx2`/`i64_min_avx2` calling an `#[inline(always)]`
+core) + runtime `is_x86_feature_detected!("avx2")` dispatch with a portable fallback. Build
+FAILED: this clean-room **safe-Rust** port denies `unsafe` (build lint: "declaration of an
+unsafe function" / "usage of an unsafe block" → `could not compile fp-frame`). Reverted.
+CONCLUSION: explicit SIMD intrinsics / `target_feature` are **out of reach for this codebase**
+(no unsafe allowed); the 8-lane chunked accumulator is the **safe-Rust ceiling** for i64
+max/min (357/424µs, 1.7× off numpy). Closing the last 1.7× would require either a workspace
+decision to allow a vetted `unsafe` SIMD module, or a global `target-cpu`/`target-feature`
+build flag (the `.cargo/config.toml` +avx2 experiment jawxr was tried + reverted as neutral-
+to-worse for corr/cov — would need per-op evaluation). Dead end recorded: don't retry
+`unsafe` target_feature in fp-frame.
 
 ### Prior dead end: max/min branchless fold (~0 gain, superseded)
 FIX ATTEMPT (REVERTED earlier): branchless `fold(i64::MIN, i64::max)` — built+measured,

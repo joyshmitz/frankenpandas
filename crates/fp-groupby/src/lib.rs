@@ -2203,6 +2203,13 @@ struct SumProdScalarAccumulator {
     prod_f64: f64,
 }
 
+#[derive(Debug, Clone)]
+struct SumProdFloatAccumulator {
+    source_idx: usize,
+    sum: f64,
+    prod: f64,
+}
+
 /// Generic string/object-key path for integer/bool `groupby.sum()` and
 /// `groupby.prod()`.
 ///
@@ -2296,6 +2303,94 @@ fn try_groupby_sum_prod_integer_counter(
                 None => Scalar::Float64(group.prod_f64),
             }
         });
+    }
+
+    Some((out_index, out_values))
+}
+
+/// Generic string/object-key path for Float64 `groupby.sum()` and
+/// `groupby.prod()`.
+///
+/// The scalar fallback clones every non-missing Float64 into a per-group
+/// `Vec<Scalar>` before calling `nansum`/`nanprod`. Those reducers are already
+/// streaming f64 folds, so keep only the per-group accumulator state here.
+fn try_groupby_sum_prod_float_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    value_dtype: DType,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Sum | AggFunc::Prod) || !matches!(value_dtype, DType::Float64) {
+        return None;
+    }
+
+    let take_sum = matches!(func, AggFunc::Sum);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, SumProdFloatAccumulator>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            SumProdFloatAccumulator {
+                source_idx: pos,
+                sum: 0.0,
+                prod: 1.0,
+            }
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        let Scalar::Float64(x) = value else {
+            return None;
+        };
+        if take_sum {
+            entry.sum += *x;
+        } else {
+            entry.prod *= *x;
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[group.source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(Scalar::Float64(if take_sum {
+            group.sum
+        } else {
+            group.prod
+        }));
     }
 
     Some((out_index, out_values))
@@ -2434,10 +2529,26 @@ pub fn groupby_agg(
     }
 
     // Generic string/object-key integer sum/prod only need streaming
-    // accumulators, not a cloned value Vec. Other value dtypes stay on the
-    // fallback path for float, timedelta, string, and mixed-object semantics.
+    // accumulators, not a cloned value Vec. Float64 has the matching fast path
+    // below; timedelta, string, and mixed-object semantics stay on fallback.
     if matches!(func, AggFunc::Sum | AggFunc::Prod)
         && let Some((out_index, out_values)) = try_groupby_sum_prod_integer_counter(
+            key_vals,
+            val_vals,
+            func,
+            value_dtype,
+            options.dropna,
+            options.sort,
+        )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key Float64 sum/prod use the same left-to-right f64
+    // fold as nansum/nanprod, but avoid cloning per-group Scalar vectors.
+    if matches!(func, AggFunc::Sum | AggFunc::Prod)
+        && let Some((out_index, out_values)) = try_groupby_sum_prod_float_counter(
             key_vals,
             val_vals,
             func,
@@ -5614,6 +5725,182 @@ mod tests {
             overflow_prod.values(),
             &[Scalar::Float64((i64::MAX as f64) * 2.0)]
         );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_float64_utf8_keys_stream_counters_2qb1i() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(4.0),
+                Scalar::Float64(-2.0),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_sorted.values(),
+            &[
+                Scalar::Float64(6.0),
+                Scalar::Float64(-0.5),
+                Scalar::Float64(0.0),
+            ]
+        );
+        assert_eq!(
+            prod_sorted.values(),
+            &[
+                Scalar::Float64(8.0),
+                Scalar::Float64(-3.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let sum_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod_unsorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sum_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            prod_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            sum_unsorted.values(),
+            &[
+                Scalar::Float64(-0.5),
+                Scalar::Float64(6.0),
+                Scalar::Float64(0.0),
+            ]
+        );
+        assert_eq!(
+            prod_unsorted.values(),
+            &[
+                Scalar::Float64(-3.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_agg_sum_prod_timedelta_fallback_preserved_2qb1i() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Timedelta64(2), Scalar::Timedelta64(3)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let sum = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let prod = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Prod,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(sum.values(), &[Scalar::Timedelta64(5)]);
+        assert!(prod.values()[0].is_missing());
     }
 
     #[test]

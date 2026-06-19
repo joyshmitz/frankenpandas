@@ -243,3 +243,54 @@ retry failed levers without a concrete retry predicate.
   elimination unless same-host profiling shows residual self-time in fallback
   value materialization or `nannunique` set construction; route remaining gaps
   to shared group-key construction or a lower-level scalar-bucket primitive.
+
+## 2026-06-18 - br-frankenpandas-2qb1i - Generic groupby Float64 sum/prod counters
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: route generic-key `groupby_agg(Sum|Prod)` over Float64 value columns
+  through per-group streaming f64 accumulators instead of cloning every
+  non-missing Float64 into `Vec<Scalar>` before calling `nansum`/`nanprod`.
+- Baseline comparator: prior generic non-Int64-key Float64 sum/prod path,
+  which hashes the same `GroupKeyRef` groups but stores cloned Float64 scalar
+  values per group before reducing. The older `br-frankenpandas-uza04.193`
+  fast path deliberately accepted only Int64/Bool; this attempt targets the
+  explicitly untouched Float64 lane.
+- Graveyard mapping: vectorized execution, cache-aware aggregation state, and
+  allocation elimination. The helper keeps only two f64 registers plus the
+  first-source index per group, removing reducer-local object vectors from a
+  realistic numeric aggregation workload.
+- Alien-artifact proof obligation: group identity, first-seen order, sorted
+  order, and output label reconstruction are unchanged because the same
+  `GroupKeyRef`, source index, and `sort_group_ordering_by` comparator are
+  used. Numeric values are folded left-to-right in row order with identical
+  f64 `+`/`*` identities to `nansum`/`nanprod`; missing values and NaN are
+  skipped by `Scalar::is_missing`. Timedelta, string, and mixed-object values
+  decline the fast path and retain fallback semantics.
+- Guard added: `groupby_agg_sum_prod_float64_utf8_keys_stream_counters_2qb1i`,
+  covering UTF-8 keys, sorted output, first-seen output, null/NaN skip,
+  all-missing groups, and Float64 sum/prod identities; and
+  `groupby_agg_sum_prod_timedelta_fallback_preserved_2qb1i`, covering
+  Timedelta sum/prod fallback behavior.
+- Bench guard added: `crates/fp-groupby/src/bin/groupby-bench.rs` now accepts
+  `--value-kind float64`, so batch can target
+  `--agg agg-sum/agg-prod --key-kind utf8 --value-kind float64` against the
+  legacy pandas original and pre-patch `Vec<Scalar>` fallback.
+- Cass/ledger preflight: local cass search returned zero hits for
+  `frankenpandas groupby sum float negative ledger`. Repo ledger search showed
+  the prior Int64/Bool `sum/prod` keep and rejected hash/open-address families;
+  this attempt avoids hash-table retuning and only removes the still-live
+  Float64 value-vector fallback.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is
+  `groupby-bench --agg agg-sum` and `--agg agg-prod` with
+  `--key-kind utf8 --value-kind float64` on realistic cardinalities versus
+  legacy pandas original and a pre-patch per-group `Vec<Scalar>` baseline,
+  with golden digest unchanged.
+- Retry predicate if rejected: do not retry Float64 `sum/prod` scalar-clone
+  elimination unless same-worker profiling shows residual self-time in fallback
+  value materialization for Float64 aggregation; route remaining gaps to shared
+  group-key construction, fused factorize+aggregate, or a lower-level numeric
+  grouped-state primitive rather than another reducer wrapper.

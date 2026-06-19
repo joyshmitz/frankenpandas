@@ -94,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iters = parse_arg("iters", 25usize);
     let agg = parse_arg("agg", "mean".to_string());
     let key_kind = parse_arg("key-kind", "int64".to_string());
+    let value_kind = parse_arg("value-kind", "int64".to_string());
     let golden = has_flag("golden");
 
     let mut index_labels = Vec::with_capacity(rows);
@@ -117,7 +118,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if i % 37 == 0 {
             value_values.push(Scalar::Null(fp_types::NullKind::NaN));
         } else {
-            value_values.push(Scalar::Int64(((i * 7 + 3) % 97) as i64));
+            value_values.push(match value_kind.as_str() {
+                "int64" => Scalar::Int64(((i * 7 + 3) % 97) as i64),
+                "float64" => Scalar::Float64(1.0 + (((i * 7 + 3) % 97) as f64 / 97.0)),
+                other => return Err(format!("unknown value-kind '{other}'").into()),
+            });
         }
     }
     let keys = Series::from_values("keys", index_labels.clone(), key_values)?;
@@ -126,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if golden {
         let out = run_agg(&agg, &keys, &values)?;
         println!(
-            "groupby_golden agg={agg} key_kind={key_kind} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
+            "groupby_golden agg={agg} key_kind={key_kind} value_kind={value_kind} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
             out.len(),
             digest(&out)
         );
@@ -143,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mean_ms = (total_ns as f64) / (iters as f64) / 1_000_000.0;
     println!(
-        "groupby_bench agg={agg} key_kind={key_kind} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
+        "groupby_bench agg={agg} key_kind={key_kind} value_kind={value_kind} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
     );
     Ok(())
 }

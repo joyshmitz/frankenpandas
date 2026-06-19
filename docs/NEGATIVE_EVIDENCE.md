@@ -25,6 +25,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
 | max 8-lane chunked accumulator (simdmx) | 2M int64 | 219 µs | 0.357 ms | **0.61× (1.63× slower)** | ✅ KEEP — 3.2× faster than scalar iter().max(); gap 5.2×→1.63× |
 | min 8-lane chunked accumulator (simdmx) | 2M int64 | 230 µs | 0.424 ms | **0.54× (1.86× slower)** | ✅ KEEP — 2.8× faster than scalar iter().min(); gap 5.1×→1.86× |
+| max/min portable-SIMD `i64x8` (uza04.207) | 2M int64 | 185 / 182 µs | 0.811 / 0.811 ms | **0.23× / 0.22×** | ❌ REVERT — safe `std::simd` was 2.3× slower than the manual 8-lane accumulator |
+| max/min portable-SIMD `i64x4` (uza04.207) | 2M int64 | 185 / 182 µs | 1.087 / 1.108 ms | **0.17× / 0.16×** | ❌ REVERT — AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator |
 
 | reset_index typed Int64 idx→col (bp6k7) | 1M int64-indexed, 2 cols | 1.93 ms | 0.38 ms | **5.1× faster** | ✅ KEEP — Index::from_i64_values |
 | concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path); 24× is glibc-malloc-bound — see mimalloc row |
@@ -340,13 +342,22 @@ emit.
 core) + runtime `is_x86_feature_detected!("avx2")` dispatch with a portable fallback. Build
 FAILED: this clean-room **safe-Rust** port denies `unsafe` (build lint: "declaration of an
 unsafe function" / "usage of an unsafe block" → `could not compile fp-frame`). Reverted.
-CONCLUSION: explicit SIMD intrinsics / `target_feature` are **out of reach for this codebase**
-(no unsafe allowed); the 8-lane chunked accumulator is the **safe-Rust ceiling** for i64
-max/min (357/424µs, 1.7× off numpy). Closing the last 1.7× would require either a workspace
-decision to allow a vetted `unsafe` SIMD module, or a global `target-cpu`/`target-feature`
-build flag (the `.cargo/config.toml` +avx2 experiment jawxr was tried + reverted as neutral-
-to-worse for corr/cov — would need per-op evaluation). Dead end recorded: don't retry
-`unsafe` target_feature in fp-frame.
+
+**FIX ATTEMPT (REVERTED, br-frankenpandas-uza04.207): safe portable-SIMD reductions.**
+Corpus routing pointed at vectorized execution (`std::simd` kernels for aggregations) as the
+right radical lever, and `fp-frame` already enables `portable_simd`. Built through `rch` on
+`hz2` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`, then timed
+the retrieved release binary locally against pandas 2.2.3 / numpy 2.4.3. Current manual
+8-lane baseline rerun: **max 0.352 ms, min 0.359 ms**; paired pandas best:
+**max 0.203 ms, min 0.205 ms** (still a loss at ~0.57×/0.57×). Replacing the helper with
+safe `std::simd::Simd<i64, 8>` regressed to **max 0.811 ms, min 0.811 ms**; `Simd<i64, 4>`
+regressed further to **max 1.087 ms, min 1.108 ms**. Both variants were reverted before
+landing. CONCLUSION: explicit SIMD intrinsics / `target_feature` are **out of reach for this
+codebase** (no unsafe allowed), and safe `std::simd` currently lowers worse than the manual
+lane accumulator for i64 extrema. The 8-lane chunked accumulator remains the **safe-Rust
+ceiling** for i64 max/min until a vetted target-specific SIMD membrane or compiler/codegen
+change is allowed. Dead end recorded: don't retry portable-SIMD i64x4/i64x8 reductions in
+fp-frame without new compiler or target evidence.
 
 ### Prior dead end: max/min branchless fold (~0 gain, superseded)
 FIX ATTEMPT (REVERTED earlier): branchless `fold(i64::MIN, i64::max)` — built+measured,

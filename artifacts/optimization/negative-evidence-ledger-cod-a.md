@@ -95,9 +95,9 @@ retry failed levers without a concrete retry predicate.
   do not reintroduce a Bool Series or label-aligned `filter_rows` path for
   positional `dropna`.
 
-## 2026-06-18 - br-frankenpandas-uza04.202 - Generic groupby std/var counters
+## 2026-06-18/19 - br-frankenpandas-uza04.202 - Generic groupby std/var counters
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: implemented, gauntlet-measured against pandas 2.2.3 on 2026-06-19.
 - Lever: route generic-key `groupby_agg(Std|Var)` over a clone-free two-pass
   numeric accumulator instead of building per-group `Vec<Scalar>` values and
   then calling `nanvar`/`nanstd`.
@@ -137,20 +137,50 @@ retry failed levers without a concrete retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
+- Gauntlet guard runs:
+  - RCH build: `cargo build --profile release-perf -p fp-groupby --bin groupby-bench`
+    on worker `hz2`, exit 0.
+  - Local timing build: same command/target dir, exit 0.
+  - Focused tests:
+    `groupby_var_std_utf8_keys_stream_numeric_counters_uza04202` and
+    `groupby_var_std_timedelta_fallback_preserves_dtype_uza04202`, exit 0.
+  - RCH Criterion guard:
+    `cargo bench -p fp-conformance --bench vs_pandas -- groupby/` on worker
+    `vmi1227854`, exit 0.
 - UBS run: first bounded scan found one new critical from an explicit `panic!`
   in the added test; the panic was removed. Rerun
   `timeout 180s ubs crates/fp-groupby/src/lib.rs crates/fp-groupby/src/bin/groupby-bench.rs`
   exited 0 with 0 critical findings and the pre-existing broad `fp-groupby`
   warning inventory.
-- Benchmark verdict: pending. Required follow-up comparator is
-  `groupby-bench --agg agg-var` and `--agg agg-std` on realistic UTF-8-key
-  cardinalities versus legacy pandas original and a pre-patch per-group
-  `Vec<Scalar>` baseline, with golden digest unchanged.
-- Retry predicate if rejected: do not retry per-group `Std`/`Var` vector
-  elimination unless same-worker profiling shows residual self-time in the
-  fallback Vec materialization or the hash/group lookup itself; route any
-  remaining gap to a shared grouped-key primitive rather than another reducer
-  micro-specialization.
+- Golden digests:
+  - 100k `agg-var`: `13b32a1dc9da2c47`; 100k `agg-std`: `200223cc1528066e`.
+  - 1M `agg-var`: `bed0cd7240248b06`; 1M `agg-std`: `520c114fa5b162b5`.
+  - 2M `agg-var`: `efda4ff0d3fd5f69`; 2M `agg-std`: `970818b60f82d0cb`.
+- Accepted pandas comparator rows, pinned to CPU 7, dataset construction outside
+  timed loops, pandas `groupby("keys", sort=True)["values"].var/std(ddof=1)`:
+
+  | Reducer | Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
+  |---|---:|---:|---:|---:|---:|---:|---|
+  | var | 100k | 2.814 ms | 3.627 ms | 1.289x | 0.52% | 1.36% | KEEP |
+  | std | 100k | 2.845 ms | 3.825 ms | 1.344x | 0.96% | 2.56% | KEEP |
+  | var | 1M | 29.563 ms | 35.966 ms | 1.217x | 3.05% | 3.26% | KEEP |
+  | std | 1M | 28.657 ms | 35.174 ms | 1.227x | 1.05% | 0.44% | KEEP |
+  | var | 2M | 58.659 ms | 76.335 ms | 1.301x | 3.49% | 1.80% | KEEP |
+  | std | 2M | 56.466 ms | 75.544 ms | 1.338x | 0.64% | 0.61% | KEEP |
+
+  Accepted geomean: 1.285x faster than pandas.
+- Dropped diagnostics:
+  - 2M `std`, first pinned run: FP p50 58.569 ms, pandas p50 55.941 ms,
+    0.955x, dropped because FP CV was 12.39%; superseded by accepted batched
+    rerun.
+  - 2M `std`, 10-iter rerun: FP p50 56.868 ms, pandas p50 85.258 ms, 1.499x,
+    dropped because pandas CV was 5.92%; superseded by accepted 20-iter rerun.
+- Benchmark verdict: KEEP. No accepted neutral/slower release row survived the
+  CV gate after the 2M batched reruns, and every accepted realistic row is a
+  material win versus pandas. No revert.
+- Retry predicate: remaining groupby work should target the shared UTF8
+  key-factorize/dense-group primitive or output assembly, not another
+  per-reducer `Std`/`Var` vector-elimination micro-tweak.
 
 ## 2026-06-18/19 - br-frankenpandas-uza04.203 - Generic groupby median numeric vectors
 

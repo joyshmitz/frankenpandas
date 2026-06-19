@@ -22,15 +22,52 @@ matrix.
 | 1M | 3 / 8 | 5 / 8 | 4.345x faster | `groupby_agg_multi` 6.291x, `groupby_transform_mean_str` 2.178x, `groupby_count` 5.988x | Keep cluster; rerun high-CV rows |
 | 2M focused nunique | 1 / 1 | 0 / 1 | 2.895x faster | `groupby_agg_nunique_utf8_float64` 2.895x | Keep `br-frankenpandas-uza04.204` |
 | Focused median | 2 / 3 | 1 / 3 | 2.174x faster | `groupby_agg_median_utf8_float64` 2.631x at 100k, 1.796x at 2M | Keep `br-frankenpandas-uza04.203` |
-| Combined accepted | 8 / 20 | 14 high-CV diagnostics total | 3.342x faster | No accepted neutral/slower rows | No revert |
+| Focused std/var | 6 / 6 | 2 high-CV diagnostics superseded by accepted reruns | 1.285x faster | `groupby_agg_var_utf8_float64` 1.289x/1.217x/1.301x; `groupby_agg_std_utf8_float64` 1.344x/1.227x/1.338x | Keep `br-frankenpandas-uza04.202` |
+| Combined accepted | 14 / 26 | 16 high-CV diagnostics total | 2.219x faster | No accepted neutral/slower rows | No revert |
 
 Release-readiness impact: GroupBy moves from stale "slower" evidence to
 partial measured wins on realistic 100k/1M workloads, plus a CV-gated 2M
 `agg-nunique` win for `br-frankenpandas-uza04.204` and CV-gated 100k/2M
-`agg-median` wins for `br-frankenpandas-uza04.203`. The category is still not
-fully validated because 11 of the original 16 harness rows were rejected by the
-high-CV filter and focused nunique/median diagnostics also dropped. Overall
+`agg-median` wins for `br-frankenpandas-uza04.203`, and six CV-gated std/var
+wins for `br-frankenpandas-uza04.202`. The category is still not fully
+validated because 11 of the original 16 harness rows were rejected by the
+high-CV filter and focused diagnostics still include dropped rows. Overall
 release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+
+### 2026-06-19 Cod-a Focused Std/Var Proof - `br-frankenpandas-uza04.202`
+
+Comparator: pandas 2.2.3 / numpy 2.4.3. Workload:
+`groupby_agg_{var,std}_utf8_float64`, UTF8 keys, Float64 values, NaN every 37th
+row, `sort=True`, `ddof=1`.
+FP command: `groupby-bench --agg agg-var|agg-std --key-kind utf8 --value-kind float64`,
+run under `taskset -c 7` from
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`.
+
+| Reducer | Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| var | 100k | 2.814 ms | 3.627 ms | 1.289x | 0.52% | 1.36% | FASTER / ACCEPTED |
+| std | 100k | 2.845 ms | 3.825 ms | 1.344x | 0.96% | 2.56% | FASTER / ACCEPTED |
+| var | 1M | 29.563 ms | 35.966 ms | 1.217x | 3.05% | 3.26% | FASTER / ACCEPTED |
+| std | 1M | 28.657 ms | 35.174 ms | 1.227x | 1.05% | 0.44% | FASTER / ACCEPTED |
+| var | 2M | 58.659 ms | 76.335 ms | 1.301x | 3.49% | 1.80% | FASTER / ACCEPTED |
+| std | 2M | 56.466 ms | 75.544 ms | 1.338x | 0.64% | 0.61% | FASTER / ACCEPTED |
+
+Dropped diagnostics:
+- 2M `std`, first pinned run: FP p50 58.569 ms, pandas p50 55.941 ms,
+  0.955x, dropped because FP CV was 12.39%; superseded by accepted batched
+  rerun.
+- 2M `std`, 10-iter rerun: FP p50 56.868 ms, pandas p50 85.258 ms, 1.499x,
+  dropped because pandas CV was 5.92%; superseded by accepted 20-iter rerun.
+
+Guards:
+- RCH build: `cargo build --profile release-perf -p fp-groupby --bin groupby-bench`
+  on worker `hz2`, exit 0.
+- Local clean-worktree timing build: same target dir, exit 0.
+- Focused conformance guards:
+  `groupby_var_std_utf8_keys_stream_numeric_counters_uza04202` and
+  `groupby_var_std_timedelta_fallback_preserves_dtype_uza04202`, exit 0.
+- RCH Criterion guard: `cargo bench -p fp-conformance --bench vs_pandas -- groupby/`
+  on worker `vmi1227854`, exit 0.
 
 ### 2026-06-19 Cod-a Focused Median Proof - `br-frankenpandas-uza04.203`
 

@@ -119,11 +119,26 @@ buffer from the Scalars variant on first call), `extend_from_slice` into a fresh
 regression (≥ the old Scalar concat, bit-transparent) so not reverted, but concat is fp's
 weakest realistic op. FIX ATTEMPT (REVERTED): collect each typed slice ONCE via `Option::collect` instead of the
 double `as_i64_slice` (probe + extend). Built+measured: **6.81 → 6.49 ms (~5%, immaterial)**
-— the double-call was NOT the bottleneck. Reverted (working-tree only). CONFIRMED the 24×
-gap is STRUCTURAL: `Column::from_i64_values` (validity init) + `Series::new` + per-series
-typed-buffer materialization, vs pandas' single flat `np.concatenate`. Closing it needs a
-kernel-level concat (build one validity-free typed Column directly, skip Series wrapping) —
-out of code-first fp-frame scope. Dead ends recorded: don't retry double-call dedup.
+— the double-call was NOT the bottleneck. Reverted (working-tree only).
+
+**ROOT CAUSE PINNED (gauntlet experiment, hypothesis tested + REFUTED).** Two earlier guesses
+(Scalars-backing materialization; validity init) were both wrong. The bench now measures
+three variants of the 1M/k=8 concat:
+- `scalars_backed` (parts via `from_values`, as_i64_slice→None, Scalar fallback path): **6.58 ms**
+- `typed_backed` (parts via `from_i64_values`, as_i64_slice→Some, typed Int64 path): **6.63 ms**
+- `direct_build` (NO concat at all — just `from_i64_values(flat.clone()) + Series::new` of a
+  pre-flattened 1M Vec): **6.69 ms**
+All three are equal. So: (a) the typed-vs-Scalar backing is irrelevant → **the typed concat
+lever (tbrtu) is ~0-gain** (kept only because it's bit-transparent and ≥ the Scalar path,
+not because it helps); (b) the concat iteration/extend is only ~0.4 ms; (c) **the entire cost
+is RESULT CONSTRUCTION** — allocating + filling a fresh 8 MB `Vec<i64>` (clone + first-touch
+page faults) for the output column. `Index::new_known_unique_int64_unit_range`, `Series::new`,
+and `ValidityMask::all_valid` are all verified O(1) (affine labels + preset caches; empty
+words vec; len-only check). pandas' `np.concatenate` (281µs) wins via numpy's optimized
+allocator/memcpy (no per-page first-touch cost, buffer reuse). FIX would need a custom
+allocator / huge-page / buffer-pool in the columnar kernel — out of safe code-first scope and
+NOT closable by any column-build or backing change. Dead ends recorded: don't retry typed-
+backing or validity-init tweaks for concat; the cost is the fresh-allocation page-fault floor.
 
 ### Gap: max/min lose to numpy SIMD (~5×)
 fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)

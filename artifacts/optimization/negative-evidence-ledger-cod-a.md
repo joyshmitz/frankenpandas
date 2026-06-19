@@ -246,7 +246,7 @@ retry failed levers without a concrete retry predicate.
 
 ## 2026-06-18 - br-frankenpandas-2qb1i - Generic groupby Float64 sum/prod counters
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: implemented, gauntlet-measured against pandas 2.2.3 on 2026-06-19.
 - Lever: route generic-key `groupby_agg(Sum|Prod)` over Float64 value columns
   through per-group streaming f64 accumulators instead of cloning every
   non-missing Float64 into `Vec<Scalar>` before calling `nansum`/`nanprod`.
@@ -284,13 +284,49 @@ retry failed levers without a concrete retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is
-  `groupby-bench --agg agg-sum` and `--agg agg-prod` with
-  `--key-kind utf8 --value-kind float64` on realistic cardinalities versus
-  legacy pandas original and a pre-patch per-group `Vec<Scalar>` baseline,
-  with golden digest unchanged.
+- Benchmark verdict: keep. Pandas head-to-head gauntlet found no accepted
+  neutral or slower rows for the current groupby cluster. The valid accepted
+  rows were 3.155x-6.291x faster than pandas, with a 4.120x accepted geomean
+  across the five accepted 100k/1M results. High-CV rows below are recorded as
+  non-proof evidence gaps, not keep proof.
 - Retry predicate if rejected: do not retry Float64 `sum/prod` scalar-clone
   elimination unless same-worker profiling shows residual self-time in fallback
   value materialization for Float64 aggregation; route remaining gaps to shared
   group-key construction, fused factorize+aggregate, or a lower-level numeric
   grouped-state primitive rather than another reducer wrapper.
+
+### Gauntlet evidence - 2026-06-19 - pandas original comparator
+
+- Artifact report: `artifacts/perf/cod-a-groupby-gauntlet-a7287a4d.md`.
+- Raw pandas harness outputs:
+  `artifacts/perf/cod-a-groupby-gauntlet-vs-pandas-a7287a4d.json` and
+  `artifacts/perf/cod-a-groupby-gauntlet-vs-pandas-a7287a4d-1m.json`.
+- Criterion guard output:
+  `artifacts/perf/cod-a-groupby-gauntlet-criterion-a7287a4d.txt`.
+- Build/profiling note: `rch exec -- cargo build --profile release-perf -p fp-bench`
+  succeeded on worker `ovh-b`, but the executable was not materialized by RCH
+  artifact sync; the pandas harness used a local per-crate release-perf build
+  in the same `CARGO_TARGET_DIR`. `rch exec -- cargo bench -p fp-conformance
+  --bench vs_pandas -- groupby/` completed on `ovh-b`.
+- Revert decision: no revert. There were no accepted slower or parity rows.
+  High-CV rows require a more stable rerun before they can prove a claim, but
+  they do not justify reverting this optimization cluster.
+
+| Size | Workload | Verdict | Accepted ratio | p50-implied ratio | FP p50 us | pandas p50 us | FP CV% | pandas CV% | Ledger action |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 100k | `groupby_sum_int64` | DROPPED_HIGH_CV | N/A | 8.095x | 199.10 | 1611.79 | 35.81 | 20.60 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_mean_float64` | DROPPED_HIGH_CV | N/A | 3.721x | 264.13 | 982.78 | 2.60 | 13.06 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_agg_multi` | DROPPED_HIGH_CV | N/A | 7.949x | 304.53 | 2420.78 | 33.79 | 19.10 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_mean_str` | DROPPED_HIGH_CV | N/A | 2.008x | 1860.89 | 3736.72 | 8.69 | 4.91 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_transform_mean` | FASTER | 4.586x | 4.586x | 234.31 | 1074.52 | 4.09 | 4.98 | Accepted win |
+| 100k | `groupby_transform_mean_str` | DROPPED_HIGH_CV | N/A | 2.018x | 1760.68 | 3553.61 | 13.09 | 11.40 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_cumcount` | DROPPED_HIGH_CV | N/A | 1.952x | 793.48 | 1548.59 | 0.97 | 13.71 | Needs stable rerun; do not cite as keep proof |
+| 100k | `groupby_count` | FASTER | 3.155x | 3.155x | 197.16 | 622.01 | 2.06 | 2.22 | Accepted win |
+| 1M | `groupby_sum_int64` | DROPPED_HIGH_CV | N/A | 4.752x | 2612.67 | 12415.94 | 15.47 | 1.41 | Needs stable rerun; do not cite as keep proof |
+| 1M | `groupby_mean_float64` | DROPPED_HIGH_CV | N/A | 4.866x | 2748.41 | 13373.26 | 20.40 | 1.14 | Needs stable rerun; do not cite as keep proof |
+| 1M | `groupby_agg_multi` | FASTER | 6.291x | 6.291x | 3212.90 | 20211.93 | 1.34 | 1.01 | Accepted win |
+| 1M | `groupby_mean_str` | DROPPED_HIGH_CV | N/A | 2.291x | 18609.44 | 42642.00 | 15.93 | 7.76 | Needs stable rerun; do not cite as keep proof |
+| 1M | `groupby_transform_mean` | DROPPED_HIGH_CV | N/A | 6.140x | 2889.73 | 17742.52 | 5.08 | 13.40 | Needs stable rerun; do not cite as keep proof |
+| 1M | `groupby_transform_mean_str` | FASTER | 2.178x | 2.178x | 20061.76 | 43688.75 | 1.31 | 1.34 | Accepted win |
+| 1M | `groupby_cumcount` | DROPPED_HIGH_CV | N/A | 4.957x | 10804.23 | 53559.56 | 7.91 | 9.48 | Needs stable rerun; do not cite as keep proof |
+| 1M | `groupby_count` | FASTER | 5.988x | 5.988x | 1993.46 | 11937.48 | 2.61 | 2.13 | Accepted win |

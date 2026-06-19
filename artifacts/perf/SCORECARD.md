@@ -6,6 +6,34 @@
 > (br-frankenpandas-fgpx3 dedup hashing, -2a6ln gather, -uxkvh dense sort,
 > -sfysu dense gather). Numbers re-measured per br-frankenpandas-a5dwk.
 
+## 2026-06-19 Cod-a Gauntlet Refresh - GroupBy
+
+Scope: `br-frankenpandas-2qb1i`, latest cod-a clone-free `fp-groupby`
+optimization cluster at commit `a7287a4d`, measured against pandas 2.2.3
+with `benches/vs_pandas_harness.py`.
+
+This refresh supersedes the stale GroupBy row below for the measured workloads
+only. It does not re-score IO, joins, rolling, indexing, or the full release
+matrix.
+
+| Size | Valid workloads | Dropped high-CV | Accepted geomean vs pandas | Accepted verdicts | Scorecard action |
+|------|----------------:|----------------:|---------------------------:|-------------------|------------------|
+| 100k | 2 / 8 | 6 / 8 | 3.804x faster | `groupby_transform_mean` 4.586x, `groupby_count` 3.155x | Keep cluster; rerun high-CV rows |
+| 1M | 3 / 8 | 5 / 8 | 4.345x faster | `groupby_agg_multi` 6.291x, `groupby_transform_mean_str` 2.178x, `groupby_count` 5.988x | Keep cluster; rerun high-CV rows |
+| Combined accepted | 5 / 16 | 11 / 16 | 4.120x faster | No accepted neutral/slower rows | No revert |
+
+Release-readiness impact: GroupBy moves from stale "slower" evidence to
+partial measured wins on realistic 100k/1M workloads, but the category is not
+fully validated because 11 of 16 rows were rejected by the harness high-CV
+filter. Overall release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+
+Artifacts:
+- `artifacts/perf/cod-a-groupby-gauntlet-a7287a4d.md`
+- `artifacts/perf/cod-a-groupby-gauntlet-vs-pandas-a7287a4d.json`
+- `artifacts/perf/cod-a-groupby-gauntlet-vs-pandas-a7287a4d-1m.json`
+- `artifacts/perf/cod-a-groupby-gauntlet-criterion-a7287a4d.txt`
+- `artifacts/optimization/negative-evidence-ledger-cod-a.md`
+
 ## Categories
 
 | Category | Weight | FP p50 | PD p50 | Ratio | Verdict |

@@ -38,7 +38,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | sort_values | 1M shuffled | 1.20× | 🟢 |
 | std / var | 2M int64 | 11.3× | 🟢 |
 | sum | 2M int64 | 1.27× | 🟢 |
-| max / min | 2M int64 | 0.19× / 0.20× | 🔴 lose to numpy SIMD |
+| max / min | 2M int64 | 0.61× / 0.54× | 🟡 8-lane chunked accumulator: 3.2×/2.8× FP-side win; gap 5×→1.7× |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.041× | 🔴 24× slower (structural) |

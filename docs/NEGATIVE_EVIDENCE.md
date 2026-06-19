@@ -23,8 +23,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | drop_duplicates FxHashSet (6vep3) | 1M, card 1000 | 5.99 ms | 2.95 ms | **2.03× faster** | ✅ KEEP — beat khash dedup |
 | sum typed Int64 (bwgyc) | 2M int64 | 216 µs | 171 µs | **1.27× faster** | ✅ KEEP |
 | std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
-| max typed Int64 (4qs3h) | 2M int64 | 219 µs | 1.15 ms | **0.19× (5.2× SLOWER)** | ⚠️ KEEP (beats old fp Scalar path) but LOSES to numpy SIMD — gap |
-| min typed Int64 (4qs3h) | 2M int64 | 230 µs | 1.17 ms | **0.20× (5.1× SLOWER)** | ⚠️ KEEP but LOSES to numpy SIMD — gap |
+| max 8-lane chunked accumulator (simdmx) | 2M int64 | 219 µs | 0.357 ms | **0.61× (1.63× slower)** | ✅ KEEP — 3.2× faster than scalar iter().max(); gap 5.2×→1.63× |
+| min 8-lane chunked accumulator (simdmx) | 2M int64 | 230 µs | 0.424 ms | **0.54× (1.86× slower)** | ✅ KEEP — 2.8× faster than scalar iter().min(); gap 5.1×→1.86× |
 
 | reset_index typed Int64 idx→col (bp6k7) | 1M int64-indexed, 2 cols | 1.93 ms | 0.38 ms | **5.1× faster** | ✅ KEEP — Index::from_i64_values |
 | concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path); 24× is glibc-malloc-bound — see mimalloc row |
@@ -171,16 +171,25 @@ with fp-groupby/fp-join arena allocators), filed as a high-priority bead, not im
 unilaterally. Dead ends still recorded: typed-backing and validity-init tweaks don't help;
 the lever is the allocator, not the column build.
 
-### Gap: max/min lose to numpy SIMD (~5×)
-fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)
-vs numpy's SIMD max. NOT a regression (the typed lever beats old fp's Scalar iteration), so
-not reverted — but a real vs-pandas gap. FIX ATTEMPT (REVERTED): branchless
-`fold(i64::MIN, i64::max)` — built+measured, **max stayed 1.15 ms (~0 gain)**; LLVM did not
-auto-vectorize the i64 min/max reduction here. Reverted to the simpler `iter().max()`
-(working-tree only, never committed). CONCLUSION: beating numpy SIMD max/min needs explicit
-SIMD (portable_simd / chunked manual vectorization) — out of safe-Rust auto-vec reach; a
-candidate radical lever for the kernel layer, NOT a code-first fp-frame change. Dead end
-recorded — do not retry the branchless-fold approach.
+### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
+**FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator
+(`i64_slice_max_simd`/`i64_slice_min_simd`): process 8 independent `max`/`min` lanes per
+step, then reduce. This breaks the serial dependency chain of `iter().max()` that LLVM
+refused to vectorize, exposing instruction-level parallelism (and SIMD where the target
+allows). Built+measured 2M int64: **max 1.15 → 0.357 ms (3.2×), min 1.17 → 0.424 ms (2.8×)**,
+shrinking the pandas gap from ~5× to 1.63×/1.86×. BIT-IDENTICAL (integer max/min are
+associative + commutative, so lane reordering can't change the result) — conformance green
+(reductions_typed_conformance 3/3, 11 reduction lib tests pass), no golden regen. KEPT.
+Remaining ~1.7× to numpy is the AVX2/AVX512 i64-max instruction the baseline build doesn't
+emit; closing it needs `#[target_feature(enable="avx2")]` on the helper (follow-up).
+
+### Prior dead end: max/min branchless fold (~0 gain, superseded)
+FIX ATTEMPT (REVERTED earlier): branchless `fold(i64::MIN, i64::max)` — built+measured,
+**max stayed 1.15 ms (~0 gain)**; LLVM did not auto-vectorize that serial reduction. The
+8-lane chunked accumulator (above) is what finally worked — a single accumulator (fold) keeps
+the serial dependency; multiple independent lanes break it. Reverted the fold; shipped chunks.
+Lesson: chunked manual vectorization (multiple independent accumulators) is the lever; a
+single-accumulator fold is not. Do not retry the branchless-fold approach.
 
 ## pandas 2.2.3 baselines (best-of-N, for pending comparisons)
 

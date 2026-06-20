@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 35/43 realistic ops faster (median ≈2.8× among wins); 6 losses,
+**Perf vs pandas 2.2.3: 36/43 realistic ops faster (median ≈2.8× among wins); 5 losses,
 2 neutral rows, all with documented fix paths; 0 shipped perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -20,6 +20,7 @@ focused `fp-groupby` release tests green.
   groupby median Utf8-key (1.80–2.63×),
   groupby std/var Utf8-key (1.22–1.34×), Series.combine_first default construction (676×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
+  DataFrame.dropna Float64 (1.22×),
   slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×),
   RangeIndex bulk indexers (2.64–51.5×) —
   fp beats pandas wherever typed access unlocks a cheaper algorithm.
@@ -27,9 +28,9 @@ focused `fp-groupby` release tests green.
   mimalloc boundary allocator (24× slower -> 2.15× slower) but still needs a reused-buffer
   or chunk/view path; ffill now flips to 1.41× faster via skw2c validity-run bulk fill;
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
-  allocator-sensitive on the plain glibc path; DataFrame.dropna typed Float64 is still
-  a 0.42× loss after uza04.208 run-gather narrowed FP 9.629 ms -> 9.131 ms, with
-  output allocation plus per-row missing scan still dominant; max/min
+  allocator-sensitive on the plain glibc path; DataFrame.dropna typed Float64 now
+  flips from a 0.42× loss to a 1.22× win via missing-free scan pruning, lazy validity
+  allocation, the bandwidth-bound serial floor, and lazy all-valid Float64 chunks; max/min
   still trail pandas after the manual 8-lane accumulator, and safe `std::simd`
   i64x8/i64x4 probes were measured and reverted as regressions; Series add/mul now has a
   kept morsel-sweep lever that makes both arithmetic rows near-parity pinned, with mul
@@ -85,7 +86,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | merge inner on Utf8 keys | 1M×1M → 500k rows | 0.42× | 🔴 2.4× slower; deferred (bead f1ftd) — fp-join pointer-key + output-alloc, hot/peer-reserved crate |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
-| DataFrame.dropna(how=any) | 500k×5 f64, ~10% NaN rows | 0.42× | 🔴 still 2.39× slower; uza04.208 run-gather narrowed FP 9.629→9.131 ms, while all-valid scan-pruning was measured and reverted |
+| DataFrame.dropna(how=any) | 500k×5 f64, ~10% NaN rows | 1.22× | 🟢 flipped from 0.42× loss; 9bccl uses missing-free Float64 witnesses plus lazy all-valid chunked run gather |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |
 | ffill | 2M f64, ~10% NaN | 1.41× with skw2c validity-run fill + 3nah5 mimalloc boundary | 🟢 flipped; packed validity-run bulk fill |
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
@@ -106,11 +107,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 35/43 measured ops faster than pandas; 6 losses (max, min, concat, DataFrame.dropna, Series.map Float64 `values()`, Series.combine_first `values()`),
+**Score: 36/43 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 10 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 35 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 36 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
@@ -166,6 +167,12 @@ typed `to_numpy()` consumption, while Series.combine_first wins on deferred/defa
 construction and typed materialization. Both forced `values()` paths still need
 lower-allocation public scalar output despite the hbq6y/p0irg repeated-slice and og9qm
 lazy-select keeps.
+The latest 9bccl DataFrame.dropna pass turns the row-wise Float64 dropna case green:
+missing-free selected columns are excluded from the row scan, nullable Float64 run-gather
+defers validity bitmap allocation until an invalid output appears, the gather keeps the
+bandwidth-bound 4M-cell serial floor, and `dropna(how=Any)` carries its kept-row validity
+witness into lazy `LazyAllValidFloat64Chunks` output instead of copying every retained
+f64 value. Same-core CPU7 best-of-200: FP 3.109 ms vs pandas 3.791 ms, 1.22× faster.
 The qngdp `values()` materializers were measured and reverted because they added
 initialization/thread/scalar-tape overhead without removing enum boxing. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
 and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by

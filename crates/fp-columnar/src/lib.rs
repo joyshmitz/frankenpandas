@@ -7869,23 +7869,38 @@ impl Column {
         };
         if let Some(src) = typed_f64 {
             let mut data = Vec::with_capacity(out_len);
-            let mut words = vec![0_u64; out_len.div_ceil(64)];
+            let mut words: Option<Vec<u64>> = None;
             let mut out_idx = 0usize;
             for &(start, len) in runs {
                 let end = start + len;
                 data.extend_from_slice(&src[start..end]);
                 for (offset, &x) in src[start..end].iter().enumerate() {
                     let pos = start + offset;
-                    if self.validity.get(pos) && !x.is_nan() {
-                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    let is_valid = self.validity.get(pos) && !x.is_nan();
+                    if let Some(words) = &mut words {
+                        if is_valid {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                    } else if !is_valid {
+                        let mut initialized = vec![0_u64; out_len.div_ceil(64)];
+                        let full_words = out_idx / 64;
+                        initialized[..full_words].fill(u64::MAX);
+                        let partial_bits = out_idx % 64;
+                        if partial_bits != 0 {
+                            initialized[full_words] = (1_u64 << partial_bits) - 1;
+                        }
+                        words = Some(initialized);
                     }
                     out_idx += 1;
                 }
             }
-            return Self::from_f64_values_with_validity(
-                data,
-                ValidityMask::from_words(words, out_len),
-            );
+            if let Some(words) = words {
+                return Self::from_f64_values_with_validity(
+                    data,
+                    ValidityMask::from_words(words, out_len),
+                );
+            }
+            return Self::from_f64_values_all_valid_unchecked(data);
         }
 
         let mut positions = Vec::with_capacity(out_len);
@@ -7893,6 +7908,44 @@ impl Column {
             positions.extend(start..start + len);
         }
         self.take_positions(&positions)
+    }
+
+    /// Gather sorted ascending contiguous source runs as an all-valid Float64
+    /// chunk view when the caller has already proven every selected output slot
+    /// is present and non-NaN.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_position_runs_all_valid_f64_unchecked(
+        &self,
+        runs: &[(usize, usize)],
+        out_len: usize,
+    ) -> Option<Self> {
+        debug_assert_eq!(runs.iter().map(|&(_, len)| len).sum::<usize>(), out_len);
+        let (data, base, source_len) = match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => (Arc::clone(data), 0, data.len()),
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => (Arc::clone(data), *start, *len),
+            _ => return None,
+        };
+
+        debug_assert!(
+            runs.iter()
+                .all(|&(start, len)| start.checked_add(len).is_some_and(|end| end <= source_len))
+        );
+        debug_assert!(runs.iter().all(|&(start, len)| {
+            (start..start + len).all(|row| self.validity.get(row) && !data[base + row].is_nan())
+        }));
+
+        if out_len == 0 {
+            return Some(Self::from_f64_values_all_valid_unchecked(Vec::new()));
+        }
+
+        let chunks = runs
+            .iter()
+            .map(|&(start, len)| (Arc::clone(&data), base + start, len))
+            .collect();
+        Some(Self::from_f64_all_valid_chunks(chunks, out_len))
     }
 
     /// Gather a contiguous row range without first materializing

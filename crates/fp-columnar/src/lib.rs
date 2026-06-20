@@ -2099,6 +2099,7 @@ enum ScalarValues {
         data: Vec<f64>,
         segments: Arc<[(usize, usize)]>,
         total_len: usize,
+        expanded: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Null-introducing counterpart of [`Self::LazyRepeatedSlicesInt64`]
@@ -2721,6 +2722,7 @@ impl ScalarValues {
             data,
             segments,
             total_len,
+            expanded: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -3008,6 +3010,118 @@ impl ScalarValues {
         out
     }
 
+    fn expand_repeated_slices_f64(
+        data: &[f64],
+        segments: &[(usize, usize)],
+        total_len: usize,
+    ) -> Vec<f64> {
+        const PARALLEL_MIN_VALUES: usize = 1 << 18;
+        const PARALLEL_MAX_CHUNKS: usize = 16;
+
+        if let Some((start, period)) = Self::repeated_prefix_period(segments, total_len, data.len())
+        {
+            let mut out = Vec::with_capacity(total_len);
+            out.extend_from_slice(&data[start..start + period.min(total_len)]);
+            while out.len() < total_len {
+                let copy_len = out.len().min(total_len - out.len());
+                out.extend_from_within(..copy_len);
+            }
+            return out;
+        }
+
+        let thread_count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(PARALLEL_MAX_CHUNKS);
+        if total_len < PARALLEL_MIN_VALUES || thread_count < 2 || segments.is_empty() {
+            let mut out = Vec::with_capacity(total_len);
+            for &(start, len) in segments {
+                out.extend_from_slice(&data[start..start + len]);
+            }
+            return out;
+        }
+
+        let target = total_len.div_ceil(thread_count).max(1);
+        let mut boundaries = vec![(0usize, 0usize)];
+        let mut cumulative = 0usize;
+        let mut next_target = target;
+        for (segment_idx, &(_, len)) in segments.iter().enumerate() {
+            cumulative += len;
+            if cumulative >= next_target && segment_idx + 1 < segments.len() {
+                boundaries.push((segment_idx + 1, cumulative));
+                next_target = cumulative.saturating_add(target);
+            }
+        }
+        debug_assert_eq!(cumulative, total_len);
+        boundaries.push((segments.len(), total_len));
+
+        let mut out = vec![0.0f64; total_len];
+        let mut chunk_slices = Vec::with_capacity(boundaries.len() - 1);
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut prev = 0usize;
+        for window in boundaries.windows(2) {
+            let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+            prev = window[1].1;
+            rest = tail;
+            chunk_slices.push(chunk_slice);
+        }
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk_slices.len());
+            for (chunk_idx, chunk_slice) in chunk_slices.into_iter().enumerate() {
+                let (segment_start, _) = boundaries[chunk_idx];
+                let (segment_end, _) = boundaries[chunk_idx + 1];
+                let segments = &segments[segment_start..segment_end];
+                handles.push(scope.spawn(move || {
+                    let mut cursor = 0usize;
+                    for &(start, len) in segments {
+                        chunk_slice[cursor..cursor + len]
+                            .copy_from_slice(&data[start..start + len]);
+                        cursor += len;
+                    }
+                    debug_assert_eq!(cursor, chunk_slice.len());
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("repeated-slice expansion worker must not panic");
+            }
+        });
+        out
+    }
+
+    fn repeated_prefix_period(
+        segments: &[(usize, usize)],
+        total_len: usize,
+        data_len: usize,
+    ) -> Option<(usize, usize)> {
+        if total_len == 0 {
+            return segments.is_empty().then_some((0, 0));
+        }
+        let &(start, period) = segments.first()?;
+        if period == 0 || start.checked_add(period)? > data_len {
+            return None;
+        }
+        let mut remaining = total_len;
+        for (idx, &(segment_start, len)) in segments.iter().enumerate() {
+            if segment_start != start {
+                return None;
+            }
+            if remaining >= period {
+                if len != period {
+                    return None;
+                }
+                remaining -= period;
+            } else {
+                if idx + 1 != segments.len() || len != remaining {
+                    return None;
+                }
+                remaining = 0;
+            }
+        }
+        (remaining == 0).then_some((start, period))
+    }
+
     fn expand_repeated_slices_i64(
         data: &[i64],
         segments: &[(usize, usize)],
@@ -3212,6 +3326,24 @@ impl ScalarValues {
             return Some(
                 expanded
                     .get_or_init(|| Self::expand_repeated_slices_i64(data, segments, *total_len))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
+    fn repeated_slices_f64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyRepeatedSlicesFloat64 {
+            data,
+            segments,
+            total_len,
+            expanded,
+            ..
+        } = self
+        {
+            return Some(
+                expanded
+                    .get_or_init(|| Self::expand_repeated_slices_f64(data, segments, *total_len))
                     .as_slice(),
             );
         }
@@ -3791,6 +3923,7 @@ impl ScalarValues {
                 segments,
                 total_len,
                 values,
+                ..
             } => values
                 .get_or_init(|| {
                     let mut out = Vec::with_capacity(*total_len);
@@ -6815,8 +6948,33 @@ impl Column {
             if let Some(data) = self.values.strided_float64_data() {
                 return Some(data);
             }
+            if let Some(data) = self.values.repeated_slices_f64_data() {
+                return Some(data);
+            }
         }
         None
+    }
+
+    #[must_use]
+    #[doc(hidden)]
+    pub fn all_valid_f64_to_vec(&self) -> Option<Vec<f64>> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        if let ScalarValues::LazyRepeatedSlicesFloat64 {
+            data,
+            segments,
+            total_len,
+            expanded,
+            ..
+        } = &self.values
+        {
+            return Some(expanded.get().map_or_else(
+                || ScalarValues::expand_repeated_slices_f64(data, segments, *total_len),
+                Clone::clone,
+            ));
+        }
+        self.as_f64_slice().map(<[f64]>::to_vec)
     }
 
     /// Borrow the column's contiguous `i64` buffer when this is an all-valid
@@ -7583,6 +7741,124 @@ impl Column {
             validity: ValidityMask::from_words(words, n),
             data: None,
         }
+    }
+
+    /// Whether [`Self::take_position_runs`] can gather this column without
+    /// expanding the runs back into a per-row positions vector.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn supports_fast_position_run_gather(&self) -> bool {
+        if self.validity.all()
+            && (self.as_f64_slice().is_some()
+                || self.as_i64_slice().is_some()
+                || self.as_bool_slice().is_some())
+        {
+            return true;
+        }
+
+        matches!(
+            &self.values,
+            ScalarValues::LazyNullableFloat64 { .. } | ScalarValues::LazyAllValidFloat64 { .. }
+        )
+    }
+
+    /// Gather sorted ascending contiguous source runs without materializing a
+    /// full positions vector first.
+    ///
+    /// # Panics
+    /// Panics if any run overflows or extends beyond this column's length.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_position_runs(&self, runs: &[(usize, usize)], out_len: usize) -> Self {
+        debug_assert_eq!(runs.iter().map(|&(_, len)| len).sum::<usize>(), out_len);
+        for &(start, len) in runs {
+            let end = start
+                .checked_add(len)
+                .expect("position run end must not overflow");
+            assert!(end <= self.len(), "position run end must be in bounds");
+        }
+
+        if out_len == 0 {
+            return self.take_positions(&[]);
+        }
+
+        if runs.len() == 1 {
+            let (start, len) = runs[0];
+            return self.take_contiguous_range(start, len);
+        }
+
+        if self.validity.all() {
+            if let Some(src) = self.as_f64_slice() {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64(data),
+                    validity: ValidityMask::all_valid(out_len),
+                    data: None,
+                };
+            }
+
+            if let Some(src) = self.as_i64_slice() {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_int64(data),
+                    validity: ValidityMask::all_valid(out_len),
+                    data: None,
+                };
+            }
+
+            if let Some(src) = self.as_bool_slice() {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_bool(data),
+                    validity: ValidityMask::all_valid(out_len),
+                    data: None,
+                };
+            }
+        }
+
+        let typed_f64: Option<&[f64]> = match &self.values {
+            ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+            ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+            _ => None,
+        };
+        if let Some(src) = typed_f64 {
+            let mut data = Vec::with_capacity(out_len);
+            let mut words = vec![0_u64; out_len.div_ceil(64)];
+            let mut out_idx = 0usize;
+            for &(start, len) in runs {
+                let end = start + len;
+                data.extend_from_slice(&src[start..end]);
+                for (offset, &x) in src[start..end].iter().enumerate() {
+                    let pos = start + offset;
+                    if self.validity.get(pos) && !x.is_nan() {
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    out_idx += 1;
+                }
+            }
+            return Self::from_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, out_len),
+            );
+        }
+
+        let mut positions = Vec::with_capacity(out_len);
+        for &(start, len) in runs {
+            positions.extend(start..start + len);
+        }
+        self.take_positions(&positions)
     }
 
     /// Gather a contiguous row range without first materializing
@@ -9069,6 +9345,11 @@ impl Column {
             }
             ScalarValues::LazyCombineFirstFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.combine_first_float64_data()
+            }
+            ScalarValues::LazyRepeatedSlicesFloat64 { total_len, .. }
+                if *total_len == self.validity.len() =>
+            {
+                self.values.repeated_slices_f64_data()
             }
             _ => None,
         }
@@ -16841,6 +17122,26 @@ mod tests {
     }
 
     #[test]
+    fn take_position_runs_nullable_float64_matches_take_positions() {
+        let column =
+            Column::from_f64_values(vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, f64::NAN, 8.0]);
+        let runs = [(0, 2), (3, 3), (7, 1)];
+        let positions = [0, 1, 3, 4, 5, 7];
+
+        assert!(column.supports_fast_position_run_gather());
+        let gathered = column.take_position_runs(&runs, positions.len());
+        let expected = column.take_positions(&positions);
+
+        assert_eq!(gathered.dtype(), expected.dtype());
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+        assert!(matches!(
+            &gathered.values,
+            ScalarValues::LazyAllValidFloat64 { .. } | ScalarValues::LazyNullableFloat64 { .. }
+        ));
+    }
+
+    #[test]
     fn take_positions_all_valid_primitives_match_validated_materialization() {
         let cases = [
             (
@@ -18487,6 +18788,49 @@ mod tests {
         let clean = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
         assert!(clean.validity().all());
         assert_eq!(clean.as_f64_slice(), Some([1.0, 2.0, 3.0].as_slice()));
+    }
+
+    #[test]
+    fn repeated_slices_float64_exposes_cached_typed_slice() {
+        let column = Column::from_f64_repeated_slices_shared(
+            vec![11.0, 22.0, 33.0, 44.0],
+            Arc::from([(1usize, 2usize), (0, 3), (3, 1)].as_slice()),
+            6,
+        );
+        let expected = [22.0, 33.0, 11.0, 22.0, 33.0, 44.0];
+
+        assert_eq!(column.as_f64_slice(), Some(expected.as_slice()));
+        assert_eq!(column.as_f64_slice(), Some(expected.as_slice()));
+        assert_eq!(column.all_valid_f64_to_vec(), Some(expected.to_vec()));
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(22.0),
+                Scalar::Float64(33.0),
+                Scalar::Float64(11.0),
+                Scalar::Float64(22.0),
+                Scalar::Float64(33.0),
+                Scalar::Float64(44.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_slices_float64_expands_periodic_prefix() {
+        let column = Column::from_f64_repeated_slices_shared(
+            vec![1.0, 2.0, 3.0],
+            Arc::from([(0usize, 3usize), (0, 3), (0, 2)].as_slice()),
+            8,
+        );
+
+        assert_eq!(
+            column.as_f64_slice(),
+            Some([1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0].as_slice())
+        );
+        assert_eq!(
+            column.all_valid_f64_to_vec(),
+            Some(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0])
+        );
     }
 
     #[test]

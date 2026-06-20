@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 34/41 realistic ops faster (median ≈2.8× among wins); 5 losses,
+**Perf vs pandas 2.2.3: 35/43 realistic ops faster (median ≈2.8× among wins); 6 losses,
 2 neutral rows, all with documented fix paths; 0 shipped perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -27,7 +27,9 @@ focused `fp-groupby` release tests green.
   mimalloc boundary allocator (24× slower -> 2.15× slower) but still needs a reused-buffer
   or chunk/view path; ffill now flips to 1.41× faster via skw2c validity-run bulk fill;
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
-  allocator-sensitive on the plain glibc path; max/min
+  allocator-sensitive on the plain glibc path; DataFrame.dropna typed Float64 is still
+  a 0.42× loss after uza04.208 run-gather narrowed FP 9.629 ms -> 9.131 ms, with
+  output allocation plus per-row missing scan still dominant; max/min
   still trail pandas after the manual 8-lane accumulator, and safe `std::simd`
   i64x8/i64x4 probes were measured and reverted as regressions; Series add/mul now has a
   kept morsel-sweep lever that makes both arithmetic rows near-parity pinned, with mul
@@ -37,11 +39,13 @@ focused `fp-groupby` release tests green.
   `values()` materialization remains a 0.21× consumption-path loss because it
   boxes every f64 into `Scalar`; Series.map Float64
   dense integer-key mapping now flips the default construction lane to a 7.04× win
-  after hbq6y's lazy repeated-slice output + counter witness, while forced
-  `values()` materialization remains a 0.45× consumption-path loss. The qngdp
-  materialization probes were measured and reverted: the threaded typed-cache fill
-  regressed the forced materialize path from 27.646 ms to 33.013 ms, and the
-  scalar-block repeated-slice fill still regressed to 30.838 ms.
+  after hbq6y's lazy repeated-slice output + counter witness, and p0irg flips
+  typed numeric materialization to a 5.24× win by exposing repeated Float64 slices
+  as an owned f64 buffer for `to_numpy()`. Forced `values()` materialization
+  remains a 0.44× consumption-path loss. The qngdp materialization probes were
+  measured and reverted: the threaded typed-cache fill regressed the forced
+  materialize path from 27.646 ms to 33.013 ms, and the scalar-block repeated-slice
+  fill still regressed to 30.838 ms.
   All gaps are tracked.
 - **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
   process-boundary allocator: 5 broad smoke wins (up to 3.35×), neutral control lanes, and
@@ -67,7 +71,8 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | max / min | 2M int64 | 0.57× / 0.57× rerun | 🟡 8-lane chunked accumulator remains best safe-Rust path; safe `std::simd` i64x8/i64x4 rejected |
 | Series add / mul | 2M f64 same-index | pinned add 1.01× neutral, mul 0.96× neutral; unpinned add 0.88× loss, mul 1.19× win | 🟡 tycz7 kept disjoint morsel sweep; FP-side add/mul ~6.0×/5.6× faster, add remains threshold-sensitive |
 | Series.map Float64 | 2M f64, 50-entry zero-based full-coverage map | 7.04× deferred; FP-side 16.06→1.71 ms | 🟢 flipped from 0.75× loss; hbq6y stores periodic dense-code output as lazy repeated Float64 slices and replaces the witness modulo with a rolling counter |
-| Series.map Float64 `values()` | same workload, forced `out.values()` materialization | 0.45× residual; qngdp probes 0.38-0.40× reverted | 🔴 residual consumption-path loss; lazy repeated-slice `Scalar` materialization is still heavier than pandas' numeric result buffer; threaded enum materialization and scalar-block cloning both lost |
+| Series.map Float64 `to_numpy()` | same workload, forced `out.to_numpy()` materialization | 5.24×; FP-side 32.95→2.30 ms | 🟢 p0irg exposes repeated Float64 slices through a direct owned f64 buffer for typed consumers; avoids public `values()` enum boxing |
+| Series.map Float64 `values()` | same workload, forced `out.values()` materialization | 0.44× residual; qngdp probes 0.38-0.40× reverted | 🔴 residual scalar consumption-path loss; lazy repeated-slice `Scalar` materialization is still heavier than pandas' numeric result buffer; threaded enum materialization and scalar-block cloning both lost |
 | Series.combine_first | 2M f64 same-index, ~50% NaN fill | 676× default construct; 2.84× typed materialize | 🟢 flipped from 0.48× loss; og9qm defers the all-valid Float64 select into a lazy tape and only materializes the selected f64 buffer for typed consumers |
 | Series.combine_first `values()` | same workload, forced `out.values()` materialization | 0.21× residual | 🔴 residual consumption-path loss; public `values()` still boxes every f64 into `Scalar`, 30.298 ms vs pandas 6.506 ms |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
@@ -80,6 +85,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | merge inner on Utf8 keys | 1M×1M → 500k rows | 0.42× | 🔴 2.4× slower; deferred (bead f1ftd) — fp-join pointer-key + output-alloc, hot/peer-reserved crate |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
+| DataFrame.dropna(how=any) | 500k×5 f64, ~10% NaN rows | 0.42× | 🔴 still 2.39× slower; uza04.208 run-gather narrowed FP 9.629→9.131 ms, while all-valid scan-pruning was measured and reverted |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |
 | ffill | 2M f64, ~10% NaN | 1.41× with skw2c validity-run fill + 3nah5 mimalloc boundary | 🟢 flipped; packed validity-run bulk fill |
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
@@ -100,11 +106,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 34/41 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
+**Score: 35/43 measured ops faster than pandas; 6 losses (max, min, concat, DataFrame.dropna, Series.map Float64 `values()`, Series.combine_first `values()`),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 10 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 34 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 35 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
@@ -136,12 +142,14 @@ pandas 6.506 ms (0.21×) because it boxes every f64 into `Scalar`. This pass is
 lower-allocation scalar materialization, not another select-kernel trim.
 The latest Series.map Float64 state keeps the earlier `0jdij` dense direct-address table
 and hbq6y's guarded periodic dense-code witness, lazy repeated-slice output, and rolling
-counter scan. Default Series construction is now green at 7.04× vs pandas. Forced
-`out.values()` is still red: current qngdp baseline was pandas ~12.2 ms vs FP
-27.646 ms. The attempted repeated-slice f64 cache plus threaded Scalar materializer
-regressed to 33.013 ms, and the scalar-block repeated-slice fill still regressed
-to 30.838 ms. Both probes were reverted; the next fix path is typed numeric
-consumption or a lower-allocation public values representation, not parallel enum
+counter scan. Default Series construction is green at 7.04× vs pandas. p0irg adds the
+typed numeric consumption path qngdp routed toward: `out.to_numpy()` now expands/copies
+the lazy repeated Float64 tape as f64 directly, moving from 32.949 ms to 2.301 ms and
+beating pandas 12.053 ms by 5.24×. Forced `out.values()` is still red at 27.348 ms vs
+pandas 12.075 ms (0.44×). The attempted qngdp enum materializers remain no-ships:
+the threaded typed-cache fill regressed the forced materialize path from 27.646 ms to
+33.013 ms, and the scalar-block repeated-slice fill still regressed to 30.838 ms.
+The remaining fix path is lower-allocation public scalar values, not parallel enum
 boxing or cloning a scalar tape.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
@@ -153,10 +161,11 @@ pandas because fp's column-rebuild construction is still heavier than numpy's po
 memmove/concatenate; max/min
 still need target-specific SIMD beyond current safe `std::simd` lowering; Series add/mul
 still need durable numpy-class vectorization or output materialization work to move from
-near-parity to clear wins; Series.map Float64 and Series.combine_first now win on
-deferred/default construction, but their forced `values()` paths still need lower-allocation
-public typed consumption despite the hbq6y periodic repeated-slice and og9qm lazy-select
-keeps.
+near-parity to clear wins; Series.map Float64 now wins on deferred construction and
+typed `to_numpy()` consumption, while Series.combine_first wins on deferred/default
+construction and typed materialization. Both forced `values()` paths still need
+lower-allocation public scalar output despite the hbq6y/p0irg repeated-slice and og9qm
+lazy-select keeps.
 The qngdp `values()` materializers were measured and reverted because they added
 initialization/thread/scalar-tape overhead without removing enum boxing. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
 and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by

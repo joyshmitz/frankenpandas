@@ -677,3 +677,29 @@ but remains **khash-floor-bound** (0.25–0.32x): FxHashMap/SwissTable get+inser
 khash inline-i64 — the same architectural floor noted for value_counts. A bijective splitmix
 mix on the i64 key was tried (suspecting FxHash clustering on strided ids) and gave **0 gain**
 → REVERTED; the floor is the table, not the hash. Bit-identical first-seen codes/uniques.
+
+### 2026-06-20 BlackThrush (cont.) — grow-not-presize beats the i64 khash floor (BREAKTHROUGH)
+The recurring "wide/sparse i64 high-card khash floor" (factorize 0.25-0.32x) turned out NOT to
+be the hash table type — it was **pre-sizing the FxHashMap to data.len()**. At 1M rows with
+distinct<<n that is a mostly-empty ~18MB table; cache-cold scattered probes dominate.
+
+- **Custom open-addressing i64→code table: REJECTED.** A hand-rolled linear-probing table
+  (fibonacci hash, occupied-bitset) measured 0.47x (d=100) – 0.88x (d=100k) vs FxHashMap —
+  SwissTable already beats naive open addressing. Probe: examples/i64_table_probe.rs (removed).
+- **FxHashMap grown from `default()` (not pre-sized): the win.** Probe loop d=100 3.3ms→1.7ms
+  (1.9x), d=100k 24ms→5.5ms (4.4x).
+- f64 grow additionally needs the splitmix bit-mix (else low-entropy float bits cluster on the
+  compact table → ~10x regression; sibling of unique()'s mixf64).
+
+Applied to factorize (commit 8c7b78f4). Measured 1M rows vs pandas `pd.factorize`:
+| dtype | distinct | presize | grow(+mix) | pandas | ratio |
+|---|---:|---:|---:|---:|---|
+| Float64 | 100 | 4610µs | 4061µs | 9777µs | 2.12x → **2.41x** |
+| Float64 | 100000 | 30001µs | 19150µs | 35522µs | 1.18x → **1.85x** |
+| Int64(wide) | 100 | 11873µs | 2665µs | 3837µs | 0.32x → **1.44x** |
+| Int64(wide) | 100000 | 32253µs | 7423µs | 8076µs | 0.25x → **1.09x** |
+
+**All four factorize cases now DOMINATE pandas.** Applying grow to nunique/unique was **~0-gain**
+(pure-insert sets don't suffer the get+insert+codes-build amplification factorize did) →
+REVERTED per the no-0-gain rule. LESSON: don't pre-size a hash map to the row count when the
+distinct count is unknown/small — grow it; the over-allocation, not the hasher, is the cache killer.

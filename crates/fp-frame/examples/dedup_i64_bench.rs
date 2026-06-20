@@ -37,12 +37,24 @@ fn main() {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    let keys: Vec<i64> = (0..rows).map(|_| (next() % distinct as u64) as i64).collect();
+    let mode = args.get(4).map(String::as_str).unwrap_or("i64");
     let payload: Vec<f64> = (0..rows).map(|i| i as f64).collect();
 
     let index = Index::new_known_unique_int64_unit_range(0, rows);
     let mut columns = BTreeMap::new();
-    columns.insert("key".to_string(), Column::from_i64_values(keys));
+    if mode == "utf8" {
+        let mut kb = Vec::with_capacity(rows * 6);
+        let mut ko = Vec::with_capacity(rows + 1);
+        ko.push(0usize);
+        for _ in 0..rows {
+            kb.extend_from_slice(format!("k{:08}", next() % distinct as u64).as_bytes());
+            ko.push(kb.len());
+        }
+        columns.insert("key".to_string(), Column::from_utf8_contiguous(kb, ko));
+    } else {
+        let keys: Vec<i64> = (0..rows).map(|_| (next() % distinct as u64) as i64).collect();
+        columns.insert("key".to_string(), Column::from_i64_values(keys));
+    }
     columns.insert("val".to_string(), Column::from_f64_values(payload));
     let df = DataFrame::new_with_column_order(
         index,

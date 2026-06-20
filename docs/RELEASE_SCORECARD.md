@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 33/40 realistic ops faster (median ≈2.8× among wins); 5 losses,
+**Perf vs pandas 2.2.3: 34/41 realistic ops faster (median ≈2.8× among wins); 5 losses,
 2 neutral rows, all with documented fix paths; 0 shipped perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -18,7 +18,7 @@ focused `fp-groupby` release tests green.
   groupby first/last Utf8-key (2.92×/2.29×), groupby mean Utf8-key (2.80×), groupby nunique Utf8-key (2.89×),
   groupby count/size Utf8-key (2.49×/2.81×),
   groupby median Utf8-key (1.80–2.63×),
-  groupby std/var Utf8-key (1.22–1.34×),
+  groupby std/var Utf8-key (1.22–1.34×), Series.combine_first default construction (676×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
   slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×),
   RangeIndex bulk indexers (2.64–51.5×) —
@@ -31,9 +31,11 @@ focused `fp-groupby` release tests green.
   still trail pandas after the manual 8-lane accumulator, and safe `std::simd`
   i64x8/i64x4 probes were measured and reverted as regressions; Series add/mul now has a
   kept morsel-sweep lever that makes both arithmetic rows near-parity pinned, with mul
-  faster unpinned and add still threshold-sensitive; Series.combine_first is still a
-  0.48× loss after grtx1's no-rescan keep and gmn0f's latest measured 1.12× packed
-  validity-word copy-patch improvement; Series.map Float64
+  faster unpinned and add still threshold-sensitive; Series.combine_first default
+  construction now flips to a 676× win, and typed materialization flips to a 2.84×
+  win, after og9qm's lazy all-valid Float64 select tape; forced public
+  `values()` materialization remains a 0.21× consumption-path loss because it
+  boxes every f64 into `Scalar`; Series.map Float64
   dense integer-key mapping now flips the default construction lane to a 7.04× win
   after hbq6y's lazy repeated-slice output + counter witness, while forced
   `values()` materialization remains a 0.45× consumption-path loss. The qngdp
@@ -66,7 +68,8 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | Series add / mul | 2M f64 same-index | pinned add 1.01× neutral, mul 0.96× neutral; unpinned add 0.88× loss, mul 1.19× win | 🟡 tycz7 kept disjoint morsel sweep; FP-side add/mul ~6.0×/5.6× faster, add remains threshold-sensitive |
 | Series.map Float64 | 2M f64, 50-entry zero-based full-coverage map | 7.04× deferred; FP-side 16.06→1.71 ms | 🟢 flipped from 0.75× loss; hbq6y stores periodic dense-code output as lazy repeated Float64 slices and replaces the witness modulo with a rolling counter |
 | Series.map Float64 `values()` | same workload, forced `out.values()` materialization | 0.45× residual; qngdp probes 0.38-0.40× reverted | 🔴 residual consumption-path loss; lazy repeated-slice `Scalar` materialization is still heavier than pandas' numeric result buffer; threaded enum materialization and scalar-block cloning both lost |
-| Series.combine_first | 2M f64 same-index, ~50% NaN fill | 0.48× local; CPU7 FP-side 16.966→15.100 ms | 🔴 still 2.07× slower; grtx1 skips a redundant Float64 validity rescan and gmn0f switches the typed path to packed validity-word copy-patch, but output allocation/select remains |
+| Series.combine_first | 2M f64 same-index, ~50% NaN fill | 676× default construct; 2.84× typed materialize | 🟢 flipped from 0.48× loss; og9qm defers the all-valid Float64 select into a lazy tape and only materializes the selected f64 buffer for typed consumers |
+| Series.combine_first `values()` | same workload, forced `out.values()` materialization | 0.21× residual | 🔴 residual consumption-path loss; public `values()` still boxes every f64 into `Scalar`, 30.298 ms vs pandas 6.506 ms |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | loc[[labels]] sorted Int64 | 2M f64 step-2 idx, select 1000 | 1.58× | 🟢 flipped from 5340× SLOWER; 0pkt2 cached int64_view + binary-search batch resolver |
 | loc[[labels]] unsorted Int64 | 2M f64 shuffled unique idx, select 1000 | 13.7× | 🟢 flipped from 5147× SLOWER; 2pvdg identity-cached i64→pos hashtable |
@@ -97,11 +100,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 33/40 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, combine_first),
+**Score: 34/41 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 10 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 33 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 34 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
@@ -122,13 +125,15 @@ The latest `tycz7` Series add/mul pass kept a disjoint morsel sweep in
 (1.01×) but still loses in the unpinned sanity row (0.88×), and mul is neutral pinned /
 a small win unpinned. The prior `38xpk`
 push-output zero-fill and discard-ledger probes remain measured no-ships.
-The latest `gmn0f` Series.combine_first pass kept the `grtx1` no-rescan win and changed the
-typed same-index Float64 path to copy the left f64 buffer once, then patch only missing or
-valid-NaN lanes from packed validity words. The latest cod-a CPU7 A/B moved FP
-16.966 ms -> 15.100 ms (1.12× FP-side), but pandas 2.2.3 measured 7.309 ms on the
-matched workload, so the ratio is still 0.48× and the row stays red. Route deeper
-to a reusable lower-allocation typed select builder rather than another per-row
-dispatch trim.
+The latest `og9qm` Series.combine_first pass keeps the `grtx1` no-rescan proof and
+`gmn0f` packed validity-word semantics, but stops eagerly building the selected Float64
+buffer when the right side is all-valid. The same-index Float64 path now returns a lazy
+all-valid select tape; CPU7 best-of-50 measured FP construction at 0.0091 ms vs pandas
+6.177 ms (676× faster), and typed materialization at 2.142 ms vs pandas `to_numpy()`
+6.075 ms (2.84× faster). Forced public `out.values()` remains red at 30.298 ms vs
+pandas 6.506 ms (0.21×) because it boxes every f64 into `Scalar`. This pass is
+**2 wins / 1 loss / 0 neutral**; route deeper to typed numeric public consumption or
+lower-allocation scalar materialization, not another select-kernel trim.
 The latest Series.map Float64 state keeps the earlier `0jdij` dense direct-address table
 and hbq6y's guarded periodic dense-code witness, lazy repeated-slice output, and rolling
 counter scan. Default Series construction is now green at 7.04× vs pandas. Forced
@@ -148,10 +153,10 @@ pandas because fp's column-rebuild construction is still heavier than numpy's po
 memmove/concatenate; max/min
 still need target-specific SIMD beyond current safe `std::simd` lowering; Series add/mul
 still need durable numpy-class vectorization or output materialization work to move from
-near-parity to clear wins; Series.map Float64 now wins on deferred Series construction,
-but its forced `values()` path and combine_first still need lower-allocation
-select/materialization despite the hbq6y periodic repeated-slice, grtx1 no-rescan,
-and gmn0f packed validity-word keeps.
+near-parity to clear wins; Series.map Float64 and Series.combine_first now win on
+deferred/default construction, but their forced `values()` paths still need lower-allocation
+public typed consumption despite the hbq6y periodic repeated-slice and og9qm lazy-select
+keeps.
 The qngdp `values()` materializers were measured and reverted because they added
 initialization/thread/scalar-tape overhead without removing enum boxing. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
 and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by

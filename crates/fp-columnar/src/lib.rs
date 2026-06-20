@@ -1901,6 +1901,21 @@ enum ScalarValues {
         data: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred all-valid Float64 `combine_first` select.
+    ///
+    /// Output row `i` is `left[i]` when the left validity bit is set and the
+    /// left datum is not NaN, otherwise `right[i]`. The caller proves the right
+    /// side is all-valid/NaN-free, so every output row is valid. This defers the
+    /// selected output buffer until a consumer asks for a typed slice or scalar
+    /// values.
+    LazyCombineFirstFloat64 {
+        left: Arc<[f64]>,
+        right: Arc<[f64]>,
+        left_validity_words: Arc<[u64]>,
+        len: usize,
+        data: OnceLock<Vec<f64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Arithmetic-progression view over shared all-valid Float64 data.
     ///
     /// Semantically identical to gathering `data[start + i * step]` for
@@ -2373,6 +2388,24 @@ impl ScalarValues {
         Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
             plan,
             col,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_combine_first_float64(
+        left: Arc<[f64]>,
+        right: Arc<[f64]>,
+        left_validity_words: Arc<[u64]>,
+        len: usize,
+    ) -> Self {
+        debug_assert!(left.len() >= len);
+        debug_assert!(right.len() >= len);
+        Self::LazyCombineFirstFloat64 {
+            left,
+            right,
+            left_validity_words,
+            len,
             data: OnceLock::new(),
             values: OnceLock::new(),
         }
@@ -3366,6 +3399,61 @@ impl ScalarValues {
         None
     }
 
+    fn materialize_combine_first_float64(
+        left: &[f64],
+        right: &[f64],
+        left_validity_words: &[u64],
+        len: usize,
+    ) -> Vec<f64> {
+        let mut out = left[..len].to_vec();
+        for (word_idx, out_chunk) in out.chunks_mut(64).enumerate() {
+            let valid_word = left_validity_words.get(word_idx).copied().unwrap_or(0);
+            let base = word_idx * 64;
+            let len_mask = if out_chunk.len() == 64 {
+                u64::MAX
+            } else {
+                (1_u64 << out_chunk.len()) - 1
+            };
+
+            let mut invalid_bits = !valid_word & len_mask;
+            while invalid_bits != 0 {
+                let offset = invalid_bits.trailing_zeros() as usize;
+                out_chunk[offset] = right[base + offset];
+                invalid_bits &= invalid_bits - 1;
+            }
+
+            let mut valid_bits = valid_word & len_mask;
+            while valid_bits != 0 {
+                let offset = valid_bits.trailing_zeros() as usize;
+                if out_chunk[offset].is_nan() {
+                    out_chunk[offset] = right[base + offset];
+                }
+                valid_bits &= valid_bits - 1;
+            }
+        }
+        out
+    }
+
+    fn combine_first_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyCombineFirstFloat64 {
+            left,
+            right,
+            left_validity_words,
+            len,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| {
+                    Self::materialize_combine_first_float64(left, right, left_validity_words, *len)
+                })
+                .as_slice(),
+            );
+        }
+        None
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
@@ -3430,6 +3518,29 @@ impl ScalarValues {
                         .copied()
                         .map(Scalar::Float64)
                         .collect()
+                })
+                .as_slice(),
+            Self::LazyCombineFirstFloat64 {
+                left,
+                right,
+                left_validity_words,
+                len,
+                data,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.get_or_init(|| {
+                        Self::materialize_combine_first_float64(
+                            left,
+                            right,
+                            left_validity_words,
+                            *len,
+                        )
+                    })
+                    .iter()
+                    .copied()
+                    .map(Scalar::Float64)
+                    .collect()
                 })
                 .as_slice(),
             Self::LazyStridedFloat64 {
@@ -4013,6 +4124,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
+            Self::LazyCombineFirstFloat64 { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
@@ -4238,6 +4350,18 @@ impl Clone for ScalarValues {
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, col, .. } => {
                 Self::lazy_all_valid_float64_pairwise_stat_matrix_column(Arc::clone(plan), *col)
             }
+            Self::LazyCombineFirstFloat64 {
+                left,
+                right,
+                left_validity_words,
+                len,
+                ..
+            } => Self::lazy_combine_first_float64(
+                Arc::clone(left),
+                Arc::clone(right),
+                Arc::clone(left_validity_words),
+                *len,
+            ),
             Self::LazyStridedFloat64 {
                 data,
                 start,
@@ -6237,6 +6361,29 @@ impl Column {
         }
     }
 
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_combine_first_all_valid(
+        left: Arc<[f64]>,
+        right: Arc<[f64]>,
+        left_validity: &ValidityMask,
+    ) -> Self {
+        let len = left_validity.len();
+        debug_assert!(left.len() >= len);
+        debug_assert!(right.len() >= len);
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_combine_first_float64(
+                left,
+                right,
+                Arc::from(left_validity.packed_words_for_scan()),
+                len,
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     pub fn from_f64_values(data: Vec<f64>) -> Self {
         let mut has_nan = false;
         let mut all_finite = true;
@@ -6627,6 +6774,20 @@ impl Column {
         Some((data, &self.validity))
     }
 
+    #[must_use]
+    #[doc(hidden)]
+    pub fn shared_f64_data_with_validity(&self) -> Option<(Arc<[f64]>, &ValidityMask)> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } if data.len() == self.validity.len() => {
+                Some((Arc::clone(data), &self.validity))
+            }
+            _ => None,
+        }
+    }
+
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
         if self.dtype == DType::Float64 && self.validity.all() {
             if let Some(ColumnData::Float64(data)) = &self.data {
@@ -6646,6 +6807,9 @@ impl Column {
                 return Some(data);
             }
             if let Some(data) = self.values.pairwise_stat_float64_data() {
+                return Some(data);
+            }
+            if let Some(data) = self.values.combine_first_float64_data() {
                 return Some(data);
             }
             if let Some(data) = self.values.strided_float64_data() {
@@ -8902,6 +9066,9 @@ impl Column {
             }
             ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_slice())
+            }
+            ScalarValues::LazyCombineFirstFloat64 { len, .. } if *len == self.validity.len() => {
+                self.values.combine_first_float64_data()
             }
             _ => None,
         }

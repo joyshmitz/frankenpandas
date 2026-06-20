@@ -9838,19 +9838,23 @@ impl Column {
             ));
         }
         if let Some(data) = self.as_f64_slice() {
-            return Ok(Self::from_f64_values(
-                data.iter()
-                    .map(|&x| {
-                        if x > 0.0 {
-                            1.0
-                        } else if x < 0.0 {
-                            -1.0
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect(),
-            ));
+            // sign(all-valid) ∈ {-1.0, 0.0, 1.0} — always finite, never NaN — so
+            // the output is provably all-valid AND all-finite. Skip the
+            // from_f64_values has_nan/all_finite rescan with a `Some(true)`
+            // witness (mirror of abs). Bit-identical (same -1/0/1, -0.0→0.0).
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&x| {
+                    if x > 0.0 {
+                        1.0
+                    } else if x < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            return Ok(Self::from_f64_all_valid_with_finite_opt(out, Some(true)));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {

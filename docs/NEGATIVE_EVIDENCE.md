@@ -764,3 +764,19 @@ floor; they keep only the (bit-identical, rescan-removing) Column-level witness-
 depends on the OP's compute/byte ratio, not just total cells — sign-bit ops (abs/neg) go serial
 when L3-resident; roundsd/transcendental ops stay parallel. **OPEN: floor/ceil 100k ~0.22x —
 roundsd map not vectorizing (try explicit SIMD `roundsd` over the slice).**
+
+### 2026-06-20 BlackThrush (cont.) — sign witness-prop WIN; scalar-arith serial-threshold ~0-gain (REVERTED)
+Probed two more numpy-fast elementwise ops (min-of-iters vs pandas 2.2.3):
+- **df_sign** was 0.74x@100k (709 vs 523) / 5.0x@1M. `Column::sign` output ∈ {-1,0,1} is always
+  finite & never NaN → applied `from_f64_all_valid_with_finite_opt(out, Some(true))`, skipping the
+  from_f64_values rescan. **709→621µs@100k (1.14x; 0.84x vs pandas), 9001→7792@1M (1.16x; 5.8x WIN).**
+  Bit-identical (5 sign tests pass). Kept PARALLEL (sign's compare+select is branchy like floor —
+  serial risks the floor/ceil regression; not worth the risk for a 1.14x gain).
+- **df_add_scalar** was 0.32x@100k (606 vs 193) / 5.7x@1M. Tried the abs/neg serial threshold on
+  apply_scalar_op (add/sub/mul/div) → **~0-GAIN (606→589@100k, 3% = noise), REVERTED.** Root cause:
+  the bottleneck is the `from_f64_values` has_nan/all_finite rescan + per-column alloc, NOT the
+  threading; and witness-prop CAN'T apply (a+c overflows finite→inf; mul/div make NaN from 0·inf,
+  0/0). Closing add_scalar needs a has_nan=false-but-recompute-all_finite constructor (add/sub only;
+  mul/div genuinely need the rescan) — deferred. LESSON: the serial-threshold lever only pays when
+  the op is BOTH pure-bandwidth AND already rescan-free (abs/neg via witness-prop). If the rescan
+  stays (no finiteness preservation), serial-vs-parallel is a wash. **OPEN: add/sub_scalar 0.32x.**

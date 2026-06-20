@@ -269,6 +269,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.abs()
             let _ = df.abs().expect("abs");
         }),
+        ("dataframe_ops", "df_add_scalar") => time_us(|| {
+            // pandas: df + 5.0
+            let _ = df.add_scalar(5.0).expect("add_scalar");
+        }),
+        ("dataframe_ops", "df_sign") => time_us(|| {
+            // pandas: np.sign(df)
+            let _ = df.sign().expect("sign");
+        }),
         ("dataframe_ops", "df_neg") => time_us(|| {
             // pandas: -df
             let _ = df.neg().expect("neg");

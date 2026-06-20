@@ -790,3 +790,18 @@ ops (round, add/sub/mul/div scalar) genuinely need the from_f64_values all_finit
 no rescan to skip — their residual small-size loss is structural (columnar per-column alloc +
 necessary finiteness pass vs pandas single 2D-block numpy ufunc). Remaining in-lane OPEN items are
 all structural-columnar or bit-locked-fdiv (df_round); no quick lever left.
+
+### 2026-06-20 BlackThrush (cont.) — transpose CATASTROPHE (40000x) partially fixed + structural wall
+Probed transpose/diff/notna (min-of-iters vs pandas). diff (1.22x@100k, 10x@1M) and notna (4.9x,
+51.7x) are WINS. **df.transpose() was a catastrophe: 105ms@100k (2780x slower than pandas 38us),
+1.5s@1M (40000x slower than 37us).** Cause: per-(row,col) BTreeMap `get` + `Scalar`
+materialization inside the n_rows loop, building n_rows separate columns. Hoisted column refs/
+slices out of the loops + added an all-valid-f64 typed path (from_f64_values, no Scalar). Bit-
+identical (7 transpose tests). 100k 105410→77569us, 1M 1505635→1098981us — **only 1.37x.**
+**STRUCTURAL WALL (br-frankenpandas-l4vzc):** transpose of an n-ROW frame builds an n-COLUMN
+DataFrame; the BTreeMap<String,Column> build + per-column validate/normalize is O(n log n), and
+pandas .T is an O(1) VIEW over its contiguous 2D ndarray block. FP cannot match without a 2D-block
+storage mode or a lazy-transpose view (major architectural change). Realistic transpose (small/
+wide frames) is fine; only pathological tall-frame transpose bites. Kept the 1.37x (clean, removes
+the redundant 10M BTreeMap gets). LESSON: any FP DataFrame op whose OUTPUT has ~n columns inherits
+the BTreeMap-of-columns O(n log n) tax — pandas' 2D block dodges it.

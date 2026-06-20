@@ -656,3 +656,24 @@ unique sparse-i64. The unifying lever: a single typed column the Scalar/digest/S
 framework processed row-by-row → direct-key FxHash probe over the raw typed slice (no
 `.values()` materialization). Declines: ewm_mean (bit-locked fdiv), df_dot (lazy/eager
 artifact). Conformance GREEN throughout.
+
+### 2026-06-20 BlackThrush (cont.) — Series::factorize typed fast paths (BIG: generic path was catastrophic)
+`Series::factorize` had typed paths only for dense-i64 + Utf8; Float64 and wide/sparse Int64
+fell to the generic path, which materialized a Scalar per row via `.values()`, ScalarKey'd +
+SipHash'd it, AND re-materialized codes as a second `Vec<Scalar>`, plus built an n-element
+`Vec<IndexLabel>` (~16MB at 1M) for the codes' 0..n index. Catastrophic at scale. Added typed
+`FxHashMap` paths (f64 canonical bits / raw i64) + `O(1)` lazy unit-range index. Measured
+(best-of, 1M rows, vs pandas 2.2.3 `pd.factorize`):
+
+| dtype | distinct | before | after | pandas | before→after |
+|---|---:|---:|---:|---:|---|
+| Float64 | 100 | 118293µs | 4610µs | 9777µs | 0.083x → **2.12x** (25.7x faster) |
+| Float64 | 100000 | 74809µs | 30001µs | 35522µs | 0.47x → **1.18x** |
+| Int64 (wide) | 100 | 55998µs | 11873µs | 3837µs | 0.069x → 0.32x (4.7x faster) |
+| Int64 (wide) | 100000 | 74070µs | 32253µs | 8076µs | 0.11x → 0.25x (2.3x faster) |
+
+Commit 8ea22583 (br-ceh1c). **f64 now dominates pandas (2.12x).** Wide-Int64 improves 2.3–4.7x
+but remains **khash-floor-bound** (0.25–0.32x): FxHashMap/SwissTable get+insert vs pandas'
+khash inline-i64 — the same architectural floor noted for value_counts. A bijective splitmix
+mix on the i64 key was tried (suspecting FxHash clustering on strided ids) and gave **0 gain**
+→ REVERTED; the floor is the table, not the hash. Bit-identical first-seen codes/uniques.

@@ -623,3 +623,22 @@ keep={First,Last,None}. Int64 high-card (0.54x) still trails khash — remaining
 shared take+filter gather over the kept rows, not the dedup probe; low-card (the realistic
 dedup case) wins. Lever generalizes: any single typed column the digest framework handled
 row-by-row → direct-key probe.
+
+### 2026-06-20 BlackThrush (cont.) — Series::nunique typed fast paths (Float64 + sparse Int64)
+`Series::nunique` had typed paths only for dense-range Int64 + contiguous Utf8; Float64 and
+wide/sparse Int64 fell to `.values()` Scalar materialization + ScalarKey + SipHash. Added
+canonical-bits `FxHashSet<u64>` (f64, -0.0→+0.0 to match `scalar_key_allow_missing`) and
+`FxHashSet<i64>` (sparse i64). Measured via `examples/nunique_bench.rs` (best-of-30,
+release-perf) vs pandas 2.2.3 `s.nunique()`, 1M rows:
+
+| dtype | distinct | before | after | pandas | before→after |
+|---|---:|---:|---:|---:|---|
+| Float64 | 100 | 68051µs | 3304µs | 5815µs | 0.085x → **1.76x** (20x faster) |
+| Float64 | 100000 | 14123µs | 8468µs | 23382µs | 1.66x → **2.76x** |
+| Int64 (wide) | 100 | 4739µs | 2524µs | 3115µs | 0.66x → **1.23x** |
+| Int64 (wide) | 100000 | 9805µs | 6230µs | 15203µs | 1.55x → **2.44x** |
+
+Commits: f64 0e4c384c (br-5389h), sparse-i64 51b952db (br-70fke). Bit-identical distinct
+count; 26 nunique tests pass incl. new ±0.0/NaN canonicalization test. Same lever as the dedup
+vein: a single typed column the generic Scalar/ScalarKey framework handled row-by-row →
+direct-key FxHash probe over the raw typed slice (no `.values()` materialization).

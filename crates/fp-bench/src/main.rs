@@ -281,6 +281,13 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.notna()
             let _ = df.notna().expect("notna");
         }),
+        ("dataframe_ops", "df_fillna") => {
+            // pandas: df.fillna(0.0) — run with --dtype float64_nan10/nan50
+            let fill = fp_types::Scalar::Float64(0.0);
+            time_us(|| {
+                let _ = df.fillna(&fill).expect("fillna");
+            })
+        }
         ("dataframe_ops", "df_add_scalar") => time_us(|| {
             // pandas: df + 5.0
             let _ = df.add_scalar(5.0).expect("add_scalar");

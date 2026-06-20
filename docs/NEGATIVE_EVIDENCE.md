@@ -805,3 +805,13 @@ storage mode or a lazy-transpose view (major architectural change). Realistic tr
 wide frames) is fine; only pathological tall-frame transpose bites. Kept the 1.37x (clean, removes
 the redundant 10M BTreeMap gets). LESSON: any FP DataFrame op whose OUTPUT has ~n columns inherits
 the BTreeMap-of-columns O(n log n) tax — pandas' 2D block dodges it.
+
+### 2026-06-20 BlackThrush (cont.) — fillna WIN; elementwise/reshape probe space fully mapped
+df.fillna(0.0) on float64_nan10 (min-of-iters): FP 871us vs pandas 1524us @100k = **1.75x WIN**;
+9247 vs 74196 @1M = **8.0x WIN**. No action. This closes the DataFrame elementwise/reshape probe:
+WINS (no action) = diff, notna, cumsum, fillna, clip, isna, describe, rank + all matrix workloads
+(on clean MIN). FIXED = abs/neg/floor/ceil/trunc/sign (witness-prop), transpose (1.37x + structural
+wall l4vzc). NEGATIVE/DEFERRED = add_scalar (~0-gain rescan-bound), df_round (bit-locked fdiv),
+floor/ceil 100k (structural columnar). Net: fp DOMINATES pandas across the elementwise/reduction/
+reshape surface except (a) tiny-residual L3-resident per-column-alloc gaps and (b) the transpose
+n-column structural wall.

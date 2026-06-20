@@ -394,13 +394,20 @@ static INDEX_LABEL_EQUALITY_CACHE: OnceLock<Mutex<FxHashMap<(u64, u64), bool>>> 
 
 const INDEX_LABEL_EQUALITY_CACHE_MAX: usize = 4096;
 
+type Int64PositionLookup = FxHashMap<i64, usize>;
+type Utf8PositionLookup = FxHashMap<Box<str>, usize>;
+type SharedInt64PositionLookup = Arc<Int64PositionLookup>;
+type SharedUtf8PositionLookup = Arc<Utf8PositionLookup>;
+type Int64PositionLookupCache = FxHashMap<u64, SharedInt64PositionLookup>;
+type Utf8PositionLookupCache = FxHashMap<u64, Option<SharedUtf8PositionLookup>>;
+type Datetime64PositionLookupCache = FxHashMap<u64, Option<SharedInt64PositionLookup>>;
+
 /// First-occurrence `i64 -> position` lookup tables for unsorted unique Int64
 /// indexes, cached by the index's runtime label identity (mirrors
 /// `INDEX_LABEL_EQUALITY_CACHE`). Lets repeated `loc[[labels]]` resolve each
 /// requested label in O(1) without rebuilding the per-call pointer-key
 /// `FxHashMap<&IndexLabel, Vec<usize>>` over the whole index every time.
-static INDEX_INT64_POS_LOOKUP_CACHE: OnceLock<Mutex<FxHashMap<u64, Arc<FxHashMap<i64, usize>>>>> =
-    OnceLock::new();
+static INDEX_INT64_POS_LOOKUP_CACHE: OnceLock<Mutex<Int64PositionLookupCache>> = OnceLock::new();
 
 /// Each entry can hold a whole-index hashtable (O(n) memory), so bound the
 /// entry count far more tightly than the boolean equality cache. The common
@@ -416,7 +423,7 @@ fn next_index_label_identity() -> u64 {
 /// Build-or-fetch the cached first-occurrence `i64 -> position` table for an
 /// index lineage. `values` must be the index's raw `i64` view; the caller has
 /// already proven the index is unique, so first occurrence == only occurrence.
-fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> Arc<FxHashMap<i64, usize>> {
+fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> SharedInt64PositionLookup {
     let cache = INDEX_INT64_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(existing) = cache
         .lock()
@@ -426,7 +433,7 @@ fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> Arc<FxHashMap<
     {
         return existing;
     }
-    let mut map: FxHashMap<i64, usize> = FxHashMap::default();
+    let mut map: Int64PositionLookup = FxHashMap::default();
     map.reserve(values.len());
     for (pos, &value) in values.iter().enumerate() {
         map.insert(value, pos);
@@ -445,10 +452,7 @@ fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> Arc<FxHashMap<
 /// indexes, cached by runtime label identity. The value is `Option`: `None`
 /// records "this index is not all-Utf8" so the warm path stays O(1) instead of
 /// rescanning a non-Utf8 index on every `loc` call.
-#[allow(clippy::type_complexity)]
-static INDEX_UTF8_POS_LOOKUP_CACHE: OnceLock<
-    Mutex<FxHashMap<u64, Option<Arc<FxHashMap<Box<str>, usize>>>>>,
-> = OnceLock::new();
+static INDEX_UTF8_POS_LOOKUP_CACHE: OnceLock<Mutex<Utf8PositionLookupCache>> = OnceLock::new();
 
 /// Each entry can hold a whole index's worth of boxed strings, so cap the entry
 /// count tightly (utf8 entries are heavier than the i64 ones).
@@ -461,7 +465,7 @@ const INDEX_UTF8_POS_LOOKUP_CACHE_MAX: usize = 16;
 fn utf8_position_lookup_cached(
     identity: u64,
     index_labels: &[IndexLabel],
-) -> Option<Arc<FxHashMap<Box<str>, usize>>> {
+) -> Option<SharedUtf8PositionLookup> {
     let cache = INDEX_UTF8_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(existing) = cache
         .lock()
@@ -471,7 +475,7 @@ fn utf8_position_lookup_cached(
     {
         return existing;
     }
-    let mut map: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    let mut map: Utf8PositionLookup = FxHashMap::default();
     map.reserve(index_labels.len());
     let mut all_utf8 = true;
     for (pos, label) in index_labels.iter().enumerate() {
@@ -500,10 +504,8 @@ fn utf8_position_lookup_cached(
 /// runtime label identity. `Datetime64(i64)` is ns-backed, so this mirrors the
 /// Int64 lookup but reads the `Datetime64` label variant. The value is
 /// `Option`: `None` records "not all Datetime64" so the warm path stays O(1).
-#[allow(clippy::type_complexity)]
-static INDEX_DATETIME_POS_LOOKUP_CACHE: OnceLock<
-    Mutex<FxHashMap<u64, Option<Arc<FxHashMap<i64, usize>>>>>,
-> = OnceLock::new();
+static INDEX_DATETIME_POS_LOOKUP_CACHE: OnceLock<Mutex<Datetime64PositionLookupCache>> =
+    OnceLock::new();
 
 const INDEX_DATETIME_POS_LOOKUP_CACHE_MAX: usize = 64;
 
@@ -514,7 +516,7 @@ const INDEX_DATETIME_POS_LOOKUP_CACHE_MAX: usize = 64;
 fn datetime64_position_lookup_cached(
     identity: u64,
     index_labels: &[IndexLabel],
-) -> Option<Arc<FxHashMap<i64, usize>>> {
+) -> Option<SharedInt64PositionLookup> {
     let cache = INDEX_DATETIME_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(existing) = cache
         .lock()
@@ -524,7 +526,7 @@ fn datetime64_position_lookup_cached(
     {
         return existing;
     }
-    let mut map: FxHashMap<i64, usize> = FxHashMap::default();
+    let mut map: Int64PositionLookup = FxHashMap::default();
     map.reserve(index_labels.len());
     let mut all_datetime = true;
     for (pos, label) in index_labels.iter().enumerate() {
@@ -10302,6 +10304,70 @@ impl RangeIndex {
         Some(index)
     }
 
+    fn affine_span_index(
+        &self,
+        first_position: usize,
+        len: usize,
+        name: Option<&str>,
+    ) -> Option<Index> {
+        let start = if len == 0 {
+            self.start
+        } else {
+            self.value_at(first_position)
+        };
+        let mut index = Index::new_known_unique_int64_affine_range(start, self.step, len)?;
+        if let Some(name) = name {
+            index = index.set_name(name);
+        }
+        Some(index)
+    }
+
+    fn matching_step_offset(&self, other: &Self) -> Option<i128> {
+        if self.step == 0 || self.step != other.step {
+            return None;
+        }
+        let delta = i128::from(other.start) - i128::from(self.start);
+        let step = i128::from(self.step);
+        (delta % step == 0).then_some(delta / step)
+    }
+
+    fn same_lattice_overlap_positions(&self, other: &Self) -> Option<Option<(usize, usize)>> {
+        let self_len = self.len();
+        let other_len = other.len();
+        if self_len == 0 || other_len == 0 {
+            return Some(None);
+        }
+        let other_start = self.matching_step_offset(other)?;
+        let other_end = other_start.checked_add(other_len as i128 - 1)?;
+        let first = other_start.max(0);
+        let last = other_end.min(self_len as i128 - 1);
+        if first > last {
+            return Some(None);
+        }
+        Some(Some((
+            usize::try_from(first).ok()?,
+            usize::try_from(last).ok()?,
+        )))
+    }
+
+    fn single_difference_span_positions(&self, other: &Self) -> Option<Option<(usize, usize)>> {
+        let self_len = self.len();
+        match self.same_lattice_overlap_positions(other)? {
+            None => Some((self_len > 0).then_some((0, self_len))),
+            Some((first, last)) => {
+                if first == 0 && last + 1 == self_len {
+                    Some(None)
+                } else if first == 0 {
+                    Some(Some((last + 1, self_len - last - 1)))
+                } else if last + 1 == self_len {
+                    Some(Some((0, first)))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     fn position_of_value(&self, value: i64) -> Option<usize> {
         self.position_of_value_with_len(value, self.len())
     }
@@ -11348,6 +11414,16 @@ impl RangeIndex {
     /// the result may not be a contiguous range.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
+        let shared_name = self.name().filter(|_| self.name() == other.name());
+        if let Some(overlap) = self.same_lattice_overlap_positions(other) {
+            let (first, len) = match overlap {
+                Some((first, last)) => (first, last - first + 1),
+                None => (0, 0),
+            };
+            if let Some(index) = self.affine_span_index(first, len, shared_name) {
+                return index;
+            }
+        }
         let mut labels = Vec::with_capacity(self.len().min(other.len()));
         for position in 0..self.len() {
             let value = self.value_at(position);
@@ -11356,7 +11432,7 @@ impl RangeIndex {
             }
         }
         let mut idx = Index::from_i64_values(labels);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+        if let Some(name) = shared_name {
             idx = idx.set_name(name);
         }
         idx
@@ -11366,6 +11442,29 @@ impl RangeIndex {
     /// `pd.RangeIndex.union(other)`.
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
+        let shared_name = self.name().filter(|_| self.name() == other.name());
+        let self_len = self.len();
+        let other_len = other.len();
+        if self_len == 0 {
+            if let Some(index) = other.affine_span_index(0, other_len, shared_name) {
+                return index;
+            }
+        } else if other_len == 0 {
+            if let Some(index) = self.affine_span_index(0, self_len, shared_name) {
+                return index;
+            }
+        } else if let Some(other_start) = self.matching_step_offset(other)
+            && let Some(other_end) = other_start.checked_add(other_len as i128 - 1)
+            && other_start >= 0
+            && other_start <= self_len as i128
+        {
+            let last = (self_len as i128 - 1).max(other_end);
+            if let Ok(len) = usize::try_from(last + 1)
+                && let Some(index) = self.affine_span_index(0, len, shared_name)
+            {
+                return index;
+            }
+        }
         let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             labels.push(self.value_at(position));
@@ -11377,7 +11476,7 @@ impl RangeIndex {
             }
         }
         let mut idx = Index::from_i64_values(labels);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+        if let Some(name) = shared_name {
             idx = idx.set_name(name);
         }
         idx
@@ -11389,6 +11488,12 @@ impl RangeIndex {
     pub fn difference(&self, other: &Self) -> Index {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like union/intersection).
+        if let Some(span) = self.single_difference_span_positions(other) {
+            let (first, len) = span.unwrap_or((0, 0));
+            if let Some(index) = self.affine_span_index(first, len, self.name()) {
+                return index;
+            }
+        }
         let mut labels = Vec::with_capacity(self.len());
         for position in 0..self.len() {
             let value = self.value_at(position);
@@ -11407,6 +11512,56 @@ impl RangeIndex {
     /// `pd.RangeIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
+        let shared_name = self.name().filter(|_| self.name() == other.name());
+        if let (Some(left_span), Some(right_span)) = (
+            self.single_difference_span_positions(other),
+            other.single_difference_span_positions(self),
+        ) {
+            match (left_span, right_span) {
+                (None, None) => {
+                    if let Some(index) = self.affine_span_index(0, 0, shared_name) {
+                        return index;
+                    }
+                }
+                (Some((first, len)), None) => {
+                    if let Some(index) = self.affine_span_index(first, len, shared_name) {
+                        return index;
+                    }
+                }
+                (None, Some((first, len))) => {
+                    if let Some(index) = other.affine_span_index(first, len, shared_name) {
+                        return index;
+                    }
+                }
+                (Some((left_first, left_len)), Some((right_first, right_len))) => {
+                    if left_len == 0 {
+                        if let Some(index) =
+                            other.affine_span_index(right_first, right_len, shared_name)
+                        {
+                            return index;
+                        }
+                    } else if right_len == 0 {
+                        if let Some(index) =
+                            self.affine_span_index(left_first, left_len, shared_name)
+                        {
+                            return index;
+                        }
+                    } else {
+                        let left_last = self.value_at(left_first + left_len - 1);
+                        let right_start = other.value_at(right_first);
+                        if left_last
+                            .checked_add(self.step)
+                            .is_some_and(|next| next == right_start)
+                            && let Some(len) = left_len.checked_add(right_len)
+                            && let Some(index) =
+                                self.affine_span_index(left_first, len, shared_name)
+                        {
+                            return index;
+                        }
+                    }
+                }
+            }
+        }
         let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             let value = self.value_at(position);
@@ -11421,7 +11576,7 @@ impl RangeIndex {
             }
         }
         let mut idx = Index::from_i64_values(labels);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+        if let Some(name) = shared_name {
             idx = idx.set_name(name);
         }
         idx
@@ -26837,6 +26992,90 @@ mod tests {
                 "RangeIndex closed-form set ops should keep typed Int64 output backing"
             );
         }
+    }
+
+    #[test]
+    fn range_index_set_ops_return_affine_spans_iatnc() {
+        let left = super::RangeIndex::new(0, 1_000_000, 1)
+            .unwrap()
+            .set_name("k");
+        let right = super::RangeIndex::new(500_000, 1_500_000, 1)
+            .unwrap()
+            .set_name("k");
+
+        let intersection = left.intersection(&right);
+        let union = left.union(&right);
+        let difference = left.difference(&right);
+
+        assert_eq!(
+            intersection.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 500_000,
+                step: 1,
+                len: 500_000,
+            })
+        );
+        assert_eq!(
+            union.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 1,
+                len: 1_500_000,
+            })
+        );
+        assert_eq!(
+            difference.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 1,
+                len: 500_000,
+            })
+        );
+        for output in [&intersection, &union, &difference] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "single-span RangeIndex set ops should return lazy affine backing"
+            );
+        }
+
+        let descending_left = super::RangeIndex::new(9, -3, -3).unwrap().set_name("k");
+        let descending_right = super::RangeIndex::new(6, -6, -3).unwrap().set_name("k");
+        assert_eq!(
+            descending_left
+                .intersection(&descending_right)
+                .labels
+                .int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 6,
+                step: -3,
+                len: 3,
+            })
+        );
+        assert_eq!(
+            descending_left
+                .union(&descending_right)
+                .labels
+                .int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 9,
+                step: -3,
+                len: 5,
+            })
+        );
+
+        let adjacent_left = super::RangeIndex::new(0, 3, 1).unwrap().set_name("k");
+        let adjacent_right = super::RangeIndex::new(3, 6, 1).unwrap().set_name("k");
+        assert_eq!(
+            adjacent_left
+                .symmetric_difference(&adjacent_right)
+                .labels
+                .int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 1,
+                len: 6,
+            })
+        );
     }
 
     #[test]

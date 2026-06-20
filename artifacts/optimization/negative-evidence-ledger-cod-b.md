@@ -509,38 +509,82 @@ retry predicate.
   same-host reverted comparison proves intermediate range materialization, not
   downstream `Index` construction, is the residual.
 
-## 2026-06-18 - br-frankenpandas-iatnc - Closed-form RangeIndex set ops
+## 2026-06-18/20 - br-frankenpandas-iatnc - Closed-form + affine RangeIndex set ops
 
-- Status: implemented, benchmark verdict pending batch-test.
-- Lever: replace `RangeIndex::{intersection, union, difference,
+- Status: measured keep for single-span outputs; residual split-span loss routed.
+- Lever 1: replace `RangeIndex::{intersection, union, difference,
   symmetric_difference}` `FxHashSet<i64>` membership/seen maps with direct
   arithmetic membership checks through `RangeIndex::contains_value`.
-- Baseline comparator: current RangeIndex-vs-RangeIndex set-op path, which builds
-  one to three hash sets even though both operands are unique arithmetic
-  progressions.
-- Graveyard mapping: algebraic data representation and cache-oblivious scanning:
-  use `(start, step, len)` as a semantic witness and stream each side exactly
-  once with no hash-table allocation or probe cache misses.
-- Alien-artifact proof obligation: `RangeIndex` is unique by construction, so
-  seen-set deduplication is redundant. Membership in the opposite range is
-  closed-form; output order remains self-order for intersection/difference and
-  self-then-other order for union/symmetric difference. Name propagation and
-  typed Int64 backing are unchanged.
-- Guard added:
-  `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, covering
-  overlapping descending ranges, disjoint ranges, pandas-order outputs, name
-  propagation, and typed Int64 output backing.
-- Validation run: passed
-  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
-  on 2026-06-18; only pre-existing workspace manifest license/license-file
-  warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is criterion
-  `RangeIndex` set ops on overlapping/disjoint 1M-row ascending and descending
-  ranges versus the legacy pandas original and a pre-patch hash-set baseline.
-- Retry predicate if rejected: only revisit if a same-host benchmark proves
-  `RangeIndex::{intersection, union, difference, symmetric_difference}` is still
-  above 0.1% self-time and the residual is arithmetic membership rather than
-  typed `Index` construction or output allocation.
+- Lever 2: when same-step/same-lattice set ops produce a single arithmetic
+  progression, return lazy affine Int64 labels instead of materializing a typed
+  `Vec<i64>`.
+- Baseline comparator: pre-affine `origin/main` RangeIndex-vs-RangeIndex set-op
+  path on worker `hz2`, using the same example harness copied into a detached
+  baseline worktree at `f83cf68c`.
+- Graveyard mapping: run-length/interval containers, affine loop nests, and
+  late materialization. Treat `(start, step, len)` as the semantic witness and
+  carry the arithmetic progression across the boundary instead of allocating the
+  labels.
+- Alien-artifact proof obligation: `RangeIndex` is unique by construction, and
+  same-lattice overlap/difference over a signed affine progression can be proven
+  in position space. Output order, name propagation, empty outputs, descending
+  steps, and pandas-style self-order semantics are preserved; split-span
+  symmetric differences intentionally fall back.
+- Guards added:
+  `range_index_set_ops_closed_form_membership_preserves_order_iatnc` and
+  `range_index_set_ops_return_affine_spans_iatnc`, covering overlapping
+  descending ranges, disjoint/adjacent ranges, pandas-order outputs, name
+  propagation, typed fallback backing, and lazy affine output backing.
+- Validation runs:
+  - `RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo test -p fp-index range_index_set_ops_return_affine_spans_iatnc -- --nocapture`
+    passed on 2026-06-20.
+  - `RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo test -p fp-index range_index_set_ops -- --nocapture`
+    passed on 2026-06-20 with all five focused set-op tests green.
+  - `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo check -p fp-index --all-targets`
+    passed on worker `vmi1293453`.
+  - `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo clippy -p fp-index --all-targets -- -D warnings`
+    passed locally after `hz2` and `vmi1149989` reported missing remote clippy
+    components for the pinned nightly.
+  - `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo build --release -p fp-index --example bench_range_setops`
+    fell back local due worker-slot pressure and passed.
+  - `rustfmt --check crates/fp-index/examples/bench_range_setops.rs` passed.
+  - `timeout 180s ubs crates/fp-index/src/lib.rs crates/fp-index/examples/bench_range_setops.rs`
+    exited 0 with no critical findings; warnings were the known broad
+    `fp-index/src/lib.rs` inventory.
+
+### 2026-06-20 same-worker pre/post evidence
+
+| Operation | `origin/main` hz2 | affine-spans hz2 | FP delta | Verdict |
+|---|---:|---:|---:|---|
+| `intersection` | 9.240731 ms | 0.000100 ms | 92,407x faster | KEEP |
+| `union` | 10.632178 ms | 0.000090 ms | 118,135x faster | KEEP |
+| `difference` | 9.341052 ms | 0.000100 ms | 93,411x faster | KEEP |
+| `symmetric_difference` | 18.670185 ms | 18.843325 ms | 0.991x | NEUTRAL / route split-span |
+
+Command:
+`RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap`.
+
+### 2026-06-20 pandas head-to-head
+
+| Operation | FrankenPandas | pandas 2.2.3 | Ratio vs pandas | Verdict |
+|---|---:|---:|---:|---|
+| `intersection` | 120 ns | 9,018 ns | 75.15x faster | WIN |
+| `union` | 120 ns | 7,995 ns | 66.63x faster | WIN |
+| `difference` | 130 ns | 16,742 ns | 128.78x faster | WIN |
+| `symmetric_difference` | 16.868715 ms | 8.619318 ms | 0.51x | LOSS |
+
+Win/loss/neutral ratio vs pandas: **3 / 1 / 0**.
+
+Negative evidence: overlapping `symmetric_difference` produces two disjoint
+spans, and the current `Index` backing can represent only one affine run. The
+membership lever is not the limiting primitive anymore. Do not retry more hash
+or scalar-membership micro-tuning here; create a first-class lazy multi-span
+Int64/run container or route `symmetric_difference` through a two-run backing.
+
+Retry predicate: only reopen `br-frankenpandas-iatnc` if a same-worker benchmark
+shows the single-span affine outputs regressed or a conformance witness proves
+name/order/descending-step semantics changed. Otherwise target the new
+multi-span representation bead for the recorded pandas loss.
 
 ## 2026-06-18/19 - br-frankenpandas-29u49 - RangeIndex miss-heavy indexers
 

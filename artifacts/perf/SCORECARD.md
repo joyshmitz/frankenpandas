@@ -34,6 +34,45 @@ validated because 11 of the original 16 harness rows were rejected by the
 high-CV filter and focused diagnostics still include dropped rows. Overall
 release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
 
+## 2026-06-20 Cod-b Gauntlet Refresh - RangeIndex Set Ops
+
+Release-readiness score for this cluster: **4/5**.
+
+- Bead: `br-frankenpandas-iatnc`.
+- pandas oracle: 2.2.3 public `RangeIndex` set-operation APIs.
+- FrankenPandas profile: focused `fp-index` example harness for 1M-row overlap
+  set ops.
+- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- Decision: keep the affine single-span output path. It dominates pandas for
+  `intersection`, `union`, and `difference`; `symmetric_difference` remains a
+  recorded loss because overlapping ranges produce two disjoint spans and the
+  current index backing only has one affine run.
+
+Same-worker `hz2` pre/post:
+
+| Operation | `origin/main` | affine-spans | FP delta | Action |
+|---|---:|---:|---:|---|
+| `intersection` | 9.240731 ms | 0.000100 ms | 92,407x faster | Keep |
+| `union` | 10.632178 ms | 0.000090 ms | 118,135x faster | Keep |
+| `difference` | 9.341052 ms | 0.000100 ms | 93,411x faster | Keep |
+| `symmetric_difference` | 18.670185 ms | 18.843325 ms | 0.991x | Route multi-span backing |
+
+Head-to-head versus pandas 2.2.3:
+
+| Operation | FrankenPandas | pandas | Ratio vs pandas | Verdict |
+|---|---:|---:|---:|---|
+| `intersection` | 120 ns | 9,018 ns | 75.15x | WIN |
+| `union` | 120 ns | 7,995 ns | 66.63x | WIN |
+| `difference` | 130 ns | 16,742 ns | 128.78x | WIN |
+| `symmetric_difference` | 16.868715 ms | 8.619318 ms | 0.51x | LOSS |
+
+Win/loss/neutral ratio vs pandas: **3 / 1 / 0**.
+
+Evidence:
+
+- `crates/fp-index/examples/bench_range_setops.rs`
+- `artifacts/optimization/negative-evidence-ledger-cod-b.md`
+
 ### 2026-06-19 Cod-a Focused Std/Var Proof - `br-frankenpandas-uza04.202`
 
 Comparator: pandas 2.2.3 / numpy 2.4.3. Workload:

@@ -885,3 +885,15 @@ count 3500x+/20000x+ (lazy all-valid), mode 1.4x/2.9x. LOSSES:
   nested) from columnar storage — inherent materialization, no 2D block. Apples-to-oranges (view vs
   copy); not a fixable algorithmic loss. LESSON: `labels()[pos]` to read ONE label is an O(n)
   materialization smell — use an O(1) typed accessor (same vein as the lazy-Int64 materialization tax).
+
+### 2026-06-20 BlackThrush (cont.) — dt.month/dt.day typed civil fast path (2x loss → parity/win)
+Probed dt.year/month/dayofweek (datetime64 nanos). dt.year ~0.85x, dt.dayofweek ~1.0x (neutral).
+**dt.month 0.56x@100k / 0.47x@1M (2x slower)**: month/day used generic extract_component_typed —
+full Scalar materialization + per-element Timestamp::from_nanos (chrono) + from_values rescan, while
+dt.year already had a typed fast path over raw &[i64] nanos with pure integer civil arithmetic. Added
+datetime64_civil_from_nanos (Hinnant civil_from_days → y/m/d; the SAME algorithm year uses, extended
+to return day) + typed_datetime_civil_component_all_valid; month/day try it first (fall back on
+NaT/non-dense). Bit-identical (89 dt + 12 month tests; same civil math as year, exact for proleptic
+Gregorian = chrono). **dt.month 100k 1603→943us (1.7x; →0.95x), 1M 21511→9697us (2.2x; →1.04x WIN).**
+LESSON: when one component (year) has a typed-slice integer fast path but siblings (month/day) fall
+to chrono+Scalar, port the fast path — the civil algorithm already yields all of y/m/d.

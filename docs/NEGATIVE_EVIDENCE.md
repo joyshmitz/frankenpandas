@@ -558,3 +558,48 @@ _None yet — value_counts confirmed a win, kept._
 - rch executes **remotely** (ovh-b); `cargo run` does NOT relay the program's stdout, so
   build via rch (artifacts transfer back) then run the binary **locally** for timing.
 - Release build of fp-frame is ~5 min remote; subsequent example builds reuse the cached lib.
+
+---
+
+## 2026-06-20 BlackThrush — affine take + nullable dedup (measured, MIN-of-fixed-iters)
+
+Methodology note: `benches/vs_pandas_harness.py`'s adaptive `time_operation` (CV-gated
+early-exit) UNDER-measures pandas on this noisy multi-agent box, manufacturing PHANTOM
+losses (ewm/join_outer/sort/value_counts all "lost" 0.2–0.8x under load yet WIN on clean
+re-measure). Reliable signal = **MIN over 50–80 fixed iters for BOTH sides** (turbo-to-turbo).
+
+### WINS shipped (bit-transparent, differential-tested, pushed main+master)
+| op | before | after | crate | commit |
+|---|---:|---:|---|---|
+| range_index_take_arithmetic (100k/1M) | 0.72x | 1.59x / 1.24x | fp-index | 34e173e4 |
+| affine_index_take_arithmetic (100k/1M) | 0.64x | 1.44x / 1.45x | fp-index | 34e173e4 |
+| drop_duplicates nullable f64 (100k,10% NaN) | 0.37x | 0.96x→1.17x | fp-frame | fd8223b5 |
+
+- affine take: affine-in/affine-out lazy result (`label_step=step·position_step`), single
+  O(len) **i64** (not i128) stride scan → autovectorizes; no Vec<i64> gather + rebuild.
+- nullable dedup: single-Float64-column raw-`to_bits` keyed probe replaces the splitmix
+  digest + RowBucket + 64-worker partition; `duplicated_mask`→Vec<bool> skips the
+  Series+`.values()` Scalar materialization in `drop_duplicates`.
+
+### DECLINED / not-real losses (negative evidence)
+- **ewm_mean 0.78–0.80x (100k/1M, float64 + nan10)**: BIT-LOCKED. pandas+fp both use the
+  `old_wt` recurrence `wavg=(old_wt*wavg+x)/(old_wt+1)` with the fdiv ON the critical path
+  (~22 cyc). Only lever = multiply-by-reciprocal (old_wt is data-independent ⇒ `1/(old_wt+1)`
+  precomputable off the critical path → ~12 cyc, would WIN) but `a*(1/b) ≠ a/b` breaks
+  goldens + conformance tolerance. DECLINED (conformance-GREEN mandate).
+- **df_dot 0.30x@1M**: NOT a real loss — lazy-vs-eager artifact. `DataFrame::dot` returns a
+  LAZY plan; the bench drops the result without materializing, so fp measures only plan
+  construction (`a_views.clone()` per output column = O(n·k) Arc bumps ≈ 25ms) vs pandas'
+  full BLAS GEMM. Confirms the prior df-dot artifact note; do not re-queue.
+- **reindex 0.71x@100k but 5.5x WIN@1M**: already optimal (O(1) affine-unit-range fast path,
+  typed parallel gather). pandas wins only on the small-size constant factor; the bench also
+  clones the n-label Vec inside the timed loop.
+- **nan50 (extreme 50%-missing) residuals**: drop_dup 0.74x, value_counts 0.93x, sort 0.90x,
+  filter_bool_mask 0.82x — bounded by the shared take/filter gather over nullable columns;
+  nan10 (realistic) all WIN. Logged, not chased (extreme dtype, low ROI).
+
+### Reverts
+- Temporary `FP_DD_TIMING` eprintln instrumentation in `duplicated`/`drop_duplicates`:
+  added to localize the hotspot, measured, **reverted** before shipping (0 in final diff).
+
+### Scorecard (clean MIN, 100k float64): 31 wins / 4 "losses" of 35 (all 4 hard/artifact above).

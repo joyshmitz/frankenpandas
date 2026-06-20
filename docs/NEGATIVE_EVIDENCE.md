@@ -603,3 +603,23 @@ re-measure). Reliable signal = **MIN over 50–80 fixed iters for BOTH sides** (
   added to localize the hotspot, measured, **reverted** before shipping (0 in final diff).
 
 ### Scorecard (clean MIN, 100k float64): 31 wins / 4 "losses" of 35 (all 4 hard/artifact above).
+
+### 2026-06-20 BlackThrush (cont.) — single-column dedup vein extended to Int64 + Utf8
+Measured via `crates/fp-frame/examples/dedup_i64_bench.rs` (best-of-40, release-perf) vs
+pandas 2.2.3 `df.drop_duplicates(subset=[col])`, 100k rows. All-valid Int64/Utf8 columns with
+duplicates miss the all-valid-unique clone shortcut and fell to the splitmix-digest + RowBucket
++ 64-worker framework. Added direct-key fast paths (i64 value / raw `&[u8]` span):
+
+| dtype | distinct | before | after | pandas | before→after ratio |
+|---|---:|---:|---:|---:|---|
+| Int64 | 1000 | 4938µs | 548µs | 727µs | 0.15x → **1.33x** (9x faster) |
+| Int64 | 100000 | 5429µs | 2199µs | 1191µs | 0.22x → 0.54x (2.5x faster) |
+| Utf8 | 1000 | 5355µs | 1393µs | 1940µs | 0.36x → **1.39x** |
+| Utf8 | 100000 | 6048µs | 3086µs | 3929µs | 0.65x → **1.27x** |
+
+Commits: i64 d18469fb (br-r7216), Utf8 f4e71926 (br-309yq). Bit-identical (exact-key dedup ==
+digest path sans the never-occurring splitmix collision). Oracle diff tests for f64/i64/Utf8 ×
+keep={First,Last,None}. Int64 high-card (0.54x) still trails khash — remaining cost is the
+shared take+filter gather over the kept rows, not the dedup probe; low-card (the realistic
+dedup case) wins. Lever generalizes: any single typed column the digest framework handled
+row-by-row → direct-key probe.

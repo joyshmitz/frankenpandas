@@ -1647,3 +1647,15 @@ from_values dominates, and the source read is already fast.) Added str_zfill/pad
 benches: str ops WIN 12.5x/11.9x/145.7x vs pandas (pandas str accessors are Python-level). Conclusion:
 str ops are strong wins; apply_str is not a lever. Weakest margins now: join_outer 5.8x, explode 6.46x
 (both fixed/strong). No loss remains except to_numpy(bench-only)/transpose(l4vzc).
+
+### 2026-06-21 BlackThrush — dt string-output helpers contiguous (date/time/strftime +8%); benches added
+The 3 String-returning dt helpers (typed_datetime_{civil,nanos,full}_string_component_all_valid —
+backing dt.date/time/strftime) built Vec<Scalar::Utf8> + from_values. Replaced with a contiguous byte
+buffer + offsets (extend the component's String bytes) -> from_utf8_contiguous, skipping the
+n-element Scalar Vec + from_values re-validation. **Bit-identical** (from_utf8_contiguous == from_values
+for all-valid; NaT bails). MEASURED: dt_date 10904->9993us, dt_strftime 45380->41939us (both ~8% fp-side,
+date 10.4->11.8x, strftime 9.0->9.5x vs pandas). Conformance GREEN (fp-frame 3098/0). MODEST (8%) — the
+component's format! String alloc still dominates; a bigger win needs write!-into-buffer (avoid the String
+alloc), but that's per-format specialized (deferred). These were already WINS (pandas dt string accessors
+are Python-level); this strengthens them. Added dt_strftime/dt_date regression-guard benches. dt string
+ops confirmed WINS — no loss. Surface stands: dominated except to_numpy(bench-only)/transpose(l4vzc).

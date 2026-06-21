@@ -1079,6 +1079,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_frame::wide_to_long(&wdf, &["A", "B"], &["id"], "year", "_", r"\d+").expect("wide_to_long");
             })
         }
+        ("dataframe_ops", "str_split_expand") => {
+            // pandas: s.str.split(",", expand=True); each cell "a{i},b{i},c{i}".
+            let mut bytes = Vec::new();
+            let mut off = vec![0usize];
+            for i in 0..rows {
+                let cell = format!("a{},b{},c{}", i % 97, i % 89, i % 83);
+                bytes.extend_from_slice(cell.as_bytes());
+                off.push(bytes.len());
+            }
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_utf8_contiguous(bytes, off),
+            )
+            .expect("split series");
+            time_us(|| {
+                let _ = series.str().split_df_n(",", None).expect("split");
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.

@@ -2035,3 +2035,13 @@ Scalar path. Added cut_explicit bench (edges spanning the data). RESULT: 0.81x->
 7.45x->12.45x@1M ~1.7x. Bit-identical, conformance GREEN (cut 15/0). BINNING FAMILY COMPLETE: cut ~2.1x,
 qcut ~1.9x, cut_bins ~1.7x — all were @100k losses (n Scalar::Utf8 clones), all now wins via the
 contiguous-Utf8 vein (separate bin-assignment from output; emit pre-formatted labels into one buffer).
+
+### 2026-06-21 BlackThrush — str.split(expand) is a win (46x); loss-rich territory EXHAUSTED
+str.split(expand=True) (split_df_n) benched: 3.51x@100k / 45.95x@1M — a WIN (pandas str.split is Python-
+level). Like wide_to_long (62x) and groupby (4-31x), the recent un-benched ops are ALL WINS. The "bench
+un-benched ops" strategy that found 16 hidden losses (reshapes/time-series/binning) has reached zero
+hit-rate: the loss-rich territory (ops where fp's columnar approach had a SPECIFIC inefficiency vs a tight
+loop — SipHash scatter, O(N^2) find, per-row String key, per-row label clone) is FULLY HARVESTED. The
+remaining un-benched ops are wins (pandas Python-level) — fp wins despite Scalar materialization because
+pandas is slower. CONCLUSION: 16 levers shipped this session; the perf surface is comprehensively
+dominated; only the architectural transpose/to_numpy (l4vzc, low-EV) remains a non-win.

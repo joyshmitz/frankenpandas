@@ -1261,3 +1261,14 @@ the float compare_scalar_values semantics aren't verifiable blind). The tuple-de
 `if let (Some(data), Scalar::Int64(n)) = (as_i64_slice(), value)` is precedented (fp-frame:12011).
 UNMEASURED — verify when disk recovers. (Float64/Utf8 searchsorted + searchsorted_values still use the
 Scalar path; the float comparison-semantics + sorted-binary-search bit-identity need a test cycle.)
+
+### 2026-06-21 BlackThrush — first/last_valid_index all-valid fast path (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. Series.first_valid_index()/last_valid_index() scanned the
+materialized .values() Scalar Vec for the first/last non-missing position, then did labels()[i] (a
+full IndexLabel Vec build for a lazy index) — two O(n) materializations for one label. Added an
+all-valid fast path: if column.validity().all(), the first/last non-missing IS position 0 / len-1, so
+return index_label_at(0)/index_label_at(len-1) (O(1) for an affine/typed index), skipping both
+materializations. **Bit-identity provable**: on an all-valid column position 0 (resp. len-1) is the
+first (resp. last) non-missing, and index_label_at(pos) == labels()[pos] (the idxmax helper); empty ->
+None either way; a column WITH missing falls to the original loop. column.validity().all() is
+precedented in fp-frame (line 15031). UNMEASURED — verify when disk recovers.

@@ -2256,3 +2256,17 @@ the per-row split_once+trim PARSE + the cell_map (1M inserts) + the output (R*C=
 values) — fp's string-composite MultiIndex vs pandas' structured codes is the fundamental gap. The clones
 WERE a real chunk (~2x), confirming the write!-vein lesson, but the parse/representation remains. Real
 improvement shipped; unstack is a structural loss pending a real MultiIndex (codes, not composite strings).
+
+### 2026-06-21 BlackThrush — SCORECARD CONFIRMATION: memory-flagged "marginal" ops are real @1M WINS (no-warmup phantoms)
+Re-verified the ops the bench-frontier memory flagged as marginal/lagging, at CORRECT abbreviated --size 1M
+with WARMED pandas (2 warmup calls + MIN). ALL are solid wins — the old sub-1x ratios were no-warmup/
+mismatched-data phantoms, NOT the --size bug hiding losses:
+  - ewm_mean: memory "0.79x" -> 2.12x WIN (fp 7289us vs pandas 15478us)
+  - sort_values_single: memory "0.91x" -> 2.13x WIN (fp 55497 vs 117972)
+  - rolling_mean_w10: 2.72x WIN; rolling_std_w50: 1.98x WIN; expanding_sum: 4.44x WIN
+Plus earlier-confirmed @1M: pivot_table 2.27x, joins 3.5-4.1x, groupby 18x, csv_write 20x, json_read 1.24x,
+to_json 3.31x (fixed), value_counts i64 5.81x / f64 4.63x, series_map 4.31x, resample most-freqs win.
+CONCLUSION: fp wins ~everything 2x-69680x at correctly-measured @1M. The ONLY real losses are structural
+(fp representation, not perf bugs): unstack 0.21x (string-composite MultiIndex), daily/sub-daily resample
+0.75x/0.83x (gather-agg+bucket floor), to_numpy/transpose (2D-block, l4vzc). Three measurement-methodology
+phantoms found+corrected this session: --size default bug, value_counts data-mismatch, no-warmup sub-1x.

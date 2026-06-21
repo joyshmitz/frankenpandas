@@ -2723,3 +2723,13 @@ Vec<usize> — but it requires RE-IMPLEMENTING the freq bucketing + empty-bin-fi
 ~parity). DEFERRED (disk dropping 56G, marginal EV). The typed mean/std/var/min/max + multi-func buckets-once
 already eliminated the per-bin Vec<Scalar> gather (the bigger cost); the Vec<usize> floor is shared with the
 generic path and lower-value.
+
+### 2026-06-21 BlackThrush — resample floor CONFIRMED inherent (don't re-chase)
+Read resample_build_groups @22257: it is ALREADY optimized — a prior dense-scatter rewrite (br-eov68 era)
+replaced the per-row groups.get_mut(key) SipHash with `dense[bidx].push(i)` by bucket index (the comment
+says so), and bucket-key Strings are built per-bucket not per-row. The remaining floor is just (a) the
+per-row month-ordinal conversion (labels.map(resample_label_to_month_ordinal)) and (b) the dense Vec<usize>
+per bucket — both O(n) INHERENT work pandas also does (bin assignment). So the resample single-agg ~parity
+(sum 1.01x / min,max 0.94x after the typed paths removed the Scalar gather) is genuine, NOT a fixable
+inefficiency. The only marginal lever left is the architectural build_bin_ranges (avoid the 8MB Vec<usize>),
+deferred. CONCLUSION: resample is fully optimized to its inherent floor — don't re-chase the single-aggs.

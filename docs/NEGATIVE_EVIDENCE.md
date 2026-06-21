@@ -2445,3 +2445,14 @@ bypass (memory) is INT64-ONLY; string keys have no fast path. FIX (filed): singl
 scattered gather) for the count-based aggs (mean/sum/std/var/count); median needs the gather (harder). Also
 check if build_groups uses std-SipHash (FxHashMap = partial). 4TH measurement phantom (--size, value_counts
 data-mismatch, no-warmup, now groupby DataFrame-vs-Series). LESSON: match the SHAPE (Series vs DataFrame) too.
+
+### 2026-06-21 BlackThrush — groupby family CORRECTED scorecard (Series-vs-Series): more phantoms + losses
+Re-verified ALL groupby benches with correct SHAPE (fp Series-groupby-1-col vs pandas Series-groupby-1-col;
+earlier I'd compared to pandas DataFrame-groupby-10-cols = ~17x inflation). Honest @1M:
+  WINS (real): groupby_cumcount 7.56x, groupby_transform_mean 1.54x, df_groupby_str_sum 5.99x (DataFrame,
+    correctly matched).
+  LOSSES (string-key, br-ih2if): mean_str 0.22x, std_str 0.25x, var_str 0.19x, median_str 0.61x.
+  BORDERLINE: groupby_count (int-key) ~0.60x — even the int-DENSE path loses to pandas Series count here.
+So the earlier groupby "14-59x wins" were partly the DataFrame-vs-Series shape phantom. The string-key aggs
++ count are real losses; cumcount/transform/df-sum are real wins. 4TH PHANTOM CLASS = shape-mismatch
+(Series vs DataFrame). The groupby loss family (string-key aggs + count) is br-ih2if (dense-by-code fix).

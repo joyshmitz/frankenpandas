@@ -27,7 +27,9 @@ focused `fp-groupby` release tests green.
   fp beats pandas wherever typed access unlocks a cheaper algorithm.
 - **Known gaps before "faster than pandas everywhere":** concat was narrowed by the 3nah5
   mimalloc boundary allocator (24× slower -> 2.15× slower) but still needs a reused-buffer
-  or chunk/view path; ffill now flips to 1.41× faster via skw2c validity-run bulk fill;
+  or chunk/view path for construction; xgrv3 flips the Float64 concat-then-sum typed
+  consumer lane to 1.67× faster by exposing lazy chunks through `as_f64_slice()`; ffill
+  now flips to 1.41× faster via skw2c validity-run bulk fill;
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
   allocator-sensitive on the plain glibc path; DataFrame.dropna typed Float64 now
   flips from a 0.42× loss to a 1.22× win via missing-free scan pruning, lazy validity
@@ -87,6 +89,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | merge inner on Utf8 keys | 1M×1M lower-hex keys → 500k rows | 17.85× | 🟢 current-head f1ftd verify; accepted batch-median artifact `artifacts/bench/cod_a_f1ftd_join_inner_str_batch_medians_20260621.json` (FP CV 3.00%, pandas CV 2.43%); raw one-binary harness rows were faster but dropped for FP CV |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
+| concat + DataFrame.sum Float64 chunks | 8×125k×4 Float64, ignore_index then column sums | 1.67× | 🟢 xgrv3 exposes `LazyAllValidFloat64Chunks` as a cached typed f64 slice; construction chunks already existed, this flips the post-concat numeric consumer path |
 | DataFrame.dropna(how=any) | 500k×5 f64, ~10% NaN rows | 1.22× | 🟢 flipped from 0.42× loss; 9bccl uses missing-free Float64 witnesses plus lazy all-valid chunked run gather |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |
 | ffill | 2M f64, ~10% NaN | 1.41× with skw2c validity-run fill + 3nah5 mimalloc boundary | 🟢 flipped; packed validity-run bulk fill |
@@ -108,11 +111,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 37/43 measured ops faster than pandas; 4 remaining loss classes (max/min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
+**Score: 38/44 measured ops faster than pandas; 4 remaining loss classes (max/min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 12 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 37 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 38 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. The stale f1ftd
 Utf8 inner-merge red row is now green on current head: batch medians on CPU7 measured
 FP 8.234 ms p50 vs pandas 146.950 ms p50, 17.85× faster with both CVs under 5%.
@@ -167,9 +170,10 @@ Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
 the whole Column. The 3nah5 mimalloc boundary allocator turns those losses from catastrophic
 to actionable; dcfv8's no-scan shift path now flips shift to 1.40× faster under that boundary,
-and skw2c's validity-run ffill path flips ffill to 1.41× faster. concat (0.46×) still trails
-pandas because fp's column-rebuild construction is still heavier than numpy's pooled/in-place
-memmove/concatenate; max/min
+and skw2c's validity-run ffill path flips ffill to 1.41× faster. concat construction (0.46×)
+still trails pandas because fp's column-rebuild construction is still heavier than numpy's
+pooled/in-place memmove/concatenate, but xgrv3 flips the Float64 concat-then-sum typed consumer
+lane to 1.67× by exposing lazy chunks through `as_f64_slice()`; max/min
 still need target-specific SIMD beyond current safe `std::simd` lowering; Series add/mul
 still need durable numpy-class vectorization or output materialization work to move from
 near-parity to clear wins; Series.map Float64 now wins on deferred construction and

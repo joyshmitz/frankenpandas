@@ -355,6 +355,22 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.melt()
             let _ = df.melt(&[], &[], None, None).expect("melt");
         }),
+        ("dataframe_ops", "df_explode") => {
+            // Series of comma-separated strings "aN,bN,cN" (3 parts each).
+            // pandas: s.str.split(",").explode().
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut offsets: Vec<usize> = vec![0];
+            for i in 0..rows {
+                bytes.extend_from_slice(format!("a{},b{},c{}", i % 97, i % 89, i % 83).as_bytes());
+                offsets.push(bytes.len());
+            }
+            let col = Column::from_utf8_contiguous(bytes, offsets);
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let series = Series::new("s", index, col).expect("explode series");
+            time_us(|| {
+                let _ = series.explode(",").expect("explode");
+            })
+        }
         ("dataframe_ops", "df_nlargest") => time_us(|| {
             // pandas: df.nlargest(100, "col_0")
             let _ = df.nlargest(100, "col_0").expect("nlargest");

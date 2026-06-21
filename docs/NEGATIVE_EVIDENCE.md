@@ -1592,3 +1592,16 @@ pandas checkout); local fallback `cargo clippy -p fp-frame --all-targets --relea
 PASS after remote clippy reported the pinned nightly clippy component missing; `cargo check -p fp-frame
 --all-targets --release` PASS. UBS bounded scan on `crates/fp-frame/src/lib.rs` hit the documented
 180s large-file timeout without emitting a finding.
+
+### 2026-06-21 BlackThrush — explode is a WIN (2.84x-43.8x), not a loss; df_explode bench added
+DUG the un-benched reshape ops (after cod-a's concat loss showed losses exist outside the curated set).
+Hypothesis: Series.explode(sep) has the unoptimized melt-pattern (Vec<Scalar::Utf8(String)> per output
+cell, no perf bead). MEASURED via a new df_explode workload (Series of "aN,bN,cN", pandas
+s.str.split(",").explode()): @100k fp=12657us pandas=35991us = **2.84x WIN**; @1M fp=12318us pandas=
+539954us = **43.8x WIN**. So explode is NOT a loss — pandas' str.split().explode() is slow enough that
+fp wins despite the Scalar allocs. 2.84x@100k is the WEAKEST margin measured. A contiguous-Utf8 fix
+(from_utf8_values_with_validity, bit-identical — from_values normalizes the NullKind::NaN empty-part
+to the dtype-standard Utf8 null) would push it higher, but it's a WIN not a loss, the gain is modest
+(~2x), and ValidityMask has no clean from_bools — deferred (not mandate-priority). Added df_explode as
+a permanent regression-guard bench. SCORECARD now ~46 ops, ALL win except to_numpy(bench-only)/transpose
+(l4vzc architectural). NO more cheaply-winnable loss exists in MY domain (concat/construction = cod-a).

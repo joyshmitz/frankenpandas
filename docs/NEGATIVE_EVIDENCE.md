@@ -1329,3 +1329,15 @@ as_f64_slice is no-NaN (so the is_nan guard is moot, and -0.0 != 0.0 is false ==
 missing to skip. Benefits DataFrame.any()/all() on numeric frames (per-column reduction). UNMEASURED
 — verify when disk recovers. NOTE: verified the Series numeric/dedup family is now FULLY typed
 (min/max/sum/prod/argmin/argmax/unique/nunique/mode/value_counts/quantile/var/any/all + cum*).
+
+### 2026-06-21 BlackThrush — GroupBy idxmin/idxmax typed Float64 path (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. SeriesGroupBy.idxmin()/idxmax() (per-group arg-extreme) scanned
+the numeric branch via &self.series.column.values()[idx] (Scalar Vec materialization) + to_f64 per
+element. Added a typed all-valid Float64 branch (before the Scalar else) scanning &[f64] directly.
+**Bit-identity provable**: to_f64(Float64(v)) = v, same first-non-missing init + strictly-smaller/larger
+update; as_f64_slice is all-valid AND no-NaN so nothing is skipped; a Float64 column with NaN/missing
+falls to the Scalar else (skips missing) — consistent. Int64 deliberately NOT typed: the Scalar else
+compares via to_f64 (i64→f64, lossy >2^53), so an i64 compare could differ — left as-is. Real lever —
+groupby idxmin/idxmax on float is common ("row of the per-group max"). DataFrame reductions confirmed
+to delegate to the now-typed Series methods (reduce_numeric → s.min/max/prod); ColumnData::Float64/
+Int64/Bool are Arc<[T]> (O(1) clone) so column_as_series is cheap. UNMEASURED.

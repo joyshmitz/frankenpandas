@@ -2469,3 +2469,13 @@ amortize (separate concern). 6TH subtlety: match the CALL PATTERN (inline vs cac
 SHIPPED (real fp-side improvement regardless): SeriesGroupBy::mean single-pass dense path — accumulate
 sum/count per gid via dense_group_ids (int64 OR contiguous-Utf8) in ONE pass, no per-group Vec<f64> buckets +
 func re-scan. Bit-identical (groupby 202/0). 16096->11526us@1M = ~1.4x fp-side -> 2.5x->3.52x more domination.
+
+### 2026-06-21 BlackThrush — SeriesGroupBy sum single-pass (sister to mean): df_groupby_str_sum 5.99x->6.88x
+Extended the dense single-pass lever to SeriesGroupBy::sum: accumulate sum per gid via dense_group_ids
+(int64 OR contiguous-Utf8 key) in ONE sequential pass, skipping agg_numeric's per-group Vec<f64> buckets +
+func re-scan. Bit-identical (groupby 202/0; first-seen gids/labels, value-order sum == nums.iter().sum(),
+Float64 output). MEASURED: df_groupby_str_sum (DataFrame .sum() = per-column SeriesGroupBy sum) 5.99x->6.88x
+@1M. mean still 3.45x (unbroken). The groupby family (inline single-agg) now: mean 3.45x, sum 6.88x, std
+2.32x, var 2.28x, median 2.09x, count 5.92x, cumcount 7.56x, transform 1.54x — ALL WIN, mean+sum now
+single-pass (no buckets). std/var (two-pass by code) + median (needs the per-group bucket) are the same
+lever, follow-up (they already win, the single-pass is more domination).

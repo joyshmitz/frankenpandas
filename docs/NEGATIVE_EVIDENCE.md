@@ -1373,3 +1373,15 @@ grouped_value_or_null(Some(idx)) == values[idx].clone() == Scalar::Float64(data[
 == from_values for all-finite f64 (as_f64_slice is no-NaN); from_i64_values == from_values for Int64;
 labels = order (same as the per-i loop). A column with missing/NaN falls to the Scalar path. GroupBy
 vein now: idxmin/idxmax, any/all, agg_numeric fallback, first/last — all typed. UNMEASURED.
+
+### 2026-06-21 BlackThrush — nlargest/nsmallest label gather via index_label_at (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. Series.nlargest/nsmallest/nlargest_keep gathered the result
+labels via `.map(|(i,_)| self.index.labels()[*i].clone())` — labels() materializes the FULL
+Vec<IndexLabel> (32B × total_rows) just to read the top-n. For nlargest(10) on a 1M-row RangeIndex
+Series that's a 32MB materialization to read 10 labels. Converted the 5 selection-based sites to
+self.index_label_at(*i) (O(1) per label for affine/typed-i64 indexes; bit-identical to labels()[pos],
+proven in the idxmax fix j75z3). The (i,_) positions come from argsort/selection so are always
+in-bounds. **SKIPPED iloc** (1 site): its positions are user-supplied and index_label_at computes
+arithmetically without the bounds-check that labels()[pos] does, so converting could change OOB
+behavior (panic→bogus label) — left as-is. Big win for nlargest(small_n) on large lazy-indexed Series.
+UNMEASURED. (Extends the "labels()[pos] = O(n) materialization tax" SMELL from idxmax to GATHER paths.)

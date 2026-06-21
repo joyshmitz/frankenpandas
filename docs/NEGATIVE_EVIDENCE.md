@@ -1995,3 +1995,13 @@ preserve the exact Null spelling). Added cut_bins bench. RESULT: 0.81x->1.75x@10
 ~2.1x. Conformance GREEN (cut 15/0). qcut (37055) is the sibling — same n-Scalar::Utf8-clone smell,
 same fast path applies (follow-up). LESSON: keep benching un-benched ops — cut joins the reshape/resample
 family of hidden losses; the contiguous-Utf8 lever recurs wherever output = per-row label/category String.
+
+### 2026-06-21 BlackThrush — qcut() all-valid contiguous-Utf8 (sibling of cut); cut/qcut both win now
+Applied the same all-valid contiguous-Utf8 fast path to qcut (quantile binning) — its output map had the
+identical n Scalar::Utf8(bin_labels[bin_idx].clone()) + from_values smell (bin_idx via partition_point).
+Added qcut_bins bench. WITH fast path: 1.92x@100k / 18.30x@1M (fp ~3530us — higher than cut's 1521us
+because qcut sorts for quantile edges, O(n log n) inherent; the fast path removed the n Scalar clones).
+Bit-identical (conformance qcut 6/0). cut + qcut binning now both WIN. The contiguous-Utf8 lever
+(per-row label/category String -> one buffer) recurs across stack/explode/melt/cut/qcut + dt-string +
+astype-str — a fully harvested vein. (cut_bins explicit-edges has the same smell + an O(n*bins) find;
+lower priority, less common.)

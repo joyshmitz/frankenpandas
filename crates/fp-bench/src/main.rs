@@ -1052,6 +1052,13 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.resample("h").mean().expect("resample hourly");
             })
         }
+        ("dataframe_ops", "qcut_bins") => {
+            // pandas: pd.qcut(s, 10) — quantile-bin a Float64 series into 10 bins.
+            let series = df.get_column("col_0");
+            time_us(|| {
+                let _ = fp_frame::qcut(&series, 10).expect("qcut");
+            })
+        }
         ("dataframe_ops", "cut_bins") => {
             // pandas: pd.cut(s, 10) — bin a Float64 series into 10 bins.
             let series = df.get_column("col_0");

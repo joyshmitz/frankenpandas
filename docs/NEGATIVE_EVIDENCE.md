@@ -2479,3 +2479,14 @@ Float64 output). MEASURED: df_groupby_str_sum (DataFrame .sum() = per-column Ser
 2.32x, var 2.28x, median 2.09x, count 5.92x, cumcount 7.56x, transform 1.54x — ALL WIN, mean+sum now
 single-pass (no buckets). std/var (two-pass by code) + median (needs the per-group bucket) are the same
 lever, follow-up (they already win, the single-pass is more domination).
+
+### 2026-06-21 BlackThrush — SeriesGroupBy var/std two-pass-by-code: var 2.28x->3.52x, std 2.32x->2.45x
+Completed the dense single-pass lever for the COUNT-BASED groupby reductions. var: two sequential passes
+over dense gids (pass 1 sum/count -> mean; pass 2 sum of (x-mean).powi(2)), no per-group Vec<f64> buckets +
+the closure's own double-rescan. std follows (calls var). Bit-identical (groupby 202/0; first-seen
+gids/labels, value-order sums, (x-mean).powi(2), NaN for n<2, ssd/(n-1)). MEASURED @1M: var 17725->12793us
+(3.52x), std 17725->16848us (2.45x). GROUPBY REDUCTIONS NOW ALL SINGLE-PASS: mean 3.45x, sum 6.88x, var
+3.52x, std 2.45x. median KEEPS the bucket (order stat needs the per-group values for the sort — single-pass
+inapplicable; already wins 2.09x inline). NOTE: the gid+order prologue is now duplicated 3x (mean/sum/var) —
+optional consolidation into a dense_group_layout helper (would add a cheap order-only pass; kept inline for
+the single-pass speed). All bit-identical, conformance green.

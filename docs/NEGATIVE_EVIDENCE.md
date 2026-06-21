@@ -2221,3 +2221,14 @@ earlier replace_all missed it — the closure param was bin_start not ord). Appl
 1M — it has 2x the buckets (41700 vs 20850 for 2d), so the per-bucket label + dense-Vec<Vec> alloc overhead
 is the residual (CSR-flatten the dense is the next micro-lever). RESAMPLE NEAR-COMPLETE: sub-daily 0.83x,
 monthly 0.96x/1.08x@100k WIN, 2d 1.01x WIN, bday 3.24x WIN; only daily 0.75x remains (highest bucket count).
+
+### 2026-06-21 BlackThrush — to_json(records) streaming serializer: 0.69x->3.31x@1M WIN (skip the Value tree)
+br-de91c CLOSED. to_json(orient="records") built a Vec<Value::Object> tree then serde_json::to_string —
+n*m Value allocs + n*m column-name String clones (row.insert(name.clone(),..) per cell!) + n Map allocs.
+Replaced with a streaming serde Serialize (RecordsJson/RowJson/CellJson): serialize_seq -> per-row
+serialize_map -> per-cell serialize_entry(name, CellJson) writing DIRECTLY to the buffer, no Value tree.
+CellJson mirrors scalar_to_json_value exactly (promotion is a no-op; serialize_f64/_str/_none are
+byte-identical to serializing the equivalent Value). Bit-identical (to_json 18/0). MEASURED: fp 182ms->38ms
+@100k = ~4.8x fp-side -> 0.62x->2.90x@100k, 0.69x->3.31x@1M (fp 373ms vs pandas 1233ms). The write!-into-
+buffer / skip-the-intermediate-tree vein (stack/melt/explode/strftime) applies to JSON serialization too:
+the n*m column-name String clones for the Map keys were the hidden dominant cost. Real @1M LOSS -> big WIN.

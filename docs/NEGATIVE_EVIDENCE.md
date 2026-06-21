@@ -897,3 +897,14 @@ NaT/non-dense). Bit-identical (89 dt + 12 month tests; same civil math as year, 
 Gregorian = chrono). **dt.month 100k 1603→943us (1.7x; →0.95x), 1M 21511→9697us (2.2x; →1.04x WIN).**
 LESSON: when one component (year) has a typed-slice integer fast path but siblings (month/day) fall
 to chrono+Scalar, port the fast path — the civil algorithm already yields all of y/m/d.
+
+### 2026-06-20 BlackThrush (cont.) — dt.hour/minute/second/quarter typed fast paths (port of month/day)
+Confirmed the dt.month lesson generalizes: hour/minute/second/quarter all used the generic
+chrono+Scalar extract_component_typed. 1M before: hour 17419us (0.57x), minute 17092 (0.59x),
+quarter 22449 (0.48x). Added typed_datetime_nanos_component_all_valid (raw &[i64], pure integer
+mod) for hour/minute/second; quarter via the civil helper ((m-1)/3+1). Bit-identical (hour 5 +
+minute 4 + second 22 + quarter 6 + 89 dt_ tests pass). **1M after: hour 2379us (7.3x; →4.2x WIN),
+minute 2376 (→4.2x WIN), quarter 13857 (1.6x; →0.77x).** hour/minute are pure-mod so they crush
+chrono; quarter still does the full civil computation (heavier) so it's only ~0.77x — the residual
+is the civil arithmetic per element vs pandas' vectorized C, not Scalar overhead. dt accessor vein
+now CLOSED for the integer-derivable components (year/month/day/hour/minute/second/quarter).

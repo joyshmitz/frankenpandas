@@ -771,6 +771,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.dt().floor("D").expect("dt floor");
             })
         }
+        ("datetime", "dt_hour" | "dt_minute" | "dt_quarter") => {
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 37_000_000_000)
+                .collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let series = Series::new(
+                "d".to_string(),
+                index,
+                Column::from_datetime64_values(nanos),
+            )
+            .expect("dt series");
+            match workload {
+                "dt_hour" => time_us(|| {
+                    let _ = series.dt().hour().expect("dt hour");
+                }),
+                "dt_minute" => time_us(|| {
+                    let _ = series.dt().minute().expect("dt minute");
+                }),
+                _ => time_us(|| {
+                    let _ = series.dt().quarter().expect("dt quarter");
+                }),
+            }
+        }
         ("datetime", "dt_year" | "dt_month" | "dt_dayofweek") => {
             let base: i64 = 946_684_800_000_000_000;
             let nanos: Vec<i64> = (0..rows as i64)

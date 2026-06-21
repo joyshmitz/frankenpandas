@@ -1750,3 +1750,14 @@ NaN branch isn't reached (NaN columns take the Scalar map -> "nan"); inf handled
 + fp-frame 3098/0. astype(str) is now COMPLETE: Int64 90.1x, Bool 347x, Float64 61.5x — all bit-identical.
 LESSON: when a formatter is too complex to replicate write-into-buffer, CALL it (avoid the Scalar Vecs +
 from_values) for a safe ~1.7-2x; only the formatter's own String alloc remains.
+
+### 2026-06-21 BlackThrush — FINDING (filed, not rushed): to_csv/ffill_axis n*m BTreeMap-per-cell smell
+Profiling the string-output ops surfaced a real inefficiency: DataFrame::to_csv (+ to_csv_options/full)
+and ffill_axis/bfill_axis do `self.columns[name].values()[row_idx]` PER CELL — an n*m BTreeMap lookup +
+per-cell values(), the EXACT smell to_numpy's br-tonp1 already fixed (pre-resolve columns once). Fix:
+hoist col_values (or a typed F/I/B/U enum) before the row loop. BUT the 3 to_csv variants are near-
+duplicates (to_csv_options uses a column SUBSET + na_rep, not self.column_order), so a blind replace_all
+is unsafe — needs a careful per-variant pass. to_csv is already a WIN (195x) so it's a strengthen, not a
+loss; FILED as a bead for a dedicated pass rather than rushing a fiddly multi-variant edit on winning
+ops. (Discipline: identified + filed > risky rushed commit.) The clean high-value string-output veins
+(dt accessors, astype int/bool/float, stack/explode) are harvested + shipped this campaign.

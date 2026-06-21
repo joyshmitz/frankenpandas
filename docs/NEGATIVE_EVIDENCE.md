@@ -1830,3 +1830,13 @@ Conformance GREEN (pivot 37/0). zngxi CLOSED — no int64-dense rewrite needed. 
 independent ~6ms" that looked like a fixed cost was measurement noise masking the SipHash scaling; the
 scatter (ScalarKey,ScalarKey) SipHash WAS the dominant cost. ALWAYS check for a stray std HashMap on a
 hot per-row path when FxHashMap is already the crate convention.
+
+### 2026-06-21 BlackThrush — df_pivot: same pivot_table smell, FxHashMap+hoist ~2x (output-build next)
+Applied the pivot_table lesson to DataFrame::pivot (added a df_pivot bench: unique r=i/10,c=i%10 since
+pivot errors on dups). BASELINE was catastrophic: 0.03x@10k / 0.24x@100k / 2.62x@1M (fp ~22-25ms flat).
+pivot had the IDENTICAL smell: per-row idx_vals/col_vals/val_vals.values()[i] in the scatter + a std-
+SipHash `cells: HashMap` used for BOTH the scatter inserts AND the per-output-cell gets. Hoisted values()
++ FxHashMap => ~2x: 0.07x@10k / 0.39x@100k / 5.47x@1M (fp ~11-13ms). Bit-identical (output ordered by
+sorted row_keys/col_keys; cells only probed by get/contains), conformance GREEN (pivot 37/0). STILL a
+loss @small — remaining ~11ms is the OUTPUT BUILD (for col {for row {cells.get}} -> Vec<Scalar> ->
+Column::new), the melt Scalar-output smell (typed from_f64_values + NaN-for-missing is the next lever).

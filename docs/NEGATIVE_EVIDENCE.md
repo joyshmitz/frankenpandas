@@ -1341,3 +1341,12 @@ compares via to_f64 (i64→f64, lossy >2^53), so an i64 compare could differ —
 groupby idxmin/idxmax on float is common ("row of the per-group max"). DataFrame reductions confirmed
 to delegate to the now-typed Series methods (reduce_numeric → s.min/max/prod); ColumnData::Float64/
 Int64/Bool are Arc<[T]> (O(1) clone) so column_as_series is cheap. UNMEASURED.
+
+### 2026-06-21 BlackThrush — SeriesGroupBy any()/all() typed paths (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. Sweeping the GroupBy-closure vein (per-group agg uses
+values()[idx] Scalar). SeriesGroupBy.any()/all() scanned each group via values()[idx] + is_missing +
+scalar_truthy. Added typed Bool/Int64/Float64 branches (mirror of the Series.any()/all() fix this
+session): all-valid groups scan the native &[bool]/&[i64]/&[f64] — scalar_truthy(Bool(b))==b,
+(Int64)==v!=0, (Float64)==(!NaN && v!=0.0); typed slices all-valid (f64 no-NaN) so bit-identical, no
+missing to skip. as_*_slice called inside the closure is O(1) per group. UNMEASURED. GroupBy vein
+continues (idxmin/idxmax done last commit) — siblings (group first/last/nth, sum/mean if Scalar) next.

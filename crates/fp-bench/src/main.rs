@@ -1011,6 +1011,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.rolling(10, Some(10)).mean().expect("rolling mean");
             })
         }
+        ("rolling", "expanding_skew") => {
+            let series = df.get_column("col_0");
+            time_us(|| { let _ = series.expanding(Some(1)).skew().expect("expanding skew"); })
+        }
         ("rolling", "rolling_std_w50") => {
             let series = df.get_column("col_0");
             time_us(|| {

@@ -2586,3 +2586,14 @@ aggregate_scalar_f64 path would skip it but RISKS the fp_types::nanstd/nanvar bi
 op order -> golden regen) for a marginal gain — NOT pursued (revert-~0-gain discipline). Benches
 resample_std/resample_median added for coverage. CONTRAST: groupby's scattered gather made sem 0.70x (big,
 fixed); resample's contiguous bins make std only 0.92x (marginal, left).
+
+### 2026-06-21 BlackThrush — expanding skew/kurt 0.14-0.22x LOSS (output Scalar cache-miss) + 7th subtlety
+expanding().skew()/kurt() are O(n) online (expanding_moment_online) but a real LOSS: @100k 0.22x, @1M 0.14x
+(fp 195ms vs pandas 27ms), SUPER-LINEAR (17.9x for 10x). Root: the per-row output builds a Vec<Scalar>
+(~32MB@1M) + Column::from_values re-scan — the 32MB Vec blows L3 -> cache-miss super-linearity. The INPUT
+values() Scalar materialization is NOT the bench cost (tried as_f64_slice input skip -> only ~5% -> REVERTED
+per revert-~0-gain): the bench reuses the series so values() is amortized/cached (7TH MEASUREMENT SUBTLETY =
+bench series-reuse caches values(), hiding input-materialization cost; real one-shot usage would pay it).
+FIX (filed): typed output — output_skew_typed/output_kurt_typed -> (f64, present_bool), collect Vec<f64> +
+ValidityMask, Column::from_f64_values_with_validity (4x smaller, no re-scan). Bit-identity risk = the
+missing-slot underlying value (Null(NaN) vs validity-false NaN) -> golden gate. Bench expanding_skew added.

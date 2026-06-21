@@ -2090,3 +2090,19 @@ series_map, resample, to_json — same family as to_numpy/transpose). The "compr
 was WRONG for @1M. CORRECTED PICTURE: fp wins Python-level-pandas ops; loses several C-optimized ones at
 scale. Methodology fix: ALWAYS use --size 10k/100k/1M (abbreviated). Re-auditing all levers at real sizes
 is the next priority. The full warmed-gauntlet "joins 28-44x etc" numbers are ALSO suspect (numeric size).
+
+### 2026-06-21 BlackThrush — CORRECTED SCORECARD @1M (abbreviated --size): honest picture
+Standard ops re-measured at REAL @1M: sort_single 2.14x (reported 35x), join_left 3.55x (28x), join_inner
+4.09x (27x), ewm_mean 2.79x (21x), groupby_sum_i64 18.17x (genuinely big). value_counts 0.32x LOSS (the
+khash floor — memory warned, my inflated numbers masked it). HONEST @1M PICTURE:
+  WINS (2-18x, not the 13-44x I claimed): pivot_table 2.27x, get_dummies 1.36x, cut 1.22x, crosstab 1.23x,
+  sort 2.14x, joins 3.5-4.1x, ewm 2.79x, groupby 18x.
+  LOSSES @1M: value_counts 0.32x, unstack 0.22x, series_map 0.23x, resample 0.20x, to_json 0.69x,
+  + architectural to_numpy/transpose.
+So fp does NOT "comprehensively dominate" @1M — it wins most ops 2-18x but LOSES ~6 (the C-optimized-pandas
+ops + the khash-floor value_counts + fp's string-composite-index unstack). The SESSION LEVERS ARE STILL
+VALID: every @100k before/after improvement is real + bit-identical (unstack O(N^2)->O(N) avoided a 14s
+catastrophe; FxHashMap/cache/contiguous measurably faster), they just don't lift the C-optimized ops to a
+WIN at 1M. The real remaining loss-rich vein: value_counts (khash), unstack (string-composite index +
+Scalar output), series_map (IndexLabel-per-row + Scalar out), resample (per-row bucket + Scalar agg),
+to_json (serde Value tree). These are fp-design-vs-pandas-C costs — harder than the @100k levers.

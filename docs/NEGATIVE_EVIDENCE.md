@@ -2313,3 +2313,14 @@ CONCLUSION: fp dominates ~EVERYTHING 2x-69680x at correctly-measured @1M. Remain
 structural (fp representation): unstack (string-composite MultiIndex), daily/sub-daily resample (gather-agg
 +bucket floor), to_numpy/transpose (2D-block l4vzc). The sibling-sweep methodology found 5 hidden losses
 this session (to_json columns/index/split/values + series_categorical) that single-op benches missed.
+
+### 2026-06-21 BlackThrush — sweep batch 3 (cut/qcut/groupby-str/iloc): all WINS, sweep now comprehensive
+Final sibling-sweep batch at correct @1M + warmed pandas: cut_bins 1.53x, qcut_bins 1.48x, groupby_mean_str
+3.65x, df_groupby_str_sum 5.99x, groupby_count 28.7x, iloc_slice 4.38x — all WINS. No new losses. Combined
+with batches 1-2 (io/rolling/datetime/dataframe_ops/groupby/indexing all swept), the @1M scorecard is now
+COMPREHENSIVE: fp wins every benched op 1.48x-69680x EXCEPT the structural survivors. The sibling-sweep
+methodology netted 6 hidden losses fixed this session (to_json columns/index/split/values + series_categorical
++ the original records) that single-op spot-checks missed. ONLY structural losses remain (fp representation,
+architectural — not single-commit levers): unstack (string-composite MultiIndex -> real codes), daily/sub-
+daily resample (gather-agg+bucket floor -> Vec-keyed groups return-type, multi-site marginal), to_numpy/
+transpose (2D-block storage, l4vzc). These need DESIGNED changes, not blind levers — the disciplined stop.

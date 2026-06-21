@@ -1786,3 +1786,15 @@ harvested across dt accessors + reshape + astype(str int/bool/float); reverted p
 to_csv-BTreeMap-hoist (output-formatting alloc, not source/lookup, is always the real cost); deferred
 br-3seq1 (to_csv float-formatter-into-accumulator, to_csv near-optimal at 5ns/field/196x) + l4vzc
 (transpose/to_numpy architectural). Surface dominates pandas 1.67x-69680x except to_numpy(bench-only).
+
+### 2026-06-21 BlackThrush — CORRECTION: pivot_table @small IS a real loss (warmup); zngxi REOPENED
+The warmup discipline (from the df_stack artifact) caught a prior ERROR: I had closed zngxi calling
+pivot_table a phantom (1.03x@100k/9.1x@1M, NO-warmup). WITH pandas warmup: df_pivot_table 0.25x@10k,
+1.00x@100k, 8.80x@1M — a REAL LOSS at small/medium input. fp is INPUT-INDEPENDENT ~6.1ms (6252/6062/
+6089us @10k/100k/1M) while pandas SCALES (1544/6069/53609us). So fp has a ~6ms FIXED overhead for a
+100x10 output — the O(n_rows) scans (unique idx/col + scatter into HashMap<(ScalarKey,ScalarKey),
+Vec<f64>>) are sub-ms even @1M, so a fixed setup/alloc cost dominates. ROOT CAUSE needs a flamegraph
+(candidates: ScalarKey HashMap vs int64-dense direct-address grouping; per-cell Vec<f64> alloc; output
+Scalar-Vec build). REOPENED zngxi with this; likely fix = int64-dense grouping (cf groupby 1432b615).
+INTEGRITY NOTE: two prior "phantom" closures (pivot_table, and the df_stack 0.4x) were NO-WARMUP
+artifacts — clean-MIN MUST warm pandas for variable ops; I'm re-auditing reshape ratios accordingly.

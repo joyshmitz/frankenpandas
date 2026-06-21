@@ -990,6 +990,19 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
             time_us(|| { let _ = gdf.groupby(&["k1","k2"]).expect("groupby").sum().expect("sum"); })
         }
+        ("groupby", "df_groupby_2strkey_sum") => {
+            let mut columns = BTreeMap::new();
+            let mut kb1 = Vec::new(); let mut ko1 = vec![0usize];
+            for i in 0..rows { let k = format!("a{:03}", i % 100); kb1.extend_from_slice(k.as_bytes()); ko1.push(kb1.len()); }
+            columns.insert("k1".to_string(), Column::from_utf8_contiguous(kb1, ko1));
+            let mut kb2 = Vec::new(); let mut ko2 = vec![0usize];
+            for i in 0..rows { let k = format!("b{:03}", (i / 100) % 50); kb2.extend_from_slice(k.as_bytes()); ko2.push(kb2.len()); }
+            columns.insert("k2".to_string(), Column::from_utf8_contiguous(kb2, ko2));
+            let mut order = vec!["k1".to_string(), "k2".to_string()];
+            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
+            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
+            time_us(|| { let _ = gdf.groupby(&["k1","k2"]).expect("groupby").sum().expect("sum"); })
+        }
         ("groupby", "groupby_agg3_str") => {
             let mut kb = Vec::with_capacity(rows * 5); let mut ko = Vec::with_capacity(rows + 1); ko.push(0usize);
             for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }

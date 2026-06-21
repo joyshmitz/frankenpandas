@@ -2603,3 +2603,11 @@ Checked whether multi-key groupby (df.groupby(["k1","k2"])) falls to the slow bu
 is single-key only). For INT64 keys it does NOT: df_groupby_2key_sum @1M = 2.45x WIN (fp 23.8ms vs pandas 58ms)
 — the int64_dense_grouping combines the keys densely. Confirms the memory's "multi-key int64 already dense".
 Bench added. (Multi-string-key may differ — no int64 dense; checking next if disk allows.)
+
+### 2026-06-21 BlackThrush — multi-STRING-key groupby 0.89x MARGINAL loss (no multi-key dense for strings)
+Contrast to multi-int-key (2.45x win): df.groupby(["k1_str","k2_str"]).sum() @1M = 0.89x LOSS (fp 122ms vs
+pandas 108ms). The int64_dense_grouping combines INT keys densely, but multi-STRING keys have no dense path
+-> build_groups + scattered gather. Marginal (0.89x, not the big single-key value-agg losses). FIX (noted,
+not filed as separate — marginal): a multi-key dense path that factorizes each key column to codes + combines
+(like int64_dense_grouping generalized to Utf8/mixed). Involved for a ~0.89x->~1.5x marginal gain; lower
+priority than the architectural/golden-gated items. Bench df_groupby_2strkey_sum added.

@@ -1659,3 +1659,14 @@ component's format! String alloc still dominates; a bigger win needs write!-into
 alloc), but that's per-format specialized (deferred). These were already WINS (pandas dt string accessors
 are Python-level); this strengthens them. Added dt_strftime/dt_date regression-guard benches. dt string
 ops confirmed WINS — no loss. Surface stands: dominated except to_numpy(bench-only)/transpose(l4vzc).
+
+### 2026-06-21 BlackThrush — LEVER: dt.date write!-into-buffer — 10.4x->17.4x (1.66x fp-side, bit-identical)
+Follow-up to the dt string helper contiguous fix (which removed the Vec<Scalar> but left the per-row
+format! String alloc as the dominant cost). dt.date now formats "YYYY-MM-DD" with `write!` DIRECTLY
+into the output byte buffer (Vec<u8> via io::Write), avoiding the format! String allocation entirely.
+**Bit-identical**: write! with the same "{y:04}-{m:02}-{d:02}" spec emits identical bytes; bails to the
+generic helper on NaT/non-dense. MEASURED: dt_date 9993->6557us (1.52x over the helper, 1.66x over the
+10904us original) -> **17.36x vs pandas** (was 10.4x). Conformance GREEN (fp-frame 3098/0). Confirms the
+format! String alloc was the dominant cost. PATTERN: fixed-format dt/string output -> write!-into-buffer
+beats format!+Scalar+from_values. (time/strftime are candidates — time has a fixed "HH:MM:SS" format;
+strftime is user-format so needs the formatter refactored to write into a buffer.)

@@ -2064,3 +2064,13 @@ a fp-bench io-timing artifact. Updated br-de91c: PROFILE to_json before the stre
 loss is real + tree-dominated, not a bench artifact). The C-optimized-pandas vein is essentially ONE op
 (to_json @small); read_json + everything else dominates. The perf surface remains comprehensively
 dominated.
+
+### 2026-06-21 BlackThrush — to_json values()-hoist ~13% (partial; bulk ~134ms still flat-anomalous)
+Profiling de91c: to_json tree-build ~100ms dominant. Hoisted the per-cell self.columns[name].values()
+(BTreeMap lookup + values() call, n*m times) to once-per-column -> col_values: Vec<&[Scalar]>. MEASURED
+~13%: 155->134us... 155ms->134ms: 0.73x->0.86x@100k, 7.92x->9.55x@1M. Bit-identical, conformance GREEN
+(to_json 18/0). So unlike the to_csv-hoist (~0-gain), the per-cell values() access WAS ~13% here. BUT the
+bulk ~134ms is STILL flat across 10k/1M (the Map/Value building + serialize) — the unexplained fixed cost
+remains (de91c open: needs finer in-loop profiling of Map-insert vs scalar_to_json_value vs serialize; the
+flatness rules out the n*m building being it). to_json still loses @100k (0.86x) but wins @1M; the full
+streaming/direct-serialize fix is the remaining lever, filed.

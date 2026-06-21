@@ -12,6 +12,23 @@ Method: `examples/bench_*.rs` self-time `best=<ns>` over N iters; pandas scripts
 Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or showed
 ~0 gain. Never retry a recorded dead end.
 
+## 🗺️ PERF FRONTIER AFTER THE DT/TIMEDELTA SWEEP (BlackThrush, 2026-06-21)
+
+The datetime AND timedelta accessor surfaces are now FULLY TYPED (every component off the raw &[i64]
+nanos): all dt components + dt.floor/ceil/round (already typed via round_to_freq) + dt.weekofyear +
+td.total_seconds. The remaining vs-pandas LOSSES are all UNSAFE to fix blind (need a build+test cycle
+or are unwinnable) — do NOT attempt code-only:
+- **pivot_table 0.67x@1M** (bead zngxi) — needs a dense-int64 grouping rewrite of a complex fn
+  (dropna + sort + aggfunc edge cases). The ONLY remaining clearly-fixable loss; do with tests.
+- **df_round 0.84x** — bit-locked: the per-element `(x*f).round_ties_even()/f` fdiv changes goldens.
+- **transpose / stack / to_numpy** — STRUCTURAL: pandas uses an O(1) 2D-block view / MultiIndex; FP's
+  columnar layout can't match without a 2D-block storage mode or lazy-transpose (beads l4vzc, m9wkn).
+- **floor/ceil 100k, set_index 0.61x@100k** — structural columnar per-column-alloc residuals.
+- NOT-IMPLEMENTED (parity, not perf): td.days/.seconds/.microseconds/.nanoseconds (fp_types::Timedelta
+  has the integer helpers; expose them typed-from-the-start when adding the API, not as a "lever").
+Everything else probed this session is an FP WIN (see entries below). The common-op fixable-loss vein
+is exhausted; the next real perf work is pivot_table (zngxi) or the structural-storage beads.
+
 ## ⏳ UNVERIFIED CODE-ONLY STACK — VERIFY ON DISK-RECOVER (BlackThrush, 2026-06-21)
 
 During a multi-turn disk-CRITICAL window (cargo forbidden), the dt-accessor fast paths below were

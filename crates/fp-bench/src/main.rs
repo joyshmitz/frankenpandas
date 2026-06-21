@@ -1059,6 +1059,26 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_frame::qcut(&series, 10).expect("qcut");
             })
         }
+        ("dataframe_ops", "wide_to_long") => {
+            // pandas: pd.wide_to_long(df, ["A","B"], i="id", j="year", sep="_",
+            // suffix=r"\\d+"); m=rows/2 rows x 2 suffixes -> ~rows long rows.
+            let m = (rows / 2).max(1);
+            let mut columns = BTreeMap::new();
+            columns.insert("id".to_string(), Column::from_i64_values((0..m as i64).collect()));
+            let mut order = vec!["id".to_string()];
+            for stub in ["A", "B"] {
+                for suf in ["2000", "2001"] {
+                    let name = format!("{stub}_{suf}");
+                    columns.insert(name.clone(), Column::from_f64_values((0..m).map(|i| i as f64).collect()));
+                    order.push(name);
+                }
+            }
+            let wdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, m), columns, order).expect("w2l frame");
+            time_us(|| {
+                let _ = fp_frame::wide_to_long(&wdf, &["A", "B"], &["id"], "year", "_", r"\d+").expect("wide_to_long");
+            })
+        }
         ("dataframe_ops", "cut_bins") => {
             // pandas: pd.cut(s, 10) — bin a Float64 series into 10 bins.
             let series = df.get_column("col_0");

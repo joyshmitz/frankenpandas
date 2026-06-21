@@ -2005,3 +2005,13 @@ Bit-identical (conformance qcut 6/0). cut + qcut binning now both WIN. The conti
 (per-row label/category String -> one buffer) recurs across stack/explode/melt/cut/qcut + dt-string +
 astype-str — a fully harvested vein. (cut_bins explicit-edges has the same smell + an O(n*bins) find;
 lower priority, less common.)
+
+### 2026-06-21 BlackThrush — wide_to_long is ALREADY a win (62x); Scalar build NOT a loss here
+Benched wide_to_long (un-benched reshape, melt-class Scalar cell-by-cell build — a cut/qcut-style
+candidate). MEASURED: 6.10x@100k / 62.19x@1M (fp ~20650us flat). A WIN — pandas wide_to_long is Python-
+level + very slow (1.28s@1M), so even fp's Scalar materialization wins big. fp's flat ~20ms is regex-
+compilation setup (the stub `^A_(\d+)$` regexes, fixed per call), NOT output-bound (output scales 10x
+@100k->1M but fp is flat). The contiguous/typed lever would be ~0-gain churn on a 62x win — NOT DONE.
+LESSON: not every Scalar-cell-by-cell reshape is a loss — when pandas is Python-slow, fp wins anyway;
+the contiguous-Utf8 lever only matters when fp would otherwise LOSE (cut/qcut/stack/explode/melt did;
+wide_to_long does not). Bench committed as a regression workload.

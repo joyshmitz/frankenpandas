@@ -908,3 +908,16 @@ minute 2376 (→4.2x WIN), quarter 13857 (1.6x; →0.77x).** hour/minute are pur
 chrono; quarter still does the full civil computation (heavier) so it's only ~0.77x — the residual
 is the civil arithmetic per element vs pandas' vectorized C, not Scalar overhead. dt accessor vein
 now CLOSED for the integer-derivable components (year/month/day/hour/minute/second/quarter).
+
+### 2026-06-20 BlackThrush (cont.) — string ops all WIN (4.8-14.6x), no losses
+Probed str.len/upper/contains/startswith on a 15-char contiguous-Utf8 column (min-of-iters vs
+pandas). ALL big wins — pandas str.* is Python-object-level per element; FP operates on the typed
+contiguous byte buffer:
+| op | 100k (pandas/FP) | 1M |
+|---|---|---|
+| str.len | **14.6x WIN** | 13.6x |
+| str.upper | 5.4x | 5.4x |
+| str.contains("5") | 8.3x | 4.8x |
+| str.startswith("item") | 8.2x | 8.4x |
+No action. Added str_len/str_upper/str_contains/str_startswith workloads for tracking. The string
+surface is FP-dominant (consistent with the contiguous-Utf8 value_counts/dedup/sort wins).

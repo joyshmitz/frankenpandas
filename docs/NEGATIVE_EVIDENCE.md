@@ -1431,3 +1431,15 @@ join_*) does NOT cover this session's levers (set_index/total_seconds/min-max-f6
 GroupBy idxmin-first/any-all/agg_numeric-fallback/label_at). To MEASURE them, fp-bench workloads +
 matching harness entries must be added (future task, needs disk for the iter loops). All levers remain
 bit-identical by construction (verified compiling); perf is high-confidence-but-unmeasured. Disk 36G.
+
+### 2026-06-21 BlackThrush — dt vein MEASURED: 6-37x vs pandas @1M (clean MIN) — phantom-loss CONFIRMED
+Clean-MIN methodology (run `fp-bench --category datetime --workload W --json` -> MIN of times_us;
+pandas MIN of 20 fixed iters on a matched 1M datetime64 Series) — bypasses the harness DROPPED_HIGH_CV.
+RESULTS @1M: dt_hour 37.5x, dt_minute 36.7x (pure rem_euclid time components), dt_year 7.7x,
+dt_quarter 7.4x, dt_month 6.5x (Hinnant civil-arith calendar components). ALL big wins.
+CRITICAL: these CONTRADICT the prior "at parity" harness reads (df-abs memory: month 1.04x, quarter
+0.77x, dayofyear 0.91x) — those were harness p50+CV. Clean MIN shows 6.5x/7.4x. STRONGLY reconfirms
+the PHANTOM-SATURATION rule: the harness p50+CV drastically understates fp's domination; always
+re-measure MIN. The typed-datetime fast paths (civil_from_nanos + rem_euclid components, this session's
+hardened weekofyear/dayofyear among them) genuinely dominate pandas' Python-level .dt accessors.
+METHODOLOGY now reusable for the remaining PENDING levers once their fp-bench workloads exist.

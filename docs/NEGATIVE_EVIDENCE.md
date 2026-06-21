@@ -2324,3 +2324,13 @@ methodology netted 6 hidden losses fixed this session (to_json columns/index/spl
 architectural — not single-commit levers): unstack (string-composite MultiIndex -> real codes), daily/sub-
 daily resample (gather-agg+bucket floor -> Vec-keyed groups return-type, multi-site marginal), to_numpy/
 transpose (2D-block storage, l4vzc). These need DESIGNED changes, not blind levers — the disciplined stop.
+
+### 2026-06-21 BlackThrush — to_dict per-cell hoist: records 3.14x->6.15x, dict 4.06x->7.34x@1M (~1.9x fp-side)
+Swept the unbenched DataFrame.to_dict (in-memory analog of to_json). It already WON pandas (Rust struct vs
+Python dicts) but carried the same per-cell smell: orient=records did self.columns[name].values()[row_idx]
+PER CELL (n*m BTreeMap lookups + values()); orient=dict did label.to_string() PER CELL (n*m formats, though
+labels are shared across columns). Fix: hoist col_values once (records); precompute the n index-label strings
+once (dict). Bit-identical (to_dict 18/0). MEASURED: records 353->182ms@1M = ~1.94x fp-side -> 3.14x->6.15x;
+dict 316->174ms = ~1.81x -> 4.06x->7.34x. LESSON: even WINNING ops carry the per-cell-values()/per-cell-
+format smell — hoisting/precomputing nearly DOUBLES them. The sweep finds both losses AND under-dominating
+wins. Added df_to_dict_records/df_to_dict_dict benches.

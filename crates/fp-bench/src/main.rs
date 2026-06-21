@@ -1079,6 +1079,19 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_frame::wide_to_long(&wdf, &["A", "B"], &["id"], "year", "_", r"\d+").expect("wide_to_long");
             })
         }
+        ("dataframe_ops", "cut_explicit") => {
+            // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
+            // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.
+            let series = df.get_column("col_0");
+            let mut edges: Vec<fp_types::Scalar> = vec![fp_types::Scalar::Float64(-1.0)];
+            for i in 1..=9 {
+                edges.push(fp_types::Scalar::Float64(i as f64 * 1e5));
+            }
+            edges.push(fp_types::Scalar::Float64(1.1e6));
+            time_us(|| {
+                let _ = fp_frame::cut_bins(&series, &edges, true, None, false).expect("cut_bins");
+            })
+        }
         ("dataframe_ops", "cut_bins") => {
             // pandas: pd.cut(s, 10) — bin a Float64 series into 10 bins.
             let series = df.get_column("col_0");

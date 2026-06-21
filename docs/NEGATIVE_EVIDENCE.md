@@ -2026,3 +2026,12 @@ all bit-identical + conformance-green. The wide-output-reshape + per-row-key-tim
 binning families — the codebase's loss-rich territory — are FULLY harvested. Only remaining non-win is
 the architectural transpose (1.37x, n-column wall) + to_numpy (bench-only, no real caller) = l4vzc, low-EV
 (high arch risk, low real value). Perf surface comprehensively DOMINATED.
+
+### 2026-06-21 BlackThrush — cut_bins (explicit edges) contiguous-Utf8 ~1.7x; BINNING FAMILY complete
+The explicit-edges cut variant had the same n Scalar::Utf8(labels[i].clone()) smell + a 0.81x@100k loss.
+Refactored its closure to produce bin indices (Vec<Option<usize>>, find logic unchanged), then an
+all-in-range fast path emits labels into ONE contiguous buffer; out-of-range/missing fall through to the
+Scalar path. Added cut_explicit bench (edges spanning the data). RESULT: 0.81x->1.38x@100k (WIN) /
+7.45x->12.45x@1M ~1.7x. Bit-identical, conformance GREEN (cut 15/0). BINNING FAMILY COMPLETE: cut ~2.1x,
+qcut ~1.9x, cut_bins ~1.7x — all were @100k losses (n Scalar::Utf8 clones), all now wins via the
+contiguous-Utf8 vein (separate bin-assignment from output; emit pre-formatted labels into one buffer).

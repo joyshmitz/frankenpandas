@@ -2232,3 +2232,15 @@ byte-identical to serializing the equivalent Value). Bit-identical (to_json 18/0
 @100k = ~4.8x fp-side -> 0.62x->2.90x@100k, 0.69x->3.31x@1M (fp 373ms vs pandas 1233ms). The write!-into-
 buffer / skip-the-intermediate-tree vein (stack/melt/explode/strftime) applies to JSON serialization too:
 the n*m column-name String clones for the Map keys were the hidden dominant cost. Real @1M LOSS -> big WIN.
+
+### 2026-06-21 BlackThrush — f64 value_counts "0.14x loss" was a DATA-MISMATCH PHANTOM (it WINS 4.63x); typed-f64 path REVERTED
+INTEGRITY CORRECTION: the f64 value_counts "0.14x@1M loss" (listed in ikq9a/the scorecard) was NOT REAL — a
+data mismatch. fp-bench value_counts uses col_0 = all-distinct continuous f64 (rng.random*1e6), but my
+pandas comparison used (standard_normal*100).astype(INT) = ~1000-distinct INTEGERS. So I compared fp-all-
+distinct-f64 (~41ms, 1M distinct) vs pandas-1000-distinct-int (~5.6ms) = bogus 0.14x. CORRECT (both
+all-distinct f64): fp 43ms vs pandas 200ms = 4.63x@1M WIN, 2.14x@100k WIN. pandas value_counts of 1M
+distinct f64 is SLOW (200ms); fp's FxHashMap<SetMemberKey> path already dominates. Tested a typed-f64 path
+(as_f64_slice + FxHashMap<u64 normalized bits>, skip set_member_key): ~0-gain / slight regression (41->43ms
+— all-distinct is hash-insert-bound, the SetMemberKey wrapper was NOT the cost; as_f64_slice adds an
+extraction). REVERTED. LESSON: match the DATA when comparing (the value_counts loss joins the --size bug as
+a measurement-methodology phantom). f64 value_counts is a WIN; it was never a real loss. ikq9a: remove it.

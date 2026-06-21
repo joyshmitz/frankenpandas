@@ -335,6 +335,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = DataFrame::crosstab(&s1, &s2).expect("crosstab");
             })
         }
+        ("dataframe_ops", "series_map") => {
+            // pandas: s.map(mapper); s values in 0..100, mapper maps 0..99.
+            let vals = Column::from_i64_values((0..rows as i64).map(|i| i % 100).collect());
+            let s = Series::new("s", Index::new_known_unique_int64_unit_range(0, rows), vals)
+                .expect("map self");
+            let mvals = Column::from_i64_values((0..100).collect());
+            let mapper = Series::new("m", Index::new_known_unique_int64_unit_range(0, 100), mvals)
+                .expect("mapper");
+            time_us(|| {
+                let _ = s.map_series(&mapper).expect("map");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");

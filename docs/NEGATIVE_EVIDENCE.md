@@ -1850,3 +1850,11 @@ Bit-identical (col_keys/row_keys are first-seen/sorted ordered lists; the maps/s
 entry/insert/get). Conformance GREEN. Remaining flat ~7ms = the per-row String stringification (rk_str/
 ck_str per row — INTENTIONAL for the Int64(5)==Utf8("5") merge quirk; could cache the <=cardinality
 distinct stringifications but the quirk constrains it). get_dummies still a candidate (br-1q4q4 #3).
+
+### 2026-06-21 BlackThrush — series_map (Series.map) FxHashMap ~41%; 4th FxHashMap-lever win
+Series::map_series built `lookup: std::collections::HashMap<IndexLabel,&Scalar>` (std SipHash) from the
+mapper, then did per-row gets. Added a series_map bench. Baseline 0.07x@10k / 0.34x@100k / 3.51x@1M (fp
+~3040us flat — SipHash). lookup -> FxHashMap => ~41%: 0.10x@10k / 0.59x@100k / 5.94x@1M. Bit-identical
+(output in self's order; map only probed by get). Conformance GREEN. Remaining ~1785us = per-row
+IndexLabel construction (val->IndexLabel per row) + Vec<Scalar> output. FOUR FxHashMap wins this session:
+pivot_table ~47%, pivot ~2x, crosstab ~25%, series_map ~41% — the std-HashMap-on-per-row-path lever.

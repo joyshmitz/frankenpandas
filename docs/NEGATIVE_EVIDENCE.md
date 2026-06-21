@@ -2403,3 +2403,13 @@ COMPREHENSIVE: the only losses were rank(axis=1) (fixed, vectorized count-rank, 
 idxmax/idxmin_axis1 (fixed, typed-f64 compare, 0.40x->2.66x/2.57x). Everything else in the family dominates.
 The per-cell-to_f64-dispatch / per-row-Series smells were the only axis=1 losers; the typed-f64 raw path
 fixes them. Benches added for the whole family (documents the domination).
+
+### 2026-06-21 BlackThrush — argmax/argmin_axis1 (arg_extrema) typed-f64 path: ~1.54x@1M WIN (same per-cell smell as idxmax)
+arg_extrema_axis1 (the argmax_axis1/argmin_axis1 helper, numeric-only sister of idxmax/idxmin_axis1) had the
+identical per-cell smell: col.values()[row_idx] (n*m BTreeMap) + Scalar + to_f64() per cell -> ~0.40x loss
+(same as idxmax was). Applied the typed-f64 path (largest-parameterized): all-valid Float64 -> raw f64
+compare over hoisted slices, first-wins, NaN skipped. Bit-identical (argmax 8/0). MEASURED (new
+df_argmax_axis1 bench vs pandas idxmax): 1.54x@1M WIN (fp 70ms vs pandas 109ms). Slightly behind idxmax's
+2.66x because the `if largest` take-branch runs per cell (not hoisted) — could split the row loop on
+largest for ~2.6x (minor follow-up; near-duplicate of idxmax). The axis=1 idxmax/idxmin/argmax/argmin
+family all now win.

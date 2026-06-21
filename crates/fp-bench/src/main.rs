@@ -291,6 +291,7 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_var_axis1") => time_us(|| { let _ = df.var_axis1().expect("x"); }),
         ("dataframe_ops", "df_prod_axis1") => time_us(|| { let _ = df.prod_axis1().expect("x"); }),
         ("dataframe_ops", "df_count_axis1") => time_us(|| { let _ = df.count_axis1().expect("x"); }),
+        ("dataframe_ops", "df_argmax_axis1") => time_us(|| { let _ = df.argmax_axis1().expect("x"); }),
         ("dataframe_ops", "df_std_axis1") => time_us(|| {
             let _ = df.std_axis1().expect("std_axis1");
         }),

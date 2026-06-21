@@ -2106,3 +2106,16 @@ catastrophe; FxHashMap/cache/contiguous measurably faster), they just don't lift
 WIN at 1M. The real remaining loss-rich vein: value_counts (khash), unstack (string-composite index +
 Scalar output), series_map (IndexLabel-per-row + Scalar out), resample (per-row bucket + Scalar agg),
 to_json (serde Value tree). These are fp-design-vs-pandas-C costs — harder than the @100k levers.
+
+### 2026-06-21 BlackThrush — series_map typed-Int64 fast path: 0.23x->4.31x@1M (REAL @1M loss FIXED)
+First fix of a REAL @1M loss (measured CORRECTLY with abbreviated --size). Series::map_series did per-row
+IndexLabel construction + FxHashMap lookup + Vec<Scalar> output over the Scalar-materialized self. Added a
+typed all-Int64 fast path (mirroring the existing Series::replace one — its comment literally said "see
+map"): when self.as_i64_slice() is Some AND the mapper index is all-Int64, probe each row's i64 directly
+over the raw &[i64] view (no self Scalar materialize, no per-row IndexLabel), i64-keyed FxHashMap (collected
+last-wins like the IndexLabel one => bit-identical); when all mapped values are Int64 + every row maps,
+emit from_i64_values (typed, no output Scalar Vec). MEASURED: 23890->2542us@1M = ~9.4x fp-side -> 0.23x->
+4.31x@1M (WIN!) / 5.73x@100k. Conformance GREEN (map_series 3/0). LESSON: the real @1M losses (vs pandas-C)
+ARE fixable with the typed-direct-probe pattern (as_i64_slice + dense/typed lookup + typed output, skipping
+ALL Scalar materialization) — the earlier campaign's factorize/unique/replace vein, now applied to map.
+ikq9a updated: series_map DONE; unstack/resample/value_counts/to_json remain.

@@ -2119,3 +2119,15 @@ emit from_i64_values (typed, no output Scalar Vec). MEASURED: 23890->2542us@1M =
 ARE fixable with the typed-direct-probe pattern (as_i64_slice + dense/typed lookup + typed output, skipping
 ALL Scalar materialization) — the earlier campaign's factorize/unique/replace vein, now applied to map.
 ikq9a updated: series_map DONE; unstack/resample/value_counts/to_json remain.
+
+### 2026-06-21 BlackThrush — resample typed-f64 mean ~7% (agg NOT the bottleneck; bucketing is)
+Applied the typed-probe pattern to resample mean (Resample::mean): typed-f64 agg (as_f64_slice, no NaN ->
+nanmean==sum/count; per-bucket f64 index instead of Vec<Scalar> clone; from_f64_values output). Gated
+bit-identical (resample 51/0). MEASURED: 59305->55155us@1M = ONLY ~7% (still 0.28x@1M LOSS). So UNLIKE
+series_map (Scalar-materialization-bound, 9.4x win), resample is BUCKETING-bound: resample_build_groups'
+per-row scatter into groups: HashMap<String,Vec<usize>> (the String period keys + HashMap get_mut+push
+per row) dominates, NOT the Scalar agg. The REAL resample lever is the bucketing: integer-period keys
+(year*12+month etc.) scattering into a DENSE/int-keyed structure (no String, no HashMap) — the complex
+multi-site restructure (the 6 bucketing fns RETURN String-keyed groups). LESSON: the typed-probe pattern
+only wins where Scalar-materialization is the bottleneck; bucketing/hash-table-bound ops (resample,
+value_counts) need the hash-table/scatter reworked. Shipped the ~7% (real, bit-identical, right direction).

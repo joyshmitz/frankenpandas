@@ -2045,3 +2045,13 @@ loop — SipHash scatter, O(N^2) find, per-row String key, per-row label clone) 
 remaining un-benched ops are wins (pandas Python-level) — fp wins despite Scalar materialization because
 pandas is slower. CONCLUSION: 16 levers shipped this session; the perf surface is comprehensively
 dominated; only the architectural transpose/to_numpy (l4vzc, low-EV) remains a non-win.
+
+### 2026-06-21 BlackThrush — to_json LOSS @small (0.73x); C-optimized-pandas vein (filed, not rushed)
+df.to_json(orient="records") = 0.73x@100k (fp ~155ms vs pandas 113ms C-ujson) / 7.92x@1M (fp ~155ms flat).
+Added json_write_records bench. SMELL: to_json builds a full serde_json Value tree (n*m Values + n Object
+maps + per-cell BTreeMap lookup) then serializes it — 2 passes vs pandas ujson's direct one-pass. LEVER:
+stream-serialize directly (write!-into-buffer / serde_json::Serializer), skip the tree; BIT-IDENTITY must
+byte-match serde_json's f64/string output. Filed br (involved + risky + flat-anomaly needs profiling — not
+rushed). SIGNIFICANCE: FIRST loss among C-OPTIMIZED pandas ops (JSON). The Python-level ops (str/reshape/
+wide_to_long) fp wins; the C-optimized ones (JSON, and structurally to_numpy/transpose) are where fp can
+still lose — a new vein to probe (read_json, to_json columns, maybe parquet/excel).

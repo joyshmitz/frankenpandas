@@ -1098,6 +1098,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.str().split_df_n(",", None).expect("split");
             })
         }
+        ("io", "json_write_records") => {
+            // pandas: df.to_json(orient="records"); 10-col f64 frame.
+            time_us(|| {
+                let _ = df.to_json("records").expect("to_json");
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.

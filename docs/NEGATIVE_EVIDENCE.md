@@ -921,3 +921,12 @@ contiguous byte buffer:
 | str.startswith("item") | 8.2x | 8.4x |
 No action. Added str_len/str_upper/str_contains/str_startswith workloads for tracking. The string
 surface is FP-dominant (consistent with the contiguous-Utf8 value_counts/dedup/sort wins).
+
+### 2026-06-20 BlackThrush (cont.) — dt.dayofyear typed fast path; datetime accessor vein CLOSED
+dt.dayofyear was 0.48x@100k / 0.44x@1M (generic chrono+Scalar). Added datetime64_days_from_civil
+(Hinnant days_from_civil, exact chrono-matching inverse) + typed_datetime_dayofyear_all_valid
+(days_since_epoch - days_at_year_start + 1). Bit-identical (3 dayofyear + 89 dt_ + 43 datetime
+tests). **100k 2675→1475us (1.8x; →0.88x), 1M 31874→15365us (2.1x; →0.91x)** — near parity (residual
+is civil+days_from_civil per element vs pandas vectorized C). DATETIME ACCESSOR VEIN CLOSED: all
+common components (year/month/day/hour/minute/second/quarter/dayofyear) now have typed integer-civil
+fast paths over raw &[i64] nanos; pure-mod ones (hour/minute) WIN 4.2x, calendar ones at parity.

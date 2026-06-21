@@ -930,3 +930,16 @@ tests). **100k 2675→1475us (1.8x; →0.88x), 1M 31874→15365us (2.1x; →0.91
 is civil+days_from_civil per element vs pandas vectorized C). DATETIME ACCESSOR VEIN CLOSED: all
 common components (year/month/day/hour/minute/second/quarter/dayofyear) now have typed integer-civil
 fast paths over raw &[i64] nanos; pure-mod ones (hour/minute) WIN 4.2x, calendar ones at parity.
+
+### 2026-06-20 BlackThrush (cont.) — fill/scan/distinct probe: shift fixed, 5 big wins
+Probed nunique/cumprod/shift/pct_change (float64) + ffill/interpolate (nan10), min-of-iters vs
+pandas. WINS: nunique 10.1x/12.4x, cumprod 18.9x/19.7x, pct_change 28.4x/27.1x, ffill 2.9x/10.4x,
+interpolate 25.7x/36.5x. ONE LOSS: **shift 0.44x@100k (2.3x slower), 5.6x WIN@1M** — Column::shift
+materialized the Scalar Vec + per-element clone + Self::new rescan, and apply_per_column threaded an
+L3-resident memcpy. FIXED (pnuf6): typed all-valid-f64 + missing-fill fast path (build f64 buffer,
+NaN in vacated slots, from_f64_values marks missing — bit-identical, 20 columnar + 25 frame tests) +
+abs serial-threshold (shift = pure bandwidth). **10k 323→36us (loss→1.17x WIN), 100k 473→372us
+(0.44x→0.56x), 1M 5.2x WIN.** Residual 100k = from_f64_values NaN-scan + columnar per-column alloc.
+LESSON: shift is the same bandwidth+threading pattern as abs/neg, but the Scalar materialization
+masked it until the typed path exposed it (then the serial-threshold paid off — unlike add_scalar
+where the rescan is unavoidable).

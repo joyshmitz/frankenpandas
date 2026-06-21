@@ -16423,6 +16423,27 @@ impl Column {
             return Ok(self.clone());
         }
         let abs = periods.unsigned_abs() as usize;
+        // Typed all-valid-Float64 fast path with a MISSING fill (the default
+        // shift, which vacates slots to NaN/missing): build the output f64
+        // buffer directly — NaN in the vacated slots, the contiguous source run
+        // copied into place — and let from_f64_values mark the NaN slots
+        // missing. No per-element Scalar clone, no Self::new revalidation.
+        // Bit-identical to the scalar loop for an all-valid f64 column + missing
+        // fill: the source values are finite (as_f64_slice ⇒ no NaN) so only the
+        // vacated slots are missing, exactly as `fill.clone()` placed them.
+        if fill.is_missing()
+            && let Some(data) = self.as_f64_slice()
+        {
+            let mut out = vec![f64::NAN; len];
+            if abs < len {
+                if periods > 0 {
+                    out[abs..].copy_from_slice(&data[..len - abs]);
+                } else {
+                    out[..len - abs].copy_from_slice(&data[abs..]);
+                }
+            }
+            return Ok(Self::from_f64_values(out));
+        }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         if abs >= len {
             for _ in 0..len {

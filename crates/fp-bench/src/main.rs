@@ -281,6 +281,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.notna()
             let _ = df.notna().expect("notna");
         }),
+        ("dataframe_ops", "df_nunique") => time_us(|| {
+            // pandas: df.nunique()
+            let _ = df.nunique().expect("nunique");
+        }),
+        ("dataframe_ops", "df_cumprod") => time_us(|| {
+            // pandas: df.cumprod()
+            let _ = df.cumprod().expect("cumprod");
+        }),
+        ("dataframe_ops", "df_shift") => time_us(|| {
+            // pandas: df.shift(1)
+            let _ = df.shift(1).expect("shift");
+        }),
+        ("dataframe_ops", "df_pct_change") => time_us(|| {
+            // pandas: df.pct_change()
+            let _ = df.pct_change(1).expect("pct_change");
+        }),
+        ("dataframe_ops", "df_ffill") => time_us(|| {
+            // pandas: df.ffill() — run with --dtype float64_nan10/nan50
+            let _ = df.ffill(None).expect("ffill");
+        }),
+        ("dataframe_ops", "df_interpolate") => time_us(|| {
+            // pandas: df.interpolate() — run with --dtype float64_nan10
+            let _ = df.interpolate().expect("interpolate");
+        }),
         ("dataframe_ops", "df_set_index") => time_us(|| {
             // pandas: df.set_index("col_0")
             let _ = df.set_index("col_0", true).expect("set_index");

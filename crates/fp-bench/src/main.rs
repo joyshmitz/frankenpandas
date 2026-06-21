@@ -1150,6 +1150,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = df.to_dict("dict").expect("to_dict");
             })
         }
+        ("dataframe_ops", "df_to_records") => {
+            time_us(|| {
+                let _ = df.to_records();
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.

@@ -2334,3 +2334,13 @@ once (dict). Bit-identical (to_dict 18/0). MEASURED: records 353->182ms@1M = ~1.
 dict 316->174ms = ~1.81x -> 4.06x->7.34x. LESSON: even WINNING ops carry the per-cell-values()/per-cell-
 format smell — hoisting/precomputing nearly DOUBLES them. The sweep finds both losses AND under-dominating
 wins. Added df_to_dict_records/df_to_dict_dict benches.
+
+### 2026-06-21 BlackThrush — to_records per-cell/per-row hoist: 1.56x@1M WIN (new bench)
+Continued the serialization-sibling sweep. DataFrame.to_records built Vec<Vec<Scalar>> with self.index.
+labels() called EVERY row (n accessor calls) + self.columns.get(name).values()[i] PER CELL (n*m BTreeMap
+get + values()). Hoisted labels() once + col_values (Vec<Option<&[Scalar]>>) once. Bit-identical (to_records
+2/0). MEASURED (new df_to_records bench): 1.56x@1M WIN (fp 77760us vs pandas 121576us). Before not separately
+benched (new bench) but the hoist removes ~10M BTreeMap gets for 1M*10 — same per-cell smell + proven lever
+as to_dict (~1.9x fp-side there). SERIALIZATION FAMILY now swept: to_json (5 orients), to_dict (3 orients),
+to_records — all hoisted/streamed + winning. The per-cell-values()/per-row-labels() smell recurs across
+EVERY row-materializing op; the sweep + hoist is the systematic fix.

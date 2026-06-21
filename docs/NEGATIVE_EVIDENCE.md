@@ -1878,3 +1878,13 @@ A delayed background baseline (pre-fix binary) captured the exact pre-fix cost: 
 O(N^2)->O(N) cell_map): 18,935us (19ms) = ~750x FP-side speedup; the O(N^2) entries.iter().find-per-cell
 made it effectively unbounded at 1M (hours). Confirms unstack was UNUSABLE at any real scale before the
 fix. (The earlier ledger entry recorded only ">30s timeout"; this is the precise number.)
+
+### 2026-06-21 BlackThrush — DataFrame.get_dummies FxHashSet/Map ~37%; wide-reshape sweep COMPLETE
+5th FxHashMap-family win. DataFrame::get_dummies had std-SipHash seen_set (per-value dedup) + val_to_idx
+(per-row scatter get). Added df_get_dummies bench (cat=i%100). Baseline 0.13x@10k/1.22x@100k/11.3x@1M (fp
+~10-11ms). seen_set->FxHashSet, val_to_idx->FxHashMap => ~37%: 0.19x@10k / 1.58x@100k / 17.34x@1M. Bit-
+identical (dedup + scatter; output order by effective_vals/column order), conformance GREEN. WIDE-OUTPUT
+RESHAPE SWEEP COMPLETE: pivot_table ~47%, pivot ~2x, crosstab ~25%, unstack O(N^2)->O(N) ~750x, series_map
+~41%, get_dummies ~37% — ALL had std-SipHash-on-per-row (and unstack also O(N^2)). Residual @10k losses
+are tiny-input fixed costs (pandas <1.5ms). The wide-output-reshape family (the structural-loss suspects
+per memory) is now DOMINATED at scale.

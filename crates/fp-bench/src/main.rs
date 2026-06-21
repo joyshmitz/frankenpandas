@@ -359,6 +359,21 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = s.unstack().expect("unstack");
             })
         }
+        ("dataframe_ops", "df_get_dummies") => {
+            // pandas: pd.get_dummies(df, columns=["cat"]); cat=i%100 -> 100 dummies.
+            let cat = Column::from_i64_values((0..rows as i64).map(|i| i % 100).collect());
+            let mut columns = BTreeMap::new();
+            columns.insert("cat".to_string(), cat);
+            let df = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                vec!["cat".to_string()],
+            )
+            .expect("gd frame");
+            time_us(|| {
+                let _ = df.get_dummies(&["cat"]).expect("get_dummies");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");

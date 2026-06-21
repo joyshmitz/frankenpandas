@@ -1934,3 +1934,13 @@ sub-daily data (24 rows/day) cache on ord. Added resample_daily bench (hourly->d
 /0.08x@100k/0.75x@1M (fp ~21400us); now 0.09x@10k/0.31x@100k/2.93x@1M (WIN) — ~3.7x. Bit-identical,
 conformance GREEN (resample 51/0). THREE most-common resample freqs now key-cached (M ~3.75x, h/min/s
 ~7.1x, D ~3.7x). Remaining: N-day(2D/3D @22108 bin_start-cacheable), weekly/Q/Y, business-day (br-ixn43).
+
+### 2026-06-21 BlackThrush — resample N-day(2D)+business-day(B) key-cache; resample_build_groups is SHARED
+KEY FINDING: resample_build_groups (the bucketing helper I cached) is called by BOTH Series.resample
+(22331) AND DataFrame.resample (23467) — so ALL my resample caches (M/h/D/2D/B) fix df.resample too (2x
+impact). Extended the cache to N-day (cache key_of(bin_start) on bin_start) + business-day (cache on ord),
+both in the shared helper. Added resample_2d + resample_bday benches. CACHED (measured): resample_2d
+0.40x@100k/3.68x@1M; resample_bday 3.61x@100k/35.98x@1M (pandas business-day resample is very slow,
+199ms@1M vs fp 5.5ms). Bit-identical, conformance GREEN (resample 51/0). Baselines ~flat-slow by analogy
+to the measured D (21ms->5.7ms). FIVE freqs now cached (M/h-min-s/D/2D/B); only W/Q/Y remain (need bucket-id
+derived before key_of). The per-bin-key-cache lever covers nearly all of Series+DataFrame resample.

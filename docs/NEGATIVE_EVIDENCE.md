@@ -2352,3 +2352,14 @@ Continued the per-cell-smell sweep. DataFrame.apply_fn(axis=1) built each row vi
 is Python-per-row). fp's Rust apply already crushes pandas; the hoist removes ~10M BTreeMap lookups (fp-side
 ~25%, before not separately benched). LESSON: row-wise apply (axis=1) is a 144x WIN for fp (Rust closure vs
 pandas Python-per-row) AND carries the per-cell smell. The hoist + bench documents the domination.
+
+### 2026-06-21 BlackThrush — rank_axis1 (df.rank(axis=1)) 0.19x@1M REAL LOSS found (filed, not blind-fixed)
+Sweep found a real @1M loss: DataFrame.rank_axis1 = 0.19x (fp 2.11s vs pandas 0.40s). Root cause (read
+46612): it builds a TEMPORARY Series PER ROW (Series::from_values per row = 1M Series objects) just to reuse
+Series::rank_with_pct, plus per-cell columns[name].values()[row_idx] (n*m BTreeMap) + a redundant per-row
+row_idx_labels build. The per-row Series construction (from_values dtype-derive + build) dominates. FIX (not
+attempted — careful bit-identity-sensitive refactor): extract the rank logic to a fn over &[Scalar] (rank_
+scalar_slice) that BOTH Series::rank_with_pct and rank_axis1 call — rank_axis1 then ranks each row's values
+directly with NO per-row Series. Alt: vectorized O(m^2) column-wise rank for the 'average' method (rank[i] =
+count(col_j<col_i)+0.5*count(==)). Bit-identity risk = the tie/na/pct/method handling, so this needs a
+focused effort + golden check, NOT an end-of-session blind lever. Bench df_rank_axis1 added (documents it).

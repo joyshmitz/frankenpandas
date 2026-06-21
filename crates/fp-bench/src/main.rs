@@ -274,6 +274,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.rank() — method='average', ascending=True, na_option='keep'
             let _ = df.rank("average", true, "keep").expect("rank");
         }),
+        ("dataframe_ops", "df_rank_axis1") => time_us(|| {
+            let _ = df.rank_axis1("average", true, "keep").expect("rank_axis1");
+        }),
         ("dataframe_ops", "df_abs") => time_us(|| {
             // pandas: df.abs()
             let _ = df.abs().expect("abs");

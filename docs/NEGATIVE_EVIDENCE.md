@@ -24,7 +24,7 @@ or benched.** FIRST ACTION ON DISK-RECOVER, in order:
    (or via rch) — confirm the whole stack COMPILES.
 2. `cargo test --offline -p fp-frame --lib -- <component>` for each: month day hour minute second
    microsecond nanosecond quarter dayofyear dayofweek days_in_month is_month_start is_month_end
-   is_quarter_start is_quarter_end is_year_start is_year_end is_leap_year month_name day_name date time
+   is_quarter_start is_quarter_end is_year_start is_year_end is_leap_year month_name day_name date time strftime
    — plus the dt differential/golden tests. Confirm BIT-IDENTICAL.
 3. Bench each (add `dt_*` workloads to fp-bench) to record the wins (pure-mod ones ~4x like
    hour/minute already measured 4.2x; calendar/civil ones ~parity-to-1.5x; string date/time skip
@@ -1155,3 +1155,17 @@ exact method). No new lever; pure risk-reduction. Unverified stack (still pendin
 disk-recover): micro/nano, days_in_month, 7 bools, month_name, day_name, date, time, dayofyear(now
 verbatim). hour/minute/second already algebraically proven last turn. weekofyear remains the ONLY
 slow-path dt method (blocked on private iso_weeks_in_year).
+
+### 2026-06-21 BlackThrush — dt.strftime typed fast path (CODE-ONLY, perf PENDING disk-CRITICAL)
+DISK-CRITICAL (39G, no cargo): code-only. dt.strftime (the most expensive dt string op) called
+extract_component_typed_str(move |ts| fmt.replace(%Y..%S, ts.year/month/day/hour/minute/second)) —
+SIX chrono component calls + 6 String allocs per element. Added a GENERIC full-datetime-string helper
+(typed_datetime_full_string_component_all_valid<F: Fn(i64×6)->String>, modeled on
+extract_component_typed_str which is itself generic-over-Fn so it compiles) that derives
+(y,m,d,h,mi,sec) ONCE per row (civil for y/m/d, secs_of_day for h/mi/sec — verbatim Timestamp). Wired
+strftime with a move closure doing the BYTE-FOR-BYTE same %Y/%m/%d/%H/%M/%S replace chain. **Bit-
+identity provable**: components equal Timestamp::year/month/day/hour/minute/second (all verified/
+proven); identical replace chain; NaT/non-dense fall back. Win: removes 6 chrono calls per element
+(String replaces remain). UNMEASURED — VERIFY when disk recovers. Now ALL dt string ops are typed
+(month_name/day_name/date/time/strftime); only weekofyear (blocked, private iso_weeks_in_year) stays
+on the slow path.

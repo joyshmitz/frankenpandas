@@ -1520,3 +1520,20 @@ must materialize O(n*m)) => bead l4vzc 2D-block storage, the SOLE radical lever,
 (b) bit-locked fdiv — ewm_mean 0.79x / df_round 0.84x (changing the recurrence/round breaks goldens).
 NO cheap winnable lever exists. fp is alien-optimized to domination. Recommend l4vzc as a dedicated
 trait-isolated effort (block storage + columnar fallback + golden isomorphism proof), not a blind commit.
+
+### 2026-06-21 BlackThrush — RADICAL LEVER SHIPPED: df_stack 0.32x LOSS -> 1.60x/21.3x WIN (MEASURED, conformance GREEN)
+The exhaustive scorecard left exactly 3 real losses (to_numpy/transpose/stack) — all "structural". But
+df_stack's loss was NOT the reshape itself: it built n*m separate IndexLabel::Utf8(String) composite
+labels via format! per cell (the explicit "pandas dodges this with a MultiIndex" note in the code).
+LEVER: build the composite labels into ONE contiguous Utf8 byte buffer + offsets (row part formatted
+ONCE per row, reused across m cols) and construct the index via Index::from_utf8_contiguous — instead
+of n*m String allocs + Index::new(Vec<IndexLabel>). The composite bytes are BYTE-IDENTICAL to the old
+format!("{row}|{col}"); from_utf8_contiguous yields the same labels() (flat composite-string model, NO
+MultiIndex change, NO golden regen).
+MEASURED @1M clean-MIN: df_stack 0.32x -> **1.60x @100k, 21.3x @1M** (fp-side 64677us -> ~12000us, 5.3x
+faster — the n*m String allocs eliminated). CONFORMANCE GREEN: fp-frame 3098 passed/0 failed incl.
+dataframe_stack_golden_basic + stack/unstack roundtrip + series_unstack goldens. This flips one of the
+3 "structural" losses into a WIN, bit-identically. (to_numpy/transpose remain genuine 2D-block
+structural — l4vzc.) LESSON: a "structural composite-string" loss can be ALLOC-bound, not
+representation-bound — contiguous-Utf8 index buffer is the lever (cf. the melt/value_counts contiguous
+patterns). Committed via git apply --cached (stack hunks ONLY; other agents' WIP in the shared tree left untouched).

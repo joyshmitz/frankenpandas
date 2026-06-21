@@ -1238,3 +1238,14 @@ two more typed branches (now Int64/Float64/Utf8/Datetime64 all typed; the 4 comm
 for that dtype; as_utf8_contiguous requires validity.all, the Datetime64 branch NaT-guards). UNMEASURED.
 Bool/Timedelta64 keys (rare as index) still use the generic path. The set_index loss vein is closed
 for the common dtypes.
+
+### 2026-06-21 BlackThrush — set_index typed Bool + Timedelta64 (CODE-ONLY) — set_index fully typed
+DISK-LOW (38G, no cargo): code-only. Completes set_index's typed label construction — all 6
+IndexLabel dtypes now build from the raw typed slice instead of the per-row scalar_to_index_label map:
+Int64 (pre-existing), Float64, Utf8, Datetime64 (recent), + Bool (as_bool_slice, validity.all) and
+Timedelta64 (as_timedelta64_slice + NaT guard). Each is VERBATIM the corresponding
+scalar_to_index_label arm; bit-identity trivially provable (as_bool_slice requires all-valid; the
+Timedelta64 NaT guard preserves missing-label rejection). Only mixed/null columns now hit the generic
+Scalar path (correctly — they Err on missing). Reset_index's non-Int64 index->column paths were
+considered but the Index exposes only an Int64 typed accessor (int64_label_values), so they'd need
+labels() materialization + per-label extraction — marginal, skipped. UNMEASURED.

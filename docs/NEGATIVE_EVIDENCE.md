@@ -2661,3 +2661,14 @@ each func over the value-order bucket == its standalone result (mean=sum/n, std=
 var two-pass, prod=left-fold), same first-seen order/labels, same by-name index. count excluded (Int64).
 MEASURED: groupby_agg3_str(["mean","std","max"]) 73120->17771us@1M = 0.63x->2.63x WIN (4.1x fp-side). Non-
 bucket funcs (median/sem/skew/kurt) fall back to the per-func loop. The groupby surface now has ZERO losses.
+
+### 2026-06-21 BlackThrush — resample.agg(multi-func) 0.38x LOSS (same per-func rebuild as groupby agg)
+Same pattern as the groupby multi-func agg (just fixed): Resample::agg(funcs) @23037 does N+1 build_groups
+(one for order + aggregate_named per func, each rebuilding the bins). resample_agg3(["mean","std","max"]) @1M
+= 0.38x LOSS (fp 88ms vs pandas 33ms). FIX (filed br): buckets-once — build the bins + per-bin buckets ONCE,
+apply each func over the shared buckets. NUANCE vs groupby: resample funcs reuse fp_types nan_* (nansum/
+nanmean/nanstd/nanvar/nanprod/nanmedian/nanmin/nanmax), so for bit-identity either (a) Scalar buckets +
+reuse the EXACT nan_func per func (guaranteed bit-identical, est 0.38x->~parity since the Scalar
+materialization is the floor), or (b) F64 buckets + own funcs (a clear win, but ONLY if fp_types::nanvar ==
+the mean-centered two-pass sum((x-mean).powi(2))/(n-1) — must verify, else golden-breaking). Bench
+resample_agg3 added. Less common than groupby agg; focused effort.

@@ -1963,3 +1963,13 @@ a loss. Also verified SeriesGroupBy string (groupby_mean_str 2.31x/23.03x, trans
 SipHash is well-amortized (only ~ngroups distinct keys, the per-row insert hits an existing bucket).
 Converting GroupMap->FxHashMap would be ~0-gain churn on a winning op — NOT DONE (REVERT-~0-gain
 discipline). The main groupby is already FxHashMap/int64-dense optimized; no lever here.
+
+### 2026-06-21 BlackThrush — WARMED GAUNTLET: standard ops all DOMINATE; memory join ratios were understated
+Warm-verified the ops memory flagged as "marginal/laggy" (clean-MIN @1M, 2 pandas warmups + 8 iters):
+ewm_mean 20.72x, sort_values_single 34.80x, join_inner 27.36x, join_left 28.13x (memory said 1.47x!),
+join_outer 44.35x (memory said 1.63x!), join_inner_str 173.24x. ALL big wins — NO hidden losses among the
+standard numeric/join/sort/ewm ops (unlike the reshapes, where warmup exposed real losses). The memory's
+join_left/outer 1.47/1.63x were NO-WARMUP/harness-p50 artifacts; warmed reality is 28-44x. CONCLUSION: the
+loss-rich territory was the wide-output reshapes + per-row-key time-series (now all fixed this session);
+the standard ops were always dominant. The warmup discipline both FINDS hidden losses (pivot_table) and
+DEBUNKS understated ratios (joins) — clean-MIN must warm pandas either way.

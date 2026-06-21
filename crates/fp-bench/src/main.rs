@@ -1277,6 +1277,20 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.resample("h").mean().expect("resample hourly");
             })
         }
+        ("datetime", "resample_std") => {
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
+            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| { let _ = series.resample("M").std().expect("resample std"); })
+        }
+        ("datetime", "resample_median") => {
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
+            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| { let _ = series.resample("M").median().expect("resample median"); })
+        }
         ("dataframe_ops", "qcut_bins") => {
             // pandas: pd.qcut(s, 10) — quantile-bin a Float64 series into 10 bins.
             let series = df.get_column("col_0");

@@ -2575,3 +2575,14 @@ and are now wins too. @1M: groupby_kurt_str 3.63x, groupby_quantile_str 2.10x WI
 (sem/skew/kurt/quantile/nunique/unique) + the single-pass reductions (mean/sum/var/std/min/max/prod/count) +
 median/cumcount/transform dominate pandas. The ONLY remaining groupby loss is multi-func agg(funcs) (br-4h46q,
 filed — needs buckets-once amortization). Groupby surface = comprehensively dominated, one filed exception.
+
+### 2026-06-21 BlackThrush — resample value-aggs MARGINAL (std 0.92x, median 1.04x) — NOT the groupby pattern
+Checked whether the groupby value-agg slow path (build_groups + scattered gather) repeats in resample
+(groupby-by-time). It does NOT meaningfully: resample bins are CONTIGUOUS (time-sorted), so aggregate_scalar's
+per-bin gather is sequential (no cache-miss scatter). The only overhead vs mean (which has a typed-f64 path)
+is the values() Scalar materialization + per-bin Vec<Scalar>. @1M: resample_std 0.92x LOSS (fp 25.6ms vs
+pandas 23.5ms, ~2ms gap), resample_median 1.04x WIN. The ~2ms is the Scalar materialization; a typed
+aggregate_scalar_f64 path would skip it but RISKS the fp_types::nanstd/nanvar bit-identity (exact float
+op order -> golden regen) for a marginal gain — NOT pursued (revert-~0-gain discipline). Benches
+resample_std/resample_median added for coverage. CONTRAST: groupby's scattered gather made sem 0.70x (big,
+fixed); resample's contiguous bins make std only 0.92x (marginal, left).

@@ -2568,3 +2568,10 @@ pandas=46016us -> 0.63x LOSS. Bench groupby_agg3_str added. FIX (filed): (a) gid
 real flip) — agg(funcs) builds gids+buckets ONCE then applies each func over the shared buckets, one result
 DataFrame. Focused rewrite, not an end-of-session blind edit. NOTE: this also caps the multi-agg gid-cache
 lever (1.33x->~1.75x).
+
+### 2026-06-21 BlackThrush — agg_values_scalar fix reaches all value-aggs: kurt 3.63x, quantile 2.10x WIN
+Confirmed the agg_values_scalar dense-bucket fix (sem/skew) is SHARED: kurt and quantile use the same path
+and are now wins too. @1M: groupby_kurt_str 3.63x, groupby_quantile_str 2.10x WIN. So ALL groupby value-aggs
+(sem/skew/kurt/quantile/nunique/unique) + the single-pass reductions (mean/sum/var/std/min/max/prod/count) +
+median/cumcount/transform dominate pandas. The ONLY remaining groupby loss is multi-func agg(funcs) (br-4h46q,
+filed — needs buckets-once amortization). Groupby surface = comprehensively dominated, one filed exception.

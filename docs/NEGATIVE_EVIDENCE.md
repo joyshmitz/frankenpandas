@@ -1409,3 +1409,14 @@ the full Vec<IndexLabel> (n×32B) — label_at computes each arithmetically. SKI
 bodies themselves. The labels()[pos]=O(n) SMELL (idxmax memory note) is now essentially closed across
 single-label + gather + DataFrame sites. UNMEASURED. `&labels()[i]` borrow sites (34773/43252) need
 restructuring (label_at returns owned) — deferred.
+
+### 2026-06-21 BlackThrush — FIX: duplicate iso_weeks_in_year (main was NOT compiling) — VERIFIED
+DISK-LOW (warm per-crate build now allowed): ran `cargo build --offline -p fp-frame --release` (warm,
+deps cached) to verify the ~25-commit code-only stack. FOUND a HARD COMPILE ERROR on main: E0592
+duplicate definitions of `fn iso_weeks_in_year` (31710 from the weekofyear fast path + 32582 from the
+isocalendar work — both byte-identical, same impl block). Introduced earlier in the dt vein (pre-this-
+session) and never caught because no build ran. Deleted the second copy (both callers use the
+survivor). **fp-frame now COMPILES (53.86s).** This means the entire pending dt/td/set_index/reduction/
+GroupBy/label_at stack compiles. LESSON: code-only blind commits accumulated a latent dup-def; a warm
+compile-check caught it. Disk 39G->37G after the build. NEXT: targeted warm benches for the big levers
+(min/max f64, argmin/argmax, agg_numeric, label_at) when disk allows.

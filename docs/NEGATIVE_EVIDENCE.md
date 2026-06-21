@@ -1907,3 +1907,14 @@ fns RETURN std::collections::HashMap so converting the local breaks the return t
 would be ~0-gain. REAL LEVER (filed): integer-period keys (year*12+month etc.) — O(N), labels built once
 per bucket not per row. Significant + golden-gated. NEGATIVE EVIDENCE: not every std HashMap is the cost;
 when a per-row String KEY feeds the map, the String construction is the smell (cf crosstab/get_dummies).
+
+### 2026-06-21 BlackThrush — resample("M") per-row String-key CACHE ~3.75x (the real lever, shipped)
+Confirmed the resample cost is the per-row String key alloc (NOT the std-SipHash map, per the prior
+ixn43 finding). CLEANER fix than the int-period restructure: the datetime index is time-ordered, so
+consecutive rows share a bucket — cache resample_month_end_key's output, recompute only when
+bucket_end_mo(mo) changes (1M allocs -> ~num_buckets). Local to the scatter loop (no return-type ripple).
+MEASURED: resample_mean 14200 -> 3780us = ~3.75x: 0.05x->0.19x@10k / 0.17x->0.64x@100k / 1.70x->6.15x@1M.
+Bit-identical (key = deterministic fn of bucket_end_mo), conformance GREEN (resample 51/0). The other 5
+freq variants (W/Q/Y/D/B) have the SAME per-row-key smell — same cache applies (br-ixn43, follow-up).
+LESSON: when a per-row String KEY is the cost, CACHE it for time-ordered/sorted data (single-element
+last-key cache) — simpler + lower-risk than restructuring to integer keys.

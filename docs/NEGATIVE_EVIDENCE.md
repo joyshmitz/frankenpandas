@@ -2456,3 +2456,16 @@ earlier I'd compared to pandas DataFrame-groupby-10-cols = ~17x inflation). Hone
 So the earlier groupby "14-59x wins" were partly the DataFrame-vs-Series shape phantom. The string-key aggs
 + count are real losses; cumcount/transform/df-sum are real wins. 4TH PHANTOM CLASS = shape-mismatch
 (Series vs DataFrame). The groupby loss family (string-key aggs + count) is br-ih2if (dense-by-code fix).
+
+### 2026-06-21 BlackThrush — 6th measurement subtlety: groupby "loss family" was GROUPER CACHING; fp WINS inline + single-pass mean shipped
+CORRECTION of the prior groupby-loss finding: it was a measurement artifact (grouper caching), NOT a real
+loss. My comparison did `g = val.groupby(key); pm(lambda: g.mean())` — pandas CACHES the grouper in `g`, so
+I measured pandas' REDUCTION-ONLY (~3.5ms) vs fp's FULL groupby (factorize+reduce, ~16ms). The fp bench does
+`.groupby().mean()` INLINE (full work each call). The fair single-agg comparison (pandas inline, no cached
+g): groupby mean_str 3.52x, std_str 2.32x, var_str 2.28x, median_str 2.09x — ALL WIN (pandas inline ~40ms
+for the string-key factorize+reduce; fp ~12-29ms). count also re-checked inline. So fp WINS the single-agg
+groupby; pandas only wins the AMORTIZED multi-agg case (g cached across mean()+std()+...), which fp doesn't
+amortize (separate concern). 6TH subtlety: match the CALL PATTERN (inline vs cached grouper) too.
+SHIPPED (real fp-side improvement regardless): SeriesGroupBy::mean single-pass dense path — accumulate
+sum/count per gid via dense_group_ids (int64 OR contiguous-Utf8) in ONE pass, no per-group Vec<f64> buckets +
+func re-scan. Bit-identical (groupby 202/0). 16096->11526us@1M = ~1.4x fp-side -> 2.5x->3.52x more domination.

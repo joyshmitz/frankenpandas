@@ -1918,3 +1918,12 @@ Bit-identical (key = deterministic fn of bucket_end_mo), conformance GREEN (resa
 freq variants (W/Q/Y/D/B) have the SAME per-row-key smell — same cache applies (br-ixn43, follow-up).
 LESSON: when a per-row String KEY is the cost, CACHE it for time-ordered/sorted data (single-element
 last-key cache) — simpler + lower-risk than restructuring to integer keys.
+
+### 2026-06-21 BlackThrush — resample sub-daily (h/min/s) key-cache ~7.1x; 2nd freq confirms the lever
+After monthly (~3.75x), applied the same per-bin key-cache to the sub-daily ns-bucketing path (h/min/s).
+Added resample_hourly bench (minutely data -> hourly bins, 60 rows/bin). BASELINE catastrophic: 0.01x@10k
+/ 0.05x@100k / 0.47x@1M (fp ~37900us flat — DateTime::from_timestamp + format! PER ROW). Cache on bin_index
+(recompute the DateTime+format! only when the bin changes) => ~7.1x: 0.08x@10k / 0.34x@100k / 3.03x@1M
+(now a WIN). Bit-identical (key = deterministic fn of bin_index; contains_key still dedups order),
+conformance GREEN (resample 51/0). TWO resample freqs now confirm the per-row-String-key-CACHE lever
+(monthly + sub-daily). Remaining: W/Q/Y (key_of(ord) — needs bucket-id exposed) + N-day (br-ixn43).

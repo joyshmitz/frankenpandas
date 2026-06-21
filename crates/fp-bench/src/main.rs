@@ -1012,6 +1012,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.resample("M").mean().expect("resample mean");
             })
         }
+        ("datetime", "resample_hourly") => {
+            // s.resample("h").mean(): `rows` minutely points -> hourly bins
+            // (60 rows/bin), exercises the sub-daily ns-bucketing path.
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 60_000_000_000).collect();
+            let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
+            let series = Series::new("s", Index::from_datetime64(nanos), vals)
+                .expect("resample series");
+            time_us(|| {
+                let _ = series.resample("h").mean().expect("resample hourly");
+            })
+        }
         // dt.floor("D") over `rows` Datetime64 nanos at 37s intervals from
         // 2000-01-01. pandas: s.dt.floor("D").
         ("datetime", "dt_floor") => {

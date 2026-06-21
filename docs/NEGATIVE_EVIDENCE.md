@@ -2291,3 +2291,14 @@ same Value-tree + per-cell-values() loss as columns/index (0.30x/0.45x measured)
 ALL 5 to_json orients now WIN via streaming: records 3.31x, columns 3.06x, index 2.85x, split 3.75x, values
 3.75x. SERDE GOTCHA: SerializeMap::serialize_entry needs Sized V — pass &slice (&&[T]) not the slice. The
 skip-the-intermediate-tree lever is the single biggest perf vein this session (5 to_json losses -> wins).
+
+### 2026-06-21 BlackThrush — series_categorical (from_categorical) 0.19x->1.07x@1M WIN (lazy-int64 vein; NEW loss found)
+Found via sibling-sweep: series_categorical was a real @1M loss (0.19x, fp 27ms vs pandas 5-10ms). from_
+categorical's bottleneck was NOT the scalar_key+FxHashMap factorize (a dense Int64 direct-address path was
+~0-gain, 26932->26163us) — it was the 1M Vec<IndexLabel::Int64(0..n)> materialization + Index::new + the
+Vec<Scalar> codes + from_values dtype scan. Fix (lazy-int64 vein): codes as Vec<i64> -> from_i64_values
+(typed, no dtype scan), index as Index::new_known_unique_int64_unit_range(0,n) (O(1) lazy RangeIndex, no 1M
+IndexLabel Vec). Applied to BOTH the bounded-Int64 dense path AND the generic path (Utf8/unbounded). Bit-
+identical (categorical 29/0). MEASURED: 26932->9307us@1M = ~2.9x -> 1.07x WIN. LESSON: a categorical/factorize
+that builds RangeIndex 0..n as a Vec<IndexLabel> + Scalar codes pays the lazy-int64 tax — the index/codes
+materialization dwarfs the hash. PROFILE: the dense factorize ~0-gain proved the hash wasn't the cost.

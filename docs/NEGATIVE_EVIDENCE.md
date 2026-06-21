@@ -2302,3 +2302,14 @@ IndexLabel Vec). Applied to BOTH the bounded-Int64 dense path AND the generic pa
 identical (categorical 29/0). MEASURED: 26932->9307us@1M = ~2.9x -> 1.07x WIN. LESSON: a categorical/factorize
 that builds RangeIndex 0..n as a Vec<IndexLabel> + Scalar codes pays the lazy-int64 tax — the index/codes
 materialization dwarfs the hash. PROFILE: the dense factorize ~0-gain proved the hash wasn't the cost.
+
+### 2026-06-21 BlackThrush — BROAD SWEEP confirmation (correct @1M, warmed pandas): all wins except known structural
+Systematic sibling-sweep across categories at correct abbreviated --size + warmed/matched pandas. ALL WINS:
+  to_datetime 6.29x, csv_read 23.8x, df_interpolate 68.7x, df_fillna 8.57x, df_ffill 259x, df_mode 2.77x,
+  str_split_expand 3.94x, df_shift 9.84x, df_pct_change 29.4x, df_diff 4.36x, groupby_cumcount 14.2x,
+  groupby_transform_mean 59.8x, wide_to_long 5.73x, reindex 11.66x. (+ earlier: rolling/ewm/sort/joins/etc.)
+  ONE loss found+fixed: series_categorical 0.19x->1.07x (lazy-int64 vein, commit c32a294a).
+CONCLUSION: fp dominates ~EVERYTHING 2x-69680x at correctly-measured @1M. Remaining real losses are ONLY
+structural (fp representation): unstack (string-composite MultiIndex), daily/sub-daily resample (gather-agg
++bucket floor), to_numpy/transpose (2D-block l4vzc). The sibling-sweep methodology found 5 hidden losses
+this session (to_json columns/index/split/values + series_categorical) that single-op benches missed.

@@ -1298,3 +1298,14 @@ confirmed; same as the idxmin/idxmax helpers at fp-frame:13383/13461), so `data[
 no-NaN, so no missing to skip and the first-occurrence tie-break is preserved. This is a GENUINE
 (non-marginal) lever — argmin/argmax on float columns is common and currently materializes Scalars +
 dispatches per element. UNMEASURED — verify when disk recovers.
+
+### 2026-06-21 BlackThrush — Series min()/max() typed Float64 path (CODE-ONLY, perf PENDING) — IMPACTFUL
+DISK-LOW (38G, no cargo): code-only. Series.min()/max() had SIMD Int64 paths (i64_slice_min/max_simd)
+but FLOAT64 fell to the generic Scalar fold: .values() materialization + per-element to_f64() + compare.
+min/max on float columns are among the MOST common reductions — a real, impactful gap. Added a typed
+all-valid Float64 fast path scanning the native &[f64]. **Bit-identity carefully preserved**: the fold
+uses `if v < result` / `if v > result` (NOT f64::min/max, which flip -0.0 vs +0.0) starting from
++/-INFINITY, EXACTLY as the Scalar loop; as_f64_slice is all-valid AND no-NaN so nothing is skipped;
+empty -> NaN (matches the `found` flag). A Float64 column WITH missing/NaN falls to the generic fold
+(skips missing) — bit-identical. (Deliberately did NOT use a SIMD f64 min/max helper: f64::min/max
+would not match the Scalar path's `<`/`>` on -0.0.) UNMEASURED — verify when disk recovers.

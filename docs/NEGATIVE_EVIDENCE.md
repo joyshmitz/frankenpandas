@@ -2421,3 +2421,13 @@ smallest v has the largest -v. 1.0*v optimizes to v so argmax matches idxmax. Bi
 min=max-of-negated, first-wins, NaN skipped). MEASURED: 70448->40216us@1M = ~1.75x fp-side -> 1.54x->2.60x.
 LESSON: a loop-invariant branch in a hot per-cell loop costs ~half; a sign/mask trick removes it. The axis=1
 idx/arg family is now uniformly ~2.6x (idxmax 2.66x, idxmin 2.57x, argmax/argmin 2.60x).
+
+### 2026-06-21 BlackThrush — per-cell-smell sweep COMPLETE (vein exhausted)
+Systematic grep for the per-cell self.columns[name].values()[row_idx] smell (n*m BTreeMap lookups in
+row*col loops) across fp-frame: ALL hot-loop sites now fixed (to_json ×5, to_dict ×3, to_records, apply,
+idxmax/idxmin/argmax/argmin_axis1, rank_axis1). The ONLY remaining match is the truncated Display/__repr__
+(loops over `show`~=10 display rows, not n — not a smell at scale). corrwith's per-column path uses cheap
+Arc column clones + the alien-optimized corr (not a per-cell loss; the 48526 flag was a stale line number).
+The per-cell-hoist / typed-slice lever is comprehensively applied. AXIS=1 FAMILY uniform ~2.6x (idx/arg) +
+6-340x (reductions). Tractable @1M frontier comprehensively conquered; only structural survivors remain
+(unstack string-MultiIndex, daily/sub-daily resample gather-agg, to_numpy/transpose 2D-block — br-ikq9a/l4vzc).

@@ -1494,3 +1494,15 @@ that addresses a real loss is **2D-block storage for homogeneous-float frames** 
 transpose/values O(1) views like pandas). This is a fundamental representation change (every op must
 work with 2D-block storage) — too large for a safe single commit; FILED as a frontier bead. This turn's
 deliverable is the rigorous gauntlet-grounded scorecard (negative evidence: winnable set exhausted).
+
+### 2026-06-21 BlackThrush — CONFORMANCE GREEN: session's ~25 levers verified bit-identical
+cargo test --release -p fp-frame: **3097 passed; 0 failed** (15 ignored) + all integration test
+binaries (value_counts_dense_conformance, differential harnesses, etc.) PASS, 0 failed. fp-conformance
+smoke suite PASS. This verifies bit-identity of this session's full code-only stack: dt/td typed paths,
+set_index (6 dtypes), min/max/sum/prod, argmin/argmax, searchsorted-i64, first/last_valid_index,
+GroupBy idxmin/first/last/any-all, agg_numeric fallback, label_at (the iso_weeks_in_year dup-fix that
+unblocked compilation included). BOLD-VERIFY LOOP COMPLETE: profiled (clean-MIN scorecard, fp dominates
+5-60x), conformance GREEN, scorecard recorded, gaps identified (structural to_numpy/transpose = l4vzc
+2D-block, bit-locked ewm/round). NEGATIVE EVIDENCE: no cheap winnable perf lever remains — the winnable
+benched surface is exhausted (fp already dominates); the sole radical lever is architectural 2D-block
+storage (l4vzc), too large for a safe single commit.

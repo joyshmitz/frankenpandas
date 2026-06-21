@@ -2165,3 +2165,15 @@ dropped as the per-row path skipped them); gated on bounded bin range, else fall
 REMAINING: the other freqs (monthly/daily/weekly/N-day/bday) have their own String-keyed scatter — same
 dense treatment applies (per-freq). Residual cost: the bins Vec<Option<i64>> (n) + dense Vec<Vec> allocs
 + dt.format per bin. resample still loses 0.63x but 2.1x closer.
+
+### 2026-06-21 BlackThrush — resample fast label formatter ~6ms (0.63x->0.83x@1M, 1.00x@100k)
+CONFIRMED via cheap-key timing test: chrono dt.format = ~7ms over 16700 bins (cheap-key floor 19083us vs
+26142us with dt.format @1M). Applied the proven strftime write! vein to the resample sub-daily labels: for
+whole-second bins in the 4-digit-year range, build "%Y-%m-%dT%H:%M:%S" directly via DatetimeAccessor::
+datetime64_civil_from_nanos (Hinnant y/m/d) + sod arithmetic — chrono %.f is empty at 0 nanos so no
+fractional. Bit-identical (resample 51/0); chrono fallback for sub-second/extreme years. MEASURED: 26142->
+20253us@1M = ~6ms -> 0.63x->0.83x@1M, 1.00x@100k (WIN). Combined w/ the dense scatter: resample_h 55155->
+20253us = ~2.7x fp-side. REMAINING ~4ms gap@1M (fp 20ms vs pandas 16ms) is the FLOOR: bins Vec<Option<i64>>
+(1M, 16MB) + dense Vec<Vec> allocs + agg. Two-pass (inline bin_index, no bins Vec) may close it to ~1.0x.
+LESSON: chrono dt.format IS a real cost (~0.4us/call) — the strftime write! vein applies to ANY per-bin/
+per-row chrono format, not just strftime() itself.

@@ -540,7 +540,11 @@ fn datetime64_position_lookup_cached(
             }
         }
     }
-    let result = if all_datetime { Some(Arc::new(map)) } else { None };
+    let result = if all_datetime {
+        Some(Arc::new(map))
+    } else {
+        None
+    };
     let mut guard = cache
         .lock()
         .expect("index datetime position lookup cache poisoned");
@@ -1786,19 +1790,17 @@ impl Index {
         {
             return SortOrder::AscendingInt64;
         }
-        *self
-            .sort_order_cache
-            .get_or_init(|| {
-                if let Some(values) = self.labels.int64_view() {
-                    if values.len() <= 1 || values.windows(2).all(|pair| pair[0] < pair[1]) {
-                        SortOrder::AscendingInt64
-                    } else {
-                        SortOrder::Unsorted
-                    }
+        *self.sort_order_cache.get_or_init(|| {
+            if let Some(values) = self.labels.int64_view() {
+                if values.len() <= 1 || values.windows(2).all(|pair| pair[0] < pair[1]) {
+                    SortOrder::AscendingInt64
                 } else {
-                    detect_sort_order(self.labels())
+                    SortOrder::Unsorted
                 }
-            })
+            } else {
+                detect_sort_order(self.labels())
+            }
+        })
     }
 
     /// Returns `true` if this index is sorted (strictly ascending, no duplicates).
@@ -2299,10 +2301,8 @@ impl Index {
                 count
             }
             None => {
-                let mut seen = FxHashSet::<i64>::with_capacity_and_hasher(
-                    vals.len(),
-                    Default::default(),
-                );
+                let mut seen =
+                    FxHashSet::<i64>::with_capacity_and_hasher(vals.len(), Default::default());
                 for &v in vals {
                     seen.insert(v);
                 }
@@ -3125,9 +3125,14 @@ impl Index {
                     return None;
                 }
                 let label_step =
-                    i64::try_from((affine.step as i128).checked_mul(position_step as i128)?).ok()?;
+                    i64::try_from((affine.step as i128).checked_mul(position_step as i128)?)
+                        .ok()?;
                 let first_label = value_at(first)?;
-                Index::new_known_unique_int64_affine_range(first_label, label_step, positions.len())?
+                Index::new_known_unique_int64_affine_range(
+                    first_label,
+                    label_step,
+                    positions.len(),
+                )?
             }
         };
         Some(self.propagate_name(result))
@@ -3247,8 +3252,7 @@ impl Index {
         // end — index 0 when ascending (step >= 0), len-1 when descending. O(1),
         // no IndexLabel materialization (br-frankenpandas-ikbh9 vein).
         if let Some(affine) = self.labels.int64_affine_range() {
-            return (affine.len > 0)
-                .then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
+            return (affine.len > 0).then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
         }
         // Lazy typed/strided Int64: scan the i64 view with the identical min_by
         // (last-of-equal) tie-break — bit-identical, no label vector. Guarded by
@@ -3279,8 +3283,7 @@ impl Index {
         // ascending (step >= 0), 0 when descending. O(1), no materialization
         // (br-frankenpandas-ikbh9 vein).
         if let Some(affine) = self.labels.int64_affine_range() {
-            return (affine.len > 0)
-                .then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
+            return (affine.len > 0).then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
         }
         // Lazy typed/strided Int64: scan the i64 view with the identical max_by
         // (last-of-equal) tie-break — bit-identical, no label vector.
@@ -3805,25 +3808,23 @@ impl Index {
         if self.labels.has_lazy_int64_backing() {
             return fixed_width_label_memory_usage(self.labels.len(), 8);
         }
-        self.labels
-            .iter()
-            .fold(0usize, |total, label| {
-                total.saturating_add(match label {
-                    IndexLabel::Int64(_)
-                    | IndexLabel::Float64(_)
-                    | IndexLabel::Timedelta64(_)
-                    | IndexLabel::Datetime64(_)
-                    | IndexLabel::Null(_) => 8,
-                    IndexLabel::Bool(_) => 1,
-                    IndexLabel::Utf8(s) => {
-                        if deep {
-                            std::mem::size_of::<String>().saturating_add(s.len())
-                        } else {
-                            std::mem::size_of::<String>()
-                        }
+        self.labels.iter().fold(0usize, |total, label| {
+            total.saturating_add(match label {
+                IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => 8,
+                IndexLabel::Bool(_) => 1,
+                IndexLabel::Utf8(s) => {
+                    if deep {
+                        std::mem::size_of::<String>().saturating_add(s.len())
+                    } else {
+                        std::mem::size_of::<String>()
                     }
-                })
+                }
             })
+        })
     }
 
     /// Number of levels in this index.
@@ -10427,7 +10428,11 @@ impl RangeIndex {
                 let label_step = i128::from(self.step).checked_mul(position_step as i128)?;
                 let label_step = i64::try_from(label_step).ok()?;
                 let first_label = self.value_at(first);
-                Index::new_known_unique_int64_affine_range(first_label, label_step, positions.len())?
+                Index::new_known_unique_int64_affine_range(
+                    first_label,
+                    label_step,
+                    positions.len(),
+                )?
             }
         };
 
@@ -11498,13 +11503,11 @@ impl RangeIndex {
         let labels: Vec<i64> = cond
             .iter()
             .enumerate()
-            .map(|(position, &keep)| {
-                if keep {
-                    self.value_at(position)
-                } else {
-                    other
-                }
-            })
+            .map(
+                |(position, &keep)| {
+                    if keep { self.value_at(position) } else { other }
+                },
+            )
             .collect();
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
@@ -15193,27 +15196,23 @@ impl MultiIndex {
     /// additionally counts string bytes, mirroring `Index::memory_usage`.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        let level_bytes = self
-            .levels
-            .iter()
-            .flatten()
-            .fold(0usize, |total, label| {
-                total.saturating_add(match label {
-                    IndexLabel::Int64(_)
-                    | IndexLabel::Float64(_)
-                    | IndexLabel::Timedelta64(_)
-                    | IndexLabel::Datetime64(_)
-                    | IndexLabel::Null(_) => 8,
-                    IndexLabel::Bool(_) => 1,
-                    IndexLabel::Utf8(value) => {
-                        if deep {
-                            std::mem::size_of::<String>().saturating_add(value.len())
-                        } else {
-                            std::mem::size_of::<String>()
-                        }
+        let level_bytes = self.levels.iter().flatten().fold(0usize, |total, label| {
+            total.saturating_add(match label {
+                IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_)
+                | IndexLabel::Null(_) => 8,
+                IndexLabel::Bool(_) => 1,
+                IndexLabel::Utf8(value) => {
+                    if deep {
+                        std::mem::size_of::<String>().saturating_add(value.len())
+                    } else {
+                        std::mem::size_of::<String>()
                     }
-                })
-            });
+                }
+            })
+        });
         level_bytes.saturating_add(multi_index_codes_memory_usage(self.nlevels(), self.len()))
     }
 
@@ -16632,16 +16631,12 @@ impl MultiIndex {
                 .set_names(self.shared_names(other)));
         }
         let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
-        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
-            self.len(),
-            Default::default(),
-        );
+        let mut seen =
+            FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(self.len(), Default::default());
         let tuples = self
             .to_list()
             .into_iter()
-            .filter(|tuple| {
-                other_keys.contains(tuple) && seen.insert(tuple.clone())
-            })
+            .filter(|tuple| other_keys.contains(tuple) && seen.insert(tuple.clone()))
             .collect();
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
@@ -16686,16 +16681,12 @@ impl MultiIndex {
                 .set_names(self.shared_names(other)));
         }
         let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
-        let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
-            self.len(),
-            Default::default(),
-        );
+        let mut seen =
+            FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(self.len(), Default::default());
         let tuples = self
             .to_list()
             .into_iter()
-            .filter(|tuple| {
-                !other_keys.contains(tuple) && seen.insert(tuple.clone())
-            })
+            .filter(|tuple| !other_keys.contains(tuple) && seen.insert(tuple.clone()))
             .collect();
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
@@ -17100,7 +17091,11 @@ mod tests {
             IndexLabel::Int64(2),
             IndexLabel::Int64(4),
         ]);
-        assert!(sorted.unsorted_unique_int64_positions(&[IndexLabel::Int64(2)]).is_none());
+        assert!(
+            sorted
+                .unsorted_unique_int64_positions(&[IndexLabel::Int64(2)])
+                .is_none()
+        );
 
         // Duplicate labels ⇒ None (multimap semantics required).
         let dup = Index::new(vec![
@@ -17108,7 +17103,10 @@ mod tests {
             IndexLabel::Int64(1),
             IndexLabel::Int64(5),
         ]);
-        assert!(dup.unsorted_unique_int64_positions(&[IndexLabel::Int64(5)]).is_none());
+        assert!(
+            dup.unsorted_unique_int64_positions(&[IndexLabel::Int64(5)])
+                .is_none()
+        );
     }
 
     #[test]
@@ -19167,7 +19165,10 @@ mod tests {
         assert_eq!(union.name(), Some("axis"));
         assert_eq!(difference.name(), Some("axis"));
         assert_eq!(symmetric.name(), Some("axis"));
-        assert_eq!(intersection.labels.int64_view().unwrap().as_slice(), &[1, 2]);
+        assert_eq!(
+            intersection.labels.int64_view().unwrap().as_slice(),
+            &[1, 2]
+        );
         assert_eq!(union.labels.int64_view().unwrap().as_slice(), &[3, 1, 2, 4]);
         assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[3]);
         assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[3, 4]);
@@ -20082,7 +20083,10 @@ mod tests {
         let result = index.delete(2).unwrap();
 
         assert_eq!(result.name(), Some("rows"));
-        assert_eq!(result.labels.int64_view().unwrap().as_slice(), &[10, 20, 40]);
+        assert_eq!(
+            result.labels.int64_view().unwrap().as_slice(),
+            &[10, 20, 40]
+        );
         assert!(index.labels.materialized.get().is_none());
         assert!(
             result.labels.materialized.get().is_none(),
@@ -20448,7 +20452,10 @@ mod tests {
         );
 
         let filled = index.shift(10, IndexLabel::Int64(0));
-        assert_eq!(filled.labels.int64_view().unwrap().as_slice(), &[0, 0, 0, 0]);
+        assert_eq!(
+            filled.labels.int64_view().unwrap().as_slice(),
+            &[0, 0, 0, 0]
+        );
         assert!(index.labels.materialized.get().is_none());
     }
 
@@ -20632,7 +20639,10 @@ mod tests {
         let replaced = index.putmask(&[false, true, false, true], &IndexLabel::Int64(9));
 
         assert_eq!(replaced.name(), Some("row"));
-        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[1, 9, 3, 9]);
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[1, 9, 3, 9]
+        );
         assert!(index.labels.materialized.get().is_none());
         assert!(
             replaced.labels.materialized.get().is_none(),
@@ -20663,7 +20673,10 @@ mod tests {
         let replaced = index.putmask(&[true, false, true], &IndexLabel::Int64(5));
 
         assert_eq!(replaced.name(), Some("axis"));
-        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[5, 8, 5, 4]);
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[5, 8, 5, 4]
+        );
         assert!(index.labels.materialized.get().is_none());
         assert!(
             replaced.labels.materialized.get().is_none(),
@@ -21412,7 +21425,12 @@ mod tests {
                 vals.sort_unstable();
             }
             let lazy = Index::from_i64_values(vals.clone());
-            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let mat = Index::new(
+                vals.iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             let ctx = format!("iter={iter} vals={vals:?}");
 
             // groupby (xk18v): label -> positions map must match exactly.
@@ -21430,7 +21448,11 @@ mod tests {
             let mi = mat.insert(loc, item.clone());
             assert_eq!(li.is_ok(), mi.is_ok(), "insert ok {ctx} loc={loc}");
             if let (Ok(a), Ok(b)) = (&li, &mi) {
-                assert_eq!(a.labels(), b.labels(), "insert labels {ctx} loc={loc} item={item:?}");
+                assert_eq!(
+                    a.labels(),
+                    b.labels(),
+                    "insert labels {ctx} loc={loc} item={item:?}"
+                );
             }
 
             // delete (uza04.150) at a random valid loc.
@@ -21478,7 +21500,12 @@ mod tests {
                 continue;
             };
             let vals: Vec<i64> = (0..len as i64).map(|i| start + step * i).collect();
-            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let mat = Index::new(
+                vals.iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
 
             // Query span: below min, exact elements, between elements, above max.
             let lo = start - 2;
@@ -21488,7 +21515,11 @@ mod tests {
                 let ctx = format!("iter={iter} start={start} step={step} len={len} q={q}");
 
                 assert_eq!(affine.get_loc(&label), mat.get_loc(&label), "get_loc {ctx}");
-                assert_eq!(affine.position(&label), mat.position(&label), "position {ctx}");
+                assert_eq!(
+                    affine.position(&label),
+                    mat.position(&label),
+                    "position {ctx}"
+                );
                 assert_eq!(affine.asof(&label), mat.asof(&label), "asof {ctx}");
                 for side in ["left", "right"] {
                     assert_eq!(
@@ -21501,8 +21532,13 @@ mod tests {
 
             // get_indexer over a small mixed target (present + absent keys).
             let targ_vals: Vec<i64> = (0..4).map(|_| (next() % 14) as i64 - 6).collect();
-            let target =
-                Index::new(targ_vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let target = Index::new(
+                targ_vals
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             assert_eq!(
                 affine.get_indexer(&target),
                 mat.get_indexer(&target),
@@ -21537,7 +21573,12 @@ mod tests {
             let vals: Vec<i64> = (0..len as i64)
                 .map(|i| start.checked_add(step.checked_mul(i).unwrap()).unwrap())
                 .collect();
-            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let mat = Index::new(
+                vals.iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
 
             // RangeIndex equivalent (positive step only; RangeIndex requires it).
             let range = if step > 0 {
@@ -21576,8 +21617,16 @@ mod tests {
                 .map(|&p| IndexLabel::Int64(vals[p]))
                 .collect();
 
-            assert_eq!(affine.take(&positions).labels(), oracle, "affine take {ctx}");
-            assert_eq!(mat.take(&positions).labels(), oracle, "materialized take {ctx}");
+            assert_eq!(
+                affine.take(&positions).labels(),
+                oracle,
+                "affine take {ctx}"
+            );
+            assert_eq!(
+                mat.take(&positions).labels(),
+                oracle,
+                "materialized take {ctx}"
+            );
 
             if let Some(range) = &range {
                 let got = range.take(&positions).expect("range take in-bounds");
@@ -21600,10 +21649,26 @@ mod tests {
         for iter in 0..800u32 {
             let n = (next() % 12) as usize + 1;
             let labels: Vec<i64> = (0..n).map(|_| (next() % 8) as i64).collect(); // dups
-            let idx = Index::new(labels.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let idx = Index::new(
+                labels
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             let sorted = idx.sort_values();
-            assert!(sorted.is_monotonic_increasing(), "monotonic iter={iter} labels={labels:?}");
-            let got: Vec<i64> = sorted.labels().iter().map(|l| match l { IndexLabel::Int64(k) => *k, _ => i64::MIN }).collect();
+            assert!(
+                sorted.is_monotonic_increasing(),
+                "monotonic iter={iter} labels={labels:?}"
+            );
+            let got: Vec<i64> = sorted
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(k) => *k,
+                    _ => i64::MIN,
+                })
+                .collect();
             let mut exp = labels.clone();
             exp.sort_unstable();
             assert_eq!(got, exp, "sorted multiset iter={iter}");
@@ -21628,13 +21693,27 @@ mod tests {
             let source: Vec<i64> = (0..sn).map(|_| (next() % 4) as i64).collect(); // dups
             let tn = (next() % 6) as usize + 1;
             let target: Vec<i64> = (0..tn).map(|_| (next() % 6) as i64).collect(); // some absent
-            let src_idx = Index::new(source.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
-            let tgt_idx = Index::new(target.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let src_idx = Index::new(
+                source
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
+            let tgt_idx = Index::new(
+                target
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             let (indexer, missing) = src_idx.get_indexer_non_unique(&tgt_idx);
 
             // Oracle.
             let mut positions: HashMap<i64, Vec<usize>> = HashMap::new();
-            for (p, &l) in source.iter().enumerate() { positions.entry(l).or_default().push(p); }
+            for (p, &l) in source.iter().enumerate() {
+                positions.entry(l).or_default().push(p);
+            }
             let mut exp_idx: Vec<isize> = Vec::new();
             let mut exp_missing: Vec<usize> = Vec::new();
             for (tp, &l) in target.iter().enumerate() {
@@ -21645,7 +21724,10 @@ mod tests {
                     exp_missing.push(tp);
                 }
             }
-            assert_eq!(indexer, exp_idx, "indexer iter={iter} src={source:?} tgt={target:?}");
+            assert_eq!(
+                indexer, exp_idx,
+                "indexer iter={iter} src={source:?} tgt={target:?}"
+            );
             assert_eq!(missing, exp_missing, "missing iter={iter}");
         }
     }
@@ -21705,19 +21787,37 @@ mod tests {
                 let j = (next() as usize) % (i + 1);
                 labels.swap(i, j);
             }
-            let ix = Index::new(labels.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let ix = Index::new(
+                labels
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             let pos: HashMap<i64, usize> =
                 labels.iter().enumerate().map(|(p, &v)| (v, p)).collect();
 
             // Targets mix present (0..n) and absent (n..n+3, -1).
             let q = (next() % 8) as usize + 1;
-            let targets: Vec<i64> = (0..q).map(|_| (next() % (n as u32 + 4)) as i64 - 1).collect();
-            let target_ix = Index::new(targets.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let targets: Vec<i64> = (0..q)
+                .map(|_| (next() % (n as u32 + 4)) as i64 - 1)
+                .collect();
+            let target_ix = Index::new(
+                targets
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            );
             let got = ix.get_indexer(&target_ix);
             assert_eq!(got.len(), targets.len(), "len iter={iter}");
             for i in 0..targets.len() {
                 let exp = pos.get(&targets[i]).copied();
-                assert_eq!(got[i], exp, "get_indexer iter={iter} target={} labels={labels:?}", targets[i]);
+                assert_eq!(
+                    got[i], exp,
+                    "get_indexer iter={iter} target={} labels={labels:?}",
+                    targets[i]
+                );
             }
         }
     }
@@ -21738,7 +21838,12 @@ mod tests {
             (state >> 33) as u32
         };
         let mk = |vals: &[i64]| {
-            Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>())
+            Index::new(
+                vals.iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            )
         };
         let to_set = |idx: &Index| -> BTreeSet<i64> {
             idx.labels()
@@ -21798,7 +21903,12 @@ mod tests {
         };
 
         let materialized = |vals: &[i64]| {
-            Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>())
+            Index::new(
+                vals.iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+            )
         };
         let assert_agree = |lazy: &Index, mat: &Index, ctx: &str| {
             assert_eq!(lazy.len(), mat.len(), "len {ctx}");
@@ -21824,7 +21934,11 @@ mod tests {
                 "has_duplicates {ctx}"
             );
             assert_eq!(lazy.hasnans(), mat.hasnans(), "hasnans {ctx}");
-            assert_eq!(lazy.inferred_type(), mat.inferred_type(), "inferred_type {ctx}");
+            assert_eq!(
+                lazy.inferred_type(),
+                mat.inferred_type(),
+                "inferred_type {ctx}"
+            );
             assert_eq!(lazy.dtype(), mat.dtype(), "dtype {ctx}");
             assert_eq!(lazy.is_integer(), mat.is_integer(), "is_integer {ctx}");
             assert_eq!(lazy.is_numeric(), mat.is_numeric(), "is_numeric {ctx}");
@@ -22063,15 +22177,7 @@ mod tests {
 
         let actual = index.diff(2);
 
-        assert_eq!(
-            actual,
-            vec![
-                None,
-                None,
-                Some(IndexLabel::Int64(10)),
-                None,
-            ]
-        );
+        assert_eq!(actual, vec![None, None, Some(IndexLabel::Int64(10)), None,]);
         assert!(
             index.labels.materialized.get().is_none(),
             "raw Int64 diff should not materialize source labels"
@@ -22243,7 +22349,10 @@ mod tests {
         let replaced = index.where_cond(&[false, true, true, false], &IndexLabel::Int64(0));
 
         assert_eq!(replaced.name(), Some("axis"));
-        assert_eq!(replaced.labels.int64_view().unwrap().as_slice(), &[0, 5, 8, 0]);
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[0, 5, 8, 0]
+        );
         assert!(index.labels.materialized.get().is_none());
         assert!(
             replaced.labels.materialized.get().is_none(),
@@ -22399,11 +22508,11 @@ mod tests {
 
     #[test]
     fn multi_index_product_cardinality_rejects_overflow_uza04184() {
+        assert_eq!(super::checked_cartesian_product_len([2, 3, 4]).unwrap(), 24);
         assert_eq!(
-            super::checked_cartesian_product_len([2, 3, 4]).unwrap(),
-            24
+            super::checked_cartesian_product_len([usize::MAX, 0]).unwrap(),
+            0
         );
-        assert_eq!(super::checked_cartesian_product_len([usize::MAX, 0]).unwrap(), 0);
         let err = super::checked_cartesian_product_len([usize::MAX, 2]).unwrap_err();
         assert!(matches!(
             err,
@@ -23199,9 +23308,18 @@ mod tests {
         let left = mk(&[0, 1, 0, 2]);
         let right = mk(&[1, 3, 2, 1]);
 
-        assert_eq!(left.intersection(&right).unwrap().to_list(), mk(&[1, 2]).to_list());
-        assert_eq!(left.union(&right).unwrap().to_list(), mk(&[0, 1, 2, 3]).to_list());
-        assert_eq!(left.difference(&right).unwrap().to_list(), mk(&[0]).to_list());
+        assert_eq!(
+            left.intersection(&right).unwrap().to_list(),
+            mk(&[1, 2]).to_list()
+        );
+        assert_eq!(
+            left.union(&right).unwrap().to_list(),
+            mk(&[0, 1, 2, 3]).to_list()
+        );
+        assert_eq!(
+            left.difference(&right).unwrap().to_list(),
+            mk(&[0]).to_list()
+        );
         assert_eq!(
             left.symmetric_difference(&right).unwrap().to_list(),
             mk(&[0, 3]).to_list()
@@ -24540,7 +24658,9 @@ mod tests {
         let (_, r_indexer) = r.reindex(&r_target);
         assert_eq!(r_indexer, vec![2, 3, 4, -1]);
 
-        let descending_target = super::RangeIndex::new(6, -3, -3).unwrap().set_name("target");
+        let descending_target = super::RangeIndex::new(6, -3, -3)
+            .unwrap()
+            .set_name("target");
         let (reindexed, descending_indexer) = r.reindex(&descending_target);
         assert!(reindexed.identical(&descending_target));
         assert_eq!(descending_indexer, vec![-1, 3, 0]);
@@ -25600,12 +25720,16 @@ mod tests {
     }
 
     #[test]
-    fn range_index_level_ops_handle_flat_contract_directly_ckbyh() -> Result<(), super::IndexError> {
+    fn range_index_level_ops_handle_flat_contract_directly_ckbyh() -> Result<(), super::IndexError>
+    {
         let range = super::RangeIndex::new(9, 0, -4)?.set_name("row");
 
         let level_values = range.get_level_values(0)?;
         assert_eq!(level_values.name(), Some("row"));
-        assert_eq!(level_values.labels.int64_view().unwrap().as_slice(), &[9, 5, 1]);
+        assert_eq!(
+            level_values.labels.int64_view().unwrap().as_slice(),
+            &[9, 5, 1]
+        );
         assert!(
             level_values.labels.materialized.get().is_none(),
             "RangeIndex::get_level_values should keep typed Int64 output backing"
@@ -25851,7 +25975,10 @@ mod tests {
         ));
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap().set_name("empty");
-        assert_eq!(empty.astype("datetime64[ns]").unwrap().name(), Some("empty"));
+        assert_eq!(
+            empty.astype("datetime64[ns]").unwrap().name(),
+            Some("empty")
+        );
         assert_eq!(empty.astype("timedelta64[ns]").unwrap().len(), 0);
     }
 
@@ -25930,13 +26057,17 @@ mod tests {
         let descending_where = super::Index::from_i64_values(vec![0, 5, 10]);
         assert_eq!(
             descending.asof_locs(&descending_where, None),
-            descending.to_flat_index().asof_locs(&descending_where, None)
+            descending
+                .to_flat_index()
+                .asof_locs(&descending_where, None)
         );
 
         let mixed_where = super::Index::new(vec![super::IndexLabel::Utf8("z".to_owned())]);
         assert_eq!(
             range.asof_locs(&mixed_where, Some(&[true, true])),
-            range.to_flat_index().asof_locs(&mixed_where, Some(&[true, true]))
+            range
+                .to_flat_index()
+                .asof_locs(&mixed_where, Some(&[true, true]))
         );
     }
 
@@ -26065,10 +26196,7 @@ mod tests {
         assert_eq!(range.name(), Some("r"));
 
         let descending = super::RangeIndex::new(9, 0, -3).unwrap();
-        assert_eq!(
-            descending.diff(1),
-            vec![None, Some(-3), Some(-3)]
-        );
+        assert_eq!(descending.diff(1), vec![None, Some(-3), Some(-3)]);
         assert_eq!(descending.diff(-1), vec![Some(3), Some(3), None]);
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
@@ -27081,10 +27209,7 @@ mod tests {
             &[9, 6, 3, 0, -3]
         );
         assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[9]);
-        assert_eq!(
-            symmetric.labels.int64_view().unwrap().as_slice(),
-            &[9, -3]
-        );
+        assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[9, -3]);
 
         let mismatched = right.set_name("other");
         assert_eq!(left.intersection(&mismatched).name(), None);
@@ -27114,7 +27239,10 @@ mod tests {
         assert_eq!(union.name(), Some("k"));
         assert_eq!(difference.name(), Some("k"));
         assert_eq!(symmetric.name(), Some("k"));
-        assert_eq!(intersection.labels.int64_view().unwrap().as_slice(), &[6, 0]);
+        assert_eq!(
+            intersection.labels.int64_view().unwrap().as_slice(),
+            &[6, 0]
+        );
         assert_eq!(
             union.labels.int64_view().unwrap().as_slice(),
             &[9, 6, 3, 0, -6]
@@ -27602,10 +27730,7 @@ mod tests {
         ]);
 
         assert_eq!(dropped.name(), Some("r"));
-        assert_eq!(
-            dropped.labels.int64_view().unwrap().as_slice(),
-            &[8, 4]
-        );
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[8, 4]);
         assert!(
             dropped.labels.materialized.get().is_none(),
             "RangeIndex::drop should keep typed Int64 output backing"
@@ -27627,19 +27752,18 @@ mod tests {
         ]);
 
         assert_eq!(dropped.name(), Some("r"));
-        assert_eq!(
-            dropped.labels.int64_view().unwrap().as_slice(),
-            &[9, 3]
-        );
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[9, 3]);
         assert!(
             dropped.labels.materialized.get().is_none(),
             "RangeIndex::drop should write a typed Int64 result without object materialization"
         );
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
-        assert!(empty
-            .drop(&[IndexLabel::Int64(0), IndexLabel::Utf8("0".to_owned())])
-            .is_empty());
+        assert!(
+            empty
+                .drop(&[IndexLabel::Int64(0), IndexLabel::Utf8("0".to_owned())])
+                .is_empty()
+        );
     }
 
     #[test]
@@ -27665,8 +27789,7 @@ mod tests {
     }
 
     #[test]
-    fn range_index_join_direct_i64_matches_flat_oracle_uza04190(
-    ) -> Result<(), super::IndexError> {
+    fn range_index_join_direct_i64_matches_flat_oracle_uza04190() -> Result<(), super::IndexError> {
         let range = super::RangeIndex::new(9, 0, -3).unwrap().set_name("k");
         let other = super::Index::from_i64_values(vec![6, 12, 6, 0]).set_name("k");
 
@@ -28199,11 +28322,7 @@ mod tests {
                 "silver".to_owned(),
                 "gold".to_owned(),
             ],
-            vec![
-                "bronze".to_owned(),
-                "silver".to_owned(),
-                "gold".to_owned(),
-            ],
+            vec!["bronze".to_owned(), "silver".to_owned(), "gold".to_owned()],
             true,
         )
         .expect("categorical index");
@@ -28217,11 +28336,7 @@ mod tests {
                 "silver".to_owned(),
                 "bronze".to_owned(),
             ],
-            vec![
-                "bronze".to_owned(),
-                "silver".to_owned(),
-                "gold".to_owned(),
-            ],
+            vec!["bronze".to_owned(), "silver".to_owned(), "gold".to_owned()],
             true,
         )
         .expect("categorical index");
@@ -28320,7 +28435,10 @@ mod tests {
                 super::DuplicateKeep::Last,
                 super::DuplicateKeep::None,
             ] {
-                assert_eq!(index.duplicated(keep), index.to_flat_index().duplicated(keep));
+                assert_eq!(
+                    index.duplicated(keep),
+                    index.to_flat_index().duplicated(keep)
+                );
             }
         }
 

@@ -45,7 +45,10 @@ fn digest(s: &Series) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let k: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
 

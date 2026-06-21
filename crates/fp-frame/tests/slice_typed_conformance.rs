@@ -51,7 +51,10 @@ fn iloc_slice_open_ended() {
     let s = s_i64(&[10, 11, 12, 13, 14], &[1, 2, 3, 4, 5]);
     assert_eq!(vals(&s.iloc_slice(Some(2), None).unwrap()), vec![3, 4, 5]);
     assert_eq!(vals(&s.iloc_slice(None, Some(2)).unwrap()), vec![1, 2]);
-    assert_eq!(vals(&s.iloc_slice(None, None).unwrap()), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        vals(&s.iloc_slice(None, None).unwrap()),
+        vec![1, 2, 3, 4, 5]
+    );
 }
 
 #[test]

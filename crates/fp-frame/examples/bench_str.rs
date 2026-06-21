@@ -24,7 +24,10 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let vals: Vec<Scalar> = (0..n)

@@ -31,7 +31,10 @@ fn best<F: Fn()>(iters: usize, f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
     let s = build(n);
 
@@ -51,7 +54,5 @@ fn main() {
         std::hint::black_box(s.var().unwrap());
     });
 
-    println!(
-        "reductions n={n}: sum={sum}ns max={max}ns min={min}ns std={std}ns var={var}ns"
-    );
+    println!("reductions n={n}: sum={sum}ns max={max}ns min={min}ns std={std}ns var={var}ns");
 }

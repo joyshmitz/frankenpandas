@@ -2,8 +2,7 @@
 //! head-to-head measurable vs pandas `df.drop_duplicates(subset=['key'])`.
 //! Run: cargo run -p fp-frame --example dedup_i64_bench --release -- 100000 1000 30
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -52,7 +51,9 @@ fn main() {
         }
         columns.insert("key".to_string(), Column::from_utf8_contiguous(kb, ko));
     } else {
-        let keys: Vec<i64> = (0..rows).map(|_| (next() % distinct as u64) as i64).collect();
+        let keys: Vec<i64> = (0..rows)
+            .map(|_| (next() % distinct as u64) as i64)
+            .collect();
         columns.insert("key".to_string(), Column::from_i64_values(keys));
     }
     columns.insert("val".to_string(), Column::from_f64_values(payload));

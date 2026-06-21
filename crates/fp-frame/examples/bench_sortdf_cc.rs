@@ -3,8 +3,7 @@
 //!
 //! Run: cargo run -p fp-frame --example bench_sortdf_cc --release -- 500000 5 20
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;

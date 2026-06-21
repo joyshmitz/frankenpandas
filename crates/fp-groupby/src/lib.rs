@@ -2259,7 +2259,9 @@ fn try_groupby_sum_prod_integer_counter(
         if take_sum {
             entry.sum += value_i128;
         } else {
-            entry.prod_i128 = entry.prod_i128.and_then(|prod| prod.checked_mul(value_i128));
+            entry.prod_i128 = entry
+                .prod_i128
+                .and_then(|prod| prod.checked_mul(value_i128));
             entry.prod_f64 *= value_i128 as f64;
         }
     }
@@ -2515,14 +2517,13 @@ pub fn groupby_agg(
     // group, not a cloned value Vec. The dense Int64 route above remains first
     // chance for small integer key domains.
     if matches!(func, AggFunc::First | AggFunc::Last)
-        && let Some((out_index, out_values)) =
-            try_groupby_first_last_scalar_slot(
-                key_vals,
-                val_vals,
-                func,
-                options.dropna,
-                options.sort,
-            )
+        && let Some((out_index, out_values)) = try_groupby_first_last_scalar_slot(
+            key_vals,
+            val_vals,
+            func,
+            options.dropna,
+            options.sort,
+        )
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -3429,13 +3430,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("keys");
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("values");
 
@@ -3508,13 +3517,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("keys");
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("values");
 
@@ -3524,16 +3541,12 @@ mod tests {
             for (k, v) in key_vals.iter().zip(val_vals.iter()) {
                 groups.entry(*k).or_default().push(*v);
             }
-            let exp_first: Vec<Scalar> = groups
-                .values()
-                .map(|vs| Scalar::Int64(vs[0]))
-                .collect();
+            let exp_first: Vec<Scalar> = groups.values().map(|vs| Scalar::Int64(vs[0])).collect();
             let exp_last: Vec<Scalar> = groups
                 .values()
                 .map(|vs| Scalar::Int64(*vs.last().unwrap()))
                 .collect();
-            let exp_keys: Vec<IndexLabel> =
-                groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
 
             let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
             let pol = RuntimePolicy::strict();
@@ -3575,13 +3588,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("keys");
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("values");
 
@@ -3591,8 +3612,7 @@ mod tests {
             for (k, v) in key_vals.iter().zip(val_vals.iter()) {
                 groups.entry(*k).or_default().insert(*v);
             }
-            let exp_keys: Vec<IndexLabel> =
-                groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
             let exp_nunique: Vec<Scalar> = groups
                 .values()
                 .map(|set| Scalar::Int64(set.len() as i64))
@@ -3638,13 +3658,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("keys");
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .expect("values");
 
@@ -3712,8 +3740,7 @@ mod tests {
             let val_vals: Vec<i64> = (0..n).map(|_| (next() % 3) as i64).collect();
 
             let mk = |keyv: &[i64], valv: &[i64]| {
-                let idx: Vec<IndexLabel> =
-                    (0..keyv.len() as i64).map(IndexLabel::Int64).collect();
+                let idx: Vec<IndexLabel> = (0..keyv.len() as i64).map(IndexLabel::Int64).collect();
                 let k = Series::from_values(
                     "k",
                     idx.clone(),
@@ -3739,10 +3766,22 @@ mod tests {
             for (name, f) in aggs {
                 let mut l1 = EvidenceLedger::new();
                 let mut l2 = EvidenceLedger::new();
-                let a = f(&k1, &v1, GroupByOptions::default(), &RuntimePolicy::strict(), &mut l1)
-                    .expect("agg orig");
-                let b = f(&k2, &v2, GroupByOptions::default(), &RuntimePolicy::strict(), &mut l2)
-                    .expect("agg rev");
+                let a = f(
+                    &k1,
+                    &v1,
+                    GroupByOptions::default(),
+                    &RuntimePolicy::strict(),
+                    &mut l1,
+                )
+                .expect("agg orig");
+                let b = f(
+                    &k2,
+                    &v2,
+                    GroupByOptions::default(),
+                    &RuntimePolicy::strict(),
+                    &mut l2,
+                )
+                .expect("agg rev");
                 assert_eq!(
                     a.index().labels(),
                     b.index().labels(),
@@ -3773,11 +3812,29 @@ mod tests {
             let n = (next() % 20) as usize + 1;
             let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
-            let vs = Series::from_values("v", idx, (0..n).map(|i| Scalar::Int64(i as i64)).collect::<Vec<_>>()).unwrap();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                (0..n).map(|i| Scalar::Int64(i as i64)).collect::<Vec<_>>(),
+            )
+            .unwrap();
             let mut l = EvidenceLedger::new();
             let size = groupby_size(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap();
-            let total: i64 = size.values().iter().map(|c| match c { Scalar::Int64(x) => *x, Scalar::Float64(x) => *x as i64, _ => 0 }).sum();
+            let total: i64 = size
+                .values()
+                .iter()
+                .map(|c| match c {
+                    Scalar::Int64(x) => *x,
+                    Scalar::Float64(x) => *x as i64,
+                    _ => 0,
+                })
+                .sum();
             assert_eq!(total, n as i64, "sum(size)==n iter={iter}");
         }
     }
@@ -3793,7 +3850,13 @@ mod tests {
             (s >> 33) as u32
         };
         let getf = |c: &[Scalar]| -> Vec<f64> {
-            c.iter().map(|v| match v { Scalar::Int64(x) => *x as f64, Scalar::Float64(x) => *x, _ => f64::NAN }).collect()
+            c.iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x as f64,
+                    Scalar::Float64(x) => *x,
+                    _ => f64::NAN,
+                })
+                .collect()
         };
         let pol = RuntimePolicy::strict();
         for iter in 0..400u32 {
@@ -3801,12 +3864,34 @@ mod tests {
             let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
             let vals: Vec<f64> = (0..n).map(|_| (next() % 200) as f64 / 3.0 - 33.0).collect();
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
-            let vs = Series::from_values("v", idx, vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>()).unwrap();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
             let mut l = EvidenceLedger::new();
-            let mins = getf(groupby_min(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
-            let means = getf(groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
-            let maxs = getf(groupby_max(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let mins = getf(
+                groupby_min(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let means = getf(
+                groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let maxs = getf(
+                groupby_max(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
             for g in 0..mins.len() {
                 assert!(mins[g] <= means[g] + 1e-9, "min<=mean iter={iter} g={g}");
                 assert!(means[g] <= maxs[g] + 1e-9, "mean<=max iter={iter} g={g}");
@@ -3826,7 +3911,13 @@ mod tests {
             (s >> 33) as u32
         };
         let getf = |c: &[Scalar]| -> Vec<f64> {
-            c.iter().map(|v| match v { Scalar::Int64(x) => *x as f64, Scalar::Float64(x) => *x, _ => f64::NAN }).collect()
+            c.iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x as f64,
+                    Scalar::Float64(x) => *x,
+                    _ => f64::NAN,
+                })
+                .collect()
         };
         let pol = RuntimePolicy::strict();
         for iter in 0..400u32 {
@@ -3834,16 +3925,41 @@ mod tests {
             let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
             let vals: Vec<f64> = (0..n).map(|_| (next() % 100) as f64 / 3.0).collect();
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
-            let vs = Series::from_values("v", idx, vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>()).unwrap();
+            let ks = Series::from_values(
+                "k",
+                idx.clone(),
+                keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let vs = Series::from_values(
+                "v",
+                idx,
+                vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>(),
+            )
+            .unwrap();
             let mut l = EvidenceLedger::new();
-            let sums = getf(groupby_sum(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
-            let means = getf(groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
-            let counts = getf(groupby_count(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let sums = getf(
+                groupby_sum(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let means = getf(
+                groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
+            let counts = getf(
+                groupby_count(&ks, &vs, GroupByOptions::default(), &pol, &mut l)
+                    .unwrap()
+                    .values(),
+            );
             assert_eq!(sums.len(), means.len(), "len iter={iter}");
             assert_eq!(sums.len(), counts.len(), "len iter={iter}");
             for g in 0..sums.len() {
-                assert!((sums[g] - means[g] * counts[g]).abs() < 1e-6, "sum==mean*count iter={iter} g={g}");
+                assert!(
+                    (sums[g] - means[g] * counts[g]).abs() < 1e-6,
+                    "sum==mean*count iter={iter} g={g}"
+                );
             }
         }
     }
@@ -3855,23 +3971,40 @@ mod tests {
         let keys = Series::from_values(
             "k",
             idx.clone(),
-            vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
         )
         .unwrap();
         let values = Series::from_values(
             "v",
             idx,
-            vec![Scalar::Float64(10.0), Scalar::Float64(f64::NAN), Scalar::Float64(20.0)],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(20.0),
+            ],
         )
         .unwrap();
         let pol = RuntimePolicy::strict();
         let mut l1 = EvidenceLedger::new();
         let mut l2 = EvidenceLedger::new();
-        let count = groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut l1).unwrap();
+        let count =
+            groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut l1).unwrap();
         let size = groupby_size(&keys, &values, GroupByOptions::default(), &pol, &mut l2).unwrap();
         // a: count 1 (NaN excluded), size 2; b: count 1, size 1.
-        assert_eq!(count.values(), &[Scalar::Int64(1), Scalar::Int64(1)], "count excludes NaN");
-        assert_eq!(size.values(), &[Scalar::Int64(2), Scalar::Int64(1)], "size counts all rows");
+        assert_eq!(
+            count.values(),
+            &[Scalar::Int64(1), Scalar::Int64(1)],
+            "count excludes NaN"
+        );
+        assert_eq!(
+            size.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)],
+            "size counts all rows"
+        );
     }
 
     #[test]
@@ -3893,7 +4026,12 @@ mod tests {
         let values = Series::from_values(
             "v",
             idx,
-            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
         )
         .unwrap();
         let mut led = EvidenceLedger::new();
@@ -3909,9 +4047,16 @@ mod tests {
         assert_eq!(out.len(), 2, "null-key group dropped");
         assert_eq!(
             out.index().labels(),
-            &[IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned())]
+            &[
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned())
+            ]
         );
-        assert_eq!(out.values(), &[Scalar::Int64(40), Scalar::Int64(40)], "sums exclude null-key value 20");
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(40), Scalar::Int64(40)],
+            "sums exclude null-key value 20"
+        );
     }
 
     #[test]
@@ -3939,8 +4084,26 @@ mod tests {
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
             let key_vals: Vec<i64> = (0..n).map(|_| (next() % 4) as i64 - 1).collect();
             let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
-            let keys = Series::from_values("k", idx.clone(), key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()).unwrap();
-            let values = Series::from_values("v", idx, val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()).unwrap();
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
 
             let mut groups: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
             for (k, v) in key_vals.iter().zip(val_vals.iter()) {
@@ -3960,8 +4123,10 @@ mod tests {
 
             let pol = RuntimePolicy::strict();
             let mut led = EvidenceLedger::new();
-            let var = groupby_var(&keys, &values, GroupByOptions::default(), &pol, &mut led).expect("var");
-            let std = groupby_std(&keys, &values, GroupByOptions::default(), &pol, &mut led).expect("std");
+            let var = groupby_var(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("var");
+            let std = groupby_std(&keys, &values, GroupByOptions::default(), &pol, &mut led)
+                .expect("std");
             let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
             for (i, ev) in exp_var.iter().enumerate() {
                 let gv = num(&var.values()[i]);
@@ -3999,13 +4164,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .unwrap();
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .unwrap();
 
@@ -4045,7 +4218,11 @@ mod tests {
                     Scalar::Int64(x) => *x as f64,
                     _ => f64::NAN,
                 };
-                assert!((g - exp_median[i]).abs() < 1e-9, "median val {ctx} i={i}: {g} vs {}", exp_median[i]);
+                assert!(
+                    (g - exp_median[i]).abs() < 1e-9,
+                    "median val {ctx} i={i}: {g} vs {}",
+                    exp_median[i]
+                );
             }
         }
     }
@@ -4077,13 +4254,21 @@ mod tests {
             let keys = Series::from_values(
                 "k",
                 idx.clone(),
-                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                key_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .unwrap();
             let values = Series::from_values(
                 "v",
                 idx,
-                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                val_vals
+                    .iter()
+                    .copied()
+                    .map(Scalar::Int64)
+                    .collect::<Vec<_>>(),
             )
             .unwrap();
 
@@ -4092,10 +4277,14 @@ mod tests {
                 groups.entry(*k).or_default().push(*v);
             }
             let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
-            let exp_sum: Vec<Scalar> =
-                groups.values().map(|vs| Scalar::Int64(vs.iter().sum())).collect();
-            let exp_count: Vec<Scalar> =
-                groups.values().map(|vs| Scalar::Int64(vs.len() as i64)).collect();
+            let exp_sum: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.iter().sum()))
+                .collect();
+            let exp_count: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.len() as i64))
+                .collect();
 
             let ctx = format!("iter={iter} keys={key_vals:?}");
             let pol = RuntimePolicy::strict();
@@ -4106,7 +4295,11 @@ mod tests {
             assert_eq!(sum.values(), exp_sum.as_slice(), "sparse sum vals {ctx}");
             let cnt = groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut led)
                 .expect("count");
-            assert_eq!(cnt.values(), exp_count.as_slice(), "sparse count vals {ctx}");
+            assert_eq!(
+                cnt.values(),
+                exp_count.as_slice(),
+                "sparse count vals {ctx}"
+            );
         }
     }
 
@@ -6414,8 +6607,7 @@ mod tests {
             dropna: true,
             sort: false,
         };
-        let unsorted_var =
-            groupby_var(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        let unsorted_var = groupby_var(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
         assert_eq!(
             unsorted_var.index().labels(),
             &["b".into(), "a".into(), "c".into(), "d".into()]
@@ -6547,8 +6739,7 @@ mod tests {
             dropna: true,
             sort: false,
         };
-        let unsorted =
-            groupby_median(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        let unsorted = groupby_median(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
         assert_eq!(
             unsorted.index().labels(),
             &["b".into(), "a".into(), "c".into(), "d".into()]
@@ -6680,8 +6871,7 @@ mod tests {
             dropna: true,
             sort: false,
         };
-        let unsorted =
-            groupby_nunique(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        let unsorted = groupby_nunique(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
         assert_eq!(
             unsorted.index().labels(),
             &["b".into(), "a".into(), "c".into(), "d".into(), "e".into()]
@@ -7279,7 +7469,10 @@ mod tests {
             &mut ledger,
         )
         .unwrap();
-        assert_eq!(count.index().labels(), &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            count.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
         assert_eq!(
             count.values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(0)]

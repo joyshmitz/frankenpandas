@@ -24,18 +24,30 @@ fn empty_i64_series() -> Series {
 
 #[test]
 fn sum_typed_int64_matches_including_wrapping() {
-    assert!(matches!(i64_series(&[1, 2, 3]).sum().unwrap(), Scalar::Int64(6)));
+    assert!(matches!(
+        i64_series(&[1, 2, 3]).sum().unwrap(),
+        Scalar::Int64(6)
+    ));
     // numpy wrap-on-overflow (a52db): MAX + 1 wraps to MIN.
     let w = i64_series(&[i64::MAX, 1]).sum().unwrap();
     assert!(matches!(w, Scalar::Int64(x) if x == i64::MIN));
     // empty Int64 sum -> 0
-    assert!(matches!(empty_i64_series().sum().unwrap(), Scalar::Int64(0)));
+    assert!(matches!(
+        empty_i64_series().sum().unwrap(),
+        Scalar::Int64(0)
+    ));
 }
 
 #[test]
 fn max_min_typed_int64_matches() {
-    assert!(matches!(i64_series(&[3, 1, 2, -5, 4]).max().unwrap(), Scalar::Int64(4)));
-    assert!(matches!(i64_series(&[3, 1, 2, -5, 4]).min().unwrap(), Scalar::Int64(-5)));
+    assert!(matches!(
+        i64_series(&[3, 1, 2, -5, 4]).max().unwrap(),
+        Scalar::Int64(4)
+    ));
+    assert!(matches!(
+        i64_series(&[3, 1, 2, -5, 4]).min().unwrap(),
+        Scalar::Int64(-5)
+    ));
     // empty -> Float64(NaN)
     assert!(matches!(empty_i64_series().max().unwrap(), Scalar::Float64(x) if x.is_nan()));
     assert!(matches!(empty_i64_series().min().unwrap(), Scalar::Float64(x) if x.is_nan()));
@@ -43,9 +55,18 @@ fn max_min_typed_int64_matches() {
 
 #[test]
 fn prod_typed_int64_matches_including_wrapping_and_identity() {
-    assert!(matches!(i64_series(&[2, 3, 4]).prod().unwrap(), Scalar::Int64(24)));
+    assert!(matches!(
+        i64_series(&[2, 3, 4]).prod().unwrap(),
+        Scalar::Int64(24)
+    ));
     // empty -> 1 (multiplicative identity)
-    assert!(matches!(empty_i64_series().prod().unwrap(), Scalar::Int64(1)));
+    assert!(matches!(
+        empty_i64_series().prod().unwrap(),
+        Scalar::Int64(1)
+    ));
     // contains zero -> 0
-    assert!(matches!(i64_series(&[5, 0, 7]).prod().unwrap(), Scalar::Int64(0)));
+    assert!(matches!(
+        i64_series(&[5, 0, 7]).prod().unwrap(),
+        Scalar::Int64(0)
+    ));
 }

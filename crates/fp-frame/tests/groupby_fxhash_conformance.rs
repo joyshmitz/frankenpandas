@@ -20,7 +20,12 @@ fn fixture() -> DataFrame {
     let mut cols = BTreeMap::new();
     cols.insert(
         "k".to_string(),
-        Column::from_values(keys.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap(),
+        Column::from_values(
+            keys.iter()
+                .map(|s| Scalar::Utf8((*s).to_string()))
+                .collect(),
+        )
+        .unwrap(),
     );
     cols.insert(
         "v".to_string(),

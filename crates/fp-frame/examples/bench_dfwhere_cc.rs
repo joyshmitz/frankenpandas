@@ -1,8 +1,7 @@
 //! DataFrame.where head-to-head. 500k×10 Float64, 50% bool cond frame, scalar other.
 //! Verifies the where_mask_typed_f64 path. Run: ... bench_dfwhere_cc --release -- 500000 10 30
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -20,8 +19,19 @@ fn main() {
     let mut order = Vec::new();
     for c in 0..k {
         let name = format!("c{c}");
-        cols.insert(name.clone(), Column::from_values((0..n).map(|i| Scalar::Float64((i + c) as f64 * 1.5)).collect()).unwrap());
-        ccols.insert(name.clone(), Column::from_values((0..n).map(|i| Scalar::Bool((i + c) % 2 == 0)).collect()).unwrap());
+        cols.insert(
+            name.clone(),
+            Column::from_values(
+                (0..n)
+                    .map(|i| Scalar::Float64((i + c) as f64 * 1.5))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        ccols.insert(
+            name.clone(),
+            Column::from_values((0..n).map(|i| Scalar::Bool((i + c) % 2 == 0)).collect()).unwrap(),
+        );
         order.push(name);
     }
     let df = DataFrame::new_with_column_order(idx.clone(), cols, order.clone()).unwrap();
@@ -34,7 +44,9 @@ fn main() {
         let out = df.where_cond(&cond, Some(&other)).expect("where");
         let e = t.elapsed().as_nanos();
         std::hint::black_box(&out);
-        if e < best { best = e; }
+        if e < best {
+            best = e;
+        }
     }
     println!("df_where n={n} k={k}: best={best}ns");
 }

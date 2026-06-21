@@ -12,7 +12,9 @@ fn utf8_series(vals: &[&str]) -> Series {
     Series::from_values(
         "s",
         (0..vals.len() as i64).map(IndexLabel::Int64).collect(),
-        vals.iter().map(|s| Scalar::Utf8((*s).to_string())).collect(),
+        vals.iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect(),
     )
     .unwrap()
 }

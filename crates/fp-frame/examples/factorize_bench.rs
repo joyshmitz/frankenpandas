@@ -22,7 +22,10 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let rows: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let rows: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let distinct: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
     let dtype = args.get(4).map(String::as_str).unwrap_or("f64");
@@ -42,7 +45,9 @@ fn main() {
             .collect();
         Series::new("c".to_string(), index, Column::from_i64_values(data)).expect("series")
     } else {
-        let data: Vec<f64> = (0..rows).map(|_| (next() % distinct) as f64 * 1.5).collect();
+        let data: Vec<f64> = (0..rows)
+            .map(|_| (next() % distinct) as f64 * 1.5)
+            .collect();
         Series::new("c".to_string(), index, Column::from_f64_values(data)).expect("series")
     };
 

@@ -298,7 +298,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             )
             .expect("pivot frame");
             time_us(|| {
-                let _ = pframe.pivot_table("v", "r", "c", "mean").expect("pivot_table");
+                let _ = pframe
+                    .pivot_table("v", "r", "c", "mean")
+                    .expect("pivot_table");
             })
         }
         ("dataframe_ops", "df_quantile") => time_us(|| {
@@ -363,7 +365,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }),
         ("dataframe_ops", "df_duplicated") => time_us(|| {
             // pandas: df.duplicated()
-            let _ = df.duplicated(None, DuplicateKeep::First).expect("duplicated");
+            let _ = df
+                .duplicated(None, DuplicateKeep::First)
+                .expect("duplicated");
         }),
         ("dataframe_ops", "df_idxmax") => time_us(|| {
             // pandas: df.idxmax()
@@ -420,9 +424,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.isna()
             let _ = df.isna().expect("isna");
         }),
-        ("groupby", "groupby_sum_int64" | "groupby_mean_float64" | "groupby_agg_multi"
-            | "groupby_std" | "groupby_median" | "groupby_nunique" | "groupby_first"
-            | "groupby_max") => {
+        (
+            "groupby",
+            "groupby_sum_int64"
+            | "groupby_mean_float64"
+            | "groupby_agg_multi"
+            | "groupby_std"
+            | "groupby_median"
+            | "groupby_nunique"
+            | "groupby_first"
+            | "groupby_max",
+        ) => {
             // pandas: key = (col_0 % 100).astype(int64); groupby(key)[col_1].agg
             let keys: Vec<i64> = raw[0].iter().map(|&v| (v as i64).rem_euclid(100)).collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -437,19 +449,39 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             .expect("fp-bench groupby frame");
             match workload {
                 "groupby_std" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").std().expect("std");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .std()
+                        .expect("std");
                 }),
                 "groupby_median" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").median().expect("median");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .median()
+                        .expect("median");
                 }),
                 "groupby_nunique" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").nunique().expect("nunique");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .nunique()
+                        .expect("nunique");
                 }),
                 "groupby_first" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").first().expect("first");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .first()
+                        .expect("first");
                 }),
                 "groupby_max" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").max().expect("max");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .max()
+                        .expect("max");
                 }),
                 "groupby_sum_int64" => time_us(|| {
                     let _ = gframe
@@ -868,9 +900,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 .map(|i| base + i * 37_000_000_000)
                 .collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let series =
-                Series::new("d".to_string(), index, Column::from_datetime64_values(nanos))
-                    .expect("dt series");
+            let series = Series::new(
+                "d".to_string(),
+                index,
+                Column::from_datetime64_values(nanos),
+            )
+            .expect("dt series");
             time_us(|| {
                 let _ = series.dt().dayofyear().expect("dt dayofyear");
             })

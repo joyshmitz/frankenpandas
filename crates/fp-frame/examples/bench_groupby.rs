@@ -4,8 +4,7 @@
 //!
 //! Run: cargo run -p fp-frame --example bench_groupby --release -- 1000000 1000 20
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -17,7 +16,9 @@ fn build(n: usize, card: usize, utf8_key: bool) -> DataFrame {
     let mut cols = BTreeMap::new();
     let key_col = if utf8_key {
         Column::from_values(
-            (0..n).map(|i| Scalar::Utf8(format!("k{:04}", i % card))).collect(),
+            (0..n)
+                .map(|i| Scalar::Utf8(format!("k{:04}", i % card)))
+                .collect(),
         )
         .unwrap()
     } else {
@@ -46,7 +47,10 @@ fn best<F: Fn()>(iters: usize, f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let card: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
 

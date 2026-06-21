@@ -12,7 +12,10 @@ use fp_types::Scalar;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let mut st: u64 = 0xabcd_1234_5678_9f01;
@@ -20,7 +23,9 @@ fn main() {
         st = st.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         ((st >> 11) as f64) / (1u64 << 53) as f64
     };
-    let vals: Vec<Scalar> = (0..n).map(|_| Scalar::Float64((nextf() * 1000.0).floor())).collect();
+    let vals: Vec<Scalar> = (0..n)
+        .map(|_| Scalar::Float64((nextf() * 1000.0).floor()))
+        .collect();
     let s = Series::from_values("v", labels, vals).unwrap();
 
     let mut best = u128::MAX;

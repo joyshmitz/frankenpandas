@@ -904,10 +904,16 @@ mod tests {
         assert!(f.starts_with("sha256:"), "prefix");
         assert_eq!(f.len(), 7 + 64, "length");
         assert!(
-            f[7..].bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            f[7..]
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
             "lowercase hex"
         );
-        assert_eq!(f, super::semantic_fingerprint_bytes(b"frankenpandas"), "deterministic");
+        assert_eq!(
+            f,
+            super::semantic_fingerprint_bytes(b"frankenpandas"),
+            "deterministic"
+        );
 
         // Distinctness on a small sample (no collisions).
         let inputs: [&[u8]; 5] = [b"a", b"b", b"ab", b"ba", b""];
@@ -928,7 +934,10 @@ mod tests {
         b.update(b"hello");
         b.update(b" ");
         b.update(b"world");
-        assert_eq!(b.finish(), super::semantic_fingerprint_bytes(b"hello world"));
+        assert_eq!(
+            b.finish(),
+            super::semantic_fingerprint_bytes(b"hello world")
+        );
     }
 
     #[test]
@@ -985,20 +994,35 @@ mod tests {
                 expected_k,
                 "one symbol hash per source symbol, len={len}"
             );
-            assert_eq!(env.raptorq.repair_symbols, repair, "repair_symbols len={len}");
+            assert_eq!(
+                env.raptorq.repair_symbols, repair,
+                "repair_symbols len={len}"
+            );
             assert_eq!(
                 env.source_hash,
                 super::semantic_fingerprint_bytes(&source),
                 "source_hash == fingerprint, len={len}"
             );
-            let expected_overhead =
-                if expected_k == 0 { 0.0 } else { f64::from(repair) / f64::from(expected_k) };
-            assert_eq!(env.raptorq.overhead_ratio, expected_overhead, "overhead len={len}");
+            let expected_overhead = if expected_k == 0 {
+                0.0
+            } else {
+                f64::from(repair) / f64::from(expected_k)
+            };
+            assert_eq!(
+                env.raptorq.overhead_ratio, expected_overhead,
+                "overhead len={len}"
+            );
             assert_eq!(env.scrub.status, "ok", "scrub ok len={len}");
-            assert!(env.decode_proofs.is_empty(), "no decode proofs yet len={len}");
+            assert!(
+                env.decode_proofs.is_empty(),
+                "no decode proofs yet len={len}"
+            );
             // Every symbol hash is a well-formed sha256 fingerprint.
             assert!(
-                env.raptorq.symbol_hashes.iter().all(|h| h.starts_with("sha256:") && h.len() == 7 + 64),
+                env.raptorq
+                    .symbol_hashes
+                    .iter()
+                    .all(|h| h.starts_with("sha256:") && h.len() == 7 + 64),
                 "symbol hash format len={len}"
             );
         }
@@ -1020,7 +1044,11 @@ mod tests {
             });
         }
         // Never exceeds the cap.
-        assert_eq!(env.decode_proofs.len(), cap, "history capped at MAX_DECODE_PROOFS");
+        assert_eq!(
+            env.decode_proofs.len(),
+            cap,
+            "history capped at MAX_DECODE_PROOFS"
+        );
         // Oldest-first eviction: the retained window is the newest `cap` entries.
         assert_eq!(
             env.decode_proofs.first().unwrap().recovered_blocks,
@@ -1054,13 +1082,21 @@ mod tests {
         assert_eq!(h.mode, RuntimeMode::Hardened);
         assert!(!h.fail_closed_unknown_features);
         assert_eq!(h.hardened_join_row_cap, Some(10));
-        assert_eq!(RuntimePolicy::default().mode, RuntimeMode::Strict, "default is strict");
+        assert_eq!(
+            RuntimePolicy::default().mode,
+            RuntimeMode::Strict,
+            "default is strict"
+        );
 
         // Fail-closed: strict mode rejects unknown features and records the decision.
         let mut led = EvidenceLedger::new();
         let action =
             RuntimePolicy::strict().decide_unknown_feature("widget", "no handler", &mut led);
-        assert_eq!(action, DecisionAction::Reject, "strict fail-closes unknown features");
+        assert_eq!(
+            action,
+            DecisionAction::Reject,
+            "strict fail-closes unknown features"
+        );
         assert_eq!(led.records().len(), 1, "decision recorded");
 
         // Bounded recovery: hardened mode repairs (caps) an over-cap join.

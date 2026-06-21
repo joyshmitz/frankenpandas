@@ -4,7 +4,7 @@
 //! homogeneous-Int64/Float64 (typed) and mixed-dtype (Scalar-fallback) cases, for both
 //! ignore_index branches. Compiled via `cargo check --tests`; full run batch-pending.
 
-use fp_frame::{concat_series_with_ignore_index, Series};
+use fp_frame::{Series, concat_series_with_ignore_index};
 use fp_index::IndexLabel;
 use fp_types::Scalar;
 

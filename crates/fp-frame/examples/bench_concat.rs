@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use fp_columnar::Column;
-use fp_frame::{concat_series_with_ignore_index, Series};
+use fp_frame::{Series, concat_series_with_ignore_index};
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
 
@@ -30,7 +30,10 @@ fn build_one_typed(m: usize, base: i64) -> Series {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let total: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let total: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let k: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
     let m = total / k.max(1);

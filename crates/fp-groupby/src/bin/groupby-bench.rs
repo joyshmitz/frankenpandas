@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use fp_frame::Series;
 use fp_groupby::{
-    AggFunc, GroupByOptions, groupby_agg, groupby_count, groupby_first, groupby_last,
-    groupby_max, groupby_mean, groupby_median, groupby_min, groupby_nunique, groupby_prod,
-    groupby_size, groupby_std, groupby_sum, groupby_var,
+    AggFunc, GroupByOptions, groupby_agg, groupby_count, groupby_first, groupby_last, groupby_max,
+    groupby_mean, groupby_median, groupby_min, groupby_nunique, groupby_prod, groupby_size,
+    groupby_std, groupby_sum, groupby_var,
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;

@@ -4,8 +4,7 @@
 //!
 //! Run: cargo run -p fp-frame --example bench_dropna_cc --release -- 500000 5 30
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;

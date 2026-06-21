@@ -25,7 +25,10 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     // Pseudo-shuffled Float64 (LCG) so rank/nlargest do real work; NaN every 10th for fillna.

@@ -13108,10 +13108,10 @@ mod tests {
         // unescaped value, and write->read round-trips them (write must re-quote).
         // (csv_field_as_written, expected_parsed_value)
         let cases: [(&str, &str); 4] = [
-            ("\"x,y\"", "x,y"),        // comma requires quoting
-            ("\"a\"\"b\"", "a\"b"),    // embedded quote -> doubled
-            ("plain", "plain"),         // no quoting needed
-            ("\" sp \"", " sp "),      // preserved leading/trailing spaces
+            ("\"x,y\"", "x,y"),     // comma requires quoting
+            ("\"a\"\"b\"", "a\"b"), // embedded quote -> doubled
+            ("plain", "plain"),     // no quoting needed
+            ("\" sp \"", " sp "),   // preserved leading/trailing spaces
         ];
         for (field, expected) in cases {
             let input = format!("col\n{field}\n");
@@ -13138,9 +13138,19 @@ mod tests {
         // column order joined by comma.
         let idx = vec![0_i64.into(), 1_i64.into()];
         let col = |name: &str, v: [i64; 2]| {
-            Series::from_values(name, idx.clone(), vec![Scalar::Int64(v[0]), Scalar::Int64(v[1])]).unwrap()
+            Series::from_values(
+                name,
+                idx.clone(),
+                vec![Scalar::Int64(v[0]), Scalar::Int64(v[1])],
+            )
+            .unwrap()
         };
-        let df = DataFrame::from_series(vec![col("alpha", [1, 2]), col("beta", [3, 4]), col("gamma", [5, 6])]).unwrap();
+        let df = DataFrame::from_series(vec![
+            col("alpha", [1, 2]),
+            col("beta", [3, 4]),
+            col("gamma", [5, 6]),
+        ])
+        .unwrap();
         let csv = write_csv_string(&df).expect("write");
         let header = csv.lines().next().expect("header line");
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
@@ -13151,9 +13161,21 @@ mod tests {
         // br-frankenpandas-me2x3: read_csv infers Int64 for all-int, Float64 for a
         // column containing a decimal, Utf8 for text.
         let df = read_csv_str("a,b,c\n1,1.5,x\n2,2.5,y\n3,3.5,z\n").expect("read");
-        assert_eq!(df.column("a").expect("a").dtype(), DType::Int64, "all-int -> Int64");
-        assert_eq!(df.column("b").expect("b").dtype(), DType::Float64, "decimal -> Float64");
-        assert_eq!(df.column("c").expect("c").dtype(), DType::Utf8, "text -> Utf8");
+        assert_eq!(
+            df.column("a").expect("a").dtype(),
+            DType::Int64,
+            "all-int -> Int64"
+        );
+        assert_eq!(
+            df.column("b").expect("b").dtype(),
+            DType::Float64,
+            "decimal -> Float64"
+        );
+        assert_eq!(
+            df.column("c").expect("c").dtype(),
+            DType::Utf8,
+            "text -> Utf8"
+        );
         assert_eq!(df.len(), 3, "row count");
     }
 
@@ -13174,8 +13196,15 @@ mod tests {
         // field, not two columns (RFC4180). Companion to ftqon (embedded newline).
         let df = read_csv_str("col,n\n\"a,b\",1\n").expect("read");
         assert_eq!(df.len(), 1, "one row");
-        assert!(df.column("col").is_some() && df.column("n").is_some(), "two columns only");
-        assert_eq!(df.column("col").unwrap().values()[0], Scalar::Utf8("a,b".to_owned()), "embedded comma kept");
+        assert!(
+            df.column("col").is_some() && df.column("n").is_some(),
+            "two columns only"
+        );
+        assert_eq!(
+            df.column("col").unwrap().values()[0],
+            Scalar::Utf8("a,b".to_owned()),
+            "embedded comma kept"
+        );
     }
 
     #[test]
@@ -13207,18 +13236,24 @@ mod tests {
         // br-frankenpandas-w3dja: Bool column survives write_csv_string -> read_csv_str
         // (True/False spelling on write + case-insensitive bool inference on read).
         let bools = [true, false, true, false, true];
-        let df = DataFrame::from_series(vec![Series::from_values(
-            "flag",
-            (0..bools.len() as i64).map(Into::into).collect::<Vec<_>>(),
-            bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>(),
-        )
-        .unwrap()])
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "flag",
+                (0..bools.len() as i64).map(Into::into).collect::<Vec<_>>(),
+                bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ])
         .unwrap();
 
         let csv = write_csv_string(&df).expect("write");
         let back = read_csv_str(&csv).expect("read");
         let col = back.column("flag").expect("flag");
-        assert_eq!(col.dtype(), DType::Bool, "round-trip keeps Bool; csv={csv:?}");
+        assert_eq!(
+            col.dtype(),
+            DType::Bool,
+            "round-trip keeps Bool; csv={csv:?}"
+        );
         assert_eq!(
             col.values(),
             &bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>()[..],
@@ -15038,7 +15073,11 @@ mod tests {
         // infers a numeric dtype (pandas parity).
         let int_col = read_csv_str("x\n1\n\"2\"\n3\n").expect("read int");
         let xi = int_col.column("x").expect("x");
-        assert_eq!(xi.dtype(), DType::Int64, "mixed quoted/unquoted ints -> Int64");
+        assert_eq!(
+            xi.dtype(),
+            DType::Int64,
+            "mixed quoted/unquoted ints -> Int64"
+        );
         assert_eq!(
             xi.values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
@@ -15047,10 +15086,18 @@ mod tests {
         // Mixed int + quoted float -> Float64 (one float promotes the column).
         let float_col = read_csv_str("y\n1\n\"2.5\"\n3\n").expect("read float");
         let yf = float_col.column("y").expect("y");
-        assert_eq!(yf.dtype(), DType::Float64, "mixed int + quoted float -> Float64");
+        assert_eq!(
+            yf.dtype(),
+            DType::Float64,
+            "mixed int + quoted float -> Float64"
+        );
         assert_eq!(
             yf.values(),
-            &[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(3.0)]
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.0)
+            ]
         );
     }
 
@@ -15724,7 +15771,10 @@ mod tests {
         // a quoted column name is unobservable when header=false, so it must not
         // force the all-valid typed writer off the fast path.
         let mut columns = BTreeMap::new();
-        columns.insert("needs,quote".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "needs,quote".to_string(),
+            Column::from_i64_values(vec![1, 2]),
+        );
         let frame = DataFrame::new_with_column_order(
             Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
             columns,
@@ -15753,7 +15803,10 @@ mod tests {
         // emitted headers use the same QUOTE_MINIMAL rules as data cells, so
         // typed columns with quoted names can still bypass the generic writer.
         let mut columns = BTreeMap::new();
-        columns.insert("comma,name".to_string(), Column::from_i64_values(vec![1, 2]));
+        columns.insert(
+            "comma,name".to_string(),
+            Column::from_i64_values(vec![1, 2]),
+        );
         columns.insert(
             "quote\"name".to_string(),
             Column::from_f64_values(vec![1.0, 2.5]),
@@ -15788,10 +15841,7 @@ mod tests {
         // columns through per-cell Scalar materialization.
         let mut columns = BTreeMap::new();
         columns.insert("a".to_string(), Column::from_i64_values(vec![1, 2]));
-        columns.insert(
-            "b".to_string(),
-            Column::from_f64_values(vec![1.0, 2.5]),
-        );
+        columns.insert("b".to_string(), Column::from_f64_values(vec![1.0, 2.5]));
         let frame = DataFrame::new_with_column_order(
             Index::from_i64(vec![10, 20]).set_name("row,id"),
             columns,

@@ -56,7 +56,10 @@ fn digest(sorted: &Series) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
 
     let series = build(n);

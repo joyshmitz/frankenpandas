@@ -22,13 +22,18 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let s = Series::from_values(
         "v",
         labels.clone(),
-        (0..n as i64).map(|x| Scalar::Float64(x as f64 * 1.5)).collect(),
+        (0..n as i64)
+            .map(|x| Scalar::Float64(x as f64 * 1.5))
+            .collect(),
     )
     .unwrap();
     let cond = Series::from_values(

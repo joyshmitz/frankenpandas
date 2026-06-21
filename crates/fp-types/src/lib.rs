@@ -4762,13 +4762,28 @@ mod tests {
             let f = (next() % 400) as f64 / 20.0 - 10.0; // finite
             let exp = (i as f64).partial_cmp(&f).unwrap();
             assert_eq!(Scalar::Int64(i).semantic_cmp(&Scalar::Float64(f)), exp);
-            assert_eq!(Scalar::Float64(f).semantic_cmp(&Scalar::Int64(i)), exp.reverse());
+            assert_eq!(
+                Scalar::Float64(f).semantic_cmp(&Scalar::Int64(i)),
+                exp.reverse()
+            );
         }
         // Exact int/float equality compares Equal in both directions.
-        assert_eq!(Scalar::Int64(5).semantic_cmp(&Scalar::Float64(5.0)), Ordering::Equal);
-        assert_eq!(Scalar::Float64(5.0).semantic_cmp(&Scalar::Int64(5)), Ordering::Equal);
-        assert_eq!(Scalar::Int64(3).semantic_cmp(&Scalar::Float64(3.5)), Ordering::Less);
-        assert_eq!(Scalar::Int64(4).semantic_cmp(&Scalar::Float64(3.5)), Ordering::Greater);
+        assert_eq!(
+            Scalar::Int64(5).semantic_cmp(&Scalar::Float64(5.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Scalar::Float64(5.0).semantic_cmp(&Scalar::Int64(5)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Scalar::Int64(3).semantic_cmp(&Scalar::Float64(3.5)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Scalar::Int64(4).semantic_cmp(&Scalar::Float64(3.5)),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -4842,22 +4857,24 @@ mod tests {
             );
             // le / ge / eq consistency with the ordering.
             let ab = a.semantic_cmp(&b);
-            assert_eq!(a.semantic_le(&b), ab != Ordering::Greater, "le-consistent {ctx}");
-            assert_eq!(a.semantic_ge(&b), ab != Ordering::Less, "ge-consistent {ctx}");
+            assert_eq!(
+                a.semantic_le(&b),
+                ab != Ordering::Greater,
+                "le-consistent {ctx}"
+            );
+            assert_eq!(
+                a.semantic_ge(&b),
+                ab != Ordering::Less,
+                "ge-consistent {ctx}"
+            );
             assert_eq!(
                 a.semantic_le(&b) && a.semantic_ge(&b),
                 ab == Ordering::Equal,
                 "le&ge<=>eq {ctx}"
             );
             // Transitivity: a<=b && b<=c  =>  a<=c.
-            if a.semantic_cmp(&b) != Ordering::Greater
-                && b.semantic_cmp(&c) != Ordering::Greater
-            {
-                assert_ne!(
-                    a.semantic_cmp(&c),
-                    Ordering::Greater,
-                    "transitivity {ctx}"
-                );
+            if a.semantic_cmp(&b) != Ordering::Greater && b.semantic_cmp(&c) != Ordering::Greater {
+                assert_ne!(a.semantic_cmp(&c), Ordering::Greater, "transitivity {ctx}");
             }
         }
 
@@ -4903,8 +4920,16 @@ mod tests {
             // Idempotence: a promoted with itself is itself.
             assert_eq!(common_dtype(a, a), Ok(a), "idempotent {a:?}");
             // Null is the identity element of the promotion lattice.
-            assert_eq!(common_dtype(DType::Null, a), Ok(a), "null-left identity {a:?}");
-            assert_eq!(common_dtype(a, DType::Null), Ok(a), "null-right identity {a:?}");
+            assert_eq!(
+                common_dtype(DType::Null, a),
+                Ok(a),
+                "null-left identity {a:?}"
+            );
+            assert_eq!(
+                common_dtype(a, DType::Null),
+                Ok(a),
+                "null-right identity {a:?}"
+            );
 
             for &b in &ALL {
                 // Commutativity: same Ok value AND same ok-ness. An asymmetric
@@ -4928,8 +4953,7 @@ mod tests {
             for &b in &ALL {
                 for &c in &ALL {
                     if let (Ok(ab), Ok(bc)) = (common_dtype(a, b), common_dtype(b, c))
-                        && let (Ok(left), Ok(right)) =
-                            (common_dtype(ab, c), common_dtype(a, bc))
+                        && let (Ok(left), Ok(right)) = (common_dtype(ab, c), common_dtype(a, bc))
                     {
                         assert_eq!(left, right, "associative {a:?},{b:?},{c:?}");
                     }
@@ -4961,22 +4985,29 @@ mod tests {
         };
         for _ in 0..600u32 {
             let n = (next() % 6) as usize + 1;
-            let ints: Vec<Scalar> =
-                (0..n).map(|_| Scalar::Int64((next() % 9) as i64 - 4)).collect();
+            let ints: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Int64((next() % 9) as i64 - 4))
+                .collect();
             assert_eq!(infer_dtype(&ints), Ok(Int64));
-            let floats: Vec<Scalar> =
-                (0..n).map(|_| Scalar::Float64(f64::from((next() % 7) as i32))).collect();
+            let floats: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Float64(f64::from((next() % 7) as i32)))
+                .collect();
             assert_eq!(infer_dtype(&floats), Ok(Float64));
             let bools: Vec<Scalar> = (0..n).map(|_| Scalar::Bool(next() % 2 == 0)).collect();
             assert_eq!(infer_dtype(&bools), Ok(Bool));
-            let strs: Vec<Scalar> =
-                (0..n).map(|_| Scalar::Utf8(format!("s{}", next() % 4))).collect();
+            let strs: Vec<Scalar> = (0..n)
+                .map(|_| Scalar::Utf8(format!("s{}", next() % 4)))
+                .collect();
             assert_eq!(infer_dtype(&strs), Ok(Utf8));
         }
 
         // Mixed-coercion rules.
         assert_eq!(
-            infer_dtype(&[Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(2)]),
+            infer_dtype(&[
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2)
+            ]),
             Ok(Int64),
             "Int64 + nulls -> Int64"
         );
@@ -5046,9 +5077,18 @@ mod tests {
     fn cast_scalar_bool_int_roundtrip_6w07b() {
         use super::cast_scalar;
         // Property (br-frankenpandas-6w07b): Bool<->Int64 cast. Seeded LCG, no mocks.
-        assert_eq!(cast_scalar(&Scalar::Bool(true), DType::Int64).unwrap(), Scalar::Int64(1));
-        assert_eq!(cast_scalar(&Scalar::Bool(false), DType::Int64).unwrap(), Scalar::Int64(0));
-        assert_eq!(cast_scalar(&Scalar::Int64(0), DType::Bool).unwrap(), Scalar::Bool(false));
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(true), DType::Int64).unwrap(),
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(false), DType::Int64).unwrap(),
+            Scalar::Int64(0)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Int64(0), DType::Bool).unwrap(),
+            Scalar::Bool(false)
+        );
         let mut st: u64 = 0x4b07_0b1c_2d3e_4f50;
         let mut next = || {
             st = st
@@ -5058,7 +5098,11 @@ mod tests {
         };
         for _ in 0..2000u32 {
             let v = (next() % 21) as i64 - 10;
-            assert_eq!(cast_scalar(&Scalar::Int64(v), DType::Bool).unwrap(), Scalar::Bool(v != 0), "int->bool v={v}");
+            assert_eq!(
+                cast_scalar(&Scalar::Int64(v), DType::Bool).unwrap(),
+                Scalar::Bool(v != 0),
+                "int->bool v={v}"
+            );
         }
     }
 
@@ -5076,14 +5120,31 @@ mod tests {
             (st >> 33) as u32
         };
         // Explicit negative-direction checks (the gotcha).
-        for (f, exp) in [(-3.7, -3i64), (3.7, 3), (-3.2, -3), (3.2, 3), (-0.9, 0), (0.9, 0), (-5.0, -5), (5.0, 5)] {
-            assert_eq!(cast_scalar(&Scalar::Float64(f), DType::Int64).unwrap(), Scalar::Int64(exp), "cast {f}");
+        for (f, exp) in [
+            (-3.7, -3i64),
+            (3.7, 3),
+            (-3.2, -3),
+            (3.2, 3),
+            (-0.9, 0),
+            (0.9, 0),
+            (-5.0, -5),
+            (5.0, 5),
+        ] {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(f), DType::Int64).unwrap(),
+                Scalar::Int64(exp),
+                "cast {f}"
+            );
         }
         // Property over random signed fractional values.
         for _ in 0..3000u32 {
             let v = (next() % 2_000_001) as f64 / 1000.0 - 1000.0; // [-1000, 1000]
             let got = cast_scalar(&Scalar::Float64(v), DType::Int64).unwrap();
-            assert_eq!(got, Scalar::Int64(v.trunc() as i64), "trunc-toward-zero v={v}");
+            assert_eq!(
+                got,
+                Scalar::Int64(v.trunc() as i64),
+                "trunc-toward-zero v={v}"
+            );
         }
     }
 
@@ -5104,20 +5165,44 @@ mod tests {
         for iter in 0..1000u32 {
             let n = (next() % 10) as usize + 1;
             let raw: Vec<f64> = (0..n)
-                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 5) as f64 })
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 5) as f64
+                    }
+                })
                 .collect();
             let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
             if finite.is_empty() {
                 continue;
             }
             let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
-            let distinct: std::collections::HashSet<u64> = finite.iter().map(|x| x.to_bits()).collect();
+            let distinct: std::collections::HashSet<u64> =
+                finite.iter().map(|x| x.to_bits()).collect();
             let prod: f64 = finite.iter().product();
-            assert!((asf(nancount(&scalars)) - finite.len() as f64).abs() < 1e-9, "nancount iter={iter}");
-            assert!((asf(nannunique(&scalars)) - distinct.len() as f64).abs() < 1e-9, "nannunique iter={iter}");
-            assert!((asf(nanprod(&scalars)) - prod).abs() < 1e-7, "nanprod iter={iter}");
-            assert_eq!(asb(nanany(&scalars)), finite.iter().any(|&x| x != 0.0), "nanany iter={iter}");
-            assert_eq!(asb(nanall(&scalars)), finite.iter().all(|&x| x != 0.0), "nanall iter={iter}");
+            assert!(
+                (asf(nancount(&scalars)) - finite.len() as f64).abs() < 1e-9,
+                "nancount iter={iter}"
+            );
+            assert!(
+                (asf(nannunique(&scalars)) - distinct.len() as f64).abs() < 1e-9,
+                "nannunique iter={iter}"
+            );
+            assert!(
+                (asf(nanprod(&scalars)) - prod).abs() < 1e-7,
+                "nanprod iter={iter}"
+            );
+            assert_eq!(
+                asb(nanany(&scalars)),
+                finite.iter().any(|&x| x != 0.0),
+                "nanany iter={iter}"
+            );
+            assert_eq!(
+                asb(nanall(&scalars)),
+                finite.iter().all(|&x| x != 0.0),
+                "nanall iter={iter}"
+            );
         }
     }
 
@@ -5137,7 +5222,13 @@ mod tests {
         for iter in 0..1000u32 {
             let n = (next() % 12) as usize + 1;
             let raw: Vec<f64> = (0..n)
-                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 200) as f64 - 100.0 })
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 200) as f64 - 100.0
+                    }
+                })
                 .collect();
             let mut finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
             if finite.is_empty() {
@@ -5149,11 +5240,27 @@ mod tests {
             let mx = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let m = finite.len();
-            let med = if m % 2 == 1 { finite[m / 2] } else { (finite[m / 2 - 1] + finite[m / 2]) / 2.0 };
-            assert!((val(nansum(&scalars)) - sum).abs() < 1e-7, "nansum iter={iter}");
-            assert!((val(nanmin(&scalars)) - mn).abs() < 1e-9, "nanmin iter={iter}");
-            assert!((val(nanmax(&scalars)) - mx).abs() < 1e-9, "nanmax iter={iter}");
-            assert!((val(nanmedian(&scalars)) - med).abs() < 1e-9, "nanmedian iter={iter}");
+            let med = if m % 2 == 1 {
+                finite[m / 2]
+            } else {
+                (finite[m / 2 - 1] + finite[m / 2]) / 2.0
+            };
+            assert!(
+                (val(nansum(&scalars)) - sum).abs() < 1e-7,
+                "nansum iter={iter}"
+            );
+            assert!(
+                (val(nanmin(&scalars)) - mn).abs() < 1e-9,
+                "nanmin iter={iter}"
+            );
+            assert!(
+                (val(nanmax(&scalars)) - mx).abs() < 1e-9,
+                "nanmax iter={iter}"
+            );
+            assert!(
+                (val(nanmedian(&scalars)) - med).abs() < 1e-9,
+                "nanmedian iter={iter}"
+            );
         }
     }
 
@@ -5173,7 +5280,13 @@ mod tests {
         for iter in 0..1000u32 {
             let n = (next() % 10) as usize + 2;
             let raw: Vec<f64> = (0..n)
-                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 200) as f64 / 7.0 })
+                .map(|_| {
+                    if next() % 4 == 0 {
+                        f64::NAN
+                    } else {
+                        (next() % 200) as f64 / 7.0
+                    }
+                })
                 .collect();
             let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
             if finite.len() < 2 {
@@ -5183,10 +5296,22 @@ mod tests {
             let nf = finite.len() as f64;
             let mean = finite.iter().sum::<f64>() / nf;
             let ss = finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
-            assert!((val(nanmean(&scalars)) - mean).abs() < 1e-7, "nanmean iter={iter}");
-            assert!((val(nanvar(&scalars, 0)) - ss / nf).abs() < 1e-7, "nanvar ddof0 iter={iter}");
-            assert!((val(nanvar(&scalars, 1)) - ss / (nf - 1.0)).abs() < 1e-7, "nanvar ddof1 iter={iter}");
-            assert!((val(nanstd(&scalars, 1)) - (ss / (nf - 1.0)).sqrt()).abs() < 1e-7, "nanstd ddof1 iter={iter}");
+            assert!(
+                (val(nanmean(&scalars)) - mean).abs() < 1e-7,
+                "nanmean iter={iter}"
+            );
+            assert!(
+                (val(nanvar(&scalars, 0)) - ss / nf).abs() < 1e-7,
+                "nanvar ddof0 iter={iter}"
+            );
+            assert!(
+                (val(nanvar(&scalars, 1)) - ss / (nf - 1.0)).abs() < 1e-7,
+                "nanvar ddof1 iter={iter}"
+            );
+            assert!(
+                (val(nanstd(&scalars, 1)) - (ss / (nf - 1.0)).sqrt()).abs() < 1e-7,
+                "nanstd ddof1 iter={iter}"
+            );
         }
     }
 
@@ -5196,7 +5321,13 @@ mod tests {
         // threshold) + known pandas G1/G2 values (the f4dc5540 inline-copy bug area).
         use super::{nankurt, nanskew};
         let f = |xs: &[f64]| -> Vec<Scalar> { xs.iter().map(|&x| Scalar::Float64(x)).collect() };
-        let val = |s: Scalar| -> Option<f64> { if s.is_missing() { None } else { s.to_f64().ok() } };
+        let val = |s: Scalar| -> Option<f64> {
+            if s.is_missing() {
+                None
+            } else {
+                s.to_f64().ok()
+            }
+        };
 
         // skew needs >= 3 observations.
         assert_eq!(val(nanskew(&f(&[1.0, 2.0]))), None, "skew n=2 -> NaN");
@@ -5208,7 +5339,10 @@ mod tests {
         // kurt needs >= 4 observations.
         assert_eq!(val(nankurt(&f(&[1.0, 2.0, 3.0]))), None, "kurt n=3 -> NaN");
         let k = val(nankurt(&f(&[1.0, 2.0, 3.0, 4.0, 5.0]))).expect("kurt n=5");
-        assert!((k - (-1.2)).abs() < 1e-6, "pandas kurt([1..5]) == -1.2, got {k}");
+        assert!(
+            (k - (-1.2)).abs() < 1e-6,
+            "pandas kurt([1..5]) == -1.2, got {k}"
+        );
     }
 
     /// behind astype/promotion. Property test of its confirmed identity +
@@ -5231,8 +5365,14 @@ mod tests {
                 Scalar::Utf8(n.to_string())
             );
         }
-        assert_eq!(cast_scalar(&Scalar::Bool(true), DType::Utf8).unwrap(), Scalar::Utf8("True".to_string()));
-        assert_eq!(cast_scalar(&Scalar::Bool(false), DType::Utf8).unwrap(), Scalar::Utf8("False".to_string()));
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(true), DType::Utf8).unwrap(),
+            Scalar::Utf8("True".to_string())
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Bool(false), DType::Utf8).unwrap(),
+            Scalar::Utf8("False".to_string())
+        );
     }
 
     #[test]
@@ -5271,7 +5411,10 @@ mod tests {
             );
 
             // Bool coercions.
-            assert_eq!(cast_scalar(&bo, DType::Int64), Ok(Scalar::Int64(i64::from(b))));
+            assert_eq!(
+                cast_scalar(&bo, DType::Int64),
+                Ok(Scalar::Int64(i64::from(b)))
+            );
             assert_eq!(
                 cast_scalar(&bo, DType::Float64),
                 Ok(Scalar::Float64(if b { 1.0 } else { 0.0 }))
@@ -5791,8 +5934,7 @@ mod tests {
                 expected_dropped.len(),
                 "case={case}: dropna length mismatch for {values:?}"
             );
-            for (pos, (actual, expected)) in
-                dropped.iter().zip(expected_dropped.iter()).enumerate()
+            for (pos, (actual, expected)) in dropped.iter().zip(expected_dropped.iter()).enumerate()
             {
                 assert!(
                     actual.semantic_eq(expected),
@@ -5806,8 +5948,7 @@ mod tests {
                 expected_filled.len(),
                 "case={case}: fill_na length mismatch for {values:?}"
             );
-            for (pos, (actual, expected)) in filled.iter().zip(expected_filled.iter()).enumerate()
-            {
+            for (pos, (actual, expected)) in filled.iter().zip(expected_filled.iter()).enumerate() {
                 assert!(
                     actual.semantic_eq(expected),
                     "case={case} pos={pos}: fill_na expected {expected:?}, got {actual:?}"
@@ -5921,7 +6062,10 @@ mod tests {
             }
             let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
             let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-            (Scalar::Timedelta64(sum as i64), Scalar::Timedelta64(mean as i64))
+            (
+                Scalar::Timedelta64(sum as i64),
+                Scalar::Timedelta64(mean as i64),
+            )
         }
 
         fn assert_sum_mean(
@@ -6609,7 +6753,10 @@ mod tests {
                 return None;
             }
             let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-            let sum_sq = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>();
+            let sum_sq = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
             let var = sum_sq / (samples.len() - ddof) as f64;
             let std = var.sqrt();
             let sem = std / (samples.len() as f64).sqrt();
@@ -6622,7 +6769,11 @@ mod tests {
                 let missing = Scalar::Null(NullKind::NaN);
                 return (missing.clone(), missing.clone(), missing);
             };
-            (Scalar::Float64(var), Scalar::Float64(std), Scalar::Float64(sem))
+            (
+                Scalar::Float64(var),
+                Scalar::Float64(std),
+                Scalar::Float64(sem),
+            )
         }
 
         fn expected_timedelta(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
@@ -7183,7 +7334,10 @@ mod tests {
             Timedelta::ceil(-Timedelta::NANOS_PER_SEC, "s"),
             -Timedelta::NANOS_PER_SEC
         );
-        assert_eq!(Timedelta::floor(1_500_000_000, "s"), Timedelta::NANOS_PER_SEC);
+        assert_eq!(
+            Timedelta::floor(1_500_000_000, "s"),
+            Timedelta::NANOS_PER_SEC
+        );
         assert_eq!(
             Timedelta::ceil(1_500_000_000, "s"),
             2 * Timedelta::NANOS_PER_SEC
@@ -7645,13 +7799,7 @@ mod tests {
             Scalar::Timedelta64(interpolated(&samples, q) as i64)
         }
 
-        fn assert_quantile(
-            case: usize,
-            family: &str,
-            values: &[Scalar],
-            q: f64,
-            expected: Scalar,
-        ) {
+        fn assert_quantile(case: usize, family: &str, values: &[Scalar], q: f64, expected: Scalar) {
             let actual = super::nanquantile(values, q);
             assert!(
                 actual.semantic_eq(&expected),
@@ -7718,13 +7866,7 @@ mod tests {
                     _ => Scalar::Float64(-0.0),
                 });
             }
-            assert_quantile(
-                case,
-                "numeric",
-                &numeric,
-                q,
-                expected_numeric(&numeric, q),
-            );
+            assert_quantile(case, "numeric", &numeric, q, expected_numeric(&numeric, q));
 
             let mut timedeltas = Vec::with_capacity(len);
             timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
@@ -8785,13 +8927,7 @@ mod tests {
             );
         }
 
-        assert_period_case(
-            usize::MAX,
-            PeriodFreq::Daily,
-            i64::MAX - 2,
-            10,
-            i64::MIN,
-        );
+        assert_period_case(usize::MAX, PeriodFreq::Daily, i64::MAX - 2, 10, i64::MIN);
         assert_period_case(
             usize::MAX - 1,
             PeriodFreq::Daily,
@@ -9174,9 +9310,11 @@ mod tests {
 
         assert!(interval_range_by_periods(5.0, 5.0, 4, IntervalClosed::Right).is_empty());
         assert!(interval_range_by_periods(5.0, 4.0, 4, IntervalClosed::Right).is_empty());
-        assert!(interval_range_by_step(5.0, 5.0, 1.0, IntervalClosed::Right)
-            .expect("zero span")
-            .is_empty());
+        assert!(
+            interval_range_by_step(5.0, 5.0, 1.0, IntervalClosed::Right)
+                .expect("zero span")
+                .is_empty()
+        );
 
         let mut seed = 0x171e_7a11_c0de_5eed_u64;
         for case in 0..220 {
@@ -9934,30 +10072,39 @@ mod tests {
             Some("UTC")
         );
 
-        assert!(ts
-            .replace(None, Some(13), None, None, None, None, None, None)
-            .is_nat());
-        assert!(ts
-            .replace(Some(2023), Some(2), Some(29), None, None, None, None, None)
-            .is_nat());
-        assert!(ts
-            .replace(None, None, None, Some(24), None, None, None, None)
-            .is_nat());
-        assert!(ts
-            .replace(None, None, None, None, Some(60), None, None, None)
-            .is_nat());
-        assert!(ts
-            .replace(None, None, None, None, None, Some(60), None, None)
-            .is_nat());
-        assert!(ts
-            .replace(None, None, None, None, None, None, Some(1_000_000), None)
-            .is_nat());
-        assert!(ts
-            .replace(None, None, None, None, None, None, None, Some(1_000))
-            .is_nat());
-        assert!(Timestamp::nat()
-            .replace(Some(2024), Some(1), Some(1), None, None, None, None, None)
-            .is_nat());
+        assert!(
+            ts.replace(None, Some(13), None, None, None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(Some(2023), Some(2), Some(29), None, None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, Some(24), None, None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, Some(60), None, None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, Some(60), None, None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, None, Some(1_000_000), None)
+                .is_nat()
+        );
+        assert!(
+            ts.replace(None, None, None, None, None, None, None, Some(1_000))
+                .is_nat()
+        );
+        assert!(
+            Timestamp::nat()
+                .replace(Some(2024), Some(1), Some(1), None, None, None, None, None)
+                .is_nat()
+        );
     }
 
     #[test]
@@ -10163,9 +10310,7 @@ mod tests {
         }
 
         fn assert_ordinal_case(case: usize, day_offset: i64, subday_nanos: i64) {
-            let nanos = day_offset
-                .saturating_mul(DAY)
-                .saturating_add(subday_nanos);
+            let nanos = day_offset.saturating_mul(DAY).saturating_add(subday_nanos);
             let ts = Timestamp::from_nanos(nanos);
             let expected_day_offset = nanos.div_euclid(DAY);
             let expected_ordinal = EPOCH_ORDINAL + expected_day_offset;
@@ -10347,16 +10492,8 @@ mod tests {
             assert_eq!(ts.month(), Some(month as i64), "case {case}: month");
             assert_eq!(ts.day(), Some(day as i64), "case {case}: day");
             assert_eq!(ts.hour(), Some(hour as i64), "case {case}: hour");
-            assert_eq!(
-                ts.minute(),
-                Some(minute as i64),
-                "case {case}: minute"
-            );
-            assert_eq!(
-                ts.second(),
-                Some(second as i64),
-                "case {case}: second"
-            );
+            assert_eq!(ts.minute(), Some(minute as i64), "case {case}: minute");
+            assert_eq!(ts.second(), Some(second as i64), "case {case}: second");
             assert_eq!(
                 ts.microsecond(),
                 Some((nanos / 1000) as i64),
@@ -10370,7 +10507,11 @@ mod tests {
         }
 
         assert!(Timestamp::parse("NaT").expect("NaT parses").is_nat());
-        assert!(Timestamp::parse("nAt").expect("mixed-case NaT parses").is_nat());
+        assert!(
+            Timestamp::parse("nAt")
+                .expect("mixed-case NaT parses")
+                .is_nat()
+        );
         assert!(Timestamp::parse("1900-02-29").is_err());
         assert!(Timestamp::parse("2001-04-31").is_err());
         assert!(Timestamp::parse("2024-00-15").is_err());

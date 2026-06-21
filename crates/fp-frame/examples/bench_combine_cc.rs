@@ -9,7 +9,10 @@ use fp_types::Scalar;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let mode = args.get(3).map(String::as_str).unwrap_or("construct");
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
@@ -30,9 +33,7 @@ fn main() {
     let b = Series::from_values(
         "b",
         labels,
-        (0..n)
-            .map(|i| Scalar::Float64(i as f64 * 2.0))
-            .collect(),
+        (0..n).map(|i| Scalar::Float64(i as f64 * 2.0)).collect(),
     )
     .unwrap();
 

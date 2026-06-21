@@ -7,8 +7,7 @@
 //!
 //! Run: cargo run -p fp-frame --example bench_reset_index --release -- 1000000 50
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -58,7 +57,10 @@ fn digest(df: &DataFrame) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
 
     let df = build(n);

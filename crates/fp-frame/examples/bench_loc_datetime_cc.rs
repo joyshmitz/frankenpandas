@@ -10,7 +10,10 @@ use fp_types::Scalar;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let k: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50);
     let base: i64 = 1_600_000_000_000_000_000;
@@ -38,5 +41,8 @@ fn main() {
             best = e;
         }
     }
-    println!("loc_datetime n={n} k={k}: best={best}ns ({:.4}ms)", best as f64 / 1e6);
+    println!(
+        "loc_datetime n={n} k={k}: best={best}ns ({:.4}ms)",
+        best as f64 / 1e6
+    );
 }

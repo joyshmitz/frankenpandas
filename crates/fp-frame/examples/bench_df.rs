@@ -1,8 +1,7 @@
 //! DataFrame-level sweep: sum(axis=1) row-wise + transpose. Float64 frame.
 //! Run: cargo run -p fp-frame --example bench_df --release -- 500000 10 30
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -34,8 +33,12 @@ fn main() {
         let name = format!("c{c}");
         cols.insert(
             name.clone(),
-            Column::from_values((0..n).map(|i| Scalar::Float64((i + c) as f64 * 1.5)).collect())
-                .unwrap(),
+            Column::from_values(
+                (0..n)
+                    .map(|i| Scalar::Float64((i + c) as f64 * 1.5))
+                    .collect(),
+            )
+            .unwrap(),
         );
         order.push(name);
     }
@@ -62,7 +65,9 @@ fn main() {
     let std_axis1 = best(iters, || {
         std::hint::black_box(df.std_axis1().expect("std_axis1"));
     });
-    println!("df_axis1 min={min_axis1}ns max={max_axis1}ns prod={prod_axis1}ns mean={mean_axis1}ns var={var_axis1}ns std={std_axis1}ns");
+    println!(
+        "df_axis1 min={min_axis1}ns max={max_axis1}ns prod={prod_axis1}ns mean={mean_axis1}ns var={var_axis1}ns std={std_axis1}ns"
+    );
     let sum_axis0 = best(iters, || {
         std::hint::black_box(df.sum().expect("sum"));
     });

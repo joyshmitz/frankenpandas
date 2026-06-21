@@ -24,7 +24,10 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let mut st: u64 = 0xdead_beef_cafe_1234;
@@ -35,7 +38,9 @@ fn main() {
     let vals: Vec<Scalar> = (0..n).map(|_| Scalar::Float64(nextf() * 1e6)).collect();
     let s = Series::from_values("v", labels.clone(), vals).unwrap();
     // ~1000 distinct for mode
-    let mvals: Vec<Scalar> = (0..n).map(|_| Scalar::Float64((nextf() * 1000.0).floor())).collect();
+    let mvals: Vec<Scalar> = (0..n)
+        .map(|_| Scalar::Float64((nextf() * 1000.0).floor()))
+        .collect();
     let sm = Series::from_values("v", labels, mvals).unwrap();
 
     let skew = best(iters, || {
@@ -54,5 +59,7 @@ fn main() {
         std::hint::black_box(sm.mode().expect("mode"));
     });
 
-    println!("misc4 n={n}: skew={skew}ns kurt={kurt}ns sem={sem}ns median={median}ns mode={mode}ns");
+    println!(
+        "misc4 n={n}: skew={skew}ns kurt={kurt}ns sem={sem}ns median={median}ns mode={mode}ns"
+    );
 }

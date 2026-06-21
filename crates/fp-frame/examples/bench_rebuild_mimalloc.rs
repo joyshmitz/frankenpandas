@@ -30,12 +30,17 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> u128 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
 
     // shift workload: 2M f64, periods=1 (matches bench_shift f64 path).
-    let shift_vals: Vec<Scalar> = (0..n as i64).map(|x| Scalar::Float64(x as f64 * 1.5)).collect();
+    let shift_vals: Vec<Scalar> = (0..n as i64)
+        .map(|x| Scalar::Float64(x as f64 * 1.5))
+        .collect();
     let shift_s = Series::from_values("v", labels.clone(), shift_vals).unwrap();
     let shift_best = best(iters, || {
         std::hint::black_box(shift_s.shift(1).expect("shift"));

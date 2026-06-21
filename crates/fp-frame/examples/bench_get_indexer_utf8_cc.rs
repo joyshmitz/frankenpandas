@@ -9,17 +9,25 @@ use fp_index::{Index, IndexLabel};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let mut keys: Vec<usize> = (0..n).collect();
     let mut st: u64 = 0x9E37_79B9_7F4A_7C15;
     for i in (1..n).rev() {
-        st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        st = st
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (st >> 33) as usize % (i + 1);
         keys.swap(i, j);
     }
-    let labels: Vec<IndexLabel> = keys.iter().map(|&i| IndexLabel::Utf8(format!("k{i:08}"))).collect();
+    let labels: Vec<IndexLabel> = keys
+        .iter()
+        .map(|&i| IndexLabel::Utf8(format!("k{i:08}")))
+        .collect();
     let idx = Index::new(labels);
     let tgt: Vec<IndexLabel> = (0..1000)
         .map(|j| IndexLabel::Utf8(format!("k{:08}", j * (n / 1000))))
@@ -36,5 +44,8 @@ fn main() {
             best = e;
         }
     }
-    println!("get_indexer_utf8 n={n} m=1000: best={best}ns ({:.4}ms)", best as f64 / 1e6);
+    println!(
+        "get_indexer_utf8 n={n} m=1000: best={best}ns ({:.4}ms)",
+        best as f64 / 1e6
+    );
 }

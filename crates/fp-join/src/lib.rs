@@ -8922,10 +8922,28 @@ mod tests {
         for iter in 0..300u32 {
             let ln = (next() % 6) as usize + 1;
             let rn = (next() % 6) as usize + 1;
-            let lk: Vec<Scalar> = (0..ln).map(|_| Scalar::Int64((next() % 4) as i64)).collect();
-            let rk: Vec<Scalar> = (0..rn).map(|_| Scalar::Int64((next() % 4) as i64)).collect();
-            let left = DataFrame::from_dict(&["k", "lv"], vec![("k", lk), ("lv", (0..ln).map(|i| Scalar::Int64(i as i64)).collect())]).unwrap();
-            let right = DataFrame::from_dict(&["k", "rv"], vec![("k", rk), ("rv", (0..rn).map(|i| Scalar::Int64(i as i64)).collect())]).unwrap();
+            let lk: Vec<Scalar> = (0..ln)
+                .map(|_| Scalar::Int64((next() % 4) as i64))
+                .collect();
+            let rk: Vec<Scalar> = (0..rn)
+                .map(|_| Scalar::Int64((next() % 4) as i64))
+                .collect();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk),
+                    ("lv", (0..ln).map(|i| Scalar::Int64(i as i64)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk),
+                    ("rv", (0..rn).map(|i| Scalar::Int64(i as i64)).collect()),
+                ],
+            )
+            .unwrap();
             let rows = |jt| {
                 let m = merge_dataframes(&left, &right, "k", jt).unwrap();
                 merged_values(&m, "k").unwrap().len()
@@ -8934,8 +8952,14 @@ mod tests {
             let lj = rows(JoinType::Left);
             let rj = rows(JoinType::Right);
             let outer = rows(JoinType::Outer);
-            assert!(inner <= lj && lj <= outer, "inner<=left<=outer iter={iter}: {inner} {lj} {outer}");
-            assert!(inner <= rj && rj <= outer, "inner<=right<=outer iter={iter}: {inner} {rj} {outer}");
+            assert!(
+                inner <= lj && lj <= outer,
+                "inner<=left<=outer iter={iter}: {inner} {lj} {outer}"
+            );
+            assert!(
+                inner <= rj && rj <= outer,
+                "inner<=right<=outer iter={iter}: {inner} {rj} {outer}"
+            );
         }
     }
 
@@ -8959,29 +8983,52 @@ mod tests {
             let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
             let rk: Vec<i64> = (0..rn).map(|_| (next() % 4) as i64).collect();
             let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
-            let left = DataFrame::from_dict(&["k", "lv"], vec![
-                ("k", lk.iter().map(|&x| Scalar::Int64(x)).collect()),
-                ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
-            ]).unwrap();
-            let right = DataFrame::from_dict(&["k", "rv"], vec![
-                ("k", rk.iter().map(|&x| Scalar::Int64(x)).collect()),
-                ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
-            ]).unwrap();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                    ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk.iter().map(|&x| Scalar::Int64(x)).collect()),
+                    ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
             let merged = merge_dataframes(&left, &right, "k", JoinType::Right).unwrap();
 
             let ks = merged_values(&merged, "k").unwrap();
             let lvs = merged_values(&merged, "lv").unwrap();
             let rvs = merged_values(&merged, "rv").unwrap();
-            let ki = |v: &Scalar| -> i64 { match v { Scalar::Int64(x) => *x, Scalar::Float64(x) => *x as i64, _ => i64::MIN } };
-            let kopt = |v: &Scalar| -> Option<i64> { if v.is_missing() { None } else { Some(ki(v)) } };
-            let mut got: Vec<(i64, Option<i64>, i64)> = (0..ks.len()).map(|i| (ki(&ks[i]), kopt(&lvs[i]), ki(&rvs[i]))).collect();
+            let ki = |v: &Scalar| -> i64 {
+                match v {
+                    Scalar::Int64(x) => *x,
+                    Scalar::Float64(x) => *x as i64,
+                    _ => i64::MIN,
+                }
+            };
+            let kopt =
+                |v: &Scalar| -> Option<i64> { if v.is_missing() { None } else { Some(ki(v)) } };
+            let mut got: Vec<(i64, Option<i64>, i64)> = (0..ks.len())
+                .map(|i| (ki(&ks[i]), kopt(&lvs[i]), ki(&rvs[i])))
+                .collect();
             // Oracle.
             let mut lby: HashMap<i64, Vec<i64>> = HashMap::new();
-            for i in 0..ln { lby.entry(lk[i]).or_default().push(lv[i]); }
+            for i in 0..ln {
+                lby.entry(lk[i]).or_default().push(lv[i]);
+            }
             let mut exp: Vec<(i64, Option<i64>, i64)> = Vec::new();
             for i in 0..rn {
                 match lby.get(&rk[i]) {
-                    Some(lvals) => for &a in lvals { exp.push((rk[i], Some(a), rv[i])); },
+                    Some(lvals) => {
+                        for &a in lvals {
+                            exp.push((rk[i], Some(a), rv[i]));
+                        }
+                    }
                     None => exp.push((rk[i], None, rv[i])),
                 }
             }
@@ -9012,25 +9059,59 @@ mod tests {
             let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
             let rk: Vec<Scalar> = (0..rn).map(|_| key(next())).collect();
             let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
-            let left = DataFrame::from_dict(&["k", "lv"], vec![("k", lk.clone()), ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect())]).unwrap();
-            let right = DataFrame::from_dict(&["k", "rv"], vec![("k", rk.clone()), ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect())]).unwrap();
+            let left = DataFrame::from_dict(
+                &["k", "lv"],
+                vec![
+                    ("k", lk.clone()),
+                    ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(
+                &["k", "rv"],
+                vec![
+                    ("k", rk.clone()),
+                    ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect()),
+                ],
+            )
+            .unwrap();
             let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
 
             let ks = merged_values(&merged, "k").unwrap();
             let lvs = merged_values(&merged, "lv").unwrap();
             let rvs = merged_values(&merged, "rv").unwrap();
-            let kstr = |v: &Scalar| -> String { match v { Scalar::Utf8(x) => x.clone(), _ => String::new() } };
-            let ki = |v: &Scalar| -> i64 { match v { Scalar::Int64(x) => *x, _ => i64::MIN } };
-            let mut got: Vec<(String, i64, i64)> = (0..ks.len()).map(|i| (kstr(&ks[i]), ki(&lvs[i]), ki(&rvs[i]))).collect();
+            let kstr = |v: &Scalar| -> String {
+                match v {
+                    Scalar::Utf8(x) => x.clone(),
+                    _ => String::new(),
+                }
+            };
+            let ki = |v: &Scalar| -> i64 {
+                match v {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                }
+            };
+            let mut got: Vec<(String, i64, i64)> = (0..ks.len())
+                .map(|i| (kstr(&ks[i]), ki(&lvs[i]), ki(&rvs[i])))
+                .collect();
             // Oracle: per-key cross product.
             let mut lby: HashMap<String, Vec<i64>> = HashMap::new();
-            for i in 0..ln { lby.entry(kstr(&lk[i])).or_default().push(lv[i]); }
+            for i in 0..ln {
+                lby.entry(kstr(&lk[i])).or_default().push(lv[i]);
+            }
             let mut rby: HashMap<String, Vec<i64>> = HashMap::new();
-            for i in 0..rn { rby.entry(kstr(&rk[i])).or_default().push(rv[i]); }
+            for i in 0..rn {
+                rby.entry(kstr(&rk[i])).or_default().push(rv[i]);
+            }
             let mut exp: Vec<(String, i64, i64)> = Vec::new();
             for (k, lvals) in &lby {
                 if let Some(rvals) = rby.get(k) {
-                    for &a in lvals { for &b in rvals { exp.push((k.clone(), a, b)); } }
+                    for &a in lvals {
+                        for &b in rvals {
+                            exp.push((k.clone(), a, b));
+                        }
+                    }
                 }
             }
             got.sort();
@@ -9048,7 +9129,10 @@ mod tests {
             &["k", "lv"],
             vec![
                 ("k", vec![s("a"), s("b"), s("c")]),
-                ("lv", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "lv",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
             ],
         )
         .expect("left");
@@ -9056,7 +9140,10 @@ mod tests {
             &["k", "rv"],
             vec![
                 ("k", vec![s("b"), s("c"), s("d")]),
-                ("rv", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "rv",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
         )
         .expect("right");
@@ -9088,12 +9175,18 @@ mod tests {
         // br-frankenpandas-d3ec6: outer-join indicator marks left_only/both/right_only.
         let left = DataFrame::from_dict(
             &["k"],
-            vec![("k", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec![(
+                "k",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
         )
         .expect("left");
         let right = DataFrame::from_dict(
             &["k"],
-            vec![("k", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)])],
+            vec![(
+                "k",
+                vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+            )],
         )
         .expect("right");
         let opts = super::MergeExecutionOptions {
@@ -9101,7 +9194,12 @@ mod tests {
             ..Default::default()
         };
         let m = super::merge_dataframes_on_with_options(
-            &left, &right, &["k"], &["k"], JoinType::Outer, opts,
+            &left,
+            &right,
+            &["k"],
+            &["k"],
+            JoinType::Outer,
+            opts,
         )
         .expect("merge");
 
@@ -9133,7 +9231,10 @@ mod tests {
             DataFrame::from_dict(
                 &["k", "v"],
                 vec![
-                    ("k", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                    (
+                        "k",
+                        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                    ),
                     (
                         "v",
                         vec![

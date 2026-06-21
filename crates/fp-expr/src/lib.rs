@@ -6129,8 +6129,18 @@ mod tests {
             let b: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
             let mut ledger = EvidenceLedger::new();
             let frame = fp_frame::DataFrame::from_series(vec![
-                fp_frame::Series::from_values("a", (0..n as i64).map(Into::into).collect::<Vec<_>>(), a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
-                fp_frame::Series::from_values("b", (0..n as i64).map(Into::into).collect::<Vec<_>>(), b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+                fp_frame::Series::from_values(
+                    "a",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                fp_frame::Series::from_values(
+                    "b",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
             ])
             .unwrap();
             let geti = |s: &Scalar| -> i64 {
@@ -6142,7 +6152,11 @@ mod tests {
             };
             let rsub = super::eval_str("a.rsub(b)", &frame, &policy, &mut ledger).unwrap();
             for i in 0..n {
-                assert_eq!(geti(&rsub.values()[i]), b[i] - a[i], "rsub iter={iter} i={i}");
+                assert_eq!(
+                    geti(&rsub.values()[i]),
+                    b[i] - a[i],
+                    "rsub iter={iter} i={i}"
+                );
             }
         }
     }
@@ -6165,8 +6179,18 @@ mod tests {
             let b: Vec<i64> = (0..n).map(|_| ((next() % 5) as i64) + 1).collect(); // non-zero
             let mut ledger = EvidenceLedger::new();
             let frame = fp_frame::DataFrame::from_series(vec![
-                fp_frame::Series::from_values("a", (0..n as i64).map(Into::into).collect::<Vec<_>>(), a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
-                fp_frame::Series::from_values("b", (0..n as i64).map(Into::into).collect::<Vec<_>>(), b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+                fp_frame::Series::from_values(
+                    "a",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                fp_frame::Series::from_values(
+                    "b",
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+                )
+                .unwrap(),
             ])
             .unwrap();
             let out = super::eval_str("a / b", &frame, &policy, &mut ledger).unwrap();
@@ -6176,7 +6200,12 @@ mod tests {
                     Scalar::Int64(x) => *x as f64,
                     _ => f64::NAN,
                 };
-                assert!((got - a[i] as f64 / b[i] as f64).abs() < 1e-9, "div iter={iter} i={i} {}/{}", a[i], b[i]);
+                assert!(
+                    (got - a[i] as f64 / b[i] as f64).abs() < 1e-9,
+                    "div iter={iter} i={i} {}/{}",
+                    a[i],
+                    b[i]
+                );
             }
         }
     }
@@ -6205,10 +6234,19 @@ mod tests {
         .unwrap();
 
         let i = |x: i64, y: i64| vec![Scalar::Int64(x), Scalar::Int64(y)];
-        let mut ev = |e: &str| super::eval_str(e, &frame, &policy, &mut ledger).unwrap().values().to_vec();
+        let mut ev = |e: &str| {
+            super::eval_str(e, &frame, &policy, &mut ledger)
+                .unwrap()
+                .values()
+                .to_vec()
+        };
 
         assert_eq!(ev("a + b * c"), i(16, 40), "* binds tighter than +");
-        assert_eq!(ev("(a + b) * c"), i(26, 120), "parentheses override precedence");
+        assert_eq!(
+            ev("(a + b) * c"),
+            i(26, 120),
+            "parentheses override precedence"
+        );
         assert_eq!(ev("a - b - c"), i(5, 11), "- is left-associative");
         assert_eq!(ev("a * b + c"), i(32, 85), "* before +");
         assert_eq!(ev("a % b"), i(1, 0), "modulo");
@@ -6238,12 +6276,30 @@ mod tests {
             let b: Vec<i64> = (0..n).map(|_| (next() % 12) as i64).collect();
             let mut ledger = EvidenceLedger::new();
             let col = |name: &str, v: &[i64]| {
-                fp_frame::Series::from_values(name, (0..n as i64).map(Into::into).collect::<Vec<_>>(), v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap()
+                fp_frame::Series::from_values(
+                    name,
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+                )
+                .unwrap()
             };
             let frame = fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b)]).unwrap();
-            let out = super::query_str("(a > 2) and (b < 8)", &frame, &policy, &mut ledger).unwrap();
-            let got: Vec<i64> = out.column("a").unwrap().values().iter().map(|s| match s { Scalar::Int64(x) => *x, _ => i64::MIN }).collect();
-            let exp: Vec<i64> = (0..n).filter(|&i| a[i] > 2 && b[i] < 8).map(|i| a[i]).collect();
+            let out =
+                super::query_str("(a > 2) and (b < 8)", &frame, &policy, &mut ledger).unwrap();
+            let got: Vec<i64> = out
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                })
+                .collect();
+            let exp: Vec<i64> = (0..n)
+                .filter(|&i| a[i] > 2 && b[i] < 8)
+                .map(|i| a[i])
+                .collect();
             assert_eq!(got, exp, "paren query iter={iter}");
         }
     }
@@ -6267,12 +6323,31 @@ mod tests {
             let c: Vec<i64> = (0..n).map(|_| (next() % 30) as i64).collect();
             let mut ledger = EvidenceLedger::new();
             let col = |name: &str, v: &[i64]| {
-                fp_frame::Series::from_values(name, (0..n as i64).map(Into::into).collect::<Vec<_>>(), v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap()
+                fp_frame::Series::from_values(
+                    name,
+                    (0..n as i64).map(Into::into).collect::<Vec<_>>(),
+                    v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>(),
+                )
+                .unwrap()
             };
-            let frame = fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b), col("c", &c)]).unwrap();
+            let frame =
+                fp_frame::DataFrame::from_series(vec![col("a", &a), col("b", &b), col("c", &c)])
+                    .unwrap();
             let out = super::query_str("a + b > c", &frame, &policy, &mut ledger).unwrap();
-            let got_a: Vec<i64> = out.column("a").unwrap().values().iter().map(|s| match s { Scalar::Int64(x) => *x, _ => i64::MIN }).collect();
-            let exp_a: Vec<i64> = (0..n).filter(|&i| a[i] + b[i] > c[i]).map(|i| a[i]).collect();
+            let got_a: Vec<i64> = out
+                .column("a")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(x) => *x,
+                    _ => i64::MIN,
+                })
+                .collect();
+            let exp_a: Vec<i64> = (0..n)
+                .filter(|&i| a[i] + b[i] > c[i])
+                .map(|i| a[i])
+                .collect();
             assert_eq!(got_a, exp_a, "compound query iter={iter}");
         }
     }
@@ -6299,11 +6374,22 @@ mod tests {
                 .unwrap()
                 .values()
                 .iter()
-                .map(|v| match v { Scalar::Utf8(x) => x.clone(), _ => String::new() })
+                .map(|v| match v {
+                    Scalar::Utf8(x) => x.clone(),
+                    _ => String::new(),
+                })
                 .collect()
         };
-        assert_eq!(kept("s == 'b'", &mut ledger), vec!["b".to_string(), "b".to_string()], "eq");
-        assert_eq!(kept("s != 'b'", &mut ledger), vec!["a".to_string(), "c".to_string()], "ne");
+        assert_eq!(
+            kept("s == 'b'", &mut ledger),
+            vec!["b".to_string(), "b".to_string()],
+            "eq"
+        );
+        assert_eq!(
+            kept("s != 'b'", &mut ledger),
+            vec!["a".to_string(), "c".to_string()],
+            "ne"
+        );
     }
 
     #[test]
@@ -6333,8 +6419,16 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(kept("not (x > 5)", &mut ledger), vec![0, 1, 2, 3, 4, 5], "not gt");
-        assert_eq!(kept("not (x < 3 or x > 7)", &mut ledger), vec![3, 4, 5, 6, 7], "not (or)");
+        assert_eq!(
+            kept("not (x > 5)", &mut ledger),
+            vec![0, 1, 2, 3, 4, 5],
+            "not gt"
+        );
+        assert_eq!(
+            kept("not (x < 3 or x > 7)", &mut ledger),
+            vec![3, 4, 5, 6, 7],
+            "not (or)"
+        );
     }
 
     #[test]
@@ -6369,7 +6463,11 @@ mod tests {
 
         assert_eq!(kept("x < 2 or x > 7", &mut ledger), vec![0, 1, 8, 9], "or");
         assert_eq!(kept("x > 2 and x < 6", &mut ledger), vec![3, 4, 5], "and");
-        assert_eq!(kept("x >= 5 and x <= 5", &mut ledger), vec![5], "single row");
+        assert_eq!(
+            kept("x >= 5 and x <= 5", &mut ledger),
+            vec![5],
+            "single row"
+        );
     }
 
     #[test]
@@ -6400,7 +6498,11 @@ mod tests {
                 .collect()
         };
         assert_eq!(kept("a in [1, 3, 5]", &mut ledger), vec![1, 3, 5], "in");
-        assert_eq!(kept("a not in [0, 2, 4, 6]", &mut ledger), vec![1, 3, 5], "not in");
+        assert_eq!(
+            kept("a not in [0, 2, 4, 6]", &mut ledger),
+            vec![1, 3, 5],
+            "not in"
+        );
     }
 
     #[test]

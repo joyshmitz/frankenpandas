@@ -2787,3 +2787,13 @@ composite GroupKey hash on multi-key). GROUPBY IS NOW COMPLETELY DOMINANT: every
 single+multi key (int AND string), single+multi func — ALL WIN @1M. The remaining non-wins are ONLY
 golden-gated (expanding skew/kurt br-nsyti), architectural (to_numpy/transpose l4vzc), inherent-floor
 (resample sum/min/max), ~parity (unique 0.96x).
+
+### 2026-06-21 BlackThrush — bead-flagged boolean/dedup ops all WIN; no measured loss in open perf beads
+Systematically checked the benched bead-flagged ops after br-buguz: filter_bool_mask (which IS df.loc_bool,
+the br-t0y8n op) 2.38x WIN, drop_duplicates 6.70x WIN @1M. So br-t0y8n (loc_bool gather) + br-6vep3
+(unique/dedup FxHashMap) + br-g1de8 (value_counts FxHashMap) have NO measured loss — the typed/dense paths
+win every benched case; their SipHash/gather "general" paths are only hit by non-benched mixed/object columns.
+Only br-buguz (DFGroupBy GroupMap, the per-row composite-key hash) had a real measured loss, now fixed
+(multi-string-key 0.89x->1.12x). The remaining open perf beads (head/tail zero-copy, dropna, RangeIndex isin,
+take_positions gathers) are unbenched zero-copy/general-path improvements on ops that ALREADY win — no
+measured loss to chase. EVERY measured loss this session is fixed; the surface is comprehensively dominant.

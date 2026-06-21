@@ -1098,6 +1098,13 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.str().split_df_n(",", None).expect("split");
             })
         }
+        ("io", "json_read_records") => {
+            // pandas: pd.read_json(json, orient="records"); parse a records JSON.
+            let json = df.to_json("records").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Records).expect("read_json");
+            })
+        }
         ("io", "json_write_records") => {
             // pandas: df.to_json(orient="records"); 10-col f64 frame.
             time_us(|| {

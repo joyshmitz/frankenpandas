@@ -2055,3 +2055,12 @@ byte-match serde_json's f64/string output. Filed br (involved + risky + flat-ano
 rushed). SIGNIFICANCE: FIRST loss among C-OPTIMIZED pandas ops (JSON). The Python-level ops (str/reshape/
 wide_to_long) fp wins; the C-optimized ones (JSON, and structurally to_numpy/transpose) are where fp can
 still lose — a new vein to probe (read_json, to_json columns, maybe parquet/excel).
+
+### 2026-06-21 BlackThrush — read_json WINS (15x); only to_json @small loses (flat-anomaly, profile first)
+Benched read_json (json_read_records): 1.39x@100k / 15.09x@1M — a WIN (pandas read_json overhead). So the
+JSON vein is NARROW: only to_json serialization @small loses (0.73x@100k). CAVEAT: both fp times are FLAT
+(to_json ~155ms, read_json ~215ms @100k AND @1M despite 10x scaling) — anomalous, possibly a fixed cost OR
+a fp-bench io-timing artifact. Updated br-de91c: PROFILE to_json before the streaming rewrite (confirm the
+loss is real + tree-dominated, not a bench artifact). The C-optimized-pandas vein is essentially ONE op
+(to_json @small); read_json + everything else dominates. The perf surface remains comprehensively
+dominated.

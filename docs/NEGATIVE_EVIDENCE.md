@@ -955,3 +955,11 @@ Monday=0, floored pre-1970), so the typed path returns the exact same Int64 valu
 path; NaT/non-dense fall back. Perf win EXPECTED by analogy to hour/minute (pure-mod → 4.2x WIN) but
 UNMEASURED — VERIFY dt_dayofweek when disk recovers (add the workload + run). Closes the dt accessor
 vein fully (year/month/day/hour/minute/second/quarter/dayofyear/dayofweek all typed).
+
+### 2026-06-21 BlackThrush — dt.dayofweek fast path VERIFIED (disk recovered)
+Follow-up to the code-only commit bb5ec58a: built + tested + benched now that disk recovered.
+dayofweek/weekday tests pass (bit-identical, as the inspection proof predicted). MEASURED:
+**dayofweek 100k 328us vs pandas 1350 = 4.1x WIN; 1M 3732 vs 14543 = 3.9x WIN** (was ~0.81-1.0x on
+the chrono+Scalar path). Confirms the analogy to hour/minute (pure-mod typed path). The datetime
+accessor vein is fully closed and all measured: hour/minute/second/dayofweek ~4x WIN, calendar ones
+(month/day/quarter/dayofyear) at parity.

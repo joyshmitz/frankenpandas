@@ -1953,3 +1953,13 @@ identical, conformance GREEN (resample 51/0). RESAMPLE SWEEP COMPLETE — ALL fr
 resample_build_groups (M/h-min-s/D/2D/B/W + Q/Y via monthly), covering BOTH Series.resample AND
 DataFrame.resample. The per-bin-key-cache lever (recompute key_of only on integer-bucket-id change for
 time-ordered data) eliminated the per-row String/DateTime alloc across the entire resample surface.
+
+### 2026-06-21 BlackThrush — df.groupby(string) is ALREADY a win; GroupMap std-SipHash is NOT a loss
+Investigated the std-SipHash GroupMap (type GroupMap = HashMap<GroupKey,Vec<usize>> @1126) used by
+DataFrameGroupBy.build_groups (string/multi keys; int64 keys bypass via int64_dense_grouping). Added a
+df_groupby_str_sum bench (1000 string groups). MEASURED: 4.16x@100k / 29.57x@1M (fp ~990us) — a WIN, NOT
+a loss. Also verified SeriesGroupBy string (groupby_mean_str 2.31x/23.03x, transform 2.47x/31.35x) — wins
+(uses the FxHashMap<ScalarKey> build_groups @24532). So groupby is FINE for string keys; the GroupMap
+SipHash is well-amortized (only ~ngroups distinct keys, the per-row insert hits an existing bucket).
+Converting GroupMap->FxHashMap would be ~0-gain churn on a winning op — NOT DONE (REVERT-~0-gain
+discipline). The main groupby is already FxHashMap/int64-dense optimized; no lever here.

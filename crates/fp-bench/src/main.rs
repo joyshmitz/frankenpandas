@@ -752,6 +752,34 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     .expect("count");
             })
         }
+        ("groupby", "df_groupby_str_sum") => {
+            // pandas: df.groupby("key")[["v0","v1","v2"]].sum(); key=g{i%1000}
+            // (1000 string groups). Exercises DataFrameGroupBy's GroupMap.
+            let mut kb = Vec::new();
+            let mut ko = vec![0usize];
+            for i in 0..rows {
+                let k = format!("g{:04}", i % 1000);
+                kb.extend_from_slice(k.as_bytes());
+                ko.push(kb.len());
+            }
+            let mut columns = BTreeMap::new();
+            columns.insert("key".to_string(), Column::from_utf8_contiguous(kb, ko));
+            let mut order = vec!["key".to_string()];
+            for c in 0..3 {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(raw[c].clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("gb frame");
+            time_us(|| {
+                let _ = gdf.groupby(&["key"]).expect("groupby").sum().expect("sum");
+            })
+        }
         ("rolling", "rolling_mean_w10") => {
             let series = df.get_column("col_0");
             time_us(|| {

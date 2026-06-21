@@ -2280,3 +2280,14 @@ Bit-identical (to_json 18/0). MEASURED: columns 3914->386ms@1M = ~10x fp-side ->
 467ms = ~6.4x -> 2.85x WIN. The streaming-serialize / skip-the-Value-tree lever generalizes across ALL
 to_json orients. LESSON: when one orient's tree-build is fixed, the sibling orients have the SAME cost —
 sweep them (added benches confirm). 5 real @1M losses now fixed via streaming: records+columns+index.
+
+### 2026-06-21 BlackThrush — to_json split/values streaming: 3.75x@1M WIN (to_json orient family COMPLETE)
+to_json(orient=split) and orient=values built the data Value tree (n*m Value::Array) AND called columns[name]
+.values() PER CELL (n*m BTreeMap lookups — un-hoisted, worse than the sibling orients). Applied the streaming
+lever: DataArrayJson (serialize_seq of RowArrayJson, CellJson cells) shared by both; SplitJson wraps it with
+{columns, index, data} (index Vec<Value> kept — only n, not n*m). Bit-identical (to_json 18/0). MEASURED:
+split 3.75x@1M WIN (fp 271ms vs pandas 1018ms), values 3.75x WIN (fp 253ms vs 952ms). The old path was the
+same Value-tree + per-cell-values() loss as columns/index (0.30x/0.45x measured) plus the un-hoisted values().
+ALL 5 to_json orients now WIN via streaming: records 3.31x, columns 3.06x, index 2.85x, split 3.75x, values
+3.75x. SERDE GOTCHA: SerializeMap::serialize_entry needs Sized V — pass &slice (&&[T]) not the slice. The
+skip-the-intermediate-tree lever is the single biggest perf vein this session (5 to_json losses -> wins).

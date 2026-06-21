@@ -2413,3 +2413,11 @@ df_argmax_axis1 bench vs pandas idxmax): 1.54x@1M WIN (fp 70ms vs pandas 109ms).
 2.66x because the `if largest` take-branch runs per cell (not hoisted) — could split the row loop on
 largest for ~2.6x (minor follow-up; near-duplicate of idxmax). The axis=1 idxmax/idxmin/argmax/argmin
 family all now win.
+
+### 2026-06-21 BlackThrush — argmax/argmin_axis1 branchless sign trick: 1.54x->2.60x@1M (matches idxmax)
+Follow-up: the `if largest` take-branch per cell held argmax_axis1 at 1.54x (vs idxmax's 2.66x). Replaced
+with a branchless sign trick: track max(sign*v) where sign=+1 (argmax) or -1 (argmin) — the col with the
+smallest v has the largest -v. 1.0*v optimizes to v so argmax matches idxmax. Bit-identical (argmax 8/0;
+min=max-of-negated, first-wins, NaN skipped). MEASURED: 70448->40216us@1M = ~1.75x fp-side -> 1.54x->2.60x.
+LESSON: a loop-invariant branch in a hot per-cell loop costs ~half; a sign/mask trick removes it. The axis=1
+idx/arg family is now uniformly ~2.6x (idxmax 2.66x, idxmin 2.57x, argmax/argmin 2.60x).

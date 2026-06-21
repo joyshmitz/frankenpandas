@@ -1047,3 +1047,19 @@ high-confidence bit-identical. NaT/non-dense fall back. Perf win EXPECTED ~1.5-4
 quarter/days_in_month) but UNMEASURED — VERIFY (+run dt is_* differential/golden tests) when disk
 recovers. The datetime accessor vein's calendar+predicate surface is now fully typed; remaining
 slow-path: weekofyear (ISO, complex) + month_name/day_name (Utf8).
+
+### 2026-06-21 BlackThrush — dt.month_name typed civil fast path (CODE-ONLY, perf PENDING disk-CRITICAL)
+DISK-CRITICAL (39G, no cargo at all): code-only, NOT built/benched/compile-checked. dt.month_name's
+typed path used extract_component_typed_str(|ts| ts.month_name()) — per-element chrono
+Timestamp::from_nanos + month_name(). Added a Utf8-output civil helper
+(typed_datetime_civil_str_component_all_valid) that REUSES the EXACT Scalar::Utf8 + Column::from_values
+builder extract_component_typed_str uses — only the date is computed via the integer civil helper
+instead of chrono. Wired month_name with a closure indexing the verbatim ["January"..."December"]
+table by civil month (m == Timestamp's m, div_euclid). **Bit-identity TRIVIALLY provable**: same
+builder, same Utf8 values (civil m == Timestamp m; NAMES verbatim); NaT/non-dense fall back. Compile
+risk LOW (helper mirrors extract_component_typed_str's structure + the verified bool/int civil
+helpers). Modest win expected (skips chrono per element; String allocs remain — a bigger
+from_utf8_contiguous variant is a follow-up) — UNMEASURED, VERIFY when disk recovers. DEFERRED:
+day_name (uses Timestamp's TRUNCATING div + a different table basis — needs a nanos str helper, not
+the civil one) and weekofyear (ISO). NOTE: a stack of code-only dt commits (micro/nano, days_in_month,
+7 bool predicates, month_name) awaits a single build+test sweep when disk recovers.

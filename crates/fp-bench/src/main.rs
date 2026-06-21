@@ -942,10 +942,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.dt().dayofyear().expect("dt dayofyear");
             })
         }
-        ("datetime", "dt_strftime" | "dt_date") => {
+        ("datetime", "dt_strftime" | "dt_date" | "dt_time") => {
             let base: i64 = 946_684_800_000_000_000;
+            // 1 day + 37 s per row so BOTH the date and the time-of-day vary.
             let nanos: Vec<i64> = (0..rows as i64)
-                .map(|i| base + i * 86_400_000_000_000)
+                .map(|i| base + i * 86_437_000_000_000)
                 .collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
             let series = Series::new(
@@ -957,6 +958,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             match workload {
                 "dt_strftime" => time_us(|| {
                     let _ = series.dt().strftime("%Y-%m-%d").expect("strftime");
+                }),
+                "dt_time" => time_us(|| {
+                    let _ = series.dt().time().expect("time");
                 }),
                 _ => time_us(|| {
                     let _ = series.dt().date().expect("date");

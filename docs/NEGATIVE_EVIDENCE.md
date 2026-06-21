@@ -1670,3 +1670,13 @@ generic helper on NaT/non-dense. MEASURED: dt_date 9993->6557us (1.52x over the 
 format! String alloc was the dominant cost. PATTERN: fixed-format dt/string output -> write!-into-buffer
 beats format!+Scalar+from_values. (time/strftime are candidates — time has a fixed "HH:MM:SS" format;
 strftime is user-format so needs the formatter refactored to write into a buffer.)
+
+### 2026-06-21 BlackThrush — LEVER: dt.time write!-into-buffer (36.7x vs pandas); dt_time bench added
+Applied the dt.date write! lever to dt.time: format "HH:MM:SS" with write! directly into the output
+byte buffer (same secs_of_day/h/mi/sec integer formulas + format spec as the helper closure), avoiding
+the per-row format! String alloc. Bit-identical (write! == format! bytes; bails on NaT). MEASURED:
+dt_time fp=5496us vs pandas 201732us = **36.71x** (pandas dt.time builds Python datetime.time objects —
+very slow); dt_date 17.53x. Conformance GREEN (fp-frame 3098/0). Added dt_time bench (step = 1day+37s so
+date AND time-of-day both vary). The fixed-format-dt write!-into-buffer vein: date(17.4x)+time(36.7x)
+done; strftime is user-format (needs the formatter refactored to write into a buffer — deferred);
+day_name/month_name already return &'static str (no alloc).

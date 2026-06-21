@@ -2651,3 +2651,13 @@ groupby value-agg loss cluster was specific to STRING-keyed groupby (scattered +
 SipHash); int-keyed grouping (groupby OR pivot) is dense and wins. SWEEP COMPLETE: every benched op + every
 unbenched sibling checked (groupby aggs/rank/transform, hash-ops, joins, f64-df, rolling, pivot value-aggs)
 DOMINATES. Only filed/golden-gated/architectural/marginal items remain.
+
+### 2026-06-21 BlackThrush — multi-func groupby agg 0.63x->2.63x WIN (buckets-once) — br-4h46q CLOSED
+Fixed the last tractable groupby loss. SeriesGroupBy::agg(funcs) (the REAL one @28194, not the Expanding agg
+I'd first misread) did N+1 group builds: one build_groups for the order + a per-func method per func, each
+rebuilding the dense gids. Buckets-once fast path: build dense gids + per-gid f64 buckets ONCE, then apply
+every f64-bucket func (sum/mean/min/max/std/var/prod) over the shared buckets. Bit-identical (groupby 202/0):
+each func over the value-order bucket == its standalone result (mean=sum/n, std=sqrt(ssd/(n-1)) matching the
+var two-pass, prod=left-fold), same first-seen order/labels, same by-name index. count excluded (Int64).
+MEASURED: groupby_agg3_str(["mean","std","max"]) 73120->17771us@1M = 0.63x->2.63x WIN (4.1x fp-side). Non-
+bucket funcs (median/sem/skew/kurt) fall back to the per-func loop. The groupby surface now has ZERO losses.

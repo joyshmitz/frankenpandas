@@ -1095,3 +1095,19 @@ EXCEPT weekofyear (ISO 8601 — deferred: depends on the still-unverified dayofy
 Timestamp::dayofyear + iso_weeks_in_year edge cases; build it on the verified foundation, with tests,
 when disk recovers). Unverified code-only stack: micro/nano, days_in_month, 7 bools, month_name,
 day_name, date — first action on disk-recover: `cargo build -p fp-bench` + dt differential/golden tests.
+
+### 2026-06-21 BlackThrush — dt.time typed fast path (CODE-ONLY, perf PENDING disk-CRITICAL)
+DISK-CRITICAL (39G, no cargo): code-only. dt.time's typed path called
+extract_component_typed_str(|ts| format!("{h:02}:{mi:02}:{sec:02}", ts.hour/minute/second)) — chrono
++ three separate hour()/minute()/second() calls (each recomputing secs_of_day) per element. Added a
+nanos-String helper (typed_datetime_nanos_string_component_all_valid, sibling of the dt.date civil-
+String helper) and wired dt.time with a closure computing secs_of_day ONCE then h=secs/3600,
+mi=(secs%3600)/60, sec=secs%60 — VERBATIM Timestamp::hour/minute/second (read & confirmed). **Bit-
+identity TRIVIALLY provable**: same Scalar::Utf8+Column::from_values builder, same format!, h/mi/sec
+== ts.hour()/minute()/second(); NaT/non-dense fall back. ALSO retroactively VALIDATED my unverified
+hour/minute/second Int64 fast paths: proved by integer-division algebra that
+`X.rem_euclid(DAY)/NANOS_PER_HOUR == (X.rem_euclid(DAY)/NANOS_PER_SEC)/3600` (etc) — they equal the
+Timestamp formulas. Compile risk LOW (near-copy of the shipped dt.date helper). UNMEASURED — VERIFY
+when disk recovers. DT vein now fully typed EXCEPT weekofyear (ISO). Unverified stack: micro/nano,
+days_in_month, 7 bools, month_name, day_name, date, time — first action on disk-recover:
+`cargo build -p fp-bench` + dt differential/golden tests.

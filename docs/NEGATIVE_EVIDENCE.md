@@ -1309,3 +1309,13 @@ uses `if v < result` / `if v > result` (NOT f64::min/max, which flip -0.0 vs +0.
 empty -> NaN (matches the `found` flag). A Float64 column WITH missing/NaN falls to the generic fold
 (skips missing) — bit-identical. (Deliberately did NOT use a SIMD f64 min/max helper: f64::min/max
 would not match the Scalar path's `<`/`>` on -0.0.) UNMEASURED — verify when disk recovers.
+
+### 2026-06-21 BlackThrush — Series prod() typed Float64 path (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. Completes the reduction sweep: sum()/mean() were ALREADY typed
+for Float64 (br-lei31, data.iter().sum()), min()/max() typed last commit, but prod() still fell to
+the generic Scalar fold for Float64 (.values() + per-element to_f64 + multiply). Added a typed path
+mirroring sum's: `data.iter().product()`. **Bit-identity provable**: Iterator::product is a 1.0-seeded
+left-fold over the same f64 values in the same order as the generic `product *= to_f64(val)`;
+as_f64_slice is all-valid so nothing is skipped — exactly as sum()'s typed path argues. Less common
+than min/max/sum but a real gap, provably bit-identical. Series numeric reductions (sum/mean/min/max/
+prod) are now ALL typed for Float64. UNMEASURED — verify when disk recovers.

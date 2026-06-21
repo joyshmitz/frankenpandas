@@ -2074,3 +2074,19 @@ bulk ~134ms is STILL flat across 10k/1M (the Map/Value building + serialize) —
 remains (de91c open: needs finer in-loop profiling of Map-insert vs scalar_to_json_value vs serialize; the
 flatness rules out the n*m building being it). to_json still loses @100k (0.86x) but wins @1M; the full
 streaming/direct-serialize fix is the remaining lever, filed.
+
+### 2026-06-21 BlackThrush — CRITICAL CORRECTION: --size arg bug invalidated ALL @1M ratios this session
+size_rows_cols() only matches "10k"/"100k"/"1M" (abbreviated); my measurement scripts passed NUMERIC
+--size 1000000 / 100000 which FALL THROUGH to the default (100_000, 10). So EVERY fp-bench call this
+session used a 100k df regardless of --size. Consequence: my "@100k" numbers are CORRECT (default==100k),
+but EVERY "@1M" ratio compared fp@100k vs pandas@1M — INFLATED. RE-MEASURED with abbreviated --size:
+  pivot_table @1M 2.27x (reported 23.5x), get_dummies 1.36x (17.9x), cut 1.22x (17.5x), crosstab 1.23x
+  (13.2x) — STILL WINS but far smaller. AND THREE ARE ACTUAL @1M LOSSES: unstack 0.22x (reported 2.6x),
+  series_map 0.23x (3.1x), resample_h 0.20x (2.1x). to_json 0.69x@1M (reported 9.55x).
+INTEGRITY: the LEVERS themselves are valid — bit-identical, conformance-green, and the @100k before/after
+improvements are REAL (unstack O(N^2)->O(N) avoided a genuine 14s catastrophe; FxHashMap/cache/contiguous
+all measurably faster at 100k). But fp still LOSES to pandas at 1M on the C-optimized-pandas ops (unstack,
+series_map, resample, to_json — same family as to_numpy/transpose). The "comprehensively dominated" claim
+was WRONG for @1M. CORRECTED PICTURE: fp wins Python-level-pandas ops; loses several C-optimized ones at
+scale. Methodology fix: ALWAYS use --size 10k/100k/1M (abbreviated). Re-auditing all levers at real sizes
+is the next priority. The full warmed-gauntlet "joins 28-44x etc" numbers are ALSO suspect (numeric size).

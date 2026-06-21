@@ -1063,3 +1063,19 @@ from_utf8_contiguous variant is a follow-up) — UNMEASURED, VERIFY when disk re
 day_name (uses Timestamp's TRUNCATING div + a different table basis — needs a nanos str helper, not
 the civil one) and weekofyear (ISO). NOTE: a stack of code-only dt commits (micro/nano, days_in_month,
 7 bool predicates, month_name) awaits a single build+test sweep when disk recovers.
+
+### 2026-06-21 BlackThrush — dt.day_name typed fast path (CODE-ONLY, perf PENDING disk-CRITICAL)
+DISK-CRITICAL (39G, no cargo): code-only. dt.day_name's typed path used
+extract_component_typed_str(|ts| ts.day_name()) — chrono per element. Added a nanos-str helper
+(typed_datetime_nanos_str_component_all_valid — sibling of the month_name civil-str helper, but
+operates on raw nanos because Timestamp::day_name uses TRUNCATING div + a Thursday-indexed table,
+NOT the civil/div_euclid math) and wired day_name with a closure VERBATIM Timestamp::day_name:
+`days = ns / NANOS_PER_DAY; NAMES[(((days%7)+7)%7)]` with NAMES=[Thu,Fri,Sat,Sun,Mon,Tue,Wed].
+**Bit-identity TRIVIALLY provable**: same Scalar::Utf8 + Column::from_values builder
+extract_component_typed_str uses, same values (closure verbatim the Timestamp formula); NaT/non-dense
+fall back. Compile risk LOW (near-copy of the just-added month_name civil-str helper, same proven
+typed_datetime_year_all_valid pattern). UNMEASURED — VERIFY when disk recovers. The dt accessor NAME
+components are now both typed (month_name + day_name); only weekofyear (ISO) remains on the slow path.
+STACK awaiting build+test: micro/nano, days_in_month, 7 bool predicates, month_name, day_name — all
+provably-bit-identical-by-inspection, same proven pattern; first action on disk-recover is
+`cargo build -p fp-bench` + the dt differential/golden tests.

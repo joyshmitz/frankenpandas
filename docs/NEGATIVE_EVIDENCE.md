@@ -2549,3 +2549,11 @@ Fix: route through the now-dense agg_values_scalar (sequential per-gid value buc
 identical (groupby 202/0): distinct count is order-independent (same seen.len()); FxHash changes bucketing
 not cardinality. MEASURED: 180709->48754us@1M = 0.88x->3.08x WIN (3.7x fp-side). The std-HashSet-on-hot-path
 smell strikes again (cf pivot SipHash). NEXT: any/all use the same agg_scalar indices path — check them.
+
+### 2026-06-21 BlackThrush — groupby unique 0.59x->0.83x (dense path; residual = output materialization)
+groupby unique was 0.59x LOSS @1M (fp 190ms): build_groups + scattered per-row values()[idx] gather. Added a
+dense path (dense_group_ids -> per-gid FxHashSet + first-seen Vec in one sequential pass, then emit
+group-major), bit-identical (groupby 202/0; first-seen group + value order, missing-once semantics preserved).
+190->134ms = 0.59x->0.83x (1.4x fp-side). STILL a marginal loss — residual is the 1M-Scalar output build
+(out_values Vec<Scalar> + from_values). NEXT: typed f64 output (collect uniques as Vec<f64> + from_f64_values,
+dedup on bits) to close to a win.

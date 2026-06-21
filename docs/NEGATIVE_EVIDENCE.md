@@ -2395,3 +2395,11 @@ slices, first(earliest-column)-wins on ties (strict >/<), NaN skipped. Bit-ident
 NON-losses in the same sweep (benched, documented): std_axis1 8.66x WIN, median_axis1 1.17x WIN. LESSON: the
 axis=1 reductions that go through per-cell to_f64() dispatch lose; a typed-f64 raw-compare path wins. The
 sweep continues to find real losses (idxmax/idxmin + rank were the axis=1 family losses, all now fixed).
+
+### 2026-06-21 BlackThrush — axis=1 reduction family COMPLETE: rest all WIN (mean 6.47x/max 6.74x/var 9.69x/prod 10.51x/count 340x)
+Swept the remaining axis=1 reductions: mean_axis1 6.47x, max_axis1 6.74x, var_axis1 9.69x, prod_axis1 10.51x,
+count_axis1 340x, std_axis1 8.66x, median_axis1 1.17x — all WINS (typed). The axis=1 family is now
+COMPREHENSIVE: the only losses were rank(axis=1) (fixed, vectorized count-rank, 0.19x->2.7-2.9x) +
+idxmax/idxmin_axis1 (fixed, typed-f64 compare, 0.40x->2.66x/2.57x). Everything else in the family dominates.
+The per-cell-to_f64-dispatch / per-row-Series smells were the only axis=1 losers; the typed-f64 raw path
+fixes them. Benches added for the whole family (documents the domination).

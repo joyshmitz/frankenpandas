@@ -286,6 +286,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_idxmin_axis1") => time_us(|| {
             let _ = df.idxmin_axis1().expect("idxmin_axis1");
         }),
+        ("dataframe_ops", "df_mean_axis1") => time_us(|| { let _ = df.mean_axis1().expect("x"); }),
+        ("dataframe_ops", "df_max_axis1") => time_us(|| { let _ = df.max_axis1().expect("x"); }),
+        ("dataframe_ops", "df_var_axis1") => time_us(|| { let _ = df.var_axis1().expect("x"); }),
+        ("dataframe_ops", "df_prod_axis1") => time_us(|| { let _ = df.prod_axis1().expect("x"); }),
+        ("dataframe_ops", "df_count_axis1") => time_us(|| { let _ = df.count_axis1().expect("x"); }),
         ("dataframe_ops", "df_std_axis1") => time_us(|| {
             let _ = df.std_axis1().expect("std_axis1");
         }),

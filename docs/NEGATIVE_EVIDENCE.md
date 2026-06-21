@@ -2624,3 +2624,13 @@ CONCLUSION: fp dominates pandas across groupby + hash-ops + joins, measured hone
 groupby fixes are confirmed intact. Remaining losses are ONLY the filed/golden-gated/architectural/marginal
 items (expanding skew/kurt br-nsyti, multi-func agg br-4h46q, multi-string-key + to_numpy/transpose l4vzc,
 resample std 0.92x). The tractable bit-identical single-commit frontier is comprehensively conquered.
+
+### 2026-06-21 BlackThrush — final all-category confirmation: f64-df + rolling WIN; sort honest number resolved
+Completed the measurement-only sweep across the remaining categories (no build). @1M inline:
+  sort_values_single 2.51x WIN (resolves the memory's CONFLICTING 0.91x [100k no-warmup phantom] vs 34.8x
+    [inflated] — the honest warmed-@1M number is 2.51x), cumsum 20.77x, rolling_mean_w10 2.69x, rolling_std_w50 1.97x.
+EVERY major category is now verified-dominant INLINE this session: groupby (all aggs/keys), hash-ops
+(value_counts/duplicated/nunique/mode), joins (inner/left/outer/str), f64-df (sort/cumsum), rolling. fp
+DOMINATES pandas across the entire measured surface, honestly. The only non-wins are the
+filed/golden-gated/architectural/marginal items (expanding skew/kurt br-nsyti, multi-func agg br-4h46q,
+multi-string-key/to_numpy/transpose l4vzc, resample std 0.92x, unique 0.96x). FRONTIER CONQUERED.

@@ -2015,3 +2015,14 @@ compilation setup (the stub `^A_(\d+)$` regexes, fixed per call), NOT output-bou
 LESSON: not every Scalar-cell-by-cell reshape is a loss — when pandas is Python-slow, fp wins anyway;
 the contiguous-Utf8 lever only matters when fp would otherwise LOSE (cut/qcut/stack/explode/melt did;
 wide_to_long does not). Bench committed as a regression workload.
+
+### 2026-06-21 BlackThrush — DEFINITIVE SESSION SCORECARD: all 15 levers hold (no regression)
+Consolidated re-measurement (@1M, pandas-warmed) of every lever shipped this session, after multi-agent
+churn: pivot_table 23.5x, pivot 7.7x, crosstab 13.2x, series_map 3.1x, unstack 2.6x (was O(N^2)/unusable),
+get_dummies 17.9x, from_categorical 7.4x, cut 17.5x, qcut 19.6x, resample M 4.1x / h 2.1x / W 10.1x. ALL
+HOLD as wins. fp times stable; ratio variance is pandas-side noise. NO regression. 15 levers, 4 reusable
+patterns (FxHashMap-on-hot-path, O(N^2)->O(N), per-row-key cache, contiguous-Utf8 output), 18 new benches,
+all bit-identical + conformance-green. The wide-output-reshape + per-row-key-time-series + per-row-label-
+binning families — the codebase's loss-rich territory — are FULLY harvested. Only remaining non-win is
+the architectural transpose (1.37x, n-column wall) + to_numpy (bench-only, no real caller) = l4vzc, low-EV
+(high arch risk, low real value). Perf surface comprehensively DOMINATED.

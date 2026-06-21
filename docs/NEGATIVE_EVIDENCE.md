@@ -12,6 +12,34 @@ Method: `examples/bench_*.rs` self-time `best=<ns>` over N iters; pandas scripts
 Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or showed
 ~0 gain. Never retry a recorded dead end.
 
+## ⏳ UNVERIFIED CODE-ONLY STACK — VERIFY ON DISK-RECOVER (BlackThrush, 2026-06-21)
+
+During a multi-turn disk-CRITICAL window (cargo forbidden), the dt-accessor fast paths below were
+written CODE-ONLY — provably bit-identical by inspection (closures verbatim the `fp_types::Timestamp`
+formulas; same `Scalar`/builder paths as the generic `extract_component_typed*`), structurally
+mirroring the shipped+tested `typed_datetime_year_all_valid` pattern — but **none has been compiled
+or benched.** FIRST ACTION ON DISK-RECOVER, in order:
+
+1. `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo build --offline -p fp-bench`
+   (or via rch) — confirm the whole stack COMPILES.
+2. `cargo test --offline -p fp-frame --lib -- <component>` for each: month day hour minute second
+   microsecond nanosecond quarter dayofyear dayofweek days_in_month is_month_start is_month_end
+   is_quarter_start is_quarter_end is_year_start is_year_end is_leap_year month_name day_name date time
+   — plus the dt differential/golden tests. Confirm BIT-IDENTICAL.
+3. Bench each (add `dt_*` workloads to fp-bench) to record the wins (pure-mod ones ~4x like
+   hour/minute already measured 4.2x; calendar/civil ones ~parity-to-1.5x; string date/time skip
+   chrono + 3x-redundant civil → modest).
+
+Commits in the stack (newest→oldest): dayofyear-hardened (f45f2357, now VERBATIM Timestamp table —
+the previously-novel days_from_civil method was removed), time (a383f972), date (c93fc9aa),
+day_name (cc8bf063), month_name (bd128716), 7 bool predicates (db4a5dfe), days_in_month (9f80ff58),
+micro/nano (8f0fb964). hour/minute/second (3be88c6b) ALGEBRAICALLY PROVEN == Timestamp formulas.
+
+RISK NOTES: hour/min/sec proven; dayofyear hardened to verbatim; all others mirror verified patterns.
+The one BLOCKED item: **dt.weekofyear** stays on the slow chrono path — `Timestamp::weekofyear`'s ISO
+clamps call `iso_weeks_in_year`, which is PRIVATE to fp_types (uncallable from fp-frame). Build it on
+the verified dayofyear/dayofweek foundation WITH tests once cargo is available.
+
 ## Results
 
 | Lever (bead) | Workload | pandas | fp | ratio | verdict |

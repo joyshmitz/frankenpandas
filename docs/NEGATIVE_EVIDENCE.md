@@ -988,3 +988,12 @@ REMAINING (non-quick): structural walls (transpose/stack/to_numpy — need 2D-bl
 total_seconds (needs new as_timedelta64_slice columnar infra); df_round (bit-locked fdiv); pivot_table
 (untested, complex setup); cod-b's fp-index lane (avoided). Quick-win probing has reached diminishing
 returns.
+
+### 2026-06-21 BlackThrush — pivot_table 0.67x@1M loss (root-caused, bead zngxi OPEN)
+df.pivot_table(v, r, c, "mean") on a 100x10 pivot: 0.94x@100k (5819 vs 5453), **0.67x@1M (62449 vs
+41943, 1.5x slower)**. Small output (no wide-output wall). Root cause: the unique-key collection +
+scatter use idx_col.values()[i]/cols_col.values()[i] (per-row Scalar) + ScalarKey + FxHashSet — the
+generic grouping pattern, NOT the dense int64 path that makes plain groupby sum/mean/std all 2-8x
+WIN. Fix (filed zngxi): dense int64 grouping for all-valid Int64 index/columns keys. NOT attempted
+this session — complex fn (dropna + ascending-sort-nulls-last both axes + aggfunc variants) needs
+careful bit-identity work; measured + root-caused only.

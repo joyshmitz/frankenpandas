@@ -281,6 +281,26 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.notna()
             let _ = df.notna().expect("notna");
         }),
+        ("dataframe_ops", "df_pivot_table") => {
+            // pandas: df.pivot_table(values="v", index="r", columns="c",
+            // aggfunc="mean"); r=i%100 (100 rows), c=i%10 (10 cols) -> 100x10.
+            let r: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let c: Vec<i64> = (0..rows as i64).map(|i| i % 10).collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let mut columns = BTreeMap::new();
+            columns.insert("r".to_string(), Column::from_i64_values(r));
+            columns.insert("c".to_string(), Column::from_i64_values(c));
+            columns.insert("v".to_string(), Column::from_f64_values(raw[0].clone()));
+            let pframe = DataFrame::new_with_column_order(
+                index,
+                columns,
+                vec!["r".to_string(), "c".to_string(), "v".to_string()],
+            )
+            .expect("pivot frame");
+            time_us(|| {
+                let _ = pframe.pivot_table("v", "r", "c", "mean").expect("pivot_table");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");

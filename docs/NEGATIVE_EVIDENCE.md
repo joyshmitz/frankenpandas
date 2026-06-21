@@ -1927,3 +1927,10 @@ Added resample_hourly bench (minutely data -> hourly bins, 60 rows/bin). BASELIN
 (now a WIN). Bit-identical (key = deterministic fn of bin_index; contains_key still dedups order),
 conformance GREEN (resample 51/0). TWO resample freqs now confirm the per-row-String-key-CACHE lever
 (monthly + sub-daily). Remaining: W/Q/Y (key_of(ord) — needs bucket-id exposed) + N-day (br-ixn43).
+
+### 2026-06-21 BlackThrush — resample daily(D) key-cache ~3.7x; 3rd freq (monthly+sub-daily+daily done)
+The daily-contiguous path did key_of(ord) (a format! String) per row; a daily bucket == one `ord`, so for
+sub-daily data (24 rows/day) cache on ord. Added resample_daily bench (hourly->daily). Baseline 0.03x@10k
+/0.08x@100k/0.75x@1M (fp ~21400us); now 0.09x@10k/0.31x@100k/2.93x@1M (WIN) — ~3.7x. Bit-identical,
+conformance GREEN (resample 51/0). THREE most-common resample freqs now key-cached (M ~3.75x, h/min/s
+~7.1x, D ~3.7x). Remaining: N-day(2D/3D @22108 bin_start-cacheable), weekly/Q/Y, business-day (br-ixn43).

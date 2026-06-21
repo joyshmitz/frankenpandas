@@ -1249,3 +1249,15 @@ Timedelta64 NaT guard preserves missing-label rejection). Only mixed/null column
 Scalar path (correctly — they Err on missing). Reset_index's non-Int64 index->column paths were
 considered but the Index exposes only an Int64 typed accessor (int64_label_values), so they'd need
 labels() materialization + per-label extraction — marginal, skipped. UNMEASURED.
+
+### 2026-06-21 BlackThrush — searchsorted typed Int64 fast path (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. Series.searchsorted(value, side) materialized the FULL .values()
+Scalar Vec (O(n) alloc, 32B/elem) just to run searchsorted_linear for ONE insertion position. Added
+a typed all-valid Int64 + Int64-needle fast path: position where `right ? x > needle : x >= needle`
+over the raw &[i64], skipping the Scalar Vec. **Bit-identity provable**: searchsorted_linear's
+predicate on all-valid Int64 + Int64 needle is exactly this (compare_scalar_values(Int64,Int64) is
+i64::cmp — NO missing/NaN/-0.0 ambiguity, unlike Float64 which I deliberately did NOT type because
+the float compare_scalar_values semantics aren't verifiable blind). The tuple-destructure pattern
+`if let (Some(data), Scalar::Int64(n)) = (as_i64_slice(), value)` is precedented (fp-frame:12011).
+UNMEASURED — verify when disk recovers. (Float64/Utf8 searchsorted + searchsorted_values still use the
+Scalar path; the float comparison-semantics + sorted-binary-search bit-identity need a test cycle.)

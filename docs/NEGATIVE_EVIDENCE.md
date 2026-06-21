@@ -2500,3 +2500,13 @@ pandas' amortized factorize (37ms + 3x3.5ms reduce). So fp dominates groupby in 
 multi-agg pattern — the "amortized multi-agg" concern is moot. OPTIONAL more-domination lever (NOT needed to
 win): cache dense_group_ids in the SeriesGroupBy via OnceCell + return &[usize] (no single-agg clone
 regression) -> 1x build -> est ~1.75x. Filed/noted, not shipped (fp already wins; moderate struct refactor).
+
+### 2026-06-21 BlackThrush — SeriesGroupBy min/max single-pass via dense_group_fold helper: 3.25x/3.23x
+Extended the dense single-pass lever to min/max (after their Utf8/Timedelta dtype guards) via a reusable
+dense_group_fold(init, fold, finish) helper — one sequential pass folds per gid (f64::min/f64::max), no
+per-group Vec<f64> buckets + iter().fold re-scan. Bit-identical (groupby 202/0; first-seen gids/labels,
+value-order fold == bucket fold, Float64 output matching agg_numeric, f64::min/max ignore NaN same as the
+closure). MEASURED @1M (NEW benches groupby_min_str/groupby_max_str): min 3.25x, max 3.23x WIN (fp ~12.2ms
+vs pandas inline ~39.5ms). The helper is reusable — mean/sum could be rewired onto it (var stays two-pass);
+left inline for now (shipped+green). GROUPBY now: mean 3.45x/sum 6.88x/var 3.52x/std 2.45x/min 3.25x/max
+3.23x/median 2.09x/count 5.92x/cumcount 7.56x/transform 1.54x/multi-agg 1.33x — ALL WIN.

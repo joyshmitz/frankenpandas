@@ -2385,3 +2385,13 @@ average back to 2.93x (no regression), min 2.70x WIN. Bit-identical (rank 48/0).
 144573us 2.93x, min 148965us 2.70x (was 0.19x both via per-row Series). dense/pct/non-f64/NaN still fall
 back. LESSON: adding a feature to a hot loop can regress the common path — MEASURE the common case after,
 gate the extra work to the path that needs it. Added df_rank_axis1_min bench.
+
+### 2026-06-21 BlackThrush — idxmax/idxmin_axis1 typed-f64 path: 0.40x->2.66x/2.57x@1M WIN (sister pair)
+Swept the axis=1 reductions. df.idxmax(axis=1)/idxmin(axis=1) were REAL @1M losses (0.40x, fp 268ms vs pandas
+108ms) — per-cell self.columns[col_name].values()[row_idx] (n*m BTreeMap) + Scalar + val.to_f64() dispatch.
+Added a typed-f64 fast path (sister pair): all-valid Float64 columns -> raw f64 compare over hoisted &[f64]
+slices, first(earliest-column)-wins on ties (strict >/<), NaN skipped. Bit-identical (idxmax 19/0, idxmin
+26/0). MEASURED: idxmax 268151->40878us = ~6.6x fp-side -> 0.40x->2.66x WIN; idxmin 40647us -> 2.57x WIN.
+NON-losses in the same sweep (benched, documented): std_axis1 8.66x WIN, median_axis1 1.17x WIN. LESSON: the
+axis=1 reductions that go through per-cell to_f64() dispatch lose; a typed-f64 raw-compare path wins. The
+sweep continues to find real losses (idxmax/idxmin + rank were the axis=1 family losses, all now fixed).

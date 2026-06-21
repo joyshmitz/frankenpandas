@@ -280,6 +280,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_rank_axis1_min") => time_us(|| {
             let _ = df.rank_axis1("min", true, "keep").expect("rank_axis1");
         }),
+        ("dataframe_ops", "df_idxmax_axis1") => time_us(|| {
+            let _ = df.idxmax_axis1().expect("idxmax_axis1");
+        }),
+        ("dataframe_ops", "df_idxmin_axis1") => time_us(|| {
+            let _ = df.idxmin_axis1().expect("idxmin_axis1");
+        }),
+        ("dataframe_ops", "df_std_axis1") => time_us(|| {
+            let _ = df.std_axis1().expect("std_axis1");
+        }),
+        ("dataframe_ops", "df_median_axis1") => time_us(|| {
+            let _ = df.median_axis1().expect("median_axis1");
+        }),
         ("dataframe_ops", "df_abs") => time_us(|| {
             // pandas: df.abs()
             let _ = df.abs().expect("abs");

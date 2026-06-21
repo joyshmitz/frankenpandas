@@ -1361,3 +1361,15 @@ f64. **Bit-identity provable**: the aggregate output is Float64, so to_f64(Int64
 the i64->f64 cast EXACTLY (no lossy-compare divergence — unlike idxmin, the values are converted to f64
 in BOTH paths); to_f64(Float64)=v; all-valid ⇒ nothing missing to skip; a value column WITH missing
 falls to the Scalar filter_map. Impactful: groupby moment/order-stat aggs over a non-dense key. UNMEASURED.
+
+### 2026-06-21 BlackThrush — SeriesGroupBy first()/last() typed value column (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. Closes the GroupBy first/last gap. first()/last() materialized
+the whole values() Scalar Vec, found the first/last non-missing index per group, then built a
+Vec<Scalar> -> from_values. For an all-valid Float64/Int64 column, the first (resp. last) non-missing
+IS indices[0] (resp. last index) — groups are never empty and every slot is valid. Added typed
+branches: gather data[indices[0]]/data[last] into Vec<f64>/Vec<i64> -> from_f64_values/from_i64_values,
+skipping BOTH the values() Scalar Vec AND the Scalar output build. **Bit-identity provable**:
+grouped_value_or_null(Some(idx)) == values[idx].clone() == Scalar::Float64(data[idx]); from_f64_values
+== from_values for all-finite f64 (as_f64_slice is no-NaN); from_i64_values == from_values for Int64;
+labels = order (same as the per-i loop). A column with missing/NaN falls to the Scalar path. GroupBy
+vein now: idxmin/idxmax, any/all, agg_numeric fallback, first/last — all typed. UNMEASURED.

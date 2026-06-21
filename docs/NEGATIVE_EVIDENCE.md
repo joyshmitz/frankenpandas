@@ -1453,3 +1453,14 @@ the per-group value gather is the typed code). NOTE: these int64 keys hit agg_nu
 the non-dense FALLBACK my agg_numeric fix targets (would need a Float64/Datetime grouping key to bench
 that fallback). Combined with the dt vein (6.5-37.5x), fp measured-dominates pandas across dt+groupby.
 No build (existing workloads). Disk 33G.
+
+### 2026-06-21 BlackThrush — pivot_table is a PHANTOM loss: 9.10x WIN @1M (clean MIN) — zngxi NOT needed
+Clean-MIN (fp-bench df_pivot_table --json MIN vs pandas 12-iter MIN, matched: r=i%100, c=i%10, v=randn,
+pivot_table(v,r,c,"mean")): @100k fp=6120us pandas=6290us = 1.03x (parity); @1M fp=6222us pandas=
+56629us = **9.10x WIN**. The recorded "pivot_table 0.67x@1M loss" (bead zngxi, frontier map) was a
+HARNESS p50+CV PHANTOM. fp's output is fixed 100x10 so it stays ~6.2ms while pandas scales with input
+rows to 56.6ms @1M. **=> zngxi should be CLOSED — NO dense-int64 rewrite needed; pivot_table already
+dominates.** CORRECTION to the post-sweep frontier map: pivot_table was listed as "the ONLY remaining
+clearly-fixable loss" — it is NOT a loss. With pivot_table cleared, the benched fixable-loss set is
+EMPTY; all remaining gaps are structural (transpose/stack/to_numpy 2D-block) or bit-locked (df_round).
+Phantom-saturation now confirmed across dt + groupby + pivot_table on clean MIN.

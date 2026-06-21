@@ -1111,3 +1111,19 @@ Timestamp formulas. Compile risk LOW (near-copy of the shipped dt.date helper). 
 when disk recovers. DT vein now fully typed EXCEPT weekofyear (ISO). Unverified stack: micro/nano,
 days_in_month, 7 bools, month_name, day_name, date, time — first action on disk-recover:
 `cargo build -p fp-bench` + dt differential/golden tests.
+
+### 2026-06-21 BlackThrush — HARDEN dt.dayofyear to verbatim Timestamp + weekofyear BLOCKED (CODE-ONLY)
+DISK-CRITICAL (39G, no cargo): code-only de-risking edit. While assessing weekofyear I found two
+things. (1) **weekofyear is BLOCKED for a safe code-only fix**: Timestamp::weekofyear's clamps call
+`iso_weeks_in_year`, which is PRIVATE to fp_types (not callable from fp-frame); replicating it +
+the full ISO-8601 algorithm blind (no test) is too risky — deferred to a build+test cycle. (2) The
+unverified dayofyear commit (ahcnx) used a NOVEL method (days_since_epoch - days_from_civil(y,1,1) +
+1) that differs from Timestamp::dayofyear's days-before-month TABLE — equivalent in theory but the
+riskiest commit in the stack. HARDENED it: rewrote typed_datetime_dayofyear_all_valid to be VERBATIM
+Timestamp::dayofyear (DAYS_BEFORE=[0,31,59,90,...,334] + leap bump for m>2, over the civil (y,m,d)),
+and REMOVED datetime64_days_from_civil (now 0 references — no dead code; fp-frame has no
+deny(warnings) but cleaner anyway). Now provably bit-identical to the chrono path (which calls that
+exact method). No new lever; pure risk-reduction. Unverified stack (still pending build+test on
+disk-recover): micro/nano, days_in_month, 7 bools, month_name, day_name, date, time, dayofyear(now
+verbatim). hour/minute/second already algebraically proven last turn. weekofyear remains the ONLY
+slow-path dt method (blocked on private iso_weeks_in_year).

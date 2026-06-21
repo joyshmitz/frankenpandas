@@ -2733,3 +2733,13 @@ per bucket — both O(n) INHERENT work pandas also does (bin assignment). So the
 (sum 1.01x / min,max 0.94x after the typed paths removed the Scalar gather) is genuine, NOT a fixable
 inefficiency. The only marginal lever left is the architectural build_bin_ranges (avoid the 8MB Vec<usize>),
 deferred. CONCLUSION: resample is fully optimized to its inherent floor — don't re-chase the single-aggs.
+
+### 2026-06-21 BlackThrush — serialization re-verified ALL WIN; df_to_records 100k anomaly (single-size artifact)
+Re-verified IO/serialization (the one un-rechecked category). @100k inline: json_write_records 3.15x /
+columns 2.91x / split 3.82x / values 3.77x, df_to_dict_records 6.28x / dict 7.08x — all WIN. df_to_records
+showed 0.19x @100k, which looked like a loss — but re-measured across sizes it is NON-MONOTONIC: 10k 1.46x,
+100k 0.19x, 1M 1.25x WIN. BOTH sides are anomalous at 100k (pandas 10k->100k only 2.8x = anomalously fast;
+fp 10k->100k 21x = anomalously slow — likely a cache/allocator boundary for the per-row Vec<Vec<Scalar>>
+around 100k×11 Scalars ~17MB). At the bench size (1M) AND 10k, fp WINS (matching the predecessor's 1.56x).
+7TH MEASUREMENT SUBTLETY: a SINGLE-SIZE point can be a double-sided anomaly — re-measure at 10k/100k/1M and
+trust the trend, not one point. No fix: df_to_records wins at realistic sizes. Serialization fully dominant.

@@ -2541,3 +2541,11 @@ push each row's Scalar into its per-gid bucket in ONE sequential pass, no build_
 gather). Bit-identical (groupby 202/0; first-seen gids/labels, value-order buckets, same func, same nullable
 preservation). MEASURED @1M: sem 62000->36366us (0.70x->1.19x WIN), skew ->33936us (0.72x->1.32x WIN). This
 path is shared, so ALL agg_values_scalar aggs benefit. NOW the groupby surface has ZERO known losses.
+
+### 2026-06-21 BlackThrush — groupby nunique 0.88x->3.08x (std SipHash HashSet + scattered gather -> dense+Fx)
+groupby nunique was a 0.88x LOSS @1M (fp 180ms). TWO smells: (1) std `HashSet::new()` = SipHash (the crate
+uses FxHashSet); (2) the agg_scalar indices path = build_groups + scattered per-row `values()[idx]` gather.
+Fix: route through the now-dense agg_values_scalar (sequential per-gid value buckets) + FxHashSet. Bit-
+identical (groupby 202/0): distinct count is order-independent (same seen.len()); FxHash changes bucketing
+not cardinality. MEASURED: 180709->48754us@1M = 0.88x->3.08x WIN (3.7x fp-side). The std-HashSet-on-hot-path
+smell strikes again (cf pivot SipHash). NEXT: any/all use the same agg_scalar indices path — check them.

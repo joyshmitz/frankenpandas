@@ -69,7 +69,7 @@ no dt method remains on the slow chrono path.
 | std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
 | max 8-lane chunked accumulator (simdmx) | 2M int64 | 219 µs | 0.357 ms | **0.61× (1.63× slower)** | ✅ KEEP — 3.2× faster than scalar iter().max(); gap 5.2×→1.63× |
 | min 8-lane chunked accumulator (simdmx) | 2M int64 | 230 µs | 0.424 ms | **0.54× (1.86× slower)** | ✅ KEEP — 2.8× faster than scalar iter().min(); gap 5.1×→1.86× |
-| max/min 16-lane chunked accumulator (x7bp8) | 2M int64 `Series.max`/`Series.min`; code-only disk-low pass | PENDING | PENDING | **PENDING-BENCH** | 🧪 PENDING-BENCH — widened the safe-Rust Int64 extrema accumulator from 8 to 16 independent lanes in `i64_slice_max_simd`/`i64_slice_min_simd`, with explicit final lane reduction instead of an iterator adaptor and shared inline lane-count helpers. Bit-transparent for integer extrema because max/min are associative and commutative and empty handling is unchanged. No cargo build, test, or bench was started in this turn per DISK-LOW directive; next turn must run the existing max/min head-to-head and revert if neutral or regressive. |
+| max/min shared inline lane-count helper (x7bp8) | 2M int64 `Series.max`/`Series.min`; `bench_reductions`; warm `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`; CPU7 best-of-300 | max 185.201 µs / min 189.920 µs | final-after-revert max 398.546 µs / min 386.121 µs | **max 0.46× / min 0.49×** | ❌ REVERT / NO-SHIP — x7bp8 was not the radical 8→16 lane change; history showed it only hoisted the already-16 lane count into a shared const and added `#[inline]`. Same-host A/B failed the keep bar: parent/final source re-ran stably at max 398-400 µs and min 386 µs, while the restored x7bp8 candidate showed no stable win and frequently regressed max (best restored-candidate reruns: max 786.681 µs, min 404.316 µs; noisy remote first pass max 421.632 µs, min 425.809 µs). Source reverted to the pre-x7bp8 local-const helper shape; keep the older measured 8/16-lane accumulator family, but do not retry shared-const/inline reshaping. |
 | max/min portable-SIMD `i64x8` (uza04.207) | 2M int64 | 185 / 182 µs | 0.811 / 0.811 ms | **0.23× / 0.22×** | ❌ REVERT — safe `std::simd` was 2.3× slower than the manual 8-lane accumulator |
 | max/min portable-SIMD `i64x4` (uza04.207) | 2M int64 | 185 / 182 µs | 1.087 / 1.108 ms | **0.17× / 0.16×** | ❌ REVERT — AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator |
 
@@ -168,6 +168,7 @@ no dt method remains on the slow chrono path.
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
 | RangeIndex.asof closed-form (jlv2o) | 1M rows, 4,096 scalar probes | 1,050.29 ms | 65.52 µs | **16,031× faster** | ✅ KEEP — lookup no longer scales with range length |
 | RangeIndex.symmetric_difference two-run backing (uza04.168) | 1M overlapping RangeIndex, split output, `len()` construction path | 5.158 ms | 0.000110 ms | **46,889× faster** | ✅ KEEP — closes the prior split-span loss by carrying two boxed affine Int64 runs lazily. rch release evidence on exact boxed code: 0.000140 ms; pre-change remote baseline was 39.710 ms. Win/loss/neutral for this pass: **1 / 0 / 0** |
+| RangeIndex.symmetric_difference BOLD-VERIFY (u22ww) | 1M overlapping RangeIndex, split output, `len()` construction path; `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`, fp-index example built with `rch exec -- cargo build -p fp-index --example bench_range_setops --release`; same-machine pandas 2.2.3 best-of-80 | 4.494 ms | 0.000160 ms | **28,090× faster** | ✅ VERIFIED KEEP — lazy two-affine Int64 backing is still decisive against pandas; no new code. Guard evidence: `cargo test -p fp-index range_index_set_ops_keep_typed_backing_uza04168 --release`, `cargo test -p fp-index range_index_join_direct_i64_matches_flat_oracle_uza04190 --release`, and `cargo bench -p fp-index --no-run` all green via `rch`. Initial `cargo bench -p fp-index --release --no-run` was rejected by Cargo because bench has no `--release` flag. |
 | RangeIndex.get_indexer miss-heavy arithmetic bulk (uza04.159) | 100k targets, 15/16 misses | 0.777 ms | 0.295 ms | **2.64× faster** | ✅ KEEP — same-host local pandas p50 vs FP Criterion mean; flips prior 0.83× loss |
 | RangeIndex.get_indexer miss-heavy arithmetic bulk (uza04.159) | 1M targets, 15/16 misses | 10.493 ms | 2.911 ms | **3.61× faster** | ✅ KEEP — batched pandas p50 CV 5.71%; FP local Criterion |
 | RangeIndex.reindex all-miss arithmetic lattice (uza04.159) | 100k target RangeIndex | 0.666 ms | 18.45 µs | **36.1× faster** | ✅ KEEP — exact lattice all-miss fast path; flips prior 0.86× loss |
@@ -1464,3 +1465,32 @@ dominates.** CORRECTION to the post-sweep frontier map: pivot_table was listed a
 clearly-fixable loss" — it is NOT a loss. With pivot_table cleared, the benched fixable-loss set is
 EMPTY; all remaining gaps are structural (transpose/stack/to_numpy 2D-block) or bit-locked (df_round).
 Phantom-saturation now confirmed across dt + groupby + pivot_table on clean MIN.
+
+## ═══ BOLD-VERIFY SCORECARD 2026-06-21 BlackThrush (disk recovered, clean-MIN vs pandas @1M) ═══
+Profiled the full surface with clean-MIN (fp-bench --json MIN vs pandas fixed-iter MIN), bypassing the
+harness's DROPPED_HIGH_CV. RESULT: **fp DOMINATES pandas across the ENTIRE winnable surface.**
+
+WINS (clean MIN @1M):
+- joins: inner 52.8x, left 27.3x, outer 5.8x
+- groupby: first 60.6x, median 61.1x, max 48.2x, std 37.9x
+- datetime: dt_hour 37.5x, dt_minute 36.7x, dt_year 7.7x, dt_quarter 7.4x, dt_month 6.5x
+- value_counts: mid-card 3.7x, high-card 20.8x, wide-high 47.2x (low-card-100 ~0.91x near-parity)
+- pivot_table: 9.1x (was the "0.67x loss" zngxi — PHANTOM, now cleared)
+
+REMAINING LOSSES — ALL structurally unwinnable or bit-locked (NOT cheap levers):
+- to_numpy: fp 2788us vs pandas **1us** — pandas returns its 2D BlockManager array as an O(1) VIEW;
+  fp is columnar (m separate Arc<[f64]>) so it MUST materialize O(n*m). UNWINNABLE without 2D-block
+  storage (architectural). A contiguous column-major buffer would cut fp-side ~3-5x but still lose.
+- transpose: fp 80ms vs pandas 52us — same root (pandas block axis-swap view; fp builds n-col BTreeMap).
+- ewm_mean: 0.79x — already typed (as_f64_slice); the per-element debias fdiv recurrence is bit-locked
+  (changing it breaks goldens). DECLINED, confirmed.
+- df_round: 0.84x — bit-locked (x*f).round_ties_even()/f fdiv.
+
+PHANTOM-SATURATION reconfirmed HARD: the harness p50+CV understated EVERYTHING (joins "1.5x"->53x;
+dt "parity"->37x; pivot_table "0.67x loss"->9x WIN). ALWAYS clean-MIN.
+
+CONCLUSION: There is NO cheap winnable perf lever left — fp already dominates. The ONLY radical lever
+that addresses a real loss is **2D-block storage for homogeneous-float frames** (makes to_numpy/
+transpose/values O(1) views like pandas). This is a fundamental representation change (every op must
+work with 2D-block storage) — too large for a safe single commit; FILED as a frontier bead. This turn's
+deliverable is the rigorous gauntlet-grounded scorecard (negative evidence: winnable set exhausted).

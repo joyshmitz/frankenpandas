@@ -1565,3 +1565,30 @@ won without 2D-block storage for homogeneous frames => bead l4vzc, architectural
 storage + columnar fallback + golden isomorphism). THE WINNABLE SURFACE IS EXHAUSTED AND DOMINATED.
 Every memory "loss" (value_counts 0.62x, ewm 0.79x, round 0.84x, pivot_table 0.67x, stack 0.32x) was
 EITHER a harness phantom (clean-MIN wins) OR now-fixed (stack). Only l4vzc remains.
+
+### 2026-06-21 cod-b — br-frankenpandas-90qpl: DataFrame.nlargest typed top-k heap WIN
+Targeted the remaining p50 loss in `df.nlargest(100, "col_0")` at 100k rows: the typed DataFrame
+path avoided gathering every row, but still built a full typed sort permutation before slicing the
+first 100 positions. Lever: for all-valid Int64/Float64 single-key `nlargest`/`nsmallest`, maintain a
+bounded worst-first heap for very small `n` (<=1024), or partial-select for larger but still sparse
+top-k, then sort only the selected prefix with a `(value, input-position)` comparator. This preserves
+`sort_values(column, asc).head(n)` tie order and keeps NaN/mixed/large-n fallback paths unchanged.
+
+Measured with the repo `fp-bench` workload and matched pandas oracle data (`float64`, 10 columns,
+seed 42; p50 microseconds; FP release-perf binary in `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`):
+
+| Size | Before FP p50 | After FP p50 | Pandas p50 | Ratio vs pandas | FP speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100k | 4906.41 us | 690.17 us | 1365.50 us | 1.98x WIN | 7.11x |
+| 1M | 46015.76 us | 3377.68 us | 76365.96 us | 22.61x WIN | 13.62x |
+
+Scorecard: wins 2, losses 0, neutral 0. No regression hunk reverted because both measured sizes moved
+from full-sort overhead to decisive wins. Validation: `cargo fmt -p fp-frame --check` PASS;
+`rch exec -- cargo test -p fp-frame dataframe_topk_ties_preserve_input_order_90qpl --release -- --nocapture`
+PASS; `rch exec -- cargo test -p fp-frame dataframe_nlargest_row_integrity_r5k8q --release -- --nocapture`
+PASS; `rch exec -- cargo test -p fp-conformance --release -- --nocapture` PASS (1595 unit tests plus
+integration/property/smoke tests green; live-oracle checks skipped where the worker lacks the legacy
+pandas checkout); local fallback `cargo clippy -p fp-frame --all-targets --release -- -D warnings`
+PASS after remote clippy reported the pinned nightly clippy component missing; `cargo check -p fp-frame
+--all-targets --release` PASS. UBS bounded scan on `crates/fp-frame/src/lib.rs` hit the documented
+180s large-file timeout without emitting a finding.

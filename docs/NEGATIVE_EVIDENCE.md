@@ -1397,3 +1397,15 @@ the FULL Vec<IndexLabel> just to read the kept rows — now O(1)/label for affin
 materialization). Big win for these ops on large lazy/RangeIndex frames. (iloc still uses labels()[pos]
 — user positions, OOB bounds-check concern, deliberately left.) UNMEASURED. Single-label sites
 (explode 16553, etc.) are next-turn candidates.
+
+### 2026-06-21 BlackThrush — single-label labels()[i] reads -> label_at (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. Swept the single-label per-row labels()[i]/[row].clone() reads
+to the label_at(&self.index, ..) free fn (added last commit). 10 sites: first_valid_index/
+last_valid_index (fallback loop), filter, explode, iterrows, itertuples, compare_with_align_axis,
+explode_with_ignore_index (×3). All loop over self's own rows (0..len or self row_indices) so positions
+are in-bounds; bit-identical to labels()[pos].clone(). For a lazy/RangeIndex these avoid materializing
+the full Vec<IndexLabel> (n×32B) — label_at computes each arithmetically. SKIPPED iloc_with_columns
+(`[position]`, user positions → OOB bounds-check concern) and the index_label_at/label_at fallback
+bodies themselves. The labels()[pos]=O(n) SMELL (idxmax memory note) is now essentially closed across
+single-label + gather + DataFrame sites. UNMEASURED. `&labels()[i]` borrow sites (34773/43252) need
+restructuring (label_at returns owned) — deferred.

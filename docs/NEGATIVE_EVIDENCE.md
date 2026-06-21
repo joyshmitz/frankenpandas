@@ -2776,3 +2776,14 @@ regardless of hasher — only the internal bucketing changes. MEASURED: df_group
 (122->94ms), groupby 202/0 green. This was the SIMPLE proven lever (FxHashMap), NOT the involved
 factorize+combine I'd assessed — and it helps ALL generic multi-key/composite/Bool/Float64-key groupby, not
 just multi-string. br-buguz resolved. The last tractable groupby loss is now a WIN.
+
+### 2026-06-21 BlackThrush — groupby COMPLETELY dominant (multi-string-key fixed); other FxHashMap beads unmeasured
+After the GroupMap FxHashMap fix (multi-string-key 0.89x->1.12x), checked the sibling FxHashMap beads:
+str_value_counts (string key "g{i%1000}") @1M = 4.19x WIN — value_counts uses a TYPED contiguous-Utf8 path,
+so br-g1de8 (value_counts/mode general FxHashMap) + br-6vep3 (unique/dedup general FxHashMap) have NO measured
+loss (the typed/dense paths win every benched case; the SipHash "general" path is only hit by non-typed/mixed
+columns that aren't benched). Only br-buguz (the DFGroupBy GroupMap) had a measured loss (the per-row
+composite GroupKey hash on multi-key). GROUPBY IS NOW COMPLETELY DOMINANT: every agg/rank/transform,
+single+multi key (int AND string), single+multi func — ALL WIN @1M. The remaining non-wins are ONLY
+golden-gated (expanding skew/kurt br-nsyti), architectural (to_numpy/transpose l4vzc), inherent-floor
+(resample sum/min/max), ~parity (unique 0.96x).

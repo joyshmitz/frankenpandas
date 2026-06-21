@@ -388,7 +388,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.isna()
             let _ = df.isna().expect("isna");
         }),
-        ("groupby", "groupby_sum_int64" | "groupby_mean_float64" | "groupby_agg_multi") => {
+        ("groupby", "groupby_sum_int64" | "groupby_mean_float64" | "groupby_agg_multi"
+            | "groupby_std" | "groupby_median" | "groupby_nunique" | "groupby_first"
+            | "groupby_max") => {
             // pandas: key = (col_0 % 100).astype(int64); groupby(key)[col_1].agg
             let keys: Vec<i64> = raw[0].iter().map(|&v| (v as i64).rem_euclid(100)).collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -402,6 +404,21 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             )
             .expect("fp-bench groupby frame");
             match workload {
+                "groupby_std" => time_us(|| {
+                    let _ = gframe.groupby(&["key"]).expect("groupby").std().expect("std");
+                }),
+                "groupby_median" => time_us(|| {
+                    let _ = gframe.groupby(&["key"]).expect("groupby").median().expect("median");
+                }),
+                "groupby_nunique" => time_us(|| {
+                    let _ = gframe.groupby(&["key"]).expect("groupby").nunique().expect("nunique");
+                }),
+                "groupby_first" => time_us(|| {
+                    let _ = gframe.groupby(&["key"]).expect("groupby").first().expect("first");
+                }),
+                "groupby_max" => time_us(|| {
+                    let _ = gframe.groupby(&["key"]).expect("groupby").max().expect("max");
+                }),
                 "groupby_sum_int64" => time_us(|| {
                     let _ = gframe
                         .groupby(&["key"])

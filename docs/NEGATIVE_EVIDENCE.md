@@ -963,3 +963,16 @@ dayofweek/weekday tests pass (bit-identical, as the inspection proof predicted).
 the chrono+Scalar path). Confirms the analogy to hour/minute (pure-mod typed path). The datetime
 accessor vein is fully closed and all measured: hour/minute/second/dayofweek ~4x WIN, calendar ones
 (month/day/quarter/dayofyear) at parity.
+
+### 2026-06-21 BlackThrush — groupby aggregations all WIN (2.3-8.0x), no losses
+Probed groupby(int64 key, 100 groups).agg for std/median/nunique/first/max (min-of-iters vs pandas).
+ALL wins — the dense int64 grouping path covers them:
+| agg | 100k (pandas/FP) | 1M |
+|---|---|---|
+| std | 5.2x | 4.2x |
+| median | 8.0x | 6.0x |
+| nunique | 2.4x | 2.3x |
+| first | 6.0x | 4.4x |
+| max | 6.0x | 3.9x |
+No action. Added groupby_std/median/nunique/first/max workloads. groupby surface is FP-dominant
+(consistent with the dense-grouping bypass wins in memory).

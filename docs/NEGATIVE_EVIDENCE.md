@@ -2743,3 +2743,14 @@ fp 10k->100k 21x = anomalously slow — likely a cache/allocator boundary for th
 around 100k×11 Scalars ~17MB). At the bench size (1M) AND 10k, fp WINS (matching the predecessor's 1.56x).
 7TH MEASUREMENT SUBTLETY: a SINGLE-SIZE point can be a double-sided anomaly — re-measure at 10k/100k/1M and
 trust the trend, not one point. No fix: df_to_records wins at realistic sizes. Serialization fully dominant.
+
+### 2026-06-21 BlackThrush — indexing all WIN; ALL-CATEGORY inline re-verification COMPLETE
+Indexing @1M inline: loc_labels 14.26x (the batch resolver fix holds), reindex 14.20x, iloc_slice 4.72x — WIN.
+This completes the all-category inline re-verification this session. EVERY major category confirmed dominant
+vs pandas @1M (honest, inline, multi-size where anomalies suspected):
+  groupby (all aggs/rank/transform/multi-key/multi-func) | hash-ops (value_counts/duplicated/nunique/mode) |
+  joins (inner/left/outer/str) | f64-df (sort/cumsum) | rolling (mean/std) | serialization (json/dict/records) |
+  datetime resample (mean/std/var/min/max/multi-func + inherent floor) | indexing (loc/reindex/iloc).
+fp DOMINATES pandas across the ENTIRE measured surface, verified not assumed. The only non-wins are the
+filed/gated items: golden-gated (expanding skew/kurt powf br-nsyti), architectural (multi-string-key,
+to_numpy/transpose l4vzc, resample build_bin_ranges), inherent-floor ~parity (resample sum/min/max, unique).

@@ -2142,3 +2142,13 @@ bench (0.14x@1M loss) is UNAFFECTED — f64 is not dense-indexable, so the khash
 a custom open-addressing f64 table, untried). But int value_counts (IDs/categoricals-as-int — common!) now
 WINS. Gate: range <= max(64Ki, 4*n) so sparse keys fall back to the hash path. The dense-direct-address
 pattern beats khash where the key space is bounded — a real lever for the hash-bound losses.
+
+### 2026-06-21 BlackThrush — unstack typed-output ~0-gain (REVERTED); the INPUT string-parse is the bulk
+Tested an unstack typed-f64 output path (per-column all-present-f64 -> from_f64_values, skip the Scalar
+output). MEASURED: 359437->360514us@1M = ~0% (still 0.13x). REVERTED (~0-gain, though conformance passed
+unstack 7/0 — bit-identical). NEGATIVE EVIDENCE: the output Scalar materialization is NOT the unstack
+bottleneck. The bulk is the INPUT: parsing the "r, c" string-composite index per row (split_once) + the
+entries Vec<(String, String, Scalar)> (2M String clones for 1M rows). Same lesson as to_csv-hoist /
+resample-typed-agg: the suspected output cost was a phantom; the real cost is the string-composite index
+(a fundamental fp representation vs pandas' MultiIndex codes). unstack's real fix is borrow-not-clone
+entries (&str slices into the index labels, no clone) + ultimately a real MultiIndex — deep, br-ikq9a.

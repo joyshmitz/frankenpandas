@@ -1973,3 +1973,14 @@ join_left/outer 1.47/1.63x were NO-WARMUP/harness-p50 artifacts; warmed reality 
 loss-rich territory was the wide-output reshapes + per-row-key time-series (now all fixed this session);
 the standard ops were always dominant. The warmup discipline both FINDS hidden losses (pivot_table) and
 DEBUNKS understated ratios (joins) — clean-MIN must warm pandas either way.
+
+### 2026-06-21 BlackThrush — FULL WARMED GAUNTLET: domination confirmed across ALL categories
+Extended the warmed clean-MIN gauntlet (@1M, pandas-warmed) to indexing/io/parsing: iloc_slice 4.73x,
+loc_labels 170.99x, reindex 163.98x (memory flagged "alloc-bound/declined" — WRONG, it's 164x),
+csv_read 1035.15x, to_datetime 33.97x. Combined with the earlier batch (ewm 20.7x, sort 34.8x, joins
+27-44x, string-join 173x, groupby 4-31x) and the shipped fixes (reshapes, resample, categorical), fp
+DOMINATES pandas across EVERY benched op family. NO remaining hidden losses. The ONLY non-win is the
+architectural transpose/to_numpy (l4vzc — pandas O(1) 2D-block view vs columnar). CONCLUSION OF THE
+SWEEP: the loss-rich territory was wide-output reshapes + per-row-key time-series (all fixed this
+session, ~13 levers); everything else was always dominant — several memory "gaps" were no-warmup/
+small-size artifacts (joins 1.47x->28x, reindex declined->164x). clean-MIN MUST warm pandas.

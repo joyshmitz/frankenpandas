@@ -2344,3 +2344,11 @@ benched (new bench) but the hoist removes ~10M BTreeMap gets for 1M*10 — same 
 as to_dict (~1.9x fp-side there). SERIALIZATION FAMILY now swept: to_json (5 orients), to_dict (3 orients),
 to_records — all hoisted/streamed + winning. The per-cell-values()/per-row-labels() smell recurs across
 EVERY row-materializing op; the sweep + hoist is the systematic fix.
+
+### 2026-06-21 BlackThrush — apply_fn(axis=1) per-cell hoist + bench: 144x@1M WIN
+Continued the per-cell-smell sweep. DataFrame.apply_fn(axis=1) built each row via columns[name].values()
+[row_idx] PER CELL (n*m BTreeMap lookups). Hoisted col_values once. Bit-identical (apply 48/0). MEASURED
+(new df_apply_row bench, row-sum): 144.4x@1M WIN (fp 72ms vs pandas 10.4 SECONDS — pandas df.apply(axis=1)
+is Python-per-row). fp's Rust apply already crushes pandas; the hoist removes ~10M BTreeMap lookups (fp-side
+~25%, before not separately benched). LESSON: row-wise apply (axis=1) is a 144x WIN for fp (Rust closure vs
+pandas Python-per-row) AND carries the per-cell smell. The hoist + bench documents the domination.

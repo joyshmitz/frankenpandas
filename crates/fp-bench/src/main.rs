@@ -1155,6 +1155,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = df.to_records();
             })
         }
+        ("dataframe_ops", "df_apply_row") => {
+            time_us(|| {
+                let _ = df
+                    .apply_fn(
+                        |row| {
+                            let s: f64 = row
+                                .iter()
+                                .filter_map(|v| match v {
+                                    fp_types::Scalar::Float64(f) => Some(*f),
+                                    _ => None,
+                                })
+                                .sum();
+                            fp_types::Scalar::Float64(s)
+                        },
+                        1,
+                    )
+                    .expect("apply");
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.

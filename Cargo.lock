@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "fp-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "fp-columnar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-types",
  "rustc-hash",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "fp-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "criterion",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "fp-expr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frame"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frankentui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-conformance",
  "fp-runtime",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "fp-groupby"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "fp-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "criterion",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "fp-io"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "bytes",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "fp-join"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "fp-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "fp-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asupersync",
  "serde",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "fp-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "frankenpandas"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fp-columnar",
  "fp-expr",

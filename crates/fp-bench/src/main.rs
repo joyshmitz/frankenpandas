@@ -323,6 +323,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = pframe.pivot("r", "c", "v").expect("pivot");
             })
         }
+        ("dataframe_ops", "df_crosstab") => {
+            // pandas: pd.crosstab(a, b); a=i%100, b=i%10 -> 100x10 counts.
+            let a = Column::from_i64_values((0..rows as i64).map(|i| i % 100).collect());
+            let b = Column::from_i64_values((0..rows as i64).map(|i| i % 10).collect());
+            let s1 = Series::new("a", Index::new_known_unique_int64_unit_range(0, rows), a)
+                .expect("crosstab s1");
+            let s2 = Series::new("b", Index::new_known_unique_int64_unit_range(0, rows), b)
+                .expect("crosstab s2");
+            time_us(|| {
+                let _ = DataFrame::crosstab(&s1, &s2).expect("crosstab");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");

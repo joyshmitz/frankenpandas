@@ -1840,3 +1840,13 @@ SipHash `cells: HashMap` used for BOTH the scatter inserts AND the per-output-ce
 sorted row_keys/col_keys; cells only probed by get/contains), conformance GREEN (pivot 37/0). STILL a
 loss @small — remaining ~11ms is the OUTPUT BUILD (for col {for row {cells.get}} -> Vec<Scalar> ->
 Column::new), the melt Scalar-output smell (typed from_f64_values + NaN-for-missing is the next lever).
+
+### 2026-06-21 BlackThrush — crosstab FxHashMap ~25% (br-1q4q4 #2); @100k now parity
+Third FxHashMap-on-hot-path win (after pivot_table, pivot). DataFrame::crosstab had THREE std-SipHash
+hashers: seen_cols (HashSet), counts (nested HashMap<String,HashMap<String,i64>> — the per-row tally),
+col_idx_of (HashMap, output). Added a df_crosstab bench (a=i%100,b=i%10). Baseline 0.28x@10k/0.80x@100k/
+8.12x@1M (fp ~9450us flat). Converted all 3 to Fx => ~25%: 0.37x@10k / 1.03x@100k (parity) / 10.64x@1M.
+Bit-identical (col_keys/row_keys are first-seen/sorted ordered lists; the maps/sets are only probed by
+entry/insert/get). Conformance GREEN. Remaining flat ~7ms = the per-row String stringification (rk_str/
+ck_str per row — INTENTIONAL for the Int64(5)==Utf8("5") merge quirk; could cache the <=cardinality
+distinct stringifications but the quirk constrains it). get_dummies still a candidate (br-1q4q4 #3).

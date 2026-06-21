@@ -2490,3 +2490,13 @@ gids/labels, value-order sums, (x-mean).powi(2), NaN for n<2, ssd/(n-1)). MEASUR
 inapplicable; already wins 2.09x inline). NOTE: the gid+order prologue is now duplicated 3x (mean/sum/var) —
 optional consolidation into a dense_group_layout helper (would add a cheap order-only pass; kept inline for
 the single-pass speed). All bit-identical, conformance green.
+
+### 2026-06-21 BlackThrush — multi-agg groupby ALSO a WIN (1.33x): fp fully dominates, no grouper cache needed
+Tested the one scenario I'd flagged as a possible fp loss — the AMORTIZED multi-agg (g = groupby(key);
+g.mean(); g.std(); g.var(), pandas caches the grouper in g). Added groupby_multi_str bench. @1M: fp=43279us
+vs pandas(cached g)=57727us -> 1.33x WIN. fp REBUILDS the dense gids 3x but each build (~5ms byte-span
+FxHash) is far cheaper than pandas' ONE string factorize (~37ms), so 3x fp rebuild (~15ms) still beats
+pandas' amortized factorize (37ms + 3x3.5ms reduce). So fp dominates groupby in BOTH the single-agg AND the
+multi-agg pattern — the "amortized multi-agg" concern is moot. OPTIONAL more-domination lever (NOT needed to
+win): cache dense_group_ids in the SeriesGroupBy via OnceCell + return &[usize] (no single-agg clone
+regression) -> 1x build -> est ~1.75x. Filed/noted, not shipped (fp already wins; moderate struct refactor).

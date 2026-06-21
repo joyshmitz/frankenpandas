@@ -1810,3 +1810,13 @@ per-cell Vec, for mean/sum/count/min/max; ScalarKey fallback for median/std). CR
 hoist lesson: the input-independence is anomalous (hashing would scale) — so VERIFY the typed-slice
 access is the win before assuming, don't guess. This is the disciplined profile-then-fix the mandate
 asks (/profiling-software-performance): perf/valgrind are restricted here, so source timers were used.
+
+### 2026-06-21 BlackThrush — pivot_table values()-hoist: REAL +13% (shipped); scatter still open
+Profiling-led PARTIAL win on the pivot_table @small loss (zngxi): the unique-collection + scatter loops
+called idx_col/cols_col/val_col .values() PER ROW (n_rows x ~3 calls, 2 loops each). Hoisted to once-per-
+column (bit-identical cached Scalar slice). MEASURED ~13%: 6100->~5300us => 0.25x->0.31x@10k, 1.01x->
+1.24x@100k, 8.56x->10.19x@1M. Conformance GREEN (pivot 37/0, unstack 7/0). So the per-row values()
+dispatch WAS ~750us — a genuine (if partial) cost, UNLIKE the to_csv-hoist phantom. REMAINING ~5.3ms is
+the SCATTER (ScalarKey HashMap + per-cell Vec) — zngxi's int64-dense scatter is the next lever (open).
+LESSON: hoisting a per-row .values() out of a loop is a safe bit-identical micro-lever worth checking on
+any hot per-row-Scalar-access path (cf the labels()[pos] materialization-tax smell).

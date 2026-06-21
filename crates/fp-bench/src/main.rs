@@ -351,11 +351,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.sort_index()
             let _ = df.sort_index(true).expect("sort_index");
         }),
-        ("dataframe_ops", "astype_str_i64" | "astype_str_f64") => {
-            let col = if workload == "astype_str_i64" {
-                Column::from_i64_values((0..rows as i64).collect())
-            } else {
-                Column::from_f64_values((0..rows).map(|i| i as f64 * 1.5).collect())
+        ("dataframe_ops", "astype_str_i64" | "astype_str_f64" | "astype_str_bool") => {
+            let col = match workload {
+                "astype_str_i64" => Column::from_i64_values((0..rows as i64).collect()),
+                "astype_str_bool" => Column::from_bool_values((0..rows).map(|i| i % 2 == 0).collect()),
+                _ => Column::from_f64_values((0..rows).map(|i| i as f64 * 1.5).collect()),
             };
             let index = Index::new_known_unique_int64_unit_range(0, rows);
             let series = Series::new("s", index, col).expect("astype series");

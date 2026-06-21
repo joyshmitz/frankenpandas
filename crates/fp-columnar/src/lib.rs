@@ -14322,6 +14322,22 @@ impl Column {
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
         }
+        // Bool -> Utf8: emit the pandas spellings "True"/"False" straight into a
+        // contiguous byte buffer. cast_scalar(Bool(b), Utf8) is exactly those two
+        // (verified by cast_scalar_to_utf8_uses_pandas_string_spellings); all-valid
+        // (as_bool_slice), bit-identical, skips the Vec<Scalar::Utf8>.
+        if target == DType::Utf8
+            && let Some(data) = self.as_bool_slice()
+        {
+            let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 5);
+            let mut offsets: Vec<usize> = Vec::with_capacity(data.len() + 1);
+            offsets.push(0);
+            for &b in data {
+                bytes.extend_from_slice(if b { b"True" } else { b"False" });
+                offsets.push(bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()

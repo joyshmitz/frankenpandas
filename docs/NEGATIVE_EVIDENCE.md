@@ -1728,3 +1728,12 @@ skipping the Vec<Scalar> source materialization AND the per-row String alloc. ME
 (incl. astype_to_utf8 spelling test) + fp-frame 3098/0. DELIBERATELY NOT float/bool (cast_scalar uses
 pandas-specific spellings "1.0"/"True" that Rust's {} does NOT produce — write! would break them). The
 write!-into-buffer vein extends to numeric->string for the safe int case.
+
+### 2026-06-21 BlackThrush — LEVER: Bool astype(str) static-byte write (347x); completes safe astype-str cases
+Sibling of the Int64 astype(str) lever. cast_scalar(Bool(b), Utf8) is exactly "True"/"False" (pandas
+spellings, verified by the spelling test), so a Bool->Utf8 fast path in Column::astype emits those static
+bytes straight into a contiguous buffer (like day_name) — bit-identical, skips Vec<Scalar::Utf8>.
+MEASURED: astype_str_bool fp=331us = **347.57x** vs pandas. Conformance GREEN (fp-columnar incl. astype
+spelling test). The SAFE astype(str) cases are now all typed-fast: Int64 90.1x, Bool 347x. Float64
+DEFERRED (35.9x win; cast_scalar's float formatter is the complex pandas repr — shortest-round-trip +
+".0" + scientific threshold — too risky to replicate write-into-buffer bit-identically).

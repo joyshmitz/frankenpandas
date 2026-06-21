@@ -383,6 +383,15 @@ with fp-groupby/fp-join arena allocators), filed as a high-priority bead, not im
 unilaterally. Dead ends still recorded: typed-backing and validity-init tweaks don't help;
 the lever is the allocator, not the column build.
 
+**CURRENT FIX — lazy Int64 chunk tape removes the construction allocation.** cod-a's follow-up
+keeps concat's source `Arc<[i64]>` buffers as `(arc, start, len)` spans in
+`LazyAllValidInt64Chunks`, and only builds the flat `Vec<i64>` when a consumer asks for a
+typed slice or public scalar values. The same workload now measures **0.000361 ms FP vs
+0.851 ms pandas = 2,358× faster** in the normal release harness; the old same-binary
+materialized direct build remains **6.249 ms**, so the delta is the eliminated output
+allocation/page-touch floor rather than allocator noise. Mimalloc remains useful for consumers
+that force materialization, but concat construction itself is no longer a loss class.
+
 **GENERALIZES (measured) — mimalloc helps the whole rebuild-class, not just concat.** Ran the
 same shift/ffill workloads under mimalloc (`bench_rebuild_mimalloc`): shift 9.01 → 3.98 ms
 (2.3×, gap 12× → 5.4×), ffill 18.43 → 6.62 ms (2.8×, gap 6.6× → 2.4×). Smaller than concat's

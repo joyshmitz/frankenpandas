@@ -751,6 +751,24 @@ impl Int64DenseCycleWitness {
 }
 
 #[derive(Clone)]
+struct Int64Chunk {
+    data: Arc<[i64]>,
+    start: usize,
+    len: usize,
+}
+
+impl Int64Chunk {
+    fn new(data: Arc<[i64]>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self { data, start, len }
+    }
+
+    fn as_slice(&self) -> &[i64] {
+        &self.data[self.start..self.start + self.len]
+    }
+}
+
+#[derive(Clone)]
 struct Float64Chunk {
     data: Arc<[f64]>,
     start: usize,
@@ -1844,6 +1862,13 @@ enum ScalarValues {
         dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    LazyAllValidInt64Chunks {
+        chunks: Arc<[Int64Chunk]>,
+        len: usize,
+        data: OnceLock<Vec<i64>>,
+        dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// All-valid Datetime64 (nanosecond epoch) backing — the typed counterpart
     /// of `LazyAllValidInt64` for `DType::Datetime64`, so a datetime-producing op
     /// (e.g. `to_datetime`) can ingest a `Vec<i64>` of nanos without boxing a
@@ -2265,6 +2290,16 @@ impl ScalarValues {
     fn lazy_all_valid_int64_arc(data: Arc<[i64]>) -> Self {
         Self::LazyAllValidInt64 {
             data,
+            dense_cycle: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_int64_chunks(chunks: Arc<[Int64Chunk]>, len: usize) -> Self {
+        Self::LazyAllValidInt64Chunks {
+            chunks,
+            len,
+            data: OnceLock::new(),
             dense_cycle: OnceLock::new(),
             values: OnceLock::new(),
         }
@@ -3567,6 +3602,28 @@ impl ScalarValues {
         None
     }
 
+    fn materialize_int64_chunks(chunks: &[Int64Chunk], len: usize) -> Vec<i64> {
+        let mut out = Vec::with_capacity(len);
+        for chunk in chunks {
+            out.extend_from_slice(chunk.as_slice());
+        }
+        debug_assert_eq!(out.len(), len);
+        out
+    }
+
+    fn chunks_i64_data(&self) -> Option<&[i64]> {
+        if let Self::LazyAllValidInt64Chunks {
+            chunks, len, data, ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| Self::materialize_int64_chunks(chunks, *len))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn materialize_combine_first_float64(
         left: &[f64],
         right: &[f64],
@@ -3627,6 +3684,16 @@ impl ScalarValues {
             Self::Eager(values) => values,
             Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
+                .as_slice(),
+            Self::LazyAllValidInt64Chunks { chunks, values, .. } => values
+                .get_or_init(|| {
+                    chunks
+                        .iter()
+                        .flat_map(Int64Chunk::as_slice)
+                        .copied()
+                        .map(Scalar::Int64)
+                        .collect()
+                })
                 .as_slice(),
             Self::LazyAllValidDatetime64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Datetime64).collect())
@@ -4287,6 +4354,7 @@ impl ScalarValues {
         match self {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
+            Self::LazyAllValidInt64Chunks { len, .. } => *len,
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
@@ -4474,6 +4542,23 @@ impl Clone for ScalarValues {
             Self::Eager(values) => Self::Eager(values.clone()),
             Self::LazyAllValidInt64 { data, .. } => {
                 Self::lazy_all_valid_int64_arc(Arc::clone(data))
+            }
+            Self::LazyAllValidInt64Chunks {
+                chunks,
+                len,
+                dense_cycle,
+                ..
+            } => {
+                let cloned = Self::lazy_all_valid_int64_chunks(Arc::clone(chunks), *len);
+                if let Self::LazyAllValidInt64Chunks {
+                    dense_cycle: cloned_cycle,
+                    ..
+                } = &cloned
+                    && let Some(value) = dense_cycle.get().copied()
+                {
+                    let _ = cloned_cycle.set(value);
+                }
+                cloned
             }
             Self::LazyAllValidDatetime64 { data, .. } => {
                 Self::lazy_all_valid_datetime64_arc(Arc::clone(data))
@@ -5991,6 +6076,32 @@ impl Column {
         }
     }
 
+    /// Build an all-valid Int64 column from immutable chunks that are already
+    /// in output row order. Semantically identical to concatenating the chunks
+    /// into one `Vec<i64>` and calling [`Self::from_i64_values`], but defers
+    /// the destination buffer until a typed or scalar consumer needs it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_i64_all_valid_chunks(chunks: Vec<(Arc<[i64]>, usize, usize)>, len: usize) -> Self {
+        debug_assert_eq!(
+            chunks
+                .iter()
+                .map(|(_, _, chunk_len)| *chunk_len)
+                .sum::<usize>(),
+            len
+        );
+        let chunks: Vec<Int64Chunk> = chunks
+            .into_iter()
+            .map(|(data, start, chunk_len)| Int64Chunk::new(data, start, chunk_len))
+            .collect();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64_chunks(Arc::from(chunks), len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid `Datetime64` column from a `Vec<i64>` of nanosecond
     /// epochs (br-frankenpandas-j5150). Caller guarantees no `Timestamp::NAT`
     /// sentinel (all rows present); semantically identical to
@@ -7049,6 +7160,9 @@ impl Column {
             if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
                 return Some(data.as_ref());
             }
+            if let Some(data) = self.values.chunks_i64_data() {
+                return Some(data);
+            }
             if let Some(data) = self.values.repeat_runs_i64_data() {
                 return Some(data);
             }
@@ -7115,6 +7229,25 @@ impl Column {
         None
     }
 
+    /// Return an all-valid Int64 column's shared contiguous backing and row
+    /// start offset when the column is represented as an immutable Arc view.
+    /// Lazy chunk tapes intentionally return `None`: callers that can preserve
+    /// chunks should carry their existing descriptors rather than flattening.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_i64_arc_view_source(&self) -> Option<(Arc<[i64]>, usize)> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidInt64 { data, .. } => Some((Arc::clone(data), 0)),
+            _ => match &self.data {
+                Some(ColumnData::Int64(data)) => Some((Arc::clone(data), 0)),
+                _ => None,
+            },
+        }
+    }
+
     /// Return a cached exact dense-cycle witness for all-valid Int64 columns.
     ///
     /// The first successful/failed lookup scans the backing once and caches the
@@ -7130,6 +7263,22 @@ impl Column {
             } = &self.values
         {
             return *dense_cycle.get_or_init(|| certify_int64_dense_cycle(data.as_ref()));
+        }
+        if self.dtype == DType::Int64
+            && self.validity.all()
+            && let ScalarValues::LazyAllValidInt64Chunks {
+                chunks,
+                len,
+                data,
+                dense_cycle,
+                ..
+            } = &self.values
+        {
+            return *dense_cycle.get_or_init(|| {
+                let values =
+                    data.get_or_init(|| ScalarValues::materialize_int64_chunks(chunks, *len));
+                certify_int64_dense_cycle(values.as_slice())
+            });
         }
         None
     }
@@ -11018,11 +11167,14 @@ impl Column {
         // as_i64_slice/as_f64_slice are Some only when BOTH columns are all-valid of
         // that dtype, so from_i64_values/from_f64_values are bit-identical to the
         // Scalar path (same dtype + no missing => same logical values).
-        if let (Some(a), Some(b)) = (self.as_i64_slice(), other.as_i64_slice()) {
-            let mut out = Vec::with_capacity(a.len() + b.len());
-            out.extend_from_slice(a);
-            out.extend_from_slice(b);
-            return Ok(Self::from_i64_values(out));
+        if let (Some((a, a_start)), Some((b, b_start))) = (
+            self.as_i64_arc_view_source(),
+            other.as_i64_arc_view_source(),
+        ) {
+            return Ok(Self::from_i64_all_valid_chunks(
+                vec![(a, a_start, self.len()), (b, b_start, other.len())],
+                self.len() + other.len(),
+            ));
         }
         if let (Some(a), Some(b)) = (self.as_f64_slice(), other.as_f64_slice()) {
             let mut out = Vec::with_capacity(a.len() + b.len());
@@ -19085,6 +19237,31 @@ mod tests {
                 Scalar::Float64(5.0),
             ]
         );
+    }
+
+    #[test]
+    fn from_i64_all_valid_chunks_materializes_in_chunk_order() {
+        let first: Arc<[i64]> = Arc::from(vec![99, 1, 2, 88]);
+        let second: Arc<[i64]> = Arc::from(vec![3, 4, 5]);
+        let column = Column::from_i64_all_valid_chunks(
+            vec![(Arc::clone(&first), 1, 2), (Arc::clone(&second), 0, 3)],
+            5,
+        );
+
+        assert_eq!(column.len(), 5);
+        assert!(column.validity().all());
+        assert_eq!(column.as_i64_slice(), Some([1, 2, 3, 4, 5].as_slice()));
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ]
+        );
+        assert_eq!(column.clone(), Column::from_i64_values(vec![1, 2, 3, 4, 5]));
     }
 
     #[test]

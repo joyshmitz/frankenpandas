@@ -1350,3 +1350,14 @@ session): all-valid groups scan the native &[bool]/&[i64]/&[f64] — scalar_trut
 (Int64)==v!=0, (Float64)==(!NaN && v!=0.0); typed slices all-valid (f64 no-NaN) so bit-identical, no
 missing to skip. as_*_slice called inside the closure is O(1) per group. UNMEASURED. GroupBy vein
 continues (idxmin/idxmax done last commit) — siblings (group first/last/nth, sum/mean if Scalar) next.
+
+### 2026-06-21 BlackThrush — agg_numeric fallback typed value-gather (CODE-ONLY, perf PENDING) — IMPACTFUL
+DISK-LOW (38G, no cargo): code-only. SeriesGroupBy.agg_numeric (backs groupby std/var/skew/kurt/sem/
+median/quantile) has dense-key fast paths (int64-dense + contiguous-Utf8 grouping keys) that read
+VALUES typed via vf/vi. But its general fallback (reached when the grouping KEY is Float64/Datetime/
+sparse-Int64) built per-group `nums: Vec<f64>` via values()[idx] Scalar + per-row to_f64. Applied the
+SAME vf/vi typed gather to the fallback: all-valid Float64 → data[idx]; all-valid Int64 → data[idx] as
+f64. **Bit-identity provable**: the aggregate output is Float64, so to_f64(Int64(v))=v as f64 matches
+the i64->f64 cast EXACTLY (no lossy-compare divergence — unlike idxmin, the values are converted to f64
+in BOTH paths); to_f64(Float64)=v; all-valid ⇒ nothing missing to skip; a value column WITH missing
+falls to the Scalar filter_map. Impactful: groupby moment/order-stat aggs over a non-dense key. UNMEASURED.

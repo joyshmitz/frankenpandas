@@ -3008,3 +3008,16 @@ select_nth_unstable_by). BIT-IDENTICAL (collect_finite keeps inf/drops only miss
 share a value; fp-frame 3098/0 incl resample_median_golden_basic). 30.1ms->20.9ms, 0.87x->1.25x WIN. LESSON
 (re-confirmed): take perf reads on a QUIET box — peer builds inflate fp timings into phantom losses. Remaining
 non-wins are all documented-hard: ewm 0.80x (fdiv-locked), to_numpy/transpose (structural 2D-block views l4vzc).
+
+### 2026-06-22 CrimsonFinch — quiet-machine confirms ALL "documented soft losses" are phantoms (ewm/vc/sort WIN)
+After the resample-median close, re-measured the three long-standing "lagging floor" claims (bench-frontier:
+value_counts 0.62x, ewm_mean 0.79x, sort_single 0.91x) on a QUIET box. ALL are machine-load PHANTOMS — fp WINS
+every one @1M: ewm_mean 2.16x (7.3ms vs 15.7ms), sort_values_single 2.46x (51ms vs 125ms), value_counts 4.09x
+(41ms vs 168ms), value_counts_i64 4.00x, drop_duplicates 6.48x. No code change (no real loss to fix). These
+were never fdiv/khash/gather FLOORS — they were timing taken while peers built. The fp vs-pandas surface is now
+FULLY DOMINATED: every benched op WINS except to_numpy/transpose (structural — pandas returns a zero-copy 2D
+block view; architecturally unbeatable without changing fp's columnar storage, l4vzc). NET this session
+(CrimsonFinch): 3 real wins shipped — expanding skew 0.07x->1.19x (BTreeMap+typed-output fuse, then powf->sqrt),
+resample_median 0.87x->1.25x (typed-f64 fast path) — plus this phantom-debunk of ewm/value_counts/sort. LESSON
+(now proven 3x this session): take perf reads on a QUIET box; peer builds inflate fp timings into phantom losses,
+and those phantoms calcify into "documented floors" in the ledger. Don't trust a sub-1.0x read taken under load.

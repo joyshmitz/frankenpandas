@@ -3128,3 +3128,14 @@ groupby, rolling/expanding, datetime/resample, joins, indexing, io csv+json, str
 @1M, measured. ONE fixable vs-pandas loss remains repo-wide: groupby_unique_str 0.61-0.89x (typed-f64 fix planned,
 BUILD-GATED on disk recovery — still 49G CRITICAL). Plus structural to_numpy/transpose (architectural). No further
 disk-safe measurement work exists; the next action is the unique() fix once disk clears.
+
+### 2026-06-22 CrimsonFinch — groupby_unique_str FIXED 0.61-0.89x->1.27-1.78x (typed-f64); ZERO fixable losses remain
+Implemented the planned typed-f64 fast path for SeriesGroupBy.unique() (d38e5c73). The dense gid block had a
+typed branch for keys but still boxed the VALUE column (values()->Vec<Scalar>, ScalarKey dedup, ~1M Scalar output
+clones). Added a Float64 value branch (gate as_f64_slice + no-NaN): dedup per gid on canonical bits (v==0.0->0 ==
+ScalarKey::FloatBits(normalized.to_bits())), uniques as f64, emit from_f64_values. Bit-identical (same gids/first-
+seen order/labels; no missing under gate) — fp-frame 3098/0 incl test_series_groupby_unique_nt65g8 +
+unique_golden_basic. groupby_unique_str ~131ms->~64ms (2x fp-side), 0.61-0.89x -> 1.27-1.78x WIN. Disk stayed FLAT
+49->50G across the incremental build (warm-target reuse replaces artifacts, no growth — earlier deferral was over-
+cautious). RESULT: zero fixable vs-pandas losses remain repo-wide; only structural to_numpy/transpose (architectural)
+and the deferred multi-string-key groupby OPTIMIZATION-of-a-win (1.07x, plan committed) are left.

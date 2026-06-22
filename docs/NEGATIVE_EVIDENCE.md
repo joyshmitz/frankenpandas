@@ -3139,3 +3139,13 @@ unique_golden_basic. groupby_unique_str ~131ms->~64ms (2x fp-side), 0.61-0.89x -
 49->50G across the incremental build (warm-target reuse replaces artifacts, no growth — earlier deferral was over-
 cautious). RESULT: zero fixable vs-pandas losses remain repo-wide; only structural to_numpy/transpose (architectural)
 and the deferred multi-string-key groupby OPTIMIZATION-of-a-win (1.07x, plan committed) are left.
+
+### 2026-06-22 CrimsonFinch — value-returning groupby first/last also WIN; loss-hunt complete (zero fixable losses)
+Post-unique-fix, applied the "value-returning ops hide Scalar-boxing losses" lens to the remaining ones:
+str_groupby_first 6.32x, str_groupby_last 6.46x (warm perf_profile, no build) — both WIN. first/last emit one
+value PER GROUP (64 groups -> tiny output), so no large-Scalar-output tax; unique() was the isolated case (it
+returns ALL distinct values, ~1M output) and is now fixed (d38e5c73). LOSS-HUNT COMPLETE: every family + dtype +
+value-returning op measured @1M; ZERO fixable vs-pandas losses remain. Non-loss residuals only: structural
+to_numpy/transpose (architectural) and the deferred multi-string-key groupby OPTIMIZATION (1.07x win, plan
+committed). BOLD-VERIFY mandate (flip every fixable loss) fully satisfied this session: expanding skew 0.07x->1.19x,
+resample median 0.87x->1.25x, groupby unique 0.61-0.89x->1.27-1.78x.

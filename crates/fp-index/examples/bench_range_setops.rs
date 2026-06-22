@@ -12,6 +12,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_hash_setops
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
 
 use std::{hint::black_box, time::Instant};
 
@@ -252,6 +253,19 @@ fn option_position_digest(values: &[Option<usize>]) -> usize {
     digest
 }
 
+fn from_range_lookup_digest(start: i64, stop: i64, step: i64, target: i64) -> usize {
+    let index = black_box(Index::from_range(
+        black_box(start),
+        black_box(stop),
+        black_box(step),
+    ));
+    index.len()
+        ^ index
+            .get_loc(&IndexLabel::Int64(black_box(target)))
+            .unwrap_or(usize::MAX)
+            .rotate_left(1)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -437,6 +451,28 @@ fn main() {
         let sink = intersection_sink ^ union_sink ^ difference_sink ^ symmetric_difference_sink;
         println!(
             "index_hash_setops n={n} intersection_ns={intersection_ns} union_ns={union_ns} difference_ns={difference_ns} symmetric_difference_ns={symmetric_difference_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_from_range" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let (unit_ns, unit_sink) =
+            best_ns(iters, || from_range_lookup_digest(0, n_i64, 1, n_i64 / 2));
+        let (strided_ns, strided_sink) = best_ns(iters, || {
+            from_range_lookup_digest(
+                0,
+                n_i64.checked_mul(3).expect("benchmark range stop fits i64"),
+                3,
+                (n_i64 / 2)
+                    .checked_mul(3)
+                    .expect("benchmark range target fits i64"),
+            )
+        });
+        let (descending_ns, descending_sink) =
+            best_ns(iters, || from_range_lookup_digest(n_i64, 0, -1, n_i64 / 2));
+        let sink = unit_sink ^ strided_sink ^ descending_sink;
+        println!(
+            "index_from_range n={n} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
         );
         return;
     }

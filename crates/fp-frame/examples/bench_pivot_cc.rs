@@ -32,28 +32,30 @@ fn main() {
     let n_col: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
     let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
     let aggfunc = args.get(5).map(String::as_str).unwrap_or("sum");
+    let keytype = args.get(6).map(String::as_str).unwrap_or("i64");
 
     let index = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
     // simple deterministic LCG-ish spread
-    cols.insert(
-        "idx".to_string(),
-        Column::from_values(
+    let idx_key = |i: usize| ((i as i64).wrapping_mul(2654435761) >> 13) % n_idx;
+    let col_key = |i: usize| ((i as i64).wrapping_mul(40503) >> 7) % n_col;
+    let (idx_vals, col_vals): (Vec<Scalar>, Vec<Scalar>) = if keytype == "str" {
+        (
             (0..n)
-                .map(|i| Scalar::Int64(((i as i64).wrapping_mul(2654435761) >> 13) % n_idx))
+                .map(|i| Scalar::Utf8(format!("r{:06}", idx_key(i)).into()))
+                .collect(),
+            (0..n)
+                .map(|i| Scalar::Utf8(format!("c{:04}", col_key(i)).into()))
                 .collect(),
         )
-        .unwrap(),
-    );
-    cols.insert(
-        "col".to_string(),
-        Column::from_values(
-            (0..n)
-                .map(|i| Scalar::Int64(((i as i64).wrapping_mul(40503) >> 7) % n_col))
-                .collect(),
+    } else {
+        (
+            (0..n).map(|i| Scalar::Int64(idx_key(i))).collect(),
+            (0..n).map(|i| Scalar::Int64(col_key(i))).collect(),
         )
-        .unwrap(),
-    );
+    };
+    cols.insert("idx".to_string(), Column::from_values(idx_vals).unwrap());
+    cols.insert("col".to_string(), Column::from_values(col_vals).unwrap());
     cols.insert(
         "val".to_string(),
         Column::from_values(
@@ -72,5 +74,7 @@ fn main() {
                 .expect("pivot_table"),
         );
     });
-    println!("pivot_table n={n} n_idx={n_idx} n_col={n_col} agg={aggfunc}: best={t}ns");
+    println!(
+        "pivot_table n={n} n_idx={n_idx} n_col={n_col} agg={aggfunc} key={keytype}: best={t}ns"
+    );
 }

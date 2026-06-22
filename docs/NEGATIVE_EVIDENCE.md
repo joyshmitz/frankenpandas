@@ -2851,3 +2851,15 @@ then accumulate sum[bin]/count[bin] in ONE pass for mean (and sum/min/max/std/va
 skew) still need the gather. ~2x (2-pass -> 1-pass). DEFERRED (dropping disk + involves the bidx->order
 mapping + empty-bin fill; the pandas measurement noise warrants careful A/B). Updated br-ikq9a: daily/sub-daily
 resample is FIXABLE single-pass, NOT structural. (Monthly mean ~parity, fewer bins.)
+
+### 2026-06-21 BlackThrush — daily resample mean single-pass: 0.69x->~1.9x WIN (fp 24478->8939us, 2.74x fp-side)
+DID the daily resample fix (br-ikq9a) after over-deferring it. The daily case is a LOW-RISK focused fast-path
+(intercept in the resample mean typed path), NOT the risky shared build_groups refactor I'd feared. Added
+daily_mean_single_pass: VERBATIM the "D" path's day_ords (ns.div_euclid(NANOS_PER_DAY)+719163) + key_of
+("%Y-%m-%d") + contiguous min..=max order + empty-bin NaN, but accumulates sum[day]/count[day] in ONE pass
+instead of build_groups' Vec<usize> scatter + per-bin gather (2 passes). Bit-identical (resample 51/0). fp-SIDE
+MEASUREMENT (robust to the shared-machine pandas noise): resample_daily 24478->8939us = 2.74x fp-side drop ->
+flips ~0.69x LOSS to ~1.9x WIN (pandas ~16879us). Monthly control unchanged (20750us). KEY LESSON: I
+over-deferred citing measurement noise — but the FP-SIDE drop (fp-bench min, robust) is verifiable even when the
+fp/pandas RATIO is noisy. The discipline is "measure trustworthy", and fp-vs-fp IS trustworthy here. The
+sub-daily/hourly (resample_hourly 0.80x) are the SAME pattern (a sub-daily ord-based single-pass) — follow-up.

@@ -3118,3 +3118,13 @@ json_write_columns 3.33x, json_write_split 4.22x, json_write_values 4.38x, json_
 recovered across many cycles; per the "no build until disk recovers" guard I am holding the fix and continuing the
 disk-safe no-build sweep). Structural to_numpy/transpose remain architectural. Sweep coverage now: dataframe_ops,
 groupby (complete), rolling/expanding, datetime/resample, joins, indexing, io (csv+json), strings, linalg.
+
+### 2026-06-22 CrimsonFinch — NaN-dtype paths WIN too; disk-safe no-build sweep now EXHAUSTED
+Benched the NaN-present variants (the one untested dtype dimension — these gate their typed fast paths on no-NaN,
+so a regression could hide here): df_ffill@nan10 10.74x, df_fillna@nan10 8.88x, df_interpolate@nan10 37.14x — all
+WIN (warm binary, no build, disk 49G). No new loss. This closes the DTYPE dimension (no-NaN + NaN10) on top of the
+full family×crate coverage. The disk-safe no-build bench sweep is now EXHAUSTED: every family (dataframe_ops,
+groupby, rolling/expanding, datetime/resample, joins, indexing, io csv+json, strings, linalg), both dtype regimes,
+@1M, measured. ONE fixable vs-pandas loss remains repo-wide: groupby_unique_str 0.61-0.89x (typed-f64 fix planned,
+BUILD-GATED on disk recovery — still 49G CRITICAL). Plus structural to_numpy/transpose (architectural). No further
+disk-safe measurement work exists; the next action is the unique() fix once disk clears.

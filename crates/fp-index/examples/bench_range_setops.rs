@@ -4,10 +4,11 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 searchsorted
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 putmask_where
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
 
 use std::{hint::black_box, time::Instant};
 
-use fp_index::RangeIndex;
+use fp_index::{Index, RangeIndex};
 
 fn best_ns(iters: usize, mut f: impl FnMut() -> usize) -> (u128, usize) {
     let mut sink = 0usize;
@@ -75,6 +76,12 @@ fn int64_index_digest(index: &fp_index::Index) -> usize {
     digest
 }
 
+fn sequential_i64_values(start: i64, len: usize) -> Vec<i64> {
+    (0..len)
+        .map(|offset| start + i64::try_from(offset).expect("offset fits i64"))
+        .collect()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -124,6 +131,24 @@ fn main() {
         let sink = putmask_sink ^ where_sink;
         println!(
             "range_putmask_where n={n} putmask_ns={putmask_ns} where_ns={where_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_append_repeat" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let left = Index::from_i64_values(sequential_i64_values(0, n)).set_name("row");
+        let right = Index::from_i64_values(sequential_i64_values(n_i64, n));
+        let (append_ns, append_sink) = best_ns(iters, || {
+            let output = left.append(&right);
+            int64_index_digest(&output)
+        });
+        let (repeat_ns, repeat_sink) = best_ns(iters, || {
+            let output = left.repeat(2);
+            int64_index_digest(&output)
+        });
+        let sink = append_sink ^ repeat_sink;
+        println!(
+            "index_append_repeat n={n} append_ns={append_ns} repeat2_ns={repeat_ns} sink={sink}"
         );
         return;
     }

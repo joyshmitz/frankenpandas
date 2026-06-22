@@ -4755,6 +4755,19 @@ impl Index {
                 (self.labels.int64_view(), where_index.labels.int64_view())
         {
             if mask.is_none() {
+                if source.windows(2).all(|pair| pair[0] <= pair[1])
+                    && keys.windows(2).all(|pair| pair[0] <= pair[1])
+                {
+                    let mut out = Vec::with_capacity(keys.len());
+                    let mut source_pos = 0usize;
+                    for &key in keys.iter() {
+                        while source_pos < source.len() && source[source_pos] <= key {
+                            source_pos += 1;
+                        }
+                        out.push(source_pos.checked_sub(1));
+                    }
+                    return out;
+                }
                 return keys
                     .iter()
                     .map(|&key| {

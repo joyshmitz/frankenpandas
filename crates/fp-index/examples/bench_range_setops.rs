@@ -9,6 +9,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_get_indexer_non_unique
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_diff
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_position_lookup
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
 
 use std::{hint::black_box, time::Instant};
 
@@ -99,6 +100,19 @@ fn lookup_probe_values(len: usize) -> Vec<i64> {
         .map(|offset| {
             let value = offset.wrapping_mul(15_485_863) % len;
             i64::try_from(value).expect("probe label fits i64")
+        })
+        .collect()
+}
+
+fn asof_where_values(len: usize) -> Vec<i64> {
+    let len_i64 = i64::try_from(len).expect("length fits i64");
+    (0..len)
+        .map(|offset| {
+            let offset = i64::try_from(offset).expect("offset fits i64");
+            offset
+                .checked_mul(2)
+                .and_then(|value| value.checked_sub((offset % 3) + 1))
+                .unwrap_or(len_i64)
         })
         .collect()
 }
@@ -207,6 +221,18 @@ fn scalar_lookup_digest(index: &Index, probes: &[i64]) -> usize {
         digest = digest
             .wrapping_mul(131)
             .wrapping_add(usize::from(index.contains(&label)));
+    }
+    digest
+}
+
+fn option_position_digest(values: &[Option<usize>]) -> usize {
+    let mut digest = values.len();
+    for value in [values.first(), values.get(values.len() / 2), values.last()]
+        .into_iter()
+        .flatten()
+    {
+        digest =
+            digest.wrapping_mul(131).rotate_left(1) ^ value.unwrap_or(usize::MAX).rotate_left(3);
     }
     digest
 }
@@ -330,6 +356,28 @@ fn main() {
         let sink = sorted_sink ^ unsorted_sink;
         println!(
             "index_position_lookup n={n} probes={probe_count} sorted_ns={sorted_ns} unsorted_ns={unsorted_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_asof_locs" {
+        let source = Index::from_i64_values(
+            (0..n)
+                .map(|offset| {
+                    i64::try_from(offset)
+                        .expect("offset fits i64")
+                        .checked_mul(2)
+                        .expect("source label fits i64")
+                })
+                .collect(),
+        );
+        let where_index = Index::from_i64_values(asof_where_values(n));
+        let where_len = where_index.len();
+        let (asof_locs_ns, sink) = best_ns(iters, || {
+            let output = source.asof_locs(&where_index, None);
+            option_position_digest(&output)
+        });
+        println!(
+            "index_asof_locs n={n} where_len={where_len} asof_locs_ns={asof_locs_ns} sink={sink}"
         );
         return;
     }

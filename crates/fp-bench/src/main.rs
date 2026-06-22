@@ -1242,6 +1242,51 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     .expect("merge");
             })
         }
+        ("joins", "join_inner_shuffled") => {
+            // Inner merge on SHUFFLED (non-monotonic) i64 keys: the sequential
+            // build_join_frames keys hit an ordered/dense fast path; shuffling
+            // both key columns (LCG permutation) forces the hash-join path.
+            let mut lk: Vec<i64> = (0..rows as i64).collect();
+            let mut rk: Vec<i64> = (0..rows as i64).map(|i| i * 2).collect();
+            let mut st: u64 = 0x243F_6A88_85A3_08D3;
+            let mut shuffle = |v: &mut Vec<i64>| {
+                for i in (1..v.len()).rev() {
+                    st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let j = (st >> 33) as usize % (i + 1);
+                    v.swap(i, j);
+                }
+            };
+            shuffle(&mut lk);
+            shuffle(&mut rk);
+            let mut left_cols = BTreeMap::new();
+            left_cols.insert("key".to_string(), Column::from_i64_values(lk));
+            left_cols.insert(
+                "left_val".to_string(),
+                Column::from_f64_values((0..rows).map(|i| i as f64).collect()),
+            );
+            let left = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                left_cols,
+                vec!["key".to_string(), "left_val".to_string()],
+            )
+            .expect("shuffled left");
+            let mut right_cols = BTreeMap::new();
+            right_cols.insert("key".to_string(), Column::from_i64_values(rk));
+            right_cols.insert(
+                "right_val".to_string(),
+                Column::from_f64_values((0..rows).map(|i| i as f64 * 10.0).collect()),
+            );
+            let right = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                right_cols,
+                vec!["key".to_string(), "right_val".to_string()],
+            )
+            .expect("shuffled right");
+            time_us(|| {
+                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
+                    .expect("merge");
+            })
+        }
         ("joins", "join_inner_str") => {
             // String-key inner merge: left key = "k{i:08}" (unique), right key =
             // "k{2i:08}" — mirrors the int64 join shape (~n/2 inner matches) but

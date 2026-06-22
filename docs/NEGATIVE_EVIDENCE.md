@@ -3319,3 +3319,11 @@ groups: build_groups still materializes the full groups map (1M Vec<usize>) used
 label, plus the sort of 1M group keys + the 3-col 1M-row output build. Kept (2.5x fp-side is NOT ~0-gain, bit-
 identical), residual filed as a follow-up (derive first-row labels from gid_per_row first-occurrence to skip the
 groups-map materialization on the dense path). 9th flip/extension this session.
+
+### 2026-06-22 CrimsonFinch — shuffled/hash-path join is WIN (2.44x): join hash path already typed, no wide-key gap there
+Tested whether the wide/high-card loss pattern (found in groupby) also affects JOINS: added join_inner_shuffled
+(both i64 key cols LCG-shuffled -> non-monotonic -> forces the hash-join path instead of the sequential ordered
+fast path). @1M: fp 58ms vs pandas 142ms = 2.44x WIN. So fp's join hash path is already typed/FxHash-fast (unlike
+the groupby generic Vec<ScalarKey>+SipHash path that the wide-i64 fix addressed). No join wide-key gap. Bench added
+for coverage. Biggest remaining measured gap stays DataFrameGroupBy wide-i64 0.25x (output/double-hash bound,
+architectural-ish) + the i64 groupby.cum* correctness bug.

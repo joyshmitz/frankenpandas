@@ -3099,3 +3099,13 @@ hinge: first-seen order per gid + the single-missing-once rule must match the cu
 groupby unique conformance/golden. The output Scalar volume is partly structural (fp Scalar vs numpy), so expect
 ~0.89x->~1.3-1.5x not a huge flip. nunique already WINS 2.99x (dense count, no value output). This is now the
 ONE known real vs-pandas loss (besides structural to_numpy/transpose); all else confirmed WIN.
+
+### 2026-06-22 CrimsonFinch — groupby family sweep COMPLETE: unique() is the sole loss; cumcount/all/transform WIN
+Benched the last 3 unmeasured groupby ops (warm binary, no build, disk 49G): groupby_cumcount 17.65x,
+groupby_all_str 1.24x, groupby_transform_mean_str 3.57x — all WIN. So across the full groupby family (mean/sum/
+min/max/std/var/median/sem/skew/kurt/prod/nunique/quantile/rank/count/agg3/cumcount/all/transform, int+str+multi
+key) the ONLY vs-pandas loss is groupby_unique_str 0.61-0.89x (value-returning op: variable-length distinct lists
+emitted as ~1M Scalars vs pandas numpy arrays — see prior entry for the typed-f64 fix plan, deferred to disk
+recovery). Confirms the loss is ISOLATED to unique()'s value-output, not a systemic groupby issue (the broadcast
+transform + boolean all + cumcount all stay typed/fast). Net known vs-pandas losses repo-wide: groupby_unique_str
+(fixable, planned) + structural to_numpy/transpose (architectural). Everything else WINS.

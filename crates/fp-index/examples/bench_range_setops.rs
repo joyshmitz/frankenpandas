@@ -10,6 +10,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_diff
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_position_lookup
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
 
 use std::{hint::black_box, time::Instant};
 
@@ -378,6 +379,24 @@ fn main() {
         });
         println!(
             "index_asof_locs n={n} where_len={where_len} asof_locs_ns={asof_locs_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_sorted_setops" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let left = Index::from_i64_values(sequential_i64_values(0, n)).set_name("row");
+        let right = Index::from_i64_values(sequential_i64_values(n_i64 / 2, n));
+        let (intersection_ns, intersection_sink) = best_ns(iters, || {
+            let output = left.intersection(&right);
+            int64_index_digest(&output)
+        });
+        let (difference_ns, difference_sink) = best_ns(iters, || {
+            let output = left.difference(&right);
+            int64_index_digest(&output)
+        });
+        let sink = intersection_sink ^ difference_sink;
+        println!(
+            "index_sorted_setops n={n} intersection_ns={intersection_ns} difference_ns={difference_ns} sink={sink}"
         );
         return;
     }

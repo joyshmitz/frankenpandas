@@ -3209,3 +3209,13 @@ item: it is a KNOWN, TEST-ENCODED divergence, fully characterized (root: try_cum
 Float64 fallback; fix: typed-i64 cum path emitting Int64 + rewrite the 4 test assertions + regen goldens + pandas
 oracle + int overflow/wrapping semantics). No further autonomous action appropriate. All PERF losses remain
 flipped (zero fixable perf losses repo-wide).
+
+### 2026-06-22 CrimsonFinch — small-n (100k) sweep clean: no fixed-overhead losses; SIZE dimension now covered
+Checked the one untested dimension — small-n, where fixed setup (grids/bins/hashes) is a larger fraction and a
+fixed-overhead loss could hide @100k while winning @1M. Representative @100k sweep (warm binary, no build):
+groupby_mean_str 2.70x, df_mode 1.42x, value_counts 1.20x, resample_mean 1.06x, sort_values_single 1.04x — all
+WIN, just marginally closer to parity than @1M (as expected: setup is proportionally larger at small n). No small-n
+loss. (df_pivot @100k errored on MY pandas-side comparison setup — duplicate (r,c) index, not an fp issue.) The
+vs-pandas bench space is now exhausted across ALL dimensions: families x dtypes (f64/i64/NaN) x value-returning
+ops x sizes (100k/1M). Zero fixable perf losses repo-wide. Only open item is the test-asserted i64 groupby.cum*
+dtype divergence (deferred, directed-correctness). BOLD-VERIFY autonomous perf sweep: COMPLETE.

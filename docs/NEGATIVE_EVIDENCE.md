@@ -2950,3 +2950,15 @@ rows). This is the genuinely STRUCTURAL string-composite cost (fp parses "r, c" 
 MultiIndex with no parse). So unstack is now correctly: dense-grid CRACKED the alloc/cache cell_map (0.22x->
 0.67x), the residual is the irreducible string-composite parse (would need a real MultiIndex = architectural).
 Good outcome: "measure don't guess" caught a wrong guess (allocs) and pinned the real bound (the parse).
+
+### 2026-06-21 BlackThrush — df_pivot dense grid: 0.27x->1.34x @1M (5.85x fp-side) — BIG hidden loss found
+RE-EXAMINING the "pivot/unstack/crosstab/get_dummies fixed" memory claim (the pattern that cracked unstack)
+SURFACED a big hidden loss: df_pivot 0.27x@1M (the memory's "pivot fixed 16.47x" was pivot_TABLE, the agg path
+— NOT the raw df.pivot). Reshape sweep @1M: df_stack 1.63x, df_melt 4.79x, df_crosstab 1.27x WIN; df_pivot
+0.27x + df_get_dummies 0.70x LOSS. df_pivot used FxHashMap<(ScalarKey,ScalarKey), Scalar> (1M inserts +
+nrows*ncols PAIR-hash lookups) — 5x WORSE than unstack's (usize,usize) map because the ScalarKey pair hash is
+dear. FIX (same dense-grid lever as unstack): map sorted row/col keys -> positions, build a dense col-major grid
+(cell -> source row idx, sentinel u32::MAX) when bounded, direct sequential output; sparse falls back to the
+pair map. Bit-identical (pivot 37/0; same sorted order, same first-write/duplicate-error). df_pivot 284469->
+48602us (5.85x fp-side), 0.27x->1.34x WIN. pivot_table intact (34119us). REMAINING hidden loss: df_get_dummies
+0.70x (next). LESSON RE-RE-CONFIRMED: "fixed" claims are often PARTIAL (a sibling op) — sweep the whole family.

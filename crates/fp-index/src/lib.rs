@@ -10482,6 +10482,54 @@ impl RangeIndex {
         i64::try_from(value).expect("validated RangeIndex value bounds")
     }
 
+    fn i64_position_arithmetic_is_safe(&self, len: usize) -> Option<()> {
+        if len == 0 {
+            return Some(());
+        }
+        let last_position = i64::try_from(len.checked_sub(1)?).ok()?;
+        let span = self.step.checked_mul(last_position)?;
+        self.start.checked_add(span)?;
+        Some(())
+    }
+
+    fn fast_i64_values_at_positions(&self, positions: &[usize], len: usize) -> Option<Vec<i64>> {
+        self.i64_position_arithmetic_is_safe(len)?;
+        let mut labels = Vec::with_capacity(positions.len());
+        for &position in positions {
+            if position >= len {
+                return None;
+            }
+            let position = i64::try_from(position).expect("prevalidated RangeIndex position");
+            labels.push(self.start + self.step * position);
+        }
+        Some(labels)
+    }
+
+    fn fast_i64_repeat_values(&self, len: usize, repeats: usize) -> Option<Vec<i64>> {
+        self.i64_position_arithmetic_is_safe(len)?;
+        let mut labels = Vec::with_capacity(repeat_output_capacity(len, repeats));
+        let mut value = self.start;
+        for position in 0..len {
+            match repeats {
+                0 => {}
+                1 => labels.push(value),
+                2 => {
+                    labels.push(value);
+                    labels.push(value);
+                }
+                _ => {
+                    for _ in 0..repeats {
+                        labels.push(value);
+                    }
+                }
+            }
+            if position + 1 < len {
+                value += self.step;
+            }
+        }
+        Some(labels)
+    }
+
     fn take_arithmetic_positions(&self, positions: &[usize], len: usize) -> Option<Index> {
         // Single O(len) pass: verify constant position stride AND in-bounds. The
         // result of an affine RangeIndex taken at an arithmetic position sequence
@@ -10848,15 +10896,19 @@ impl RangeIndex {
         if let Some(idx) = self.take_arithmetic_positions(positions, len) {
             return Ok(idx);
         }
-        for &p in positions {
-            if p >= len {
-                return Err(IndexError::OutOfBounds {
-                    position: p,
-                    length: len,
-                });
+        let labels = if let Some(labels) = self.fast_i64_values_at_positions(positions, len) {
+            labels
+        } else {
+            for &p in positions {
+                if p >= len {
+                    return Err(IndexError::OutOfBounds {
+                        position: p,
+                        length: len,
+                    });
+                }
             }
-        }
-        let labels: Vec<i64> = positions.iter().map(|&p| self.value_at(p)).collect();
+            positions.iter().map(|&p| self.value_at(p)).collect()
+        };
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
@@ -10869,13 +10921,21 @@ impl RangeIndex {
     /// contiguous range.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Index {
-        let mut labels = Vec::with_capacity(repeat_output_capacity(self.len(), repeats));
-        for position in 0..self.len() {
-            let value = self.value_at(position);
-            for _ in 0..repeats {
-                labels.push(value);
+        let len = self.len();
+        let labels = if repeats == 0 {
+            Vec::new()
+        } else if let Some(labels) = self.fast_i64_repeat_values(len, repeats) {
+            labels
+        } else {
+            let mut labels = Vec::with_capacity(repeat_output_capacity(len, repeats));
+            for position in 0..len {
+                let value = self.value_at(position);
+                for _ in 0..repeats {
+                    labels.push(value);
+                }
             }
-        }
+            labels
+        };
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);

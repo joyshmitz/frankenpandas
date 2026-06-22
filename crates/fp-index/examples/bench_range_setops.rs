@@ -13,6 +13,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_hash_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 
 use std::{hint::black_box, time::Instant};
 
@@ -117,6 +118,13 @@ fn lookup_probe_values(len: usize) -> Vec<i64> {
             let value = offset.wrapping_mul(15_485_863) % len;
             i64::try_from(value).expect("probe label fits i64")
         })
+        .collect()
+}
+
+fn take_positions(len: usize) -> Vec<usize> {
+    let len = len.max(1);
+    (0..len)
+        .map(|offset| offset.wrapping_mul(15_485_863) % len)
         .collect()
 }
 
@@ -315,6 +323,27 @@ fn main() {
         let sink = putmask_sink ^ where_sink;
         println!(
             "range_putmask_where n={n} putmask_ns={putmask_ns} where_ns={where_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_take_repeat" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let index = RangeIndex::new(0, n_i64 * 3, 3)
+            .expect("valid take range")
+            .set_name("row");
+        let positions = take_positions(n);
+        let position_count = positions.len();
+        let (take_ns, take_sink) = best_ns(iters, || {
+            let output = index.take(&positions).expect("take");
+            int64_index_digest(&output)
+        });
+        let (repeat_ns, repeat_sink) = best_ns(iters, || {
+            let output = index.repeat(2);
+            int64_index_digest(&output)
+        });
+        let sink = take_sink ^ repeat_sink;
+        println!(
+            "range_take_repeat n={n} positions={position_count} take_ns={take_ns} repeat2_ns={repeat_ns} sink={sink}"
         );
         return;
     }

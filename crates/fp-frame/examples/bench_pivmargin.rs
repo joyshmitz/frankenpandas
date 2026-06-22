@@ -12,6 +12,7 @@ fn main() {
     let n_col: i64 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
     let iters: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
     let agg = a.get(5).map(String::as_str).unwrap_or("sum");
+    let valtype = a.get(6).map(String::as_str).unwrap_or("f64");
     let index = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
     cols.insert(
@@ -36,7 +37,13 @@ fn main() {
         "val".to_string(),
         Column::from_values(
             (0..n)
-                .map(|i| Scalar::Float64((i % 997) as f64 * 1.5))
+                .map(|i| {
+                    if valtype == "i64" {
+                        Scalar::Int64((i % 997) as i64)
+                    } else {
+                        Scalar::Float64((i % 997) as f64 * 1.5)
+                    }
+                })
                 .collect(),
         )
         .unwrap(),

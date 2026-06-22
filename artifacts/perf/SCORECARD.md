@@ -91,6 +91,40 @@ Evidence:
 - `crates/fp-index/examples/bench_range_setops.rs`
 - `artifacts/optimization/negative-evidence-ledger-cod-b.md`
 
+## 2026-06-22 Cod-b Evidence Closeout - RangeIndex Values
+
+Release-readiness score for this closeout: **3/5 evidence**, **0/5 pandas domination**.
+
+- Bead: `br-frankenpandas-uza04.165`.
+- Targeted lever: `RangeIndex::values` should generate the arithmetic
+  progression directly instead of materializing a flat `Index` and extracting
+  `IndexLabel::Int64` labels.
+- Status: the production source already had the direct path when this fresh
+  cod-b restart inspected it. No new production code was kept; an attempted
+  vectorization reshaping probe was stopped under disk-critical policy before a
+  completed post-change bench and was reverted.
+- Build/bench target: warm
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- FP evidence: focused Criterion group added to
+  `crates/fp-index/benches/range_index_indexers.rs`, measured before the
+  unbenchmarked probe. `range_index_values/current_direct_values/1_000_000`
+  mean was 0.773 ms; the explicit legacy comparator
+  `legacy_flat_index_values/1_000_000` mean was 6.571 ms.
+- Oracle: pandas 2.2.3 `pd.RangeIndex(0, 2n, 2).values` plus forced `sum()`
+  on the same 1M-label shape, local p50 0.090 ms.
+
+| Workload | FrankenPandas | Legacy FP comparator | pandas | FP-side delta | Ratio vs pandas | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| 100k labels | 72.4 us | 236.5 us | 11.1 us | 3.27x faster | 0.15x | Existing direct path verified, still pandas loss |
+| 1M labels | 0.773 ms | 6.571 ms | 0.090 ms | 8.50x faster | 0.12x | Existing direct path verified, still pandas loss |
+
+Decision: close the bead as evidence-only. The old flat-index materialization
+family is not worth retrying, but the vs-pandas gap remains structural:
+pandas exposes a NumPy int64 view/cache and consumes it in C, while
+FrankenPandas returns and consumes an owned `Vec<i64>`. A future win needs a
+typed view/array consumer path or API-level avoidance of public materialization,
+not another `IndexLabel` extraction bypass.
+
 ## 2026-06-20 Cod-b No-Ship - Series.combine_first values residual
 
 Release-readiness score for this probe: **0/5 keep**, **5/5 evidence**.

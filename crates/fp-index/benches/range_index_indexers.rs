@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fp_index::RangeIndex;
+use fp_index::{IndexLabel, RangeIndex};
 
 const SIZES: &[usize] = &[100_000, 1_000_000];
 
@@ -53,6 +53,29 @@ fn legacy_get_loc_indexer_checksum(source: &RangeIndex, targets: &[i64]) -> isiz
 fn current_reindex_checksum(source: &RangeIndex, target: &RangeIndex) -> isize {
     let (_, indexer) = source.reindex(target);
     checksum_indexer(&indexer)
+}
+
+fn checksum_i64_values(values: &[i64]) -> i64 {
+    values
+        .iter()
+        .fold(values.len() as i64, |acc, value| acc.wrapping_add(*value))
+}
+
+fn current_values_checksum(source: &RangeIndex) -> i64 {
+    checksum_i64_values(&source.values())
+}
+
+fn legacy_flat_index_values_checksum(source: &RangeIndex) -> i64 {
+    let values: Vec<i64> = source
+        .to_index()
+        .labels()
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(value) => *value,
+            other => panic!("RangeIndex materialized non-int64 label: {other:?}"),
+        })
+        .collect();
+    checksum_i64_values(&values)
 }
 
 fn legacy_get_loc_reindex_checksum(source: &RangeIndex, targets: &[i64]) -> isize {
@@ -129,5 +152,37 @@ fn bench_range_index_indexers(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_range_index_indexers);
+fn bench_range_index_values(c: &mut Criterion) {
+    let mut group = c.benchmark_group("range_index_values");
+    for &size in SIZES {
+        let source = build_source(size);
+
+        group.bench_with_input(
+            BenchmarkId::new("current_direct_values", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    black_box(current_values_checksum(black_box(&source)));
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("legacy_flat_index_values", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    black_box(legacy_flat_index_values_checksum(black_box(&source)));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_range_index_indexers,
+    bench_range_index_values
+);
 criterion_main!(benches);

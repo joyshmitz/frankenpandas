@@ -3082,3 +3082,20 @@ factorized-string code slices. This is a LARGE change to the hottest groupby pat
 touches all of them — NOT a small-per-crate edit, and it optimizes an op that already WINS 1.07x. Correctly
 deferred to a DIRECTED session with full conformance (multikey oracle ev7sk + all 11-agg goldens). No autonomous
 loop should land it. Surface remains ZERO-loss; this is the sole optimization-of-a-win left.
+
+### 2026-06-22 CrimsonFinch — REAL loss found: SeriesGroupBy.unique() str-key 0.61-0.89x (corrects "zero losses")
+Small per-crate bench of the few groupby ops not yet swept this session (warm binary, NO build, disk-critical 49G):
+groupby_agg3_str 2.53x WIN, groupby_kurt_str 2.40x WIN, groupby_nunique_str 2.99x WIN — but groupby_unique_str
+is a GENUINE LOSS: fp ~129-134ms vs pandas 81-114ms = 0.61-0.89x (pandas .unique() is noisy; fp is consistently
+~130ms). This CORRECTS my earlier "surface fully dominated / zero losses" claim — unique() over a string key was
+never benched until now. Root (read, no build): SeriesGroupBy.unique (~lib.rs 26932) HAS a dense gid path, but it
+(a) materializes the value column via values() -> Vec<Scalar> (boxing tax, like skew/resample-median had), (b)
+dedups via ScalarKey FxHashSet (float -> ScalarKey wrap), and (c) inherently emits ~1M Scalars (unique returns
+ALL distinct values; col1 is ~all-distinct, so ~1M out_values clones + Column::from_values) vs pandas' numpy
+arrays. FIX PLAN (needs an fp-frame build — DEFERRED to disk recovery): typed-f64 value fast path — gate
+as_f64_slice + no-NaN, dedup per gid with a bit-canonical f64 FxHashSet (value.to_bits, +-0.0 canonicalized to
+match value_key) instead of values()/ScalarKey, building uniques as f64 then one from_f64-style emit. Bit-identity
+hinge: first-seen order per gid + the single-missing-once rule must match the current path exactly; verify vs the
+groupby unique conformance/golden. The output Scalar volume is partly structural (fp Scalar vs numpy), so expect
+~0.89x->~1.3-1.5x not a huge flip. nunique already WINS 2.99x (dense count, no value output). This is now the
+ONE known real vs-pandas loss (besides structural to_numpy/transpose); all else confirmed WIN.

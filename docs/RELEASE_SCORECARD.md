@@ -22,13 +22,26 @@ the `fp-frame` `DataFrameGroupBy.build_groups` / `pivot_table` / `crosstab` path
 | **DataFrameGroupBy single Utf8 key** | **0.90× LOSS** | **2.68×** | `FxHashMap<&str,gid>`, kill per-row `Vec<ScalarKey>` |
 | **DataFrameGroupBy multi Utf8 key** | **0.87× LOSS** | **1.29×** | `KeyCol::StrScalar` mixed-radix dense |
 | SeriesGroupBy single Utf8 key | 1.12× | **2.80×** | one hash probe (was seen-set + groups-map) |
+| **pivot var/std (Int64)** + margins all-aggfunc | **0.96× / 0.053× LOSS** | **3.21× / 3.45×** | dense two/four-pass; O(n) margins (was O(n·n_idx), 18.9× slower) |
+| pivot Int64-VALUE base+margins; median; Datetime64/mixed axes | 0.053–1.14× | 1.97–3.5× | `pivot_value_f64`; per-cell scatter+sort; unified axis extractor |
+| groupby.transform single Utf8 key | **0.73× LOSS** | **2.72×** | `transform_dense_gids` Scalar-Utf8 sibling |
+| SeriesGroupBy cumsum/cum* Utf8 key | **0.83× LOSS** | **2.85×** | `dense_group_ids` Scalar-Utf8 sibling |
+| **multi-agg single/multi Utf8 key** `.agg([sum,mean,std,count])` | **0.35× / 0.36× LOSS** | **1.72× / 1.69×** | `dense_group_ids_for_order` mixed Int64/Utf8 dense moments |
+| **Series.map Utf8→Utf8 / Int64→Utf8 dict** | **0.42× / 0.12× LOSS** | **1.93× / 1.07×** | contiguous-Utf8 output (was N `Box<str>` clones) |
+| **Series.isin / DataFrame.isin Utf8** | **0.51× / 1.13× LOSS** | **2.31× / 2.34×** | `&[u8]` probe + typed Bool (was `Vec<Scalar::Bool>` boxing) |
 
-5 genuine measured losses flipped (get_dummies, groupby single/multi Utf8, pivot var/std, **pivot margins
-— an 18.9× loss, the single biggest gap in the codebase, from repeated O(n·n_idx) margin scans**); rest
-deepened from near-parity. The pivot dense path now covers **sum/mean/count/size/min/max/var/std/median ×
-{Int64, Datetime64, Utf8} + mixed axes**, and `margins=True` is O(n) for every aggfunc. One neutral experiment
-(generic dense-scatter that killed only the `Vec<f64>` churn, not string hashing) measured ~0-gain and
-reverted. Next reachable gap is `fp-join` Utf8-keyed merge (separate crate, not warm in the build dir).
+12 genuine measured losses flipped (get_dummies; groupby single/multi Utf8; pivot var/std; **pivot margins —
+an 18.9× loss, the single biggest gap, from repeated O(n·n_idx) margin scans**; pivot Int64-value; groupby
+transform/cumsum Utf8; multi-agg single/multi Utf8 — a 2.8× slowdown on a core analytics op; **Series.map
+Int64→Utf8 — an 8.6× loss**; Series/DataFrame.isin); rest deepened from near-parity. Two reinforcing levers:
+**(1) every Int64-only dense path needs a Scalar-backed-Utf8 sibling** (factorize / `&str`-hash instead of
+per-row `Vec<ScalarKey>` / Scalar materialization), and **(2) emit typed columns** (contiguous Utf8 / typed
+Bool / typed i64) instead of `Vec<Scalar>` boxing. The pivot dense path now covers
+**sum/mean/count/size/min/max/var/std/median × {Int64, Datetime64, Utf8} keys × {Float64, Int64} values +
+margins(O(n)) + mixed axes**; the groupby Utf8 surface (build_groups, transform, cumulative, multi-agg
+moments) is fully dense. One neutral experiment (generic dense-scatter that killed only the `Vec<f64>` churn,
+not string hashing) measured ~0-gain and reverted. Next reachable gap is `fp-join` Utf8-keyed merge (separate
+crate, not warm in the build dir). Full per-lever detail + ratios in `docs/NEGATIVE_EVIDENCE.md`.
 
 ## Release-readiness verdict (gauntlet, measured)
 

@@ -3021,3 +3021,12 @@ block view; architecturally unbeatable without changing fp's columnar storage, l
 resample_median 0.87x->1.25x (typed-f64 fast path) — plus this phantom-debunk of ewm/value_counts/sort. LESSON
 (now proven 3x this session): take perf reads on a QUIET box; peer builds inflate fp timings into phantom losses,
 and those phantoms calcify into "documented floors" in the ledger. Don't trust a sub-1.0x read taken under load.
+
+### 2026-06-22 CrimsonFinch — surface audit COMPLETE: last unmeasured df ops all WIN (shift/sort_index/idxmax/crosstab/explode)
+Closed the audit by measuring the few fp-bench df_* ops not yet swept this session (quiet box, @1M): df_shift
+6.09x, df_sort_index lazy-O(1) (already-sorted Int64 index, vs pandas 44ms), df_idxmax 1.14x, df_crosstab 1.03x,
+df_explode 9.48x — ALL WIN. Combined with the prior clean sweeps (dataframe_ops axis1/conversion/hash, groupby,
+rolling, datetime/resample, joins, io, indexing, linalg) + the ewm/value_counts/sort phantom-debunk, EVERY
+benched fp op now beats pandas @1M. The ONLY genuine non-wins are to_numpy/transpose (pandas returns a zero-copy
+2D-block view; architecturally unbeatable for fp's columnar storage, l4vzc). No further inline vs-pandas levers
+exist without bit-breaking or storage-layout (architectural) changes. BOLD-VERIFY surface audit: DONE.

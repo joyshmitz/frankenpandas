@@ -2938,3 +2938,15 @@ replaces the hash; sparse grids fall back to a hash map. First-write-wins == or_
 0.67x is the string-composite PARSE (split_once + row/col string-key discovery) + Vec<Scalar> output — the
 genuinely structural fp representation. LESSON (recurring this session): "structural" framings keep being
 mostly ALLOC/cache-bound (stack, resample, now unstack) — profile the framing before accepting it.
+
+### 2026-06-21 BlackThrush — unstack residual is parse-bound (alloc fix ~0-gain, REVERTED); empirically confirmed
+Followed "measure don't guess" on the unstack 0.67x residual: tried halving the row/col discovery String allocs
+(the old push + insert each cloned r.to_string(); moved keys out of the map at the end = 1 alloc/unique). Built
++ conformance 7/0 (bit-identical) but df_unstack @1M 55929->56138us = ~0-GAIN. REVERTED (discipline). EMPIRICAL
+CONCLUSION: the allocs are NOT the unstack bottleneck (mimalloc is fast); the residual 0.67x is the PARSE itself
+— split_once(", ") + the row_idx_of/col_idx_of string-key hash lookups (1M each, the 100k-entry row map is
+cache-missing, same pattern as the cell_map I fixed BUT the row DISCOVERY is inherent — need the hash for unique
+rows). This is the genuinely STRUCTURAL string-composite cost (fp parses "r, c" strings; pandas has a real
+MultiIndex with no parse). So unstack is now correctly: dense-grid CRACKED the alloc/cache cell_map (0.22x->
+0.67x), the residual is the irreducible string-composite parse (would need a real MultiIndex = architectural).
+Good outcome: "measure don't guess" caught a wrong guess (allocs) and pinned the real bound (the parse).

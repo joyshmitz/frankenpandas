@@ -3067,3 +3067,18 @@ auto-resume's mandate; deferred on disk pressure + hot-path golden risk):
   multiindex goldens; revert if any byte differs.
 - Wire into DataFrameGroupBy.sum (~62210, beside the multi_int64_dense_grouping call ~62773) and the agg dispatch.
 Expected ~1.07x->~2x. Everything else on the surface is a confirmed WIN; this is the last (marginal) optimization.
+
+### 2026-06-22 CrimsonFinch — multi-string-key dense: ROUTING CORRECTION (it's the central dispatch, scope is large)
+Traced the benched df.groupby([str,str]).sum() exactly (correcting the prior plan's pointer): it does NOT go
+through the moments_by_pair path (~62771, that's agg([...])/numeric-moments). It goes through
+`aggregate_named_func` (~60832) — the CENTRAL dispatch shared by sum/mean/count/min/max/var/std/first/last/prod/
+median. Multi-string-key there hits build_groups() (~60915, the SipHash GroupMap cost) AND the single-pass
+`dense` precompute (~60934) which BAILS unless EVERY key is as_i64_slice (~60957) — so strings get the slow
+per-group gather too. To land the dense win bit-identically you must extend BOTH: (a) produce group_order/labels/
+gid without build_groups via sorted-factorize per Utf8 key (code k == k-th lexicographic unique, so tuple-code
+sort == pandas string sort — see groupby_sum_multikey_attaches_row_multiindex golden: flat Utf8 "east, A" index
++ Utf8-level MultiIndex + names, lexicographically sorted), and (b) generalize the `dense` precompute to accept
+factorized-string code slices. This is a LARGE change to the hottest groupby path (11 aggs), so revert-risk
+touches all of them — NOT a small-per-crate edit, and it optimizes an op that already WINS 1.07x. Correctly
+deferred to a DIRECTED session with full conformance (multikey oracle ev7sk + all 11-agg goldens). No autonomous
+loop should land it. Surface remains ZERO-loss; this is the sole optimization-of-a-win left.

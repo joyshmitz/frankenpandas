@@ -4823,18 +4823,25 @@ impl Index {
     /// overflow return `None` for that position.
     #[must_use]
     pub fn diff(&self, periods: usize) -> Vec<Option<IndexLabel>> {
-        let mut out = vec![None; self.len()];
         if periods == 0 {
-            return out;
+            return vec![None; self.len()];
         }
         if let Some(values) = self.labels.int64_view() {
-            for (position, slot) in out.iter_mut().enumerate().skip(periods) {
-                *slot = values[position]
-                    .checked_sub(values[position - periods])
-                    .map(IndexLabel::Int64);
+            let leading = periods.min(values.len());
+            let mut out = Vec::with_capacity(values.len());
+            out.extend(std::iter::repeat_n(None, leading));
+            if periods >= values.len() {
+                return out;
+            }
+            for (&current, &previous) in values[periods..]
+                .iter()
+                .zip(&values[..values.len() - periods])
+            {
+                out.push(current.checked_sub(previous).map(IndexLabel::Int64));
             }
             return out;
         }
+        let mut out = vec![None; self.len()];
         for (position, slot) in out.iter_mut().enumerate().skip(periods) {
             *slot = match (&self.labels[position], &self.labels[position - periods]) {
                 (IndexLabel::Int64(current), IndexLabel::Int64(previous)) => {
@@ -22323,6 +22330,7 @@ mod tests {
         let actual = index.diff(2);
 
         assert_eq!(actual, vec![None, None, Some(IndexLabel::Int64(10)), None,]);
+        assert_eq!(index.diff(99), vec![None, None, None, None]);
         assert!(
             index.labels.materialized.get().is_none(),
             "raw Int64 diff should not materialize source labels"

@@ -7,6 +7,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_get_indexer_non_unique
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_diff
 
 use std::{hint::black_box, time::Instant};
 
@@ -84,6 +85,19 @@ fn sequential_i64_values(start: i64, len: usize) -> Vec<i64> {
         .collect()
 }
 
+fn stepped_i64_values(len: usize) -> Vec<i64> {
+    (0..len)
+        .map(|offset| {
+            let offset = i64::try_from(offset).expect("offset fits i64");
+            offset
+                .checked_mul(3)
+                .expect("benchmark value fits i64")
+                .checked_add(offset.rem_euclid(7))
+                .expect("benchmark value fits i64")
+        })
+        .collect()
+}
+
 fn quarter_drop_labels(len: usize) -> Vec<IndexLabel> {
     (0..len)
         .step_by(4)
@@ -137,6 +151,31 @@ fn indexer_digest(indexer: &[isize], missing: &[usize]) -> usize {
     .flatten()
     {
         digest = digest.wrapping_mul(131).wrapping_add(*value).rotate_left(1);
+    }
+    digest
+}
+
+fn diff_digest(values: &[Option<IndexLabel>]) -> usize {
+    let mut digest = values.len();
+    for label in [values.first(), values.get(values.len() / 2), values.last()]
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        digest = match label {
+            IndexLabel::Int64(value) => value
+                .to_ne_bytes()
+                .iter()
+                .fold(digest.rotate_left(1), |acc, byte| {
+                    acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
+                }),
+            other => other
+                .to_string()
+                .bytes()
+                .fold(digest.rotate_left(1), |acc, byte| {
+                    acc.wrapping_mul(131).wrapping_add(usize::from(byte))
+                }),
+        };
     }
     digest
 }
@@ -237,6 +276,16 @@ fn main() {
         println!(
             "index_get_indexer_non_unique n={n} repeats={repeats} target_len={target_len} missing_count={missing_count} non_unique_ns={non_unique_ns} sink={sink}"
         );
+        return;
+    }
+    if scenario == "index_diff" {
+        let index = Index::from_i64_values(stepped_i64_values(n)).set_name("row");
+        let periods = 1usize;
+        let (diff_ns, sink) = best_ns(iters, || {
+            let output = index.diff(periods);
+            diff_digest(&output)
+        });
+        println!("index_diff n={n} periods={periods} diff_ns={diff_ns} sink={sink}");
         return;
     }
 

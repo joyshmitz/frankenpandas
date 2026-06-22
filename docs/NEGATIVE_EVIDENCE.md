@@ -18,8 +18,12 @@ The datetime AND timedelta accessor surfaces are now FULLY TYPED (every componen
 nanos): all dt components + dt.floor/ceil/round (already typed via round_to_freq) + dt.weekofyear +
 td.total_seconds. The remaining vs-pandas LOSSES are all UNSAFE to fix blind (need a build+test cycle
 or are unwinnable) — do NOT attempt code-only:
-- **pivot_table 0.67x@1M** (bead zngxi) — needs a dense-int64 grouping rewrite of a complex fn
-  (dropna + sort + aggfunc edge cases). The ONLY remaining clearly-fixable loss; do with tests.
+- **pivot_table — FIXED 2026-06-22 (1q4q4): now 3.5x WIN** (was 1.01x on this host; the 0.67x@1M was
+  stale). Typed dense-Int64 fast path: all-valid Int64 axis keys + all-valid Float64 values + online
+  aggfunc (sum/mean/count/size) scatter-accumulate into a dense column-major R×C buffer in ROW ORDER
+  (bit-identical to the generic `vals.iter().sum()` fold), skipping 3M `values()` Scalar materializations
+  + the `(ScalarKey,ScalarKey)->Vec<f64>` groups map. 56→16ms @1M, oracle-exact incl 32031 missing
+  cells. Non-Int64 keys / non-Float64 vals / other aggfuncs keep the generic path. See ledger row.
 - **df_round 0.84x** — bit-locked: the per-element `(x*f).round_ties_even()/f` fdiv changes goldens.
 - **transpose / stack / to_numpy** — STRUCTURAL: pandas uses an O(1) 2D-block view / MultiIndex; FP's
   columnar layout can't match without a 2D-block storage mode or lazy-transpose (beads l4vzc, m9wkn).
@@ -60,7 +64,7 @@ no dt method remains on the slow chrono path.
 
 | Lever (bead) | Workload | pandas | fp | ratio | verdict |
 |---|---|---|---:|---:|---|
-| value_counts FxHash (g1de8) | 500k rows, 5k distinct Utf8 | 22.90 ms | 8.85 ms | **2.59× faster** | ✅ KEEP — beat khash (was 0.62× pre-lever) |
+| pivot_table typed dense-Int64 (1q4q4) | 1M rows, int64 idx (1000 distinct) × int64 col (10), f64 vals, agg=sum | 56.61 ms | 16.0 ms | **3.54× faster** | ✅ FIXED — was 1.01× parity (the memory 0.67x@1M was a stale/heavier-host read). All-valid Int64 idx+col & all-valid Float64 vals + online agg (sum/mean/count/size) gate a dense column-major R×C scatter-accumulate in ROW ORDER: bit-identical to generic `vals.iter().sum()` fold (same left-to-right per-cell f64 fold), skips 3 × 1M `values()` Scalar materializations + the `(ScalarKey,ScalarKey)->Vec<f64>` groups map + per-cell re-aggregate. Absent cell → `Null(NullKind::NaN)` via `from_f64_values_with_validity` (matches generic fill). Oracle-EXACT vs pandas 2.2.3 on a 20k×(1000×50) sparse run incl. 32031 missing cells: sum 14897835.0, mean 13400251.75, count/size 20000 all identical. count 56.6→15.3ms (3.7×). Non-Int64 keys / non-Float64 vals / other aggfuncs keep generic. Guards: 38 fp-frame `pivot` tests (incl. new `dense_int64_fast_path_1q4q4`), 36 fp-conformance `pivot` (incl. live_oracle), fmt+clippy clean on touched code. |
 | sort_values gather/reorder (7ufhq+take_positions) | 1M shuffled int64 | 57.18 ms | 47.68 ms | **1.20× faster** | ✅ KEEP — was 0.91× pre-levers |
 | head/tail zero-copy slice (6wx84) | 2M int64, k=5 | 5.91 µs | 0.35 µs | **~17× faster** | ✅ KEEP — Index::slice+Column::slice |
 | loc_bool filter (t0y8n) | 2M, 50% mask | 10.89 ms | 8.42 ms | **1.29× faster** | ✅ KEEP — collect-positions + take_positions |

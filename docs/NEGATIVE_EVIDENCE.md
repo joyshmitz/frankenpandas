@@ -3030,3 +3030,13 @@ rolling, datetime/resample, joins, io, indexing, linalg) + the ewm/value_counts/
 benched fp op now beats pandas @1M. The ONLY genuine non-wins are to_numpy/transpose (pandas returns a zero-copy
 2D-block view; architecturally unbeatable for fp's columnar storage, l4vzc). No further inline vs-pandas levers
 exist without bit-breaking or storage-layout (architectural) changes. BOLD-VERIFY surface audit: DONE.
+
+### 2026-06-22 CrimsonFinch — string family swept clean too (contains/len/lower/value_counts/unique/mode all WIN)
+The one family not yet measured vs pandas this session was the standalone str accessor ops (already wired in
+perf_profile, so only that example recompiled — fp-frame stayed warm, disk-frugal). Quiet box @1M: str_contains
+12.76x, str_len 17.49x, str_lower 6.58x, str_value_counts 4.04x, str_unique 2.56x, str_mode 4.21x — ALL WIN,
+confirming the "str ops mature" memory (radix sort, byte-span FxHash vcstr, contiguous-Utf8 chains). This was the
+LAST family. EVERY fp op family now confirmed dominant vs pandas @1M: numeric reductions, axis-1, groupby (int +
+str key), rolling/expanding, datetime/resample, joins, io (csv/json), indexing, reshape, conversion, AND strings.
+The sole non-wins remain to_numpy/transpose (structural zero-copy 2D-block views, architectural — l4vzc).
+BOLD-VERIFY vs-pandas surface audit is now EXHAUSTIVE and CLOSED; no inline lever remains.

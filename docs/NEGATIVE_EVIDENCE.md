@@ -2993,3 +2993,18 @@ a shared accumulator's worst-case bookkeeping (the remove() multiset) silently t
 give the cheaper caller its own loop. ALSO measured this sweep: resample_median 0.46x / resample_max 0.58x /
 resample_std 0.80x still LOSSES @1M with my pandas/freq (ME, hourly src) — NOT re-investigated this session
 (distinct from the recent "resample no losses" claim which used a different harness/freq); candidate next.
+
+### 2026-06-22 CrimsonFinch — clean-machine re-sweep: resample "losses" were phantoms; median 0.87x->1.25x closed
+RESUMED after disk recovered. Re-measured resample @1M on a QUIET machine (the prior 0.46x/0.58x/0.80x reads
+were taken while peer agents were building — classic machine-load PHANTOMS): resample_mean 1.28x / sum 1.31x /
+max 0.96x / std 1.44x — all WIN/parity. Also re-swept joins/io/indexing/linalg clean: join inner 5.11x/left
+4.81x/outer 4.77x, loc_labels 19.7x, reindex 15.4x, csv_read 21x, csv_write 20x — ALL big WINS. The fp surface
+is dominated; the only genuine residual was resample_median 0.87x. Root: it alone still went through
+aggregate_scalar(nanmedian) = column.values() Scalar materialization + per-bucket Vec<Scalar> clone +
+collect_finite re-scan — the SAME Scalar-boxing tax the sum/mean/std/var/min/max resample paths already bypass
+with a typed-f64 fast path (nanmedian is already O(n) select_nth, NOT a full sort, so boxing was the whole gap).
+FIX: typed-f64 median fast path (gate all-valid no-NaN, no empty bins; gather f64 per bucket + the exact same
+select_nth_unstable_by). BIT-IDENTICAL (collect_finite keeps inf/drops only missing, so the gather matches; ties
+share a value; fp-frame 3098/0 incl resample_median_golden_basic). 30.1ms->20.9ms, 0.87x->1.25x WIN. LESSON
+(re-confirmed): take perf reads on a QUIET box — peer builds inflate fp timings into phantom losses. Remaining
+non-wins are all documented-hard: ewm 0.80x (fdiv-locked), to_numpy/transpose (structural 2D-block views l4vzc).

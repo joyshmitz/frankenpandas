@@ -22,13 +22,10 @@ fn main() {
             Column::from_values(
                 (0..n)
                     .map(|i| {
-                        Scalar::Utf8(
-                            format!(
-                                "v{:06}",
-                                ((i as i64).wrapping_mul(2654435761 + c as i64) >> 13) % card
-                            )
-                            .into(),
-                        )
+                        Scalar::Utf8(format!(
+                            "v{:06}",
+                            ((i as i64).wrapping_mul(2654435761 + c as i64) >> 13) % card
+                        ))
                     })
                     .collect(),
             )
@@ -38,7 +35,7 @@ fn main() {
     }
     let df = DataFrame::new_with_column_order(index, cols, order).unwrap();
     let needles: Vec<Scalar> = (0..setsz)
-        .map(|x| Scalar::Utf8(format!("v{:06}", x).into()))
+        .map(|x| Scalar::Utf8(format!("v{:06}", x)))
         .collect();
     let mut best = u128::MAX;
     for _ in 0..it {

@@ -15,13 +15,10 @@ fn main() {
         labels,
         (0..n)
             .map(|i| {
-                Scalar::Utf8(
-                    format!(
-                        "cat{:03}",
-                        ((i as i64).wrapping_mul(2654435761) >> 13) % card
-                    )
-                    .into(),
-                )
+                Scalar::Utf8(format!(
+                    "cat{:03}",
+                    ((i as i64).wrapping_mul(2654435761) >> 13) % card
+                ))
             })
             .collect(),
     )
@@ -29,8 +26,8 @@ fn main() {
     let mapping: Vec<(Scalar, Scalar)> = (0..card)
         .map(|k| {
             (
-                Scalar::Utf8(format!("cat{:03}", k).into()),
-                Scalar::Utf8(format!("V{}", k).into()),
+                Scalar::Utf8(format!("cat{:03}", k)),
+                Scalar::Utf8(format!("V{}", k)),
             )
         })
         .collect();

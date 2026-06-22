@@ -15,9 +15,10 @@ fn main() {
         labels.clone(),
         (0..n)
             .map(|i| {
-                Scalar::Utf8(
-                    format!("k{:04}", ((i as i64).wrapping_mul(2654435761) >> 13) % card).into(),
-                )
+                Scalar::Utf8(format!(
+                    "k{:04}",
+                    ((i as i64).wrapping_mul(2654435761) >> 13) % card
+                ))
             })
             .collect(),
     )

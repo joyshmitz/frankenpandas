@@ -18,9 +18,10 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    Scalar::Utf8(
-                        format!("cat{:03}", ((i as i64).wrapping_mul(2654435761) >> 13) % k).into(),
-                    )
+                    Scalar::Utf8(format!(
+                        "cat{:03}",
+                        ((i as i64).wrapping_mul(2654435761) >> 13) % k
+                    ))
                 })
                 .collect(),
         )

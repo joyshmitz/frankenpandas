@@ -286,12 +286,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_idxmin_axis1") => time_us(|| {
             let _ = df.idxmin_axis1().expect("idxmin_axis1");
         }),
-        ("dataframe_ops", "df_mean_axis1") => time_us(|| { let _ = df.mean_axis1().expect("x"); }),
-        ("dataframe_ops", "df_max_axis1") => time_us(|| { let _ = df.max_axis1().expect("x"); }),
-        ("dataframe_ops", "df_var_axis1") => time_us(|| { let _ = df.var_axis1().expect("x"); }),
-        ("dataframe_ops", "df_prod_axis1") => time_us(|| { let _ = df.prod_axis1().expect("x"); }),
-        ("dataframe_ops", "df_count_axis1") => time_us(|| { let _ = df.count_axis1().expect("x"); }),
-        ("dataframe_ops", "df_argmax_axis1") => time_us(|| { let _ = df.argmax_axis1().expect("x"); }),
+        ("dataframe_ops", "df_mean_axis1") => time_us(|| {
+            let _ = df.mean_axis1().expect("x");
+        }),
+        ("dataframe_ops", "df_max_axis1") => time_us(|| {
+            let _ = df.max_axis1().expect("x");
+        }),
+        ("dataframe_ops", "df_var_axis1") => time_us(|| {
+            let _ = df.var_axis1().expect("x");
+        }),
+        ("dataframe_ops", "df_prod_axis1") => time_us(|| {
+            let _ = df.prod_axis1().expect("x");
+        }),
+        ("dataframe_ops", "df_count_axis1") => time_us(|| {
+            let _ = df.count_axis1().expect("x");
+        }),
+        ("dataframe_ops", "df_argmax_axis1") => time_us(|| {
+            let _ = df.argmax_axis1().expect("x");
+        }),
         ("dataframe_ops", "df_std_axis1") => time_us(|| {
             let _ = df.std_axis1().expect("std_axis1");
         }),
@@ -344,8 +356,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             columns.insert("r".to_string(), Column::from_i64_values(r));
             columns.insert("c".to_string(), Column::from_i64_values(c));
             columns.insert("v".to_string(), Column::from_f64_values(raw[0].clone()));
-            let pframe = DataFrame::new_with_column_order(index, columns, vec!["r".to_string(), "c".to_string(), "v".to_string()]).expect("pivot frame");
-            time_us(|| { let _ = pframe.pivot_table("v", "r", "c", "std").expect("pivot_table"); })
+            let pframe = DataFrame::new_with_column_order(
+                index,
+                columns,
+                vec!["r".to_string(), "c".to_string(), "v".to_string()],
+            )
+            .expect("pivot frame");
+            time_us(|| {
+                let _ = pframe
+                    .pivot_table("v", "r", "c", "std")
+                    .expect("pivot_table");
+            })
         }
         ("dataframe_ops", "df_pivot_table_median") => {
             let r: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
@@ -355,8 +376,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             columns.insert("r".to_string(), Column::from_i64_values(r));
             columns.insert("c".to_string(), Column::from_i64_values(c));
             columns.insert("v".to_string(), Column::from_f64_values(raw[0].clone()));
-            let pframe = DataFrame::new_with_column_order(index, columns, vec!["r".to_string(), "c".to_string(), "v".to_string()]).expect("pivot frame");
-            time_us(|| { let _ = pframe.pivot_table("v", "r", "c", "median").expect("pivot_table"); })
+            let pframe = DataFrame::new_with_column_order(
+                index,
+                columns,
+                vec!["r".to_string(), "c".to_string(), "v".to_string()],
+            )
+            .expect("pivot frame");
+            time_us(|| {
+                let _ = pframe
+                    .pivot_table("v", "r", "c", "median")
+                    .expect("pivot_table");
+            })
         }
         ("dataframe_ops", "df_pivot") => {
             // pandas: df.pivot(index="r", columns="c", values="v"); UNIQUE (r,c)
@@ -408,8 +438,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let labels: Vec<IndexLabel> = (0..rows)
                 .map(|i| IndexLabel::Utf8(format!("{}, {}", i / 10, i % 10)))
                 .collect();
-            let s = Series::new("s", Index::new(labels), Column::from_f64_values(raw[0].clone()))
-                .expect("unstack series");
+            let s = Series::new(
+                "s",
+                Index::new(labels),
+                Column::from_f64_values(raw[0].clone()),
+            )
+            .expect("unstack series");
             time_us(|| {
                 let _ = s.unstack().expect("unstack");
             })
@@ -431,8 +465,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }
         ("dataframe_ops", "series_categorical") => {
             // pandas: pd.Series(arr).astype("category"); arr=i%100 (100 cats).
-            let values: Vec<fp_types::Scalar> =
-                (0..rows as i64).map(|i| fp_types::Scalar::Int64(i % 100)).collect();
+            let values: Vec<fp_types::Scalar> = (0..rows as i64)
+                .map(|i| fp_types::Scalar::Int64(i % 100))
+                .collect();
             time_us(|| {
                 let _ = Series::from_categorical("c", values.clone(), false).expect("categorical");
             })
@@ -488,7 +523,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "astype_str_i64" | "astype_str_f64" | "astype_str_bool") => {
             let col = match workload {
                 "astype_str_i64" => Column::from_i64_values((0..rows as i64).collect()),
-                "astype_str_bool" => Column::from_bool_values((0..rows).map(|i| i % 2 == 0).collect()),
+                "astype_str_bool" => {
+                    Column::from_bool_values((0..rows).map(|i| i % 2 == 0).collect())
+                }
                 _ => Column::from_f64_values((0..rows).map(|i| i as f64 * 1.5).collect()),
             };
             let index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -735,9 +772,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").median().expect("median"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .median()
+                    .expect("median");
+            })
         }
         ("groupby", "groupby_std_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
@@ -748,9 +801,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").std().expect("std"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .std()
+                    .expect("std");
+            })
         }
         ("groupby", "groupby_var_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
@@ -761,9 +830,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").var().expect("var"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .var()
+                    .expect("var");
+            })
         }
         ("groupby", "groupby_multi_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
@@ -774,8 +859,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
             time_us(|| {
                 let g = val_series.groupby(&key_series).expect("groupby");
                 let _ = g.mean().expect("mean");
@@ -792,9 +887,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").min().expect("min"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .min()
+                    .expect("min");
+            })
         }
         ("groupby", "groupby_max_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
@@ -805,9 +916,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").max().expect("max"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .max()
+                    .expect("max");
+            })
         }
         ("groupby", "groupby_prod_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
@@ -818,69 +945,199 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 ko.push(kb.len());
             }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").prod().expect("prod"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .prod()
+                    .expect("prod");
+            })
         }
         ("groupby", "groupby_rank_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").rank("average", true, "keep").expect("rank"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .rank("average", true, "keep")
+                    .expect("rank");
+            })
         }
         ("groupby", "groupby_sem_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").sem().expect("sem"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .sem()
+                    .expect("sem");
+            })
         }
         ("groupby", "groupby_skew_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").skew().expect("skew"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .skew()
+                    .expect("skew");
+            })
         }
         ("groupby", "groupby_nunique_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").nunique().expect("nunique"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .nunique()
+                    .expect("nunique");
+            })
         }
         ("groupby", "groupby_all_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").all().expect("all"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .all()
+                    .expect("all");
+            })
         }
         ("groupby", "groupby_unique_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").unique().expect("unique"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .unique()
+                    .expect("unique");
+            })
         }
         ("groupby", "groupby_unique_i64") => {
             // Int64-VALUE variant of groupby_unique_str: str key (1000 groups),
@@ -888,32 +1145,89 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let ivals: Vec<i64> = raw[1].iter().map(|&v| (v as i64).rem_euclid(50_000)).collect();
-            let val_series = Series::new("col_1".to_string(), index, Column::from_i64_values(ivals)).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").unique().expect("unique"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let ivals: Vec<i64> = raw[1]
+                .iter()
+                .map(|&v| (v as i64).rem_euclid(50_000))
+                .collect();
+            let val_series =
+                Series::new("col_1".to_string(), index, Column::from_i64_values(ivals))
+                    .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .unique()
+                    .expect("unique");
+            })
         }
         ("groupby", "groupby_kurt_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").kurt().expect("kurt"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .kurt()
+                    .expect("kurt");
+            })
         }
         ("groupby", "groupby_quantile_str") => {
             let mut kb = Vec::with_capacity(rows * 5);
             let mut ko = Vec::with_capacity(rows + 1);
             ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").quantile(0.5).expect("q"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .quantile(0.5)
+                    .expect("q");
+            })
         }
         ("groupby", "groupby_transform_mean_str") => {
             // String-key variant: s.groupby(str_key).transform("mean"). key =
@@ -1009,9 +1323,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let mut columns = BTreeMap::new();
             columns.insert("key".to_string(), Column::from_utf8_contiguous(kb, ko));
             let mut order = vec!["key".to_string()];
-            for c in 0..3 {
+            for (c, column) in raw.iter().enumerate().take(3) {
                 let n = format!("v{c}");
-                columns.insert(n.clone(), Column::from_f64_values(raw[c].clone()));
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
                 order.push(n);
             }
             let gdf = DataFrame::new_with_column_order(
@@ -1031,30 +1345,91 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             columns.insert("k1".to_string(), Column::from_i64_values(k1));
             columns.insert("k2".to_string(), Column::from_i64_values(k2));
             let mut order = vec!["k1".to_string(), "k2".to_string()];
-            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
-            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
-            time_us(|| { let _ = gdf.groupby(&["k1","k2"]).expect("groupby").sum().expect("sum"); })
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("gb frame");
+            time_us(|| {
+                let _ = gdf
+                    .groupby(&["k1", "k2"])
+                    .expect("groupby")
+                    .sum()
+                    .expect("sum");
+            })
         }
         ("groupby", "df_groupby_2strkey_sum") => {
             let mut columns = BTreeMap::new();
-            let mut kb1 = Vec::new(); let mut ko1 = vec![0usize];
-            for i in 0..rows { let k = format!("a{:03}", i % 100); kb1.extend_from_slice(k.as_bytes()); ko1.push(kb1.len()); }
+            let mut kb1 = Vec::new();
+            let mut ko1 = vec![0usize];
+            for i in 0..rows {
+                let k = format!("a{:03}", i % 100);
+                kb1.extend_from_slice(k.as_bytes());
+                ko1.push(kb1.len());
+            }
             columns.insert("k1".to_string(), Column::from_utf8_contiguous(kb1, ko1));
-            let mut kb2 = Vec::new(); let mut ko2 = vec![0usize];
-            for i in 0..rows { let k = format!("b{:03}", (i / 100) % 50); kb2.extend_from_slice(k.as_bytes()); ko2.push(kb2.len()); }
+            let mut kb2 = Vec::new();
+            let mut ko2 = vec![0usize];
+            for i in 0..rows {
+                let k = format!("b{:03}", (i / 100) % 50);
+                kb2.extend_from_slice(k.as_bytes());
+                ko2.push(kb2.len());
+            }
             columns.insert("k2".to_string(), Column::from_utf8_contiguous(kb2, ko2));
             let mut order = vec!["k1".to_string(), "k2".to_string()];
-            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
-            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
-            time_us(|| { let _ = gdf.groupby(&["k1","k2"]).expect("groupby").sum().expect("sum"); })
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("gb frame");
+            time_us(|| {
+                let _ = gdf
+                    .groupby(&["k1", "k2"])
+                    .expect("groupby")
+                    .sum()
+                    .expect("sum");
+            })
         }
         ("groupby", "groupby_agg3_str") => {
-            let mut kb = Vec::with_capacity(rows * 5); let mut ko = Vec::with_capacity(rows + 1); ko.push(0usize);
-            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            let mut kb = Vec::with_capacity(rows * 5);
+            let mut ko = Vec::with_capacity(rows + 1);
+            ko.push(0usize);
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
             let index = Index::new_known_unique_int64_unit_range(0, rows);
-            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
-            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
-            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").agg(&["mean","std","max"]).expect("agg"); })
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_utf8_contiguous(kb, ko),
+            )
+            .expect("key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("val");
+            time_us(|| {
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .agg(&["mean", "std", "max"])
+                    .expect("agg");
+            })
         }
         ("groupby", "groupby_widekey_sum") => {
             // Single WIDE-range i64 key (sparse, ~rows/2 distinct over a huge
@@ -1078,7 +1453,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             )
             .expect("widekey val");
             time_us(|| {
-                let _ = val_series.groupby(&key_series).expect("groupby").sum().expect("sum");
+                let _ = val_series
+                    .groupby(&key_series)
+                    .expect("groupby")
+                    .sum()
+                    .expect("sum");
             })
         }
         ("groupby", "df_groupby_widekey_sum") => {
@@ -1090,9 +1469,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 .collect();
             columns.insert("key".to_string(), Column::from_i64_values(key_vals));
             let mut order = vec!["key".to_string()];
-            for c in 0..3 {
+            for (c, column) in raw.iter().enumerate().take(3) {
                 let n = format!("v{c}");
-                columns.insert(n.clone(), Column::from_f64_values(raw[c].clone()));
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
                 order.push(n);
             }
             let gdf = DataFrame::new_with_column_order(
@@ -1110,18 +1489,44 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let key_vals: Vec<i64> = (0..rows).map(|i| (i % 1000) as i64).collect();
             columns.insert("key".to_string(), Column::from_i64_values(key_vals));
             let mut order = vec!["key".to_string()];
-            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
-            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
-            time_us(|| { let _ = gdf.groupby(&["key"]).expect("groupby").var().expect("var"); })
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("gb frame");
+            time_us(|| {
+                let _ = gdf.groupby(&["key"]).expect("groupby").var().expect("var");
+            })
         }
         ("groupby", "df_groupby_int_mean") => {
             let mut columns = BTreeMap::new();
             let key_vals: Vec<i64> = (0..rows).map(|i| (i % 1000) as i64).collect();
             columns.insert("key".to_string(), Column::from_i64_values(key_vals));
             let mut order = vec!["key".to_string()];
-            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
-            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
-            time_us(|| { let _ = gdf.groupby(&["key"]).expect("groupby").mean().expect("mean"); })
+            for (c, column) in raw.iter().enumerate().take(3) {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(column.clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("gb frame");
+            time_us(|| {
+                let _ = gdf
+                    .groupby(&["key"])
+                    .expect("groupby")
+                    .mean()
+                    .expect("mean");
+            })
         }
         ("rolling", "rolling_mean_w10") => {
             let series = df.get_column("col_0");
@@ -1131,7 +1536,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }
         ("rolling", "expanding_skew") => {
             let series = df.get_column("col_0");
-            time_us(|| { let _ = series.expanding(Some(1)).skew().expect("expanding skew"); })
+            time_us(|| {
+                let _ = series.expanding(Some(1)).skew().expect("expanding skew");
+            })
         }
         ("rolling", "rolling_std_w50") => {
             let series = df.get_column("col_0");
@@ -1251,7 +1658,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let mut st: u64 = 0x243F_6A88_85A3_08D3;
             let mut shuffle = |v: &mut Vec<i64>| {
                 for i in (1..v.len()).rev() {
-                    st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    st = st
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     let j = (st >> 33) as usize % (i + 1);
                     v.swap(i, j);
                 }
@@ -1283,8 +1692,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             )
             .expect("shuffled right");
             time_us(|| {
-                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
-                    .expect("merge");
+                let _ =
+                    merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
+                        .expect("merge");
             })
         }
         ("joins", "join_inner_str") => {
@@ -1424,10 +1834,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // datetime index -> ~rows/30 month buckets.
             let base: i64 = 946_684_800_000_000_000;
             // hourly so 1M points stay within datetime64[ns] range (<=2262).
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals)
-                .expect("resample series");
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
             time_us(|| {
                 let _ = series.resample("M").mean().expect("resample mean");
             })
@@ -1436,48 +1848,78 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // s.resample("h").mean(): `rows` minutely points -> hourly bins
             // (60 rows/bin), exercises the sub-daily ns-bucketing path.
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 60_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 60_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals)
-                .expect("resample series");
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
             time_us(|| {
                 let _ = series.resample("h").mean().expect("resample hourly");
             })
         }
         ("datetime", "resample_std") => {
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
-            time_us(|| { let _ = series.resample("M").std().expect("resample std"); })
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("M").std().expect("resample std");
+            })
         }
         ("datetime", "resample_median") => {
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
-            time_us(|| { let _ = series.resample("M").median().expect("resample median"); })
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("M").median().expect("resample median");
+            })
         }
         ("datetime", "resample_agg3") => {
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
-            time_us(|| { let _ = series.resample("M").agg(&["mean","std","max"]).expect("resample agg"); })
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series
+                    .resample("M")
+                    .agg(&["mean", "std", "max"])
+                    .expect("resample agg");
+            })
         }
         ("datetime", "resample_sum") => {
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
-            time_us(|| { let _ = series.resample("M").sum().expect("resample sum"); })
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("M").sum().expect("resample sum");
+            })
         }
         ("datetime", "resample_max") => {
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
-            time_us(|| { let _ = series.resample("M").max().expect("resample max"); })
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("M").max().expect("resample max");
+            })
         }
         ("dataframe_ops", "qcut_bins") => {
             // pandas: pd.qcut(s, 10) — quantile-bin a Float64 series into 10 bins.
@@ -1491,19 +1933,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // suffix=r"\\d+"); m=rows/2 rows x 2 suffixes -> ~rows long rows.
             let m = (rows / 2).max(1);
             let mut columns = BTreeMap::new();
-            columns.insert("id".to_string(), Column::from_i64_values((0..m as i64).collect()));
+            columns.insert(
+                "id".to_string(),
+                Column::from_i64_values((0..m as i64).collect()),
+            );
             let mut order = vec!["id".to_string()];
             for stub in ["A", "B"] {
                 for suf in ["2000", "2001"] {
                     let name = format!("{stub}_{suf}");
-                    columns.insert(name.clone(), Column::from_f64_values((0..m).map(|i| i as f64).collect()));
+                    columns.insert(
+                        name.clone(),
+                        Column::from_f64_values((0..m).map(|i| i as f64).collect()),
+                    );
                     order.push(name);
                 }
             }
             let wdf = DataFrame::new_with_column_order(
-                Index::new_known_unique_int64_unit_range(0, m), columns, order).expect("w2l frame");
+                Index::new_known_unique_int64_unit_range(0, m),
+                columns,
+                order,
+            )
+            .expect("w2l frame");
             time_us(|| {
-                let _ = fp_frame::wide_to_long(&wdf, &["A", "B"], &["id"], "year", "_", r"\d+").expect("wide_to_long");
+                let _ = fp_frame::wide_to_long(&wdf, &["A", "B"], &["id"], "year", "_", r"\d+")
+                    .expect("wide_to_long");
             })
         }
         ("dataframe_ops", "str_split_expand") => {
@@ -1538,60 +1991,44 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = df.to_json("records").expect("to_json");
             })
         }
-        ("io", "json_write_columns") => {
-            time_us(|| {
-                let _ = df.to_json("columns").expect("to_json");
-            })
-        }
-        ("io", "json_write_index") => {
-            time_us(|| {
-                let _ = df.to_json("index").expect("to_json");
-            })
-        }
-        ("io", "json_write_split") => {
-            time_us(|| {
-                let _ = df.to_json("split").expect("to_json");
-            })
-        }
-        ("io", "json_write_values") => {
-            time_us(|| {
-                let _ = df.to_json("values").expect("to_json");
-            })
-        }
-        ("dataframe_ops", "df_to_dict_records") => {
-            time_us(|| {
-                let _ = df.to_dict("records").expect("to_dict");
-            })
-        }
-        ("dataframe_ops", "df_to_dict_dict") => {
-            time_us(|| {
-                let _ = df.to_dict("dict").expect("to_dict");
-            })
-        }
-        ("dataframe_ops", "df_to_records") => {
-            time_us(|| {
-                let _ = df.to_records();
-            })
-        }
-        ("dataframe_ops", "df_apply_row") => {
-            time_us(|| {
-                let _ = df
-                    .apply_fn(
-                        |row| {
-                            let s: f64 = row
-                                .iter()
-                                .filter_map(|v| match v {
-                                    fp_types::Scalar::Float64(f) => Some(*f),
-                                    _ => None,
-                                })
-                                .sum();
-                            fp_types::Scalar::Float64(s)
-                        },
-                        1,
-                    )
-                    .expect("apply");
-            })
-        }
+        ("io", "json_write_columns") => time_us(|| {
+            let _ = df.to_json("columns").expect("to_json");
+        }),
+        ("io", "json_write_index") => time_us(|| {
+            let _ = df.to_json("index").expect("to_json");
+        }),
+        ("io", "json_write_split") => time_us(|| {
+            let _ = df.to_json("split").expect("to_json");
+        }),
+        ("io", "json_write_values") => time_us(|| {
+            let _ = df.to_json("values").expect("to_json");
+        }),
+        ("dataframe_ops", "df_to_dict_records") => time_us(|| {
+            let _ = df.to_dict("records").expect("to_dict");
+        }),
+        ("dataframe_ops", "df_to_dict_dict") => time_us(|| {
+            let _ = df.to_dict("dict").expect("to_dict");
+        }),
+        ("dataframe_ops", "df_to_records") => time_us(|| {
+            let _ = df.to_records();
+        }),
+        ("dataframe_ops", "df_apply_row") => time_us(|| {
+            let _ = df
+                .apply_fn(
+                    |row| {
+                        let s: f64 = row
+                            .iter()
+                            .filter_map(|v| match v {
+                                fp_types::Scalar::Float64(f) => Some(*f),
+                                _ => None,
+                            })
+                            .sum();
+                        fp_types::Scalar::Float64(s)
+                    },
+                    1,
+                )
+                .expect("apply");
+        }),
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.
@@ -1616,21 +2053,28 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // s.resample("D").mean(): `rows` hourly points -> daily bins
             // (24 rows/bin), exercises the daily-contiguous bucketing path.
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals)
-                .expect("resample series");
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
             time_us(|| {
                 let _ = series.resample("D").mean().expect("resample daily");
             })
         }
-        ("datetime", "resample_2d" | "resample_bday" | "resample_w" | "resample_q" | "resample_y") => {
+        (
+            "datetime",
+            "resample_2d" | "resample_bday" | "resample_w" | "resample_q" | "resample_y",
+        ) => {
             // hourly points -> 2D / B / W / Q / Y bins.
             let base: i64 = 946_684_800_000_000_000;
-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 3_600_000_000_000)
+                .collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
-            let series = Series::new("s", Index::from_datetime64(nanos), vals)
-                .expect("resample series");
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
             let freq = match workload {
                 "resample_2d" => "2D",
                 "resample_bday" => "B",

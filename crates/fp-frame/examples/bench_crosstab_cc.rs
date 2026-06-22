@@ -30,10 +30,10 @@ fn main() {
     let (rv, cv): (Vec<Scalar>, Vec<Scalar>) = if kt == "str" {
         (
             (0..n)
-                .map(|i| Scalar::Utf8(format!("r{:06}", rk(i)).into()))
+                .map(|i| Scalar::Utf8(format!("r{:06}", rk(i))))
                 .collect(),
             (0..n)
-                .map(|i| Scalar::Utf8(format!("c{:04}", ck(i)).into()))
+                .map(|i| Scalar::Utf8(format!("c{:04}", ck(i))))
                 .collect(),
         )
     } else {

@@ -19,12 +19,7 @@ fn main() {
     )
     .unwrap();
     let mapping: Vec<(Scalar, Scalar)> = (0..card)
-        .map(|k| {
-            (
-                Scalar::Int64(k),
-                Scalar::Utf8(format!("label_{}", k)),
-            )
-        })
+        .map(|k| (Scalar::Int64(k), Scalar::Utf8(format!("label_{}", k))))
         .collect();
     let mut best = u128::MAX;
     for _ in 0..it {

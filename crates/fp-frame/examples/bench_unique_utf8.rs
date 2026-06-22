@@ -27,9 +27,10 @@ fn main() {
         labels,
         (0..n)
             .map(|i| {
-                Scalar::Utf8(
-                    format!("v{:08}", ((i as i64).wrapping_mul(2654435761) >> 13) % card).into(),
-                )
+                Scalar::Utf8(format!(
+                    "v{:08}",
+                    ((i as i64).wrapping_mul(2654435761) >> 13) % card
+                ))
             })
             .collect(),
     )

@@ -18,9 +18,10 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    Scalar::Utf8(
-                        format!("a{:04}", ((i as i64).wrapping_mul(2654435761) >> 13) % c1).into(),
-                    )
+                    Scalar::Utf8(format!(
+                        "a{:04}",
+                        ((i as i64).wrapping_mul(2654435761) >> 13) % c1
+                    ))
                 })
                 .collect(),
         )
@@ -31,9 +32,10 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    Scalar::Utf8(
-                        format!("b{:03}", ((i as i64).wrapping_mul(40503) >> 7) % c2).into(),
-                    )
+                    Scalar::Utf8(format!(
+                        "b{:03}",
+                        ((i as i64).wrapping_mul(40503) >> 7) % c2
+                    ))
                 })
                 .collect(),
         )

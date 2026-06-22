@@ -14,13 +14,10 @@ fn main() {
         labels,
         (0..n)
             .map(|i| {
-                Scalar::Utf8(
-                    format!(
-                        "k{:010}",
-                        ((i as i64).wrapping_mul(2654435761) >> 7) & 0x3FFFFFFF
-                    )
-                    .into(),
-                )
+                Scalar::Utf8(format!(
+                    "k{:010}",
+                    ((i as i64).wrapping_mul(2654435761) >> 7) & 0x3FFFFFFF
+                ))
             })
             .collect(),
     )

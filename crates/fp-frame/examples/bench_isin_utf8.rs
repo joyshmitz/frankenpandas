@@ -16,15 +16,16 @@ fn main() {
         labels,
         (0..n)
             .map(|i| {
-                Scalar::Utf8(
-                    format!("v{:06}", ((i as i64).wrapping_mul(2654435761) >> 13) % card).into(),
-                )
+                Scalar::Utf8(format!(
+                    "v{:06}",
+                    ((i as i64).wrapping_mul(2654435761) >> 13) % card
+                ))
             })
             .collect(),
     )
     .unwrap();
     let needles: Vec<Scalar> = (0..setsz)
-        .map(|k| Scalar::Utf8(format!("v{:06}", k).into()))
+        .map(|k| Scalar::Utf8(format!("v{:06}", k)))
         .collect();
     let mut best = u128::MAX;
     for _ in 0..it {

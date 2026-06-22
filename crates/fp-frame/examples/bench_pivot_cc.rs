@@ -42,10 +42,10 @@ fn main() {
     let (idx_vals, col_vals): (Vec<Scalar>, Vec<Scalar>) = if keytype == "str" {
         (
             (0..n)
-                .map(|i| Scalar::Utf8(format!("r{:06}", idx_key(i)).into()))
+                .map(|i| Scalar::Utf8(format!("r{:06}", idx_key(i))))
                 .collect(),
             (0..n)
-                .map(|i| Scalar::Utf8(format!("c{:04}", col_key(i)).into()))
+                .map(|i| Scalar::Utf8(format!("c{:04}", col_key(i))))
                 .collect(),
         )
     } else if keytype == "dt" {

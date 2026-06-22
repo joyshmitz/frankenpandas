@@ -13,7 +13,7 @@ fn main() {
         "c",
         labels,
         (0..n)
-            .map(|i| Scalar::Utf8(format!("item_{:08}_xyz", i).into()))
+            .map(|i| Scalar::Utf8(format!("item_{:08}_xyz", i)))
             .collect(),
     )
     .unwrap();

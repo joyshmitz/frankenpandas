@@ -11,6 +11,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_position_lookup
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_hash_setops
 
 use std::{hint::black_box, time::Instant};
 
@@ -85,6 +86,19 @@ fn int64_index_digest(index: &fp_index::Index) -> usize {
 fn sequential_i64_values(start: i64, len: usize) -> Vec<i64> {
     (0..len)
         .map(|offset| start + i64::try_from(offset).expect("offset fits i64"))
+        .collect()
+}
+
+fn alternating_extreme_i64_values(start: i64, len: usize) -> Vec<i64> {
+    (0..len)
+        .map(|offset| {
+            let rank = if offset % 2 == 0 {
+                len - 1 - (offset / 2)
+            } else {
+                offset / 2
+            };
+            start + i64::try_from(rank).expect("rank fits i64")
+        })
         .collect()
 }
 
@@ -397,6 +411,32 @@ fn main() {
         let sink = intersection_sink ^ difference_sink;
         println!(
             "index_sorted_setops n={n} intersection_ns={intersection_ns} difference_ns={difference_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_hash_setops" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let left = Index::from_i64_values(alternating_extreme_i64_values(0, n)).set_name("row");
+        let right = Index::from_i64_values(alternating_extreme_i64_values(n_i64 / 2, n));
+        let (intersection_ns, intersection_sink) = best_ns(iters, || {
+            let output = left.intersection(&right);
+            int64_index_digest(&output)
+        });
+        let (union_ns, union_sink) = best_ns(iters, || {
+            let output = left.union_with(&right);
+            int64_index_digest(&output)
+        });
+        let (difference_ns, difference_sink) = best_ns(iters, || {
+            let output = left.difference(&right);
+            int64_index_digest(&output)
+        });
+        let (symmetric_difference_ns, symmetric_difference_sink) = best_ns(iters, || {
+            let output = left.symmetric_difference(&right);
+            int64_index_digest(&output)
+        });
+        let sink = intersection_sink ^ union_sink ^ difference_sink ^ symmetric_difference_sink;
+        println!(
+            "index_hash_setops n={n} intersection_ns={intersection_ns} union_ns={union_ns} difference_ns={difference_ns} symmetric_difference_ns={symmetric_difference_ns} sink={sink}"
         );
         return;
     }

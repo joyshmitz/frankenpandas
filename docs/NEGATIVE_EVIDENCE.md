@@ -2974,3 +2974,22 @@ first-seen order + indicator cells match; all-valid i64 => dummy_na all-false). 
 melt 4.79x, crosstab 1.27x, pivot_table 16x WIN; only unstack 0.67x remains (parse-limited string-composite,
 genuinely structural). Two big hidden losses (pivot 0.27x, get_dummies 0.70x) found+fixed by sweeping the whole
 family after the "fixed" claim — the pattern keeps paying.
+
+### 2026-06-22 CrimsonFinch — expanding skew/kurt fuse + powf->sqrt: 0.07x->1.19x @1M (the big rolling-cat loss)
+Swept rolling/groupby/datetime vs pandas @1M (MIN both sides). One catastrophic loss: expanding().skew()
+0.07x (fp 209ms vs pandas 15.3ms, 14x SLOWER) — the largest single-op loss left. Root (two layers): (1) the
+shared RollingMomentState keeps a BTreeMap<u64,usize> multiset and inserts PER ELEMENT (1M tree inserts =
+O(n log n), cache-missing) — needed only for sliding-window constant detection on remove(), but expanding
+NEVER removes, so constancy = "every admitted value == first" (IEEE == agrees with the value_key multiset for
+all non-NaN incl +-0.0); plus Scalar boxing on input+output. (2) the per-element s2.powf(1.5) libcall (~30ns)
+dominated once the map was gone. FIX: dedicated expanding loop = as_f64_slice input view + running power sums +
+first-value constancy flag + typed nullable output (from_f64_values_with_validity), then s2*s2.sqrt() for
+s2^1.5 (hardware sqrt ~5ns, ~1 ULP, same as powf). The BTreeMap+typed-output half is BIT-IDENTICAL (committed
+separately, goldens green); the sqrt half shifts ONE Debug golden by 1 ULP (...3946 vs powf ...3948; pandas
+itself = ...3960, never matched bit-for-bit) — regenerated, naive-reference tolerance + whole skew suite stay
+green (fp-frame 3098/0, fp-conformance 419+/0). expanding_skew 209ms->12.8ms; 0.07x->1.19x WIN (fp now BEATS
+pandas). This was the FILED br-nsyti (typed output) + its golden-gated powf follow-up, both closed. LESSON:
+a shared accumulator's worst-case bookkeeping (the remove() multiset) silently taxed the append-only caller —
+give the cheaper caller its own loop. ALSO measured this sweep: resample_median 0.46x / resample_max 0.58x /
+resample_std 0.80x still LOSSES @1M with my pandas/freq (ME, hourly src) — NOT re-investigated this session
+(distinct from the recent "resample no losses" claim which used a different harness/freq); candidate next.

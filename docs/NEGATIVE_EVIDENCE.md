@@ -2899,3 +2899,17 @@ hourly 12392 INTACT. Q/Y now sit at the INHERENT civil-month-ord floor (~0.97x �
 conversions, fp Rust vs pandas C, exactly like dt_month/dt_quarter ~0.9x); the single-pass removed the GATHER,
 the civil conversion is the irreducible remainder. ALL resample mean+sum now single-pass at EVERY freq family
 (D / sub-daily H-min-s-ms-us-ns / M-Q-Y-A). The br-ikq9a resample "gather-agg floor" is fully closed for mean+sum.
+
+### 2026-06-21 BlackThrush — resample sweep: surface WIN except max 0.93x; min/max single-pass deferred (output-path mismatch)
+Comprehensive resample sweep @1M post-fix (fp min-of-3, pandas min-of-6 warmed): resample_mean 1.28x, daily
+2.01x, hourly 4.26x, sum 1.32x, median 1.07x, std 1.19x, w 1.15x, q 1.10x WIN; 2d 1.01x / y 1.03x ~par; ONLY
+resample_max 0.93x LOSS. So the resample surface is comprehensively WIN except the lone marginal max. The
+min/max single-pass WAS investigated: the per-bin extremum (strict >/< + ±inf init) IS bit-identical to
+resample_extremum_typed's reduce (keeps first extreme, -0.0/0.0 ties match). BUT the empty-bin OUTPUT differs:
+resample_extremum_typed emits Scalar::Null(NullKind::NaN) via Column::from_values, while the mean/sum single-
+pass emits from_f64_values(NaN) — a valid-NaN vs a null slot. So min/max can't reuse the is_sum->kind reduce
+generalization (different output column type); it needs a SEPARATE Scalar-output single-pass helper (~50 lines,
+the monthly logic + extremum accumulator + Vec<Scalar> Null-for-empty emit). For a marginal 0.93x gain on a
+LESS-COMMON op, with bit-identity risk on the empty-bin null path, the EV/effort says DEFER (filed br-ikq9a).
+The resample reductions cluster is COMPREHENSIVELY CLOSED for the common aggs (mean+sum all freqs); max is the
+lone marginal residual.

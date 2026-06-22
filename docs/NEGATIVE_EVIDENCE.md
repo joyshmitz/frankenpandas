@@ -3158,3 +3158,14 @@ fp 62.8ms vs pandas 102.9ms = 1.64x WIN (was ~0.85x by analogy to the f64 boxing
 test_series_groupby_unique_nt65g8 + series_unique_sparse_i64. Both typed value dtypes (f64+i64) now covered.
 Disk flat 50G. LESSON: when adding a typed fast path, cover BOTH common value dtypes (f64 AND i64) — a one-dtype
 fix leaves the sibling as a latent loss.
+
+### 2026-06-22 CrimsonFinch — unique vein FULLY CLOSED: non-grouped Series.unique already typed (no fix needed)
+Checked (no-build code read, lib.rs ~8852) whether non-grouped Series.unique() shares the Scalar-boxing loss the
+GROUPED version had: it does NOT — it already has typed-i64 fast paths (dense bitset for bounded range +
+FxHashSet<i64> for sparse/wide, br-15f51/BlackThrush) plus the f64/value_counts typed dedup; only the Vec<Scalar>
+RETURN is inherent to that low-level API signature, and the input/dedup are typed. So the unique vein is now FULLY
+CLOSED: grouped f64 (d38e5c73) + grouped i64 (fa8d6634) fixed this session; non-grouped already optimized. No
+further unique work. Loss-hunt definitively complete: 4 real losses flipped this session (expanding skew, resample
+median, groupby unique f64, groupby unique i64), every other family/dtype/value-returning op confirmed WIN, zero
+fixable vs-pandas losses remain. Residuals are non-losses only: structural to_numpy/transpose + the deferred
+multi-string-key groupby OPTIMIZATION-of-a-win (1.07x, plan committed).

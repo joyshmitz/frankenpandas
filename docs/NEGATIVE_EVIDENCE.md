@@ -3284,3 +3284,14 @@ median 0.87x->1.25x, groupby unique f64 0.61-0.89x->1.27-1.78x, groupby unique i
 groupby 1.07x->1.69x, crosstab 0.68x->19.46x. Remaining non-wins: structural to_numpy/transpose (pandas zero-copy
 view, architectural) + the confirmed i64 groupby.cum* dtype divergence (correctness/golden-breaking, directed
 session). The only "gaps" left are bandwidth-bound parity wins (idxmax 1.08x) where a change would be ~0-gain.
+
+### 2026-06-22 CrimsonFinch — multi-strkey value-agg dense single-pass: 1.69x->2.22x @1M (build_groups + value-agg now both dense)
+Followed the multi-strkey build_groups dense win (1.07x->1.69x) by closing the REMAINING cost: the value
+aggregation still used the per-group Scalar gather (aggregate_named_func's `dense` single-pass precompute was
+all-int + single-string only; multi-string/mixed fell through). Added a multi-column mixed Int64/Utf8 branch to
+that precompute: factorize each Utf8 key to first-seen u32 codes, mixed-radix dense gid_per_row, retain per-col
+factorize maps to bridge the sorted group_order back to gids (go_gid) — so the proven single-pass Float64
+accumulators (sum/mean/min/max/var/std/first/last/prod) run for multi-strkey instead of the gather. Bit-identical:
+same first-seen gids over the same rows, go_gid bridges by actual key values; fp-frame 3098/0. df_groupby_2strkey_
+sum @1M 64ms->50ms (1.28x more fp-side), 1.69x->2.22x. FULL multi-strkey arc this session: 89ms->50ms, 1.07x->
+2.22x WIN (build_groups dense + value-agg dense). 7th loss-flip/extension this session.

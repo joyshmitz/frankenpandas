@@ -11487,7 +11487,71 @@ impl RangeIndex {
         out
     }
 
+    fn matching_step_i64_slice_offset(&self, other: &[i64]) -> Option<i128> {
+        let &first = other.first()?;
+        let step = i128::from(self.step);
+        for (position, &value) in other.iter().enumerate() {
+            let expected = i128::from(first) + (position as i128) * step;
+            if i128::from(value) != expected {
+                return None;
+            }
+        }
+        let offset = i128::from(first) - i128::from(self.start);
+        if offset % step != 0 {
+            return None;
+        }
+        Some(offset / step)
+    }
+
+    fn same_lattice_i64_slice_overlap_positions(
+        &self,
+        other: &[i64],
+    ) -> Option<Option<(usize, usize)>> {
+        if self.is_empty() || other.is_empty() {
+            return Some(None);
+        }
+        let other_start = self.matching_step_i64_slice_offset(other)?;
+        let other_last = other_start.checked_add(other.len() as i128 - 1)?;
+        let first = other_start.max(0);
+        let last = other_last.min(self.len() as i128 - 1);
+        if first > last {
+            return Some(None);
+        }
+        Some(Some((
+            usize::try_from(first).ok()?,
+            usize::try_from(last).ok()?,
+        )))
+    }
+
+    fn join_outer_i64_affine_slice(&self, other: &[i64]) -> Option<Index> {
+        let self_len = self.len();
+        if other.is_empty() {
+            return self.affine_span_index(0, self_len, None);
+        }
+        if self_len == 0 {
+            self.matching_step_i64_slice_offset(other)?;
+            return Index::new_known_unique_int64_affine_range(other[0], self.step, other.len());
+        }
+        let other_start = self.matching_step_i64_slice_offset(other)?;
+        if other_start < 0 || other_start > self_len as i128 {
+            return None;
+        }
+        let other_last = other_start.checked_add(other.len() as i128 - 1)?;
+        let joined_len = (self_len as i128).max(other_last + 1);
+        self.affine_span_index(0, usize::try_from(joined_len).ok()?, None)
+    }
+
     fn join_inner_i64(&self, other: &[i64]) -> Index {
+        if let Some(overlap) = self.same_lattice_i64_slice_overlap_positions(other) {
+            let (first, len) = match overlap {
+                Some((first, last)) => (first, last - first + 1),
+                None => (0, 0),
+            };
+            if let Some(index) = self.affine_span_index(first, len, None) {
+                return index;
+            }
+        }
+
         let mut labels = Vec::new();
         if other.is_empty() || self.is_empty() {
             return Index::from_i64_values(labels);
@@ -11527,6 +11591,10 @@ impl RangeIndex {
     }
 
     fn join_outer_i64(&self, other: &[i64]) -> Index {
+        if let Some(index) = self.join_outer_i64_affine_slice(other) {
+            return index;
+        }
+
         let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             labels.push(self.value_at(position));
@@ -28256,6 +28324,33 @@ mod tests {
             let oracle = range.to_flat_index().join(&other, how)?;
             assert_eq!(direct.name(), oracle.name(), "name mismatch for {how}");
             assert_eq!(direct, oracle, "label mismatch for {how}");
+        }
+
+        let seq_range = super::RangeIndex::new(0, 6, 1).unwrap().set_name("k");
+        let seq_other = super::Index::from_i64_values(vec![3, 4, 5, 6, 7]).set_name("k");
+        let seq_inner = seq_range.join(&seq_other, "inner")?;
+        assert_eq!(
+            seq_inner.labels.int64_view().unwrap().as_slice(),
+            &[3, 4, 5]
+        );
+        assert!(
+            seq_inner.labels.materialized.get().is_none(),
+            "same-lattice RangeIndex::join(inner) should stay lazy"
+        );
+        let seq_outer = seq_range.join(&seq_other, "outer")?;
+        assert_eq!(
+            seq_outer.labels.int64_view().unwrap().as_slice(),
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert!(
+            seq_outer.labels.materialized.get().is_none(),
+            "same-lattice RangeIndex::join(outer) should stay lazy"
+        );
+        for how in ["inner", "outer"] {
+            assert_eq!(
+                seq_range.join(&seq_other, how)?,
+                seq_range.to_flat_index().join(&seq_other, how)?
+            );
         }
 
         let mismatched_name = other.set_name("other");

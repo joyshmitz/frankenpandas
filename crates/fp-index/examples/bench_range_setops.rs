@@ -18,6 +18,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_diff
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_join
 
 use std::{hint::black_box, time::Instant};
 
@@ -462,6 +463,24 @@ fn main() {
         println!(
             "range_diff n={n} periods={periods} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
         );
+        return;
+    }
+    if scenario == "range_join" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let range = RangeIndex::new(0, n_i64, 1)
+            .expect("valid join range")
+            .set_name("k");
+        let other = Index::from_i64_values(sequential_i64_values(n_i64 / 2, n)).set_name("k");
+        let (inner_ns, inner_sink) = best_ns(iters, || {
+            let output = range.join(&other, "inner").expect("inner join");
+            int64_index_digest(&output)
+        });
+        let (outer_ns, outer_sink) = best_ns(iters, || {
+            let output = range.join(&other, "outer").expect("outer join");
+            int64_index_digest(&output)
+        });
+        let sink = inner_sink ^ outer_sink;
+        println!("range_join n={n} inner_ns={inner_ns} outer_ns={outer_ns} sink={sink}");
         return;
     }
     if scenario == "index_append_repeat" {

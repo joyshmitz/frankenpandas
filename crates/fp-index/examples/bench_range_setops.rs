@@ -17,6 +17,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 100 range_reindex
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_asof_locs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
@@ -395,6 +396,11 @@ fn range_reindex_legacy_target_values_digest(source: &RangeIndex, target: &Range
     let target_values = black_box(target).values();
     let indexer = black_box(source).get_indexer(black_box(&target_values));
     target.len() ^ indexer_digest(&indexer, &[])
+}
+
+fn range_asof_locs_digest(source: &RangeIndex, where_index: &Index) -> usize {
+    let positions = black_box(source).asof_locs(black_box(where_index), None);
+    option_position_digest(&positions)
 }
 
 fn label_materializing_nunique_digest(index: &Index) -> usize {
@@ -869,6 +875,23 @@ fn main() {
         let sink = current_sink ^ legacy_sink ^ descending_sink ^ descending_legacy_sink;
         println!(
             "range_reindex n={n} current_ns={current_ns} legacy_target_values_ns={legacy_target_values_ns} descending_ns={descending_ns} descending_legacy_target_values_ns={descending_legacy_target_values_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_asof_locs" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let source = RangeIndex::new(
+            0,
+            n_i64.checked_mul(2).expect("benchmark range stop fits i64"),
+            2,
+        )
+        .expect("valid asof_locs source")
+        .set_name("row");
+        let where_index = Index::from_i64_values(asof_where_values(n));
+        let where_len = where_index.len();
+        let (asof_locs_ns, sink) = best_ns(iters, || range_asof_locs_digest(&source, &where_index));
+        println!(
+            "range_asof_locs n={n} where_len={where_len} asof_locs_ns={asof_locs_ns} sink={sink}"
         );
         return;
     }

@@ -11422,6 +11422,20 @@ impl RangeIndex {
     pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
         if let Some(keys) = where_index.labels.int64_view() {
             if mask.is_none() {
+                if self.step > 0 && keys.windows(2).all(|pair| pair[0] <= pair[1]) {
+                    let len = self.len();
+                    let mut next_position = 0usize;
+                    let mut best = None;
+                    let mut positions = Vec::with_capacity(keys.len());
+                    for &key in keys.iter() {
+                        while next_position < len && self.value_at(next_position) <= key {
+                            best = Some(next_position);
+                            next_position += 1;
+                        }
+                        positions.push(best);
+                    }
+                    return positions;
+                }
                 return keys
                     .iter()
                     .map(|&key| {

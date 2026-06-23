@@ -3429,3 +3429,13 @@ bench_range_setops --release -- 1000000 50 index_nunique`. Results: fp dense 1,1
 26,740,717 ns dense and 31,722,265 ns wide, so the current raw-count path is also 22.72x / 2.03x faster than the old
 label-vector + label-hash shape. Kept as non-zero evidence; no production code changed because the production fast
 path and tests were already present.
+
+### 2026-06-23 BlackThrush — RangeIndex.asof_locs sorted-target stream: 0.36x loss -> 7.81x win @1M
+Closed br-frankenpandas-vuftp with a real production lever. Added `range_asof_locs` to
+`crates/fp-index/examples/bench_range_setops.rs`, then measured 1M-label `RangeIndex(0, 2n, 2)` with 1M
+nondecreasing Int64 probes just below source labels. Baseline FP binary-searched every probe:
+56,835,368 ns vs pandas 20,489,127 ns = 0.36x. Fix: when the source range is ascending, probes are all Int64, no mask
+is supplied, and target labels are nondecreasing, stream the source cursor once and emit the current right-bound
+position per probe; unsorted targets, masked calls, descending ranges, and mixed-label targets keep the existing
+fallback paths. After: 2,624,860 ns = 21.65x FP-side and 7.81x faster than pandas. Ordering, duplicate-target,
+before-first, and after-last semantics match the existing `range_index_asof_locs_uses_direct_values_vuftp` oracle.

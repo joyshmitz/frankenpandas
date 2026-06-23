@@ -1,4 +1,4 @@
-//! Bench + golden digest for MultiIndex::duplicated/drop_duplicates
+//! Bench + golden digest for MultiIndex::duplicated/drop_duplicates/nunique
 //! (br-frankenpandas-midedup).
 //!
 //! Run: cargo run -p fp-index --example bench_multiindex_dedup --release -- <n>
@@ -31,20 +31,46 @@ fn main() {
 
     let mask = mi.duplicated(DuplicateKeep::First);
     let kept = mi.drop_duplicates().len();
+    let nunique = mi.nunique();
+    let unique_len = mi.unique().len();
+    if nunique != unique_len {
+        eprintln!("nunique mismatch: nunique={nunique} unique_len={unique_len}");
+        std::process::exit(2);
+    }
     let mut chk: u64 = 0xcbf29ce484222325;
     for &b in &mask {
-        chk = (chk ^ b as u64).wrapping_mul(0x100000001b3);
+        chk = (chk ^ u64::from(b)).wrapping_mul(0x100000001b3);
     }
-    chk ^= (kept as u64).wrapping_mul(0x9E3779B97F4A7C15);
+    chk ^= u64::try_from(kept)
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(0x9E3779B97F4A7C15);
+    chk ^= u64::try_from(nunique)
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(0xBF58476D1CE4E5B9);
 
     let mut sink = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
         sink ^= black_box(mi.duplicated(DuplicateKeep::First)).len();
     }
-    let elapsed = start.elapsed();
+    let duplicated_elapsed = start.elapsed();
+
+    let start = Instant::now();
+    for _ in 0..iters {
+        sink ^= black_box(mi.nunique());
+    }
+    let nunique_elapsed = start.elapsed();
+
+    let start = Instant::now();
+    for _ in 0..iters {
+        sink ^= black_box(mi.unique().len());
+    }
+    let unique_len_elapsed = start.elapsed();
+
     println!(
-        "mi_dedup n={n} iters={iters}: {:.3} ms/iter (kept={kept} chk={chk:016x} sink={sink})",
-        elapsed.as_secs_f64() * 1000.0 / iters as f64
+        "mi_dedup n={n} iters={iters}: duplicated_ms={:.3} nunique_ms={:.3} unique_len_ms={:.3} kept={kept} nunique={nunique} chk={chk:016x} sink={sink}",
+        duplicated_elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        nunique_elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        unique_len_elapsed.as_secs_f64() * 1000.0 / iters as f64
     );
 }

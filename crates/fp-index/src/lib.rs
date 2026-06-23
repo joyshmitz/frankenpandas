@@ -1556,19 +1556,26 @@ impl Index {
         Some(index)
     }
 
-    fn new_known_unique_int64_two_affine_runs(
+    fn new_int64_two_affine_runs(
         first: Int64AffineLabels,
         second: Int64AffineLabels,
     ) -> Option<Self> {
         let labels = IndexLabels::new_int64_two_affine(first, second)?;
-        let index = Self {
+        Some(Self {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
-        };
+        })
+    }
+
+    fn new_known_unique_int64_two_affine_runs(
+        first: Int64AffineLabels,
+        second: Int64AffineLabels,
+    ) -> Option<Self> {
+        let index = Self::new_int64_two_affine_runs(first, second)?;
         let _ = index.duplicate_cache.set(false);
         Some(index)
     }
@@ -10530,6 +10537,92 @@ impl RangeIndex {
         Some(labels)
     }
 
+    fn push_i64_position_range(
+        &self,
+        len: usize,
+        start: usize,
+        end: usize,
+        labels: &mut Vec<i64>,
+    ) -> Option<()> {
+        if start > end || end > len {
+            return None;
+        }
+        self.i64_position_arithmetic_is_safe(len)?;
+        if start == end {
+            return Some(());
+        }
+        let start_position = i64::try_from(start).ok()?;
+        let span = self.step.checked_mul(start_position)?;
+        let mut value = self.start.checked_add(span)?;
+        for position in start..end {
+            labels.push(value);
+            if position + 1 < end {
+                value += self.step;
+            }
+        }
+        Some(())
+    }
+
+    fn i64_position_affine_run(
+        &self,
+        len: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<Int64AffineLabels> {
+        if start > end || end > len {
+            return None;
+        }
+        self.i64_position_arithmetic_is_safe(len)?;
+        let run_len = end - start;
+        let start_value = if run_len == 0 {
+            self.start
+        } else {
+            let start_position = i64::try_from(start).ok()?;
+            let span = self.step.checked_mul(start_position)?;
+            self.start.checked_add(span)?
+        };
+        Int64AffineLabels::new(start_value, self.step, run_len)
+    }
+
+    fn fast_i64_insert_values(&self, len: usize, loc: usize, value: i64) -> Option<Vec<i64>> {
+        let mut labels = Vec::with_capacity(insert_output_capacity(len));
+        self.push_i64_position_range(len, 0, loc, &mut labels)?;
+        labels.push(value);
+        self.push_i64_position_range(len, loc, len, &mut labels)?;
+        Some(labels)
+    }
+
+    fn fast_i64_append_index(&self, other: &Self, len: usize, other_len: usize) -> Option<Index> {
+        let first = self.i64_position_affine_run(len, 0, len)?;
+        let second = other.i64_position_affine_run(other_len, 0, other_len)?;
+        Index::new_int64_two_affine_runs(first, second)
+    }
+
+    fn fast_i64_append_values(
+        &self,
+        other: &Self,
+        len: usize,
+        other_len: usize,
+    ) -> Option<Vec<i64>> {
+        let mut labels = Vec::with_capacity(combined_output_capacity(len, other_len));
+        self.push_i64_position_range(len, 0, len, &mut labels)?;
+        other.push_i64_position_range(other_len, 0, other_len, &mut labels)?;
+        Some(labels)
+    }
+
+    fn fast_i64_delete_index(&self, len: usize, loc: usize) -> Option<Index> {
+        let first = self.i64_position_affine_run(len, 0, loc)?;
+        let second = self.i64_position_affine_run(len, loc + 1, len)?;
+        Index::new_known_unique_int64_two_affine_runs(first, second)
+    }
+
+    fn fast_i64_delete_values(&self, len: usize, loc: usize) -> Option<Vec<i64>> {
+        let mut labels = Vec::with_capacity(len.saturating_sub(1));
+        self.push_i64_position_range(len, 0, loc, &mut labels)?;
+        self.push_i64_position_range(len, loc + 1, len, &mut labels)?;
+        Some(labels)
+    }
+
     fn take_arithmetic_positions(&self, positions: &[usize], len: usize) -> Option<Index> {
         // Single O(len) pass: verify constant position stride AND in-bounds. The
         // result of an affine RangeIndex taken at an arithmetic position sequence
@@ -11902,14 +11995,19 @@ impl RangeIndex {
                 length: len,
             });
         }
-        let mut labels = Vec::with_capacity(insert_output_capacity(len));
-        for position in 0..loc {
-            labels.push(self.value_at(position));
-        }
-        labels.push(value);
-        for position in loc..len {
-            labels.push(self.value_at(position));
-        }
+        let labels = if let Some(labels) = self.fast_i64_insert_values(len, loc, value) {
+            labels
+        } else {
+            let mut labels = Vec::with_capacity(insert_output_capacity(len));
+            for position in 0..loc {
+                labels.push(self.value_at(position));
+            }
+            labels.push(value);
+            for position in loc..len {
+                labels.push(self.value_at(position));
+            }
+            labels
+        };
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -11923,13 +12021,27 @@ impl RangeIndex {
     /// the index name when both operands share it.
     #[must_use]
     pub fn append(&self, other: &Self) -> Index {
-        let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
-        for position in 0..self.len() {
-            labels.push(self.value_at(position));
+        let len = self.len();
+        let other_len = other.len();
+        if let Some(index) = self.fast_i64_append_index(other, len, other_len) {
+            let mut out = index;
+            if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+                out = out.set_name(name);
+            }
+            return out;
         }
-        for position in 0..other.len() {
-            labels.push(other.value_at(position));
-        }
+        let labels = if let Some(labels) = self.fast_i64_append_values(other, len, other_len) {
+            labels
+        } else {
+            let mut labels = Vec::with_capacity(combined_output_capacity(len, other_len));
+            for position in 0..len {
+                labels.push(self.value_at(position));
+            }
+            for position in 0..other_len {
+                labels.push(other.value_at(position));
+            }
+            labels
+        };
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             out = out.set_name(name);
@@ -11948,12 +12060,24 @@ impl RangeIndex {
                 length: len,
             });
         }
-        let mut labels = Vec::with_capacity(len.saturating_sub(1));
-        for position in 0..len {
-            if position != loc {
-                labels.push(self.value_at(position));
+        if let Some(index) = self.fast_i64_delete_index(len, loc) {
+            let mut out = index;
+            if let Some(name) = self.name() {
+                out = out.set_name(name);
             }
+            return Ok(out);
         }
+        let labels = if let Some(labels) = self.fast_i64_delete_values(len, loc) {
+            labels
+        } else {
+            let mut labels = Vec::with_capacity(len.saturating_sub(1));
+            for position in 0..len {
+                if position != loc {
+                    labels.push(self.value_at(position));
+                }
+            }
+            labels
+        };
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -27631,6 +27755,36 @@ mod tests {
             &[0, 1, 2, 10, 11]
         );
         assert_eq!(deleted.labels.int64_view().unwrap().as_slice(), &[0, 2]);
+        assert_eq!(
+            appended.labels.int64_two_affine.as_deref().copied(),
+            Some(Int64TwoAffineLabels {
+                first: Int64AffineLabels {
+                    start: 0,
+                    step: 1,
+                    len: 3,
+                },
+                second: Int64AffineLabels {
+                    start: 10,
+                    step: 1,
+                    len: 2,
+                },
+            })
+        );
+        assert_eq!(
+            deleted.labels.int64_two_affine.as_deref().copied(),
+            Some(Int64TwoAffineLabels {
+                first: Int64AffineLabels {
+                    start: 0,
+                    step: 1,
+                    len: 1,
+                },
+                second: Int64AffineLabels {
+                    start: 2,
+                    step: 1,
+                    len: 1,
+                },
+            })
+        );
 
         for output in [&inserted, &appended, &deleted] {
             assert!(
@@ -27660,6 +27814,21 @@ mod tests {
             appended.labels.int64_view().unwrap().as_slice(),
             &[9, 5, 1, -1, -3, -5]
         );
+        assert_eq!(
+            appended.labels.int64_two_affine.as_deref().copied(),
+            Some(Int64TwoAffineLabels {
+                first: Int64AffineLabels {
+                    start: 9,
+                    step: -4,
+                    len: 3,
+                },
+                second: Int64AffineLabels {
+                    start: -1,
+                    step: -2,
+                    len: 3,
+                },
+            })
+        );
 
         let mismatched_name = right.set_name("other");
         assert_eq!(left.append(&mismatched_name).name(), None);
@@ -27667,6 +27836,21 @@ mod tests {
         let deleted = left.delete(1)?;
         assert_eq!(deleted.name(), Some("k"));
         assert_eq!(deleted.labels.int64_view().unwrap().as_slice(), &[9, 1]);
+        assert_eq!(
+            deleted.labels.int64_two_affine.as_deref().copied(),
+            Some(Int64TwoAffineLabels {
+                first: Int64AffineLabels {
+                    start: 9,
+                    step: -4,
+                    len: 1,
+                },
+                second: Int64AffineLabels {
+                    start: 1,
+                    step: -4,
+                    len: 1,
+                },
+            })
+        );
 
         let insert_err = left.insert(4, 0).unwrap_err();
         assert!(matches!(

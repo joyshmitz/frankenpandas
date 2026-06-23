@@ -15,6 +15,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 
 use std::{hint::black_box, time::Instant};
 
@@ -354,6 +355,34 @@ fn main() {
         let sink = take_sink ^ repeat_sink;
         println!(
             "range_take_repeat n={n} positions={position_count} take_ns={take_ns} repeat2_ns={repeat_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_splice_outputs" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let left = RangeIndex::new(0, n_i64 * 3, 3)
+            .expect("valid left range")
+            .set_name("row");
+        let right = RangeIndex::new(n_i64 * 5, n_i64 * 7, 2)
+            .expect("valid right range")
+            .set_name("row");
+        let insert_loc = n / 2;
+        let delete_loc = n / 2;
+        let (insert_ns, insert_sink) = best_ns(iters, || {
+            let output = left.insert(insert_loc, -7).expect("insert");
+            black_box(output).len()
+        });
+        let (append_ns, append_sink) = best_ns(iters, || {
+            let output = left.append(&right);
+            black_box(output).len()
+        });
+        let (delete_ns, delete_sink) = best_ns(iters, || {
+            let output = left.delete(delete_loc).expect("delete");
+            black_box(output).len()
+        });
+        let sink = insert_sink ^ append_sink ^ delete_sink;
+        println!(
+            "range_splice_outputs n={n} insert_loc={insert_loc} delete_loc={delete_loc} insert_ns={insert_ns} append_ns={append_ns} delete_ns={delete_ns} sink={sink}"
         );
         return;
     }

@@ -12175,13 +12175,37 @@ impl RangeIndex {
 }
 
 /// Public pandas-style categorical index wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CategoricalIndex {
     labels: Vec<String>,
     categories: Vec<String>,
     ordered: bool,
     name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category_codes: Option<Vec<usize>>,
 }
+
+impl std::fmt::Debug for CategoricalIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CategoricalIndex")
+            .field("labels", &self.labels)
+            .field("categories", &self.categories)
+            .field("ordered", &self.ordered)
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl PartialEq for CategoricalIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.labels == other.labels
+            && self.categories == other.categories
+            && self.ordered == other.ordered
+            && self.name == other.name
+    }
+}
+
+impl Eq for CategoricalIndex {}
 
 fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
     let word = rank >> 6;
@@ -12194,23 +12218,64 @@ fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
 }
 
 impl CategoricalIndex {
+    fn category_codes_for(labels: &[String], categories: &[String]) -> Option<Vec<usize>> {
+        let map = {
+            let mut map: FxHashMap<&str, usize> = FxHashMap::default();
+            for (i, cat) in categories.iter().enumerate() {
+                map.entry(cat.as_str()).or_insert(i);
+            }
+            map
+        };
+        let mut codes = Vec::with_capacity(labels.len());
+        for label in labels {
+            codes.push(map.get(label.as_str()).copied()?);
+        }
+        Some(codes)
+    }
+
+    fn from_parts(
+        labels: Vec<String>,
+        categories: Vec<String>,
+        ordered: bool,
+        name: Option<String>,
+    ) -> Self {
+        let category_codes = Self::category_codes_for(&labels, &categories);
+        Self {
+            labels,
+            categories,
+            ordered,
+            name,
+            category_codes,
+        }
+    }
+
     #[must_use]
     pub fn from_values(labels: Vec<String>, ordered: bool) -> Self {
         // First-seen dedup in O(n): a side hash set tracks membership while the
         // categories Vec preserves insertion order, replacing the O(n·k)
         // `categories.contains` linear rescan per label.
         let mut categories = Vec::<String>::new();
-        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut ranks = FxHashMap::<&str, usize>::default();
+        let mut category_codes = Vec::<usize>::with_capacity(labels.len());
         for label in &labels {
-            if seen.insert(label.as_str()) {
-                categories.push(label.clone());
-            }
+            let label = label.as_str();
+            let rank = if let Some(rank) = ranks.get(label).copied() {
+                rank
+            } else {
+                let rank = categories.len();
+                ranks.insert(label, rank);
+                categories.push(label.to_owned());
+                rank
+            };
+            category_codes.push(rank);
         }
+        drop(ranks);
         Self {
             labels,
             categories,
             ordered,
             name: None,
+            category_codes: Some(category_codes),
         }
     }
 
@@ -12221,19 +12286,31 @@ impl CategoricalIndex {
     ) -> Result<Self, IndexError> {
         // O(n+k) membership: hash the category set once, then validate each
         // label in original order (first offending label still reported).
-        let category_set: FxHashSet<&str> = categories.iter().map(String::as_str).collect();
+        let category_map = {
+            let mut map = FxHashMap::<&str, usize>::default();
+            for (rank, category) in categories.iter().enumerate() {
+                map.entry(category.as_str()).or_insert(rank);
+            }
+            map
+        };
+        let mut category_codes = Vec::<usize>::with_capacity(labels.len());
         for label in &labels {
-            if !category_set.contains(label.as_str()) {
-                return Err(IndexError::InvalidArgument(format!(
-                    "CategoricalIndex label {label:?} is not present in categories"
-                )));
+            match category_map.get(label.as_str()).copied() {
+                Some(rank) => category_codes.push(rank),
+                None => {
+                    return Err(IndexError::InvalidArgument(format!(
+                        "CategoricalIndex label {label:?} is not present in categories"
+                    )));
+                }
             }
         }
+        drop(category_map);
         Ok(Self {
             labels,
             categories,
             ordered,
             name: None,
+            category_codes: Some(category_codes),
         })
     }
 
@@ -12650,11 +12727,42 @@ impl CategoricalIndex {
                 codes.push(code);
             }
         }
+        let unique_index = Self::from_parts(
+            uniques,
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        );
+        (codes, unique_index)
+    }
+
+    fn factorize_by_category_codes(&self, category_codes: &[usize]) -> (Vec<isize>, Self) {
+        if category_codes.len() != self.labels.len() {
+            return self.factorize_by_category_rank();
+        }
+        let mut rank_codes = vec![-1isize; self.categories.len()];
+        let mut unique_labels = Vec::<String>::new();
+        let mut unique_category_codes = Vec::<usize>::new();
+        let mut codes = Vec::with_capacity(category_codes.len());
+        for &rank in category_codes {
+            let Some(category) = self.categories.get(rank) else {
+                return self.factorize_by_category_rank();
+            };
+            let mut code = rank_codes[rank];
+            if code < 0 {
+                code = isize::try_from(unique_labels.len()).unwrap_or(isize::MAX);
+                rank_codes[rank] = code;
+                unique_labels.push(category.clone());
+                unique_category_codes.push(rank);
+            }
+            codes.push(code);
+        }
         let unique_index = Self {
-            labels: uniques,
+            labels: unique_labels,
             categories: self.categories.clone(),
             ordered: self.ordered,
             name: self.name.clone(),
+            category_codes: Some(unique_category_codes),
         };
         (codes, unique_index)
     }
@@ -12684,12 +12792,12 @@ impl CategoricalIndex {
                 codes.push(code);
             }
         }
-        let unique_index = Self {
-            labels: uniques,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        };
+        let unique_index = Self::from_parts(
+            uniques,
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        );
         (codes, unique_index)
     }
 
@@ -12816,6 +12924,9 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn codes(&self) -> Vec<Option<usize>> {
+        if let Some(codes) = &self.category_codes {
+            return codes.iter().copied().map(Some).collect();
+        }
         // O(n+k): hash category->index once instead of a linear
         // `categories.position` scan per label. First-occurrence index
         // preserved, so output is bit-identical.
@@ -12891,12 +13002,12 @@ impl CategoricalIndex {
                 }
             })
             .collect();
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Replace positions where `mask` is `true` with `value`, matching
@@ -12926,12 +13037,12 @@ impl CategoricalIndex {
                 }
             })
             .collect();
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Alias for [`isna`], matching `pd.CategoricalIndex.isnull()`.
@@ -13004,12 +13115,12 @@ impl CategoricalIndex {
         }
         let mut categories = self.categories.clone();
         categories.extend(new);
-        Ok(Self {
-            labels: self.labels.clone(),
+        Ok(Self::from_parts(
+            self.labels.clone(),
             categories,
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Drop categories from the list, matching
@@ -13043,12 +13154,12 @@ impl CategoricalIndex {
             .filter(|cat| !removals_set.contains(cat))
             .cloned()
             .collect();
-        Ok(Self {
-            labels: self.labels.clone(),
+        Ok(Self::from_parts(
+            self.labels.clone(),
             categories,
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Narrow categories to the set of labels actually present, matching
@@ -13062,12 +13173,12 @@ impl CategoricalIndex {
             .filter(|cat| used.contains(cat))
             .cloned()
             .collect();
-        Self {
-            labels: self.labels.clone(),
+        Self::from_parts(
+            self.labels.clone(),
             categories,
-            ordered: self.ordered,
-            name: self.name.clone(),
-        }
+            self.ordered,
+            self.name.clone(),
+        )
     }
 
     /// Replace the categories list, matching
@@ -13085,12 +13196,12 @@ impl CategoricalIndex {
                 )));
             }
         }
-        Ok(Self {
-            labels: self.labels.clone(),
-            categories: new_categories,
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+        Ok(Self::from_parts(
+            self.labels.clone(),
+            new_categories,
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Rename categories pos-by-pos, matching
@@ -13111,12 +13222,12 @@ impl CategoricalIndex {
             .iter()
             .map(|label| (*mapping.get(label).expect("label is a category")).clone())
             .collect();
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: new,
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            new,
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Reorder the categories list, matching
@@ -13144,12 +13255,12 @@ impl CategoricalIndex {
                 "reorder_categories: new categories contain duplicates".to_owned(),
             ));
         }
-        Ok(Self {
-            labels: self.labels.clone(),
-            categories: new,
+        Ok(Self::from_parts(
+            self.labels.clone(),
+            new,
             ordered,
-            name: self.name.clone(),
-        })
+            self.name.clone(),
+        ))
     }
 
     /// Convert to a flat [`Index`] of utf8 labels, matching
@@ -13348,16 +13459,16 @@ impl CategoricalIndex {
                 categories.push(label.clone());
             }
         }
-        Self {
+        Self::from_parts(
             labels,
             categories,
-            ordered: self.ordered,
-            name: if self.name == other.name {
+            self.ordered,
+            if self.name == other.name {
                 self.name.clone()
             } else {
                 None
             },
-        }
+        )
     }
 
     /// Labels in both indexes (first-seen order from self), matching
@@ -13436,12 +13547,12 @@ impl CategoricalIndex {
     pub fn sort_values(&self) -> Self {
         let positions = self.argsort();
         let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
-        Self {
+        Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        }
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        )
     }
 
     /// Alias for `sort_values`, matching `pd.CategoricalIndex.sort()`.
@@ -13497,12 +13608,7 @@ impl CategoricalIndex {
         } else {
             None
         };
-        Self {
-            labels,
-            categories,
-            ordered: self.ordered && other.ordered,
-            name,
-        }
+        Self::from_parts(labels, categories, self.ordered && other.ordered, name)
     }
 
     /// Remove the label at the given position, matching
@@ -13516,12 +13622,12 @@ impl CategoricalIndex {
         }
         let mut labels = self.labels.clone();
         labels.remove(loc);
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Insert `value` at position `loc`, matching
@@ -13541,12 +13647,12 @@ impl CategoricalIndex {
         }
         let mut labels = self.labels.clone();
         labels.insert(loc, value.to_owned());
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Repeat each label `repeats` times, matching
@@ -13559,12 +13665,12 @@ impl CategoricalIndex {
                 labels.push(label.clone());
             }
         }
-        Self {
+        Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        }
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        )
     }
 
     /// Pick labels at the given positions, matching
@@ -13580,12 +13686,12 @@ impl CategoricalIndex {
             }
         }
         let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
-        Ok(Self {
+        Ok(Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        })
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Per-position membership mask, matching
@@ -13757,12 +13863,12 @@ impl CategoricalIndex {
         } else {
             self.unique_labels_by_hash()
         };
-        Self {
+        Self::from_parts(
             labels,
-            categories: self.categories.clone(),
-            ordered: self.ordered,
-            name: self.name.clone(),
-        }
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        )
     }
 
     /// Per-position duplicate mask, matching
@@ -13798,6 +13904,9 @@ impl CategoricalIndex {
     /// the same categories list.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
+        if let Some(codes) = &self.category_codes {
+            return self.factorize_by_category_codes(codes);
+        }
         if self.category_rank_unique_scan_is_bounded() {
             return self.factorize_by_category_rank();
         }
@@ -28882,6 +28991,7 @@ mod tests {
             categories: vec!["bronze".to_owned()],
             ordered: true,
             name: None,
+            category_codes: None,
         };
         let codes = invalid.codes();
         assert_eq!(codes, vec![None, Some(0)]);
@@ -28940,6 +29050,7 @@ mod tests {
             categories: vec!["low".to_owned()],
             ordered: false,
             name: None,
+            category_codes: None,
         };
         let mut oracle = std::collections::HashSet::<&str>::new();
         for label in invalid.labels() {
@@ -28955,6 +29066,7 @@ mod tests {
             categories: large_categories,
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert!(!sparse.is_unique());
@@ -29021,6 +29133,7 @@ mod tests {
             categories: vec!["low".to_owned()],
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert_matches_flat(&invalid);
 
@@ -29036,6 +29149,7 @@ mod tests {
             categories: large_categories,
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_matches_flat(&sparse);
@@ -29098,6 +29212,7 @@ mod tests {
             categories: vec!["low".to_owned()],
             ordered: true,
             name: Some("dirty".to_owned()),
+            category_codes: None,
         };
         assert!(invalid.category_rank_unique_scan_is_bounded());
         assert_unique_matches_oracle(&invalid);
@@ -29114,6 +29229,7 @@ mod tests {
             categories: large_categories,
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_unique_matches_oracle(&sparse);
@@ -29210,6 +29326,7 @@ mod tests {
             categories: vec!["low".to_owned()],
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(invalid.category_rank_unique_scan_is_bounded());
         assert_eq!(
@@ -29234,6 +29351,7 @@ mod tests {
             categories: large_categories,
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_value_counts_matches_oracle(&sparse);
@@ -29297,6 +29415,15 @@ mod tests {
             vec!["low".to_owned(), "high".to_owned(), "med".to_owned()].as_slice()
         );
         assert_factorize_matches_oracle(&repeated);
+        let same_public_state_without_sidecar = super::CategoricalIndex {
+            labels: repeated.labels().to_vec(),
+            categories: repeated.categories().to_vec(),
+            ordered: repeated.ordered(),
+            name: repeated.name().map(str::to_owned),
+            category_codes: None,
+        };
+        assert_eq!(repeated, same_public_state_without_sidecar);
+        assert_factorize_matches_oracle(&same_public_state_without_sidecar);
 
         let invalid = super::CategoricalIndex {
             labels: vec![
@@ -29309,6 +29436,7 @@ mod tests {
             categories: vec!["low".to_owned()],
             ordered: true,
             name: Some("dirty".to_owned()),
+            category_codes: None,
         };
         assert!(invalid.category_rank_unique_scan_is_bounded());
         assert_factorize_matches_oracle(&invalid);
@@ -29325,6 +29453,7 @@ mod tests {
             categories: large_categories,
             ordered: false,
             name: None,
+            category_codes: None,
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_factorize_matches_oracle(&sparse);

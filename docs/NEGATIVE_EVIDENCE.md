@@ -3418,3 +3418,14 @@ dense_aggregate_emit as the bounded path; fp-frame 3098/0). df_groupby_widekey_s
 2.18s->99ms = 22x fp-side, 0.10x->2.30x WIN. Wide-i64 high-card groupby now DOMINATES (Series 2.20x + DataFrame
 2.30x). 10th loss-flip this session. (Earlier sparse build_groups/precompute paths retained — they serve the
 non-bypass cases: as_index=False, non-dense-reducible funcs, multi-key.)
+
+### 2026-06-23 BlackThrush — Int64 Index.nunique raw-count proof: 8.76x dense / 1.56x wide vs pandas @1M
+Closed br-frankenpandas-0jula as proof/evidence for the existing typed Int64 `Index::nunique` fast path. Added
+`index_nunique` to `crates/fp-index/examples/bench_range_setops.rs` to cover both branches of the raw i64 counter:
+dense repeated labels hit the direct-address bitset, wide repeated labels force the hash-set path. Command:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo run -p fp-index --example
+bench_range_setops --release -- 1000000 50 index_nunique`. Results: fp dense 1,176,898 ns vs pandas 10,310,012 ns
+= 8.76x; fp wide 15,625,952 ns vs pandas 24,437,490 ns = 1.56x. Benchmark-only label-materializing comparator was
+26,740,717 ns dense and 31,722,265 ns wide, so the current raw-count path is also 22.72x / 2.03x faster than the old
+label-vector + label-hash shape. Kept as non-zero evidence; no production code changed because the production fast
+path and tests were already present.

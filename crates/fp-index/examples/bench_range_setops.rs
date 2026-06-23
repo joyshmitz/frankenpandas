@@ -7,6 +7,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_get_indexer_non_unique
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_nunique
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_diff
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_position_lookup
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
@@ -26,6 +27,7 @@
 use std::{hint::black_box, time::Instant};
 
 use fp_index::{Index, IndexLabel, RangeIndex};
+use rustc_hash::FxHashMap;
 
 fn best_ns(iters: usize, mut f: impl FnMut() -> usize) -> (u128, usize) {
     let mut sink = 0usize;
@@ -172,6 +174,18 @@ fn quarter_drop_labels(len: usize) -> Vec<IndexLabel> {
 fn repeated_i64_values(len: usize, repeats: usize) -> Vec<i64> {
     (0..len)
         .map(|offset| i64::try_from(offset / repeats).expect("label fits i64"))
+        .collect()
+}
+
+fn wide_repeated_i64_values(len: usize, repeats: usize) -> Vec<i64> {
+    const STRIDE: i64 = 1_000_003;
+    (0..len)
+        .map(|offset| {
+            i64::try_from(offset / repeats)
+                .expect("label fits i64")
+                .checked_mul(STRIDE)
+                .expect("wide label fits i64")
+        })
         .collect()
 }
 
@@ -381,6 +395,15 @@ fn range_reindex_legacy_target_values_digest(source: &RangeIndex, target: &Range
     let target_values = black_box(target).values();
     let indexer = black_box(source).get_indexer(black_box(&target_values));
     target.len() ^ indexer_digest(&indexer, &[])
+}
+
+fn label_materializing_nunique_digest(index: &Index) -> usize {
+    let labels = black_box(index).values();
+    let mut seen = FxHashMap::<&IndexLabel, ()>::default();
+    for label in &labels {
+        seen.insert(label, ());
+    }
+    seen.len()
 }
 
 fn range_median_digest(index: &RangeIndex, calls: usize) -> usize {
@@ -624,6 +647,23 @@ fn main() {
         });
         println!(
             "index_get_indexer_non_unique n={n} repeats={repeats} target_len={target_len} missing_count={missing_count} non_unique_ns={non_unique_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_nunique" {
+        let repeats = 4usize;
+        let unique_len = n.div_ceil(repeats);
+        let dense = Index::from_i64_values(repeated_i64_values(n, repeats)).set_name("row");
+        let wide = Index::from_i64_values(wide_repeated_i64_values(n, repeats)).set_name("row");
+        let (dense_ns, dense_sink) = best_ns(iters, || black_box(&dense).nunique());
+        let (dense_label_ns, dense_label_sink) =
+            best_ns(iters, || label_materializing_nunique_digest(&dense));
+        let (wide_ns, wide_sink) = best_ns(iters, || black_box(&wide).nunique());
+        let (wide_label_ns, wide_label_sink) =
+            best_ns(iters, || label_materializing_nunique_digest(&wide));
+        let sink = dense_sink ^ dense_label_sink ^ wide_sink ^ wide_label_sink;
+        println!(
+            "index_nunique n={n} repeats={repeats} unique_len={unique_len} dense_ns={dense_ns} dense_label_materializing_ns={dense_label_ns} wide_ns={wide_ns} wide_label_materializing_ns={wide_label_ns} sink={sink}"
         );
         return;
     }

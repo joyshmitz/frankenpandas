@@ -12,6 +12,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_asof_locs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_hash_setops
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_list_aliases
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
@@ -259,20 +260,52 @@ fn diff_digest(values: &[Option<IndexLabel>]) -> usize {
         .flatten()
         .flatten()
     {
-        digest = match label {
-            IndexLabel::Int64(value) => value
-                .to_ne_bytes()
-                .iter()
-                .fold(digest.rotate_left(1), |acc, byte| {
-                    acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
-                }),
-            other => other
-                .to_string()
-                .bytes()
-                .fold(digest.rotate_left(1), |acc, byte| {
-                    acc.wrapping_mul(131).wrapping_add(usize::from(byte))
-                }),
-        };
+        digest = index_label_digest(digest, label);
+    }
+    digest
+}
+
+fn fold_u64_digest(digest: usize, tag: usize, value: u64) -> usize {
+    value
+        .to_ne_bytes()
+        .iter()
+        .fold(digest.rotate_left(1).wrapping_add(tag), |acc, byte| {
+            acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
+        })
+}
+
+fn index_label_digest(digest: usize, label: &IndexLabel) -> usize {
+    match label {
+        IndexLabel::Int64(value) => {
+            fold_u64_digest(digest, 1, u64::from_ne_bytes(value.to_ne_bytes()))
+        }
+        IndexLabel::Utf8(value) => value
+            .bytes()
+            .fold(digest.rotate_left(1).wrapping_add(2), |acc, byte| {
+                acc.wrapping_mul(131).wrapping_add(usize::from(byte))
+            }),
+        IndexLabel::Timedelta64(value) => {
+            fold_u64_digest(digest, 3, u64::from_ne_bytes(value.to_ne_bytes()))
+        }
+        IndexLabel::Datetime64(value) => {
+            fold_u64_digest(digest, 4, u64::from_ne_bytes(value.to_ne_bytes()))
+        }
+        IndexLabel::Float64(value) => fold_u64_digest(digest, 5, value.0.to_bits()),
+        IndexLabel::Bool(value) => digest
+            .rotate_left(1)
+            .wrapping_mul(131)
+            .wrapping_add(6 + usize::from(*value)),
+        IndexLabel::Null(_) => digest.rotate_left(1).wrapping_mul(131).wrapping_add(8),
+    }
+}
+
+fn label_vec_digest(values: &[IndexLabel]) -> usize {
+    let mut digest = values.len();
+    for label in [values.first(), values.get(values.len() / 2), values.last()]
+        .into_iter()
+        .flatten()
+    {
+        digest = index_label_digest(digest, label);
     }
     digest
 }
@@ -669,6 +702,23 @@ fn main() {
         let sink = intersection_sink ^ union_sink ^ difference_sink ^ symmetric_difference_sink;
         println!(
             "index_hash_setops n={n} intersection_ns={intersection_ns} union_ns={union_ns} difference_ns={difference_ns} symmetric_difference_ns={symmetric_difference_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "index_list_aliases" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let index = Index::from_range(
+            0,
+            n_i64.checked_mul(3).expect("benchmark range stop fits i64"),
+            3,
+        )
+        .set_name("row");
+        let (to_list_ns, to_list_sink) = best_ns(iters, || label_vec_digest(&index.to_list()));
+        let (values_ns, values_sink) = best_ns(iters, || label_vec_digest(&index.values()));
+        let (ravel_ns, ravel_sink) = best_ns(iters, || label_vec_digest(&index.ravel()));
+        let sink = to_list_sink ^ values_sink ^ ravel_sink;
+        println!(
+            "index_list_aliases n={n} to_list_ns={to_list_ns} values_ns={values_ns} ravel_ns={ravel_ns} sink={sink}"
         );
         return;
     }

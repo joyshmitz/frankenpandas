@@ -974,6 +974,40 @@ impl IndexLabels {
             .as_slice()
     }
 
+    fn to_owned_labels(&self) -> Vec<IndexLabel> {
+        if let Some(slice) = &self.materialized_slice {
+            return slice.as_slice().to_vec();
+        }
+        if let Some(range) = self.int64_unit_range {
+            return range.materialize();
+        }
+        if let Some(range) = self.int64_affine {
+            return range.materialize();
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            return runs.materialize();
+        }
+        if let Some(strided) = self.int64_strided.clone() {
+            return strided.materialize();
+        }
+        if let Some((bytes, offsets)) = &self.utf8_contiguous {
+            return offsets
+                .windows(2)
+                .map(|w| {
+                    IndexLabel::Utf8(
+                        std::str::from_utf8(&bytes[w[0]..w[1]])
+                            .expect("contiguous utf8 index buffer is valid")
+                            .to_owned(),
+                    )
+                })
+                .collect();
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            return values.iter().copied().map(IndexLabel::Int64).collect();
+        }
+        self.as_slice().to_vec()
+    }
+
     fn len(&self) -> usize {
         if let Some(slice) = &self.materialized_slice {
             return slice.len;
@@ -3924,13 +3958,7 @@ impl Index {
     /// that need ownership without manually cloning via `labels()`.
     #[must_use]
     pub fn to_list(&self) -> Vec<IndexLabel> {
-        if let Some(values) = self.labels.int64_view() {
-            return values
-                .iter()
-                .map(|&value| IndexLabel::Int64(value))
-                .collect();
-        }
-        self.labels().to_vec()
+        self.labels.to_owned_labels()
     }
 
     /// Stringify each label using its `Display` impl.
@@ -22001,6 +22029,27 @@ mod tests {
         let materialized = Index::new(expected);
         assert_eq!(index.to_list(), materialized.to_list());
         assert_eq!(index.to_numpy(), materialized.to_numpy());
+
+        let affine = Index::new_known_unique_int64_affine_range(2, 3, 4).unwrap();
+        let expected_affine = vec![
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(8),
+            IndexLabel::Int64(11),
+        ];
+        assert!(affine.labels.materialized.get().is_none());
+        assert!(affine.cached_int64_label_values().is_none());
+        assert_eq!(affine.to_list(), expected_affine);
+        assert_eq!(affine.values(), expected_affine);
+        assert_eq!(affine.ravel(), expected_affine);
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "affine to_list aliases should not cache IndexLabel labels"
+        );
+        assert!(
+            affine.cached_int64_label_values().is_none(),
+            "affine to_list aliases should not build the intermediate i64 view"
+        );
     }
 
     #[test]

@@ -54,6 +54,11 @@ fn main() {
     let categories: Vec<String> = (0..cats).map(|i| format!("cat_{i:04}")).collect();
     let categorical = CategoricalIndex::with_categories(labels.clone(), categories, false).unwrap();
     let hash_index = Index::new(labels.into_iter().map(IndexLabel::Utf8).collect());
+    let categories: Vec<String> = (0..cats).map(|i| format!("cat_{i:04}")).collect();
+    let monotonic_labels: Vec<String> = (0..n)
+        .map(|i| format!("cat_{:04}", i.saturating_mul(cats) / n.max(1)))
+        .collect();
+    let monotonic = CategoricalIndex::with_categories(monotonic_labels, categories, true).unwrap();
 
     bench("cat_factorize", 5, iters, || {
         let (codes, uniques) = categorical.factorize();
@@ -68,6 +73,9 @@ fn main() {
     });
     bench("cat_nunique", 5, iters, || categorical.nunique());
     bench("cat_unique", 5, iters, || categorical.unique().len());
+    bench("cat_monotonic_increasing", 5, iters, || {
+        usize::from(monotonic.is_monotonic_increasing())
+    });
     bench("cat_duplicated", 5, iters, || {
         categorical
             .duplicated(DuplicateKeep::First)

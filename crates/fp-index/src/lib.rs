@@ -12461,6 +12461,9 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        if let Some(codes) = &self.category_codes {
+            return self.category_codes_are_monotonic_increasing(codes);
+        }
         self.category_ranks_are_monotonic(|prev, next| prev <= next)
     }
 
@@ -12471,6 +12474,9 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
+        if let Some(codes) = &self.category_codes {
+            return self.category_codes_are_monotonic_decreasing(codes);
+        }
         self.category_ranks_are_monotonic(|prev, next| prev >= next)
     }
 
@@ -13078,6 +13084,52 @@ impl CategoricalIndex {
         };
         for rank in ranks {
             if !ordered(previous, rank) {
+                return false;
+            }
+            previous = rank;
+        }
+        true
+    }
+
+    fn category_codes_are_monotonic_increasing(&self, category_codes: &[usize]) -> bool {
+        if category_codes.len() != self.labels.len() {
+            return self.category_ranks_are_monotonic(|prev, next| prev <= next);
+        }
+        let Some((&first, rest)) = category_codes.split_first() else {
+            return true;
+        };
+        if first >= self.categories.len() {
+            return self.category_ranks_are_monotonic(|prev, next| prev <= next);
+        }
+        let mut previous = first;
+        for &rank in rest {
+            if rank >= self.categories.len() {
+                return self.category_ranks_are_monotonic(|prev, next| prev <= next);
+            }
+            if previous > rank {
+                return false;
+            }
+            previous = rank;
+        }
+        true
+    }
+
+    fn category_codes_are_monotonic_decreasing(&self, category_codes: &[usize]) -> bool {
+        if category_codes.len() != self.labels.len() {
+            return self.category_ranks_are_monotonic(|prev, next| prev >= next);
+        }
+        let Some((&first, rest)) = category_codes.split_first() else {
+            return true;
+        };
+        if first >= self.categories.len() {
+            return self.category_ranks_are_monotonic(|prev, next| prev >= next);
+        }
+        let mut previous = first;
+        for &rank in rest {
+            if rank >= self.categories.len() {
+                return self.category_ranks_are_monotonic(|prev, next| prev >= next);
+            }
+            if previous < rank {
                 return false;
             }
             previous = rank;
@@ -29148,6 +29200,26 @@ mod tests {
         .expect("categorical index");
         assert!(increasing.is_monotonic_increasing());
         assert!(!increasing.is_monotonic_decreasing());
+        let mut increasing_without_codes = increasing.clone();
+        increasing_without_codes.category_codes = None;
+        assert_eq!(
+            increasing_without_codes.is_monotonic_increasing(),
+            increasing.is_monotonic_increasing()
+        );
+        assert_eq!(
+            increasing_without_codes.is_monotonic_decreasing(),
+            increasing.is_monotonic_decreasing()
+        );
+        let mut increasing_malformed_codes = increasing.clone();
+        increasing_malformed_codes.category_codes = Some(vec![usize::MAX; increasing.len()]);
+        assert_eq!(
+            increasing_malformed_codes.is_monotonic_increasing(),
+            increasing_without_codes.is_monotonic_increasing()
+        );
+        assert_eq!(
+            increasing_malformed_codes.is_monotonic_decreasing(),
+            increasing_without_codes.is_monotonic_decreasing()
+        );
 
         let decreasing = super::CategoricalIndex::with_categories(
             vec![

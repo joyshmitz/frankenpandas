@@ -12445,6 +12445,9 @@ impl CategoricalIndex {
         if self.labels.len() <= 1 {
             return true;
         }
+        if let Some(codes) = &self.category_codes {
+            return self.labels_are_unique_by_category_codes(codes);
+        }
         if self.category_rank_unique_scan_is_bounded() {
             return self.labels_are_unique_by_category_rank();
         }
@@ -12475,6 +12478,9 @@ impl CategoricalIndex {
     pub fn nunique(&self) -> usize {
         if self.labels.len() <= 1 {
             return self.labels.len();
+        }
+        if let Some(codes) = &self.category_codes {
+            return self.unique_label_count_by_category_codes(codes);
         }
         if self.category_rank_unique_scan_is_bounded() {
             return self.unique_label_count_by_category_rank();
@@ -12612,6 +12618,22 @@ impl CategoricalIndex {
         true
     }
 
+    fn labels_are_unique_by_category_codes(&self, category_codes: &[usize]) -> bool {
+        if category_codes.len() != self.labels.len() {
+            return self.labels_are_unique_by_category_rank();
+        }
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        for &rank in category_codes {
+            let Some(_) = self.categories.get(rank) else {
+                return self.labels_are_unique_by_category_rank();
+            };
+            if !mark_category_rank(&mut seen_ranks, rank) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn unique_label_count_by_category_rank(&self) -> usize {
         let map = self.category_index_map();
         let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
@@ -12623,6 +12645,23 @@ impl CategoricalIndex {
                     unique += 1;
                 }
             } else if invalid_seen.insert(label.as_str()) {
+                unique += 1;
+            }
+        }
+        unique
+    }
+
+    fn unique_label_count_by_category_codes(&self, category_codes: &[usize]) -> usize {
+        if category_codes.len() != self.labels.len() {
+            return self.unique_label_count_by_category_rank();
+        }
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        let mut unique = 0usize;
+        for &rank in category_codes {
+            let Some(_) = self.categories.get(rank) else {
+                return self.unique_label_count_by_category_rank();
+            };
+            if mark_category_rank(&mut seen_ranks, rank) {
                 unique += 1;
             }
         }
@@ -29124,6 +29163,16 @@ mod tests {
         assert!(!repeated.is_unique());
         assert!(repeated.has_duplicates());
         assert_eq!(repeated.nunique(), 3);
+
+        let mut without_codes = repeated.clone();
+        without_codes.category_codes = None;
+        assert_eq!(without_codes.is_unique(), repeated.is_unique());
+        assert_eq!(without_codes.nunique(), repeated.nunique());
+
+        let mut malformed_codes = repeated.clone();
+        malformed_codes.category_codes = Some(vec![usize::MAX; repeated.len()]);
+        assert_eq!(malformed_codes.is_unique(), repeated.is_unique());
+        assert_eq!(malformed_codes.nunique(), repeated.nunique());
 
         let unique = super::CategoricalIndex::with_categories(
             vec!["high".to_owned(), "low".to_owned(), "med".to_owned()],

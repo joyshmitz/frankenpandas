@@ -16,6 +16,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
 
 use std::{hint::black_box, time::Instant};
 
@@ -285,6 +286,21 @@ fn range_to_flat_lookup_digest(index: &RangeIndex, target: i64) -> usize {
             .rotate_left(1)
 }
 
+fn range_median_digest(index: &RangeIndex, calls: usize) -> usize {
+    let mut digest = calls;
+    for _ in 0..calls {
+        let bits = black_box(index)
+            .median()
+            .expect("benchmark range is non-empty")
+            .to_bits();
+        digest = digest
+            .wrapping_mul(131)
+            .wrapping_add(usize::try_from(bits & 0xffff_ffff).expect("lower bits fit usize"))
+            .rotate_left(1);
+    }
+    digest
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -296,6 +312,10 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(200);
     let scenario = args.get(3).map_or("overlap", String::as_str);
+    let extra: usize = args
+        .get(4)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     if scenario == "searchsorted" {
         let n_i64 = i64::try_from(n).expect("n fits i64");
         let index = RangeIndex::new(0, n_i64 * 2, 2).expect("valid search range");
@@ -383,6 +403,27 @@ fn main() {
         let sink = insert_sink ^ append_sink ^ delete_sink;
         println!(
             "range_splice_outputs n={n} insert_loc={insert_loc} delete_loc={delete_loc} insert_ns={insert_ns} append_ns={append_ns} delete_ns={delete_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_median" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let calls = extra.max(1);
+        let unit = RangeIndex::new(0, n_i64, 1).expect("valid unit range");
+        let strided = RangeIndex::new(
+            0,
+            n_i64.checked_mul(3).expect("benchmark range stop fits i64"),
+            3,
+        )
+        .expect("valid strided range");
+        let descending = RangeIndex::new(n_i64, 0, -1).expect("valid descending range");
+        let (unit_ns, unit_sink) = best_ns(iters, || range_median_digest(&unit, calls));
+        let (strided_ns, strided_sink) = best_ns(iters, || range_median_digest(&strided, calls));
+        let (descending_ns, descending_sink) =
+            best_ns(iters, || range_median_digest(&descending, calls));
+        let sink = unit_sink ^ strided_sink ^ descending_sink;
+        println!(
+            "range_median n={n} calls={calls} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
         );
         return;
     }

@@ -5267,6 +5267,255 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
     }))
 }
 
+struct FixedDecimalUtf8Domain {
+    prefix: Vec<u8>,
+    decimal_width: usize,
+    start: u64,
+    len: usize,
+}
+
+impl FixedDecimalUtf8Domain {
+    fn row_width(&self) -> usize {
+        self.prefix.len() + self.decimal_width
+    }
+}
+
+fn trailing_decimal_width(bytes: &[u8]) -> Option<usize> {
+    let width = bytes
+        .iter()
+        .rev()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (width > 0).then_some(width)
+}
+
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    let mut out = 0u64;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+    }
+    Some(out)
+}
+
+fn fixed_decimal_utf8_domain(bytes: &[u8], offsets: &[usize]) -> Option<FixedDecimalUtf8Domain> {
+    let len = offsets.len().checked_sub(1)?;
+    if len == 0 {
+        return None;
+    }
+
+    let first = utf8_span(bytes, offsets, 0);
+    let decimal_width = trailing_decimal_width(first)?;
+    let prefix_len = first.len().checked_sub(decimal_width)?;
+    let prefix = first[..prefix_len].to_vec();
+    let start = parse_decimal_u64(&first[prefix_len..])?;
+    let row_width = first.len();
+
+    for row in 0..len {
+        let span = utf8_span(bytes, offsets, row);
+        if span.len() != row_width || !span.starts_with(&prefix) {
+            return None;
+        }
+        let value = parse_decimal_u64(&span[prefix_len..])?;
+        if value != start.checked_add(row as u64)? {
+            return None;
+        }
+    }
+
+    Some(FixedDecimalUtf8Domain {
+        prefix,
+        decimal_width,
+        start,
+        len,
+    })
+}
+
+fn fixed_decimal_utf8_bucket(span: &[u8], domain: &FixedDecimalUtf8Domain) -> Option<usize> {
+    if span.len() != domain.row_width() || !span.starts_with(&domain.prefix) {
+        return None;
+    }
+    let value = parse_decimal_u64(&span[domain.prefix.len()..])?;
+    let relative = value.checked_sub(domain.start)?;
+    let bucket = usize::try_from(relative).ok()?;
+    (bucket < domain.len).then_some(bucket)
+}
+
+enum FixedDecimalUtf8OuterLane<'a> {
+    SharedKey,
+    LeftF64(&'a [f64]),
+    RightF64(&'a [f64]),
+    LeftI64(&'a [i64]),
+    RightI64(&'a [i64]),
+}
+
+fn build_single_key_fixed_decimal_utf8_outer_all_matched_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    if left_on[0] != right_on[0] {
+        return Ok(None);
+    }
+
+    let Some((left_bytes, left_offsets)) = left_key.as_utf8_contiguous() else {
+        return Ok(None);
+    };
+    let Some((right_bytes, right_offsets)) = right_key.as_utf8_contiguous() else {
+        return Ok(None);
+    };
+    let left_len = left_offsets.len().saturating_sub(1);
+    let right_len = right_offsets.len().saturating_sub(1);
+    if left_len == 0 || right_len == 0 {
+        return Ok(None);
+    }
+
+    let Some(domain) = fixed_decimal_utf8_domain(right_bytes, right_offsets) else {
+        return Ok(None);
+    };
+
+    let mut counts = vec![0usize; right_len];
+    let mut left_buckets = Vec::<usize>::with_capacity(left_len);
+    for left_pos in 0..left_len {
+        let span = utf8_span(left_bytes, left_offsets, left_pos);
+        let Some(bucket) = fixed_decimal_utf8_bucket(span, &domain) else {
+            return Ok(None);
+        };
+        counts[bucket] = counts[bucket].checked_add(1).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(
+                "merge output row count overflowed".to_owned(),
+            ))
+        })?;
+        left_buckets.push(bucket);
+    }
+    if counts.contains(&0) {
+        return Ok(None);
+    }
+
+    let mut offsets = Vec::with_capacity(right_len + 1);
+    offsets.push(0usize);
+    for &count in &counts {
+        offsets.push(offsets.last().copied().unwrap_or(0) + count);
+    }
+    let output_len = offsets[right_len];
+    let mut left_positions = vec![0usize; output_len];
+    let mut cursor = offsets[..right_len].to_vec();
+    for (left_pos, &bucket) in left_buckets.iter().enumerate() {
+        let out = cursor[bucket];
+        left_positions[out] = left_pos;
+        cursor[bucket] += 1;
+    }
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let shared_key_names = [left_on[0]].into_iter().collect::<HashSet<&str>>();
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let mut specs = Vec::<(String, FixedDecimalUtf8OuterLane<'_>)>::new();
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let lane = if name.as_str() == left_on[0] {
+            FixedDecimalUtf8OuterLane::SharedKey
+        } else if let Some(values) = col.as_f64_slice() {
+            FixedDecimalUtf8OuterLane::LeftF64(values)
+        } else if let Some(values) = col.as_i64_slice() {
+            FixedDecimalUtf8OuterLane::LeftI64(values)
+        } else {
+            return Ok(None);
+        };
+        let out_name = if name.as_str() == left_on[0] {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push((out_name, lane));
+    }
+    for name in right.column_names() {
+        if name.as_str() == right_on[0] {
+            continue;
+        }
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let lane = if let Some(values) = col.as_f64_slice() {
+            FixedDecimalUtf8OuterLane::RightF64(values)
+        } else if let Some(values) = col.as_i64_slice() {
+            FixedDecimalUtf8OuterLane::RightI64(values)
+        } else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push((out_name, lane));
+    }
+
+    let run_lens: Arc<[usize]> = Arc::from(counts.clone());
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for (name, lane) in specs {
+        let column = match lane {
+            FixedDecimalUtf8OuterLane::SharedKey => {
+                let row_width = domain.row_width();
+                let mut bytes = Vec::with_capacity(output_len.saturating_mul(row_width));
+                let mut out_offsets = Vec::with_capacity(output_len + 1);
+                out_offsets.push(0);
+                for (bucket, &count) in counts.iter().enumerate() {
+                    let span = utf8_span(right_bytes, right_offsets, bucket);
+                    for _ in 0..count {
+                        bytes.extend_from_slice(span);
+                        out_offsets.push(bytes.len());
+                    }
+                }
+                Column::from_utf8_contiguous(bytes, out_offsets)
+            }
+            FixedDecimalUtf8OuterLane::LeftF64(values) => {
+                let data = left_positions.iter().map(|&pos| values[pos]).collect();
+                Column::from_f64_values_all_valid_unchecked(data)
+            }
+            FixedDecimalUtf8OuterLane::RightF64(values) => {
+                let run_values = (0..right_len).map(|bucket| values[bucket]).collect();
+                Column::from_f64_repeat_values_run_lengths(run_values, Arc::clone(&run_lens))
+            }
+            FixedDecimalUtf8OuterLane::LeftI64(values) => {
+                let data = left_positions.iter().map(|&pos| values[pos]).collect();
+                Column::from_i64_values(data)
+            }
+            FixedDecimalUtf8OuterLane::RightI64(values) => {
+                let run_values = (0..right_len).map(|bucket| values[bucket]).collect();
+                Column::from_i64_repeat_values_run_lengths(run_values, Arc::clone(&run_lens))
+            }
+        };
+        debug_assert_eq!(column.len(), output_len);
+        insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn build_single_key_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -7080,6 +7329,24 @@ pub fn merge_dataframes_on_with_options(
             &right_positions,
             &suffixes,
         );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(merged) = build_single_key_fixed_decimal_utf8_outer_all_matched_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            left_key_columns[0],
+            right_key_columns[0],
+            &suffixes,
+        )?
+    {
+        return Ok(merged);
     }
     if matches!(join_type, JoinType::Outer)
         && left_on.len() == 1
@@ -11555,6 +11822,86 @@ mod tests {
         assert!(fast.columns.get("v").unwrap().values()[5].is_missing());
         assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
         assert!(fast.columns.get("w").unwrap().values()[6].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_fixed_decimal_utf8_all_matched_fuses_sorted_output_wikcu() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "lv"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        s("k00000002"),
+                        s("k00000000"),
+                        s("k00000002"),
+                        s("k00000001"),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(21.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "rv"],
+            vec![
+                ("id", vec![s("k00000000"), s("k00000001"), s("k00000002")]),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(110.0),
+                        Scalar::Float64(120.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                s("k00000000"),
+                s("k00000001"),
+                s("k00000002"),
+                s("k00000002")
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("lv").unwrap().values(),
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(21.0),
+            ]
+        );
     }
 
     #[test]

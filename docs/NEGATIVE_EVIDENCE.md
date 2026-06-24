@@ -3452,3 +3452,31 @@ affine Int64 flat index, string/object casts already iterate `value_at(position)
 `range_index_astype_uses_direct_values_up4dq` unit test covers name propagation, descending values, typed Int64
 backing, and unsupported dtype errors. Kept the benchmark and evidence because all measured ratios are wins, not
 ~0-gain.
+
+### 2026-06-24 SlateOtter — Nullable-Float64 dense groupby reductions: 0.43–0.47x loss -> 2.14–3.80x win @1M
+DataFrameGroupBy sum/mean/min/count/std on a single dense Int64 key with a Float64 VALUE
+column that contains MISSING values fell off the dense `aggregate_int64_dense` ->
+`dense_aggregate_emit` fast path. That emit only handled `as_f64_slice` (all-valid, no NaN/Null)
+and `as_i64_slice`, so any value column WITH missing entries was excluded by the gate and dropped
+to the generic `build_groups` path (SipHash grouping + per-group Scalar-closure scans) — measured
+0.43–0.47x pandas. Extended the gate in `aggregate_named_func` to admit nullable Float64
+(`as_f64_slice_with_validity`) for exactly the funcs `dense_aggregate_emit` now implements
+(sum/mean/count/min/max/var/std), and added a typed skipna accumulation arm over `(data,
+validity)`: sum/count single-pass; mean single-pass accumulate+count; var/std two-pass
+mean-centered ddof=1 (count<2 -> NaN); min/max first-valid tracking (all-missing -> NaN).
+BIT-IDENTICAL to the generic path's nan* reductions (all-missing group -> sum 0.0,
+mean/min/max/var/std NaN, count 0; same two-pass folds). Bench `bench_gbnull` @1M rows /
+1000 groups / 20% missing, fp before = generic path (lib.rs change stashed), fp after = dense path:
+
+| op   | before (generic) | after (dense) | pandas   | before->pandas | after->pandas | fp-side |
+|------|------------------|---------------|----------|----------------|---------------|---------|
+| sum  | 42.99ms          | 5.40ms        | 18.83ms  | 0.44x          | 3.49x         | 7.96x   |
+| mean | 46.05ms          | 5.68ms        | 21.56ms  | 0.47x          | 3.80x         | 8.11x   |
+| min  | 41.00ms          | 5.64ms        | 17.72ms  | 0.43x          | 3.14x         | 7.27x   |
+| std  | 43.52ms          | 9.59ms        | 20.48ms  | 0.47x          | 2.14x         | 4.54x   |
+
+All four flip LOSS -> WIN. Correctness pinned by new `groupby_nullable_dense_conformance`
+(5 tests, hand-computed expected covering multi-element, single-element std->NaN, and
+all-missing groups) — all pass. pandas baseline: float64 column with NaN, same splitmix-scrambled
+keys/values, best-of-6. Bench command:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_gbnull --release -- <op>`.

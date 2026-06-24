@@ -1,5 +1,23 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — nullable-Float64 dense groupby reductions (measured, loss→win)
+
+`DataFrameGroupBy` sum/mean/min/count/std on a dense Int64 key with a Float64 value column
+that contains **missing values** was excluded from the dense `dense_aggregate_emit` fast path
+(it only accepted all-valid `as_f64_slice`) and fell to the generic `build_groups` path —
+**0.43–0.47× pandas**. Added a typed skipna arm over `(data, validity)` and widened the gate.
+Bench `bench_gbnull` @1M rows / 1000 groups / 20% missing, bit-identical (5-test
+`groupby_nullable_dense_conformance` green):
+
+| op   | before | after  | pandas  | ratio  | fp-side |
+|------|--------|--------|---------|--------|---------|
+| sum  | 42.99ms| 5.40ms | 18.83ms | **3.49×** | 7.96× |
+| mean | 46.05ms| 5.68ms | 21.56ms | **3.80×** | 8.11× |
+| min  | 41.00ms| 5.64ms | 17.72ms | **3.14×** | 7.27× |
+| std  | 43.52ms| 9.59ms | 20.48ms | **2.14×** | 4.54× |
+
+Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-22 cod-pandas — fp-frame typed-key reshape/groupby sweep (measured, br-frankenpandas-1q4q4)
 
 Closed the Utf8/Datetime64 gap where `fp-frame` had Int64-only dense paths. All head-to-head best-of-N

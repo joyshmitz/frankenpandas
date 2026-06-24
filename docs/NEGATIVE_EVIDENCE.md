@@ -3565,3 +3565,29 @@ Both flip LOSS -> WIN. Correctness pinned by extending `sgb_nullable_dense_confo
 var/std: group [2,4,6] -> var 4/std 2, singletons + all-missing -> NaN) — all green. pandas baseline:
 float64 Series with NaN, same splitmix keys, best-of-6. Remaining SeriesGroupBy nullable gap: median (~0.98x,
 near parity, separate path) — not pursued.
+
+### 2026-06-24 SlateOtter — typed nullable-f64 Series sum/mean/var/std: var 1.06x->1.66x (parity->win), std 1.53x->2.43x @1M
+Series-level (not groupby) reductions had typed all-valid f64 fast paths but a Float64 column WITH missing
+values fell to a `self.column.values()` Scalar loop — materializing a 1M-element `Vec<Scalar>` and matching
+each element. Added typed `as_f64_slice_with_validity` skipna branches to `Series::sum` (the f64 default arm)
+and `Series::var` (the second-pass squared-deviation fold); mean (= sum/count) and std (= var.sqrt()) inherit
+the speedup. Bit-identical to the Scalar loop: same non-missing values in row order, same 0.0-seeded `+`
+(sum) and `(v-mean)^2` fold (var), `count()` already a popcount. Bench `bench_series_null` @1M / 20% missing,
+best-of-8, before = Scalar loop (stashed), after = typed; before/after measured ~6 min apart on the same host
+(the uniform ~1.6x fp-side speedup across all four independent ops confirms it is the lever, not load):
+
+| op   | before (Scalar loop) | after (typed) | pandas   | before->pandas | after->pandas | fp-side |
+|------|----------------------|---------------|----------|----------------|---------------|---------|
+| var  | 10.71ms              | 6.81ms        | 11.30ms  | 1.06x (parity) | 1.66x WIN     | 1.57x   |
+| std  | 10.89ms              | 6.84ms        | 16.64ms  | 1.53x WIN      | 2.43x WIN     | 1.59x   |
+| mean | 5.24ms               | 3.26ms        | 2.68ms   | 0.51x          | 0.82x         | 1.61x   |
+| sum  | 5.20ms               | 3.26ms        | 2.03ms   | 0.39x          | 0.62x         | 1.59x   |
+
+HONEST: var flips parity->win and std strengthens to 2.43x — the headline wins. sum/mean improve 1.6x
+fp-side and bit-identical but REMAIN below pandas (0.62x/0.82x): pandas' `np.nansum`/`nanmean` are SIMD
+(NaN-blend vectorized over the f64 buffer), while fp's safe per-element `validity.get(i)` conditional add
+is scalar — closing that needs SIMD intrinsics (unsafe, forbidden by default) and the branchless mul/select
+forms break bit-identity (NaN*0 / signed-zero). Kept because the change is a strict bit-identical fp-side
+improvement (necessary plumbing for the var/std wins, no regression — all-valid path guarded). Correctness:
+new `series_nullable_reduction_conformance` (6 tests: nullable sum/mean/var/std, all-missing, all-valid
+regression guard) green. pandas baseline best-of-8, float64 Series with NaN.

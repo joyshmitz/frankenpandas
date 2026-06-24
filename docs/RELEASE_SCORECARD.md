@@ -1,5 +1,23 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — typed nullable-f64 Series sum/mean/var/std (measured)
+
+Series-level reductions had all-valid f64 fast paths but a Float64 column WITH missing values fell to a
+`values()` Scalar-Vec loop. Added typed `as_f64_slice_with_validity` skipna branches to `sum`/`var` (mean/std
+inherit). Bit-identical (6-test `series_nullable_reduction_conformance` green). `bench_series_null` @1M /
+20% missing, ~1.6× fp-side across all four:
+
+| op   | before  | after  | pandas  | ratio          |
+|------|---------|--------|---------|----------------|
+| var  | 10.71ms | 6.81ms | 11.30ms | 1.06→**1.66×** |
+| std  | 10.89ms | 6.84ms | 16.64ms | 1.53→**2.43×** |
+| mean | 5.24ms  | 3.26ms | 2.68ms  | 0.51→0.82× *   |
+| sum  | 5.20ms  | 3.26ms | 2.03ms  | 0.39→0.62× *   |
+
+var flips parity→win, std strengthens. *sum/mean improve 1.6× fp-side but stay below pandas's SIMD
+`np.nansum` (safe scalar `validity.get` vs vectorized NaN-blend; closing it needs unsafe SIMD). Detail in
+`docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — dense SeriesGroupBy var/std incl. nullable-f64 (measured, loss→win)
 
 `SeriesGroupBy::std` had no dense path (always `agg_numeric`) and `var`'s dense block gated all-valid

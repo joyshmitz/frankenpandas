@@ -3591,3 +3591,33 @@ forms break bit-identity (NaN*0 / signed-zero). Kept because the change is a str
 improvement (necessary plumbing for the var/std wins, no regression — all-valid path guarded). Correctness:
 new `series_nullable_reduction_conformance` (6 tests: nullable sum/mean/var/std, all-missing, all-valid
 regression guard) green. pandas baseline best-of-8, float64 Series with NaN.
+
+### 2026-06-24 SlateOtter — Series cumsum/cummax 0.40–0.44x LOSS = the f64-arc-copy-on-produce floor (surfaced + evidence)
+Probed 7 all-valid-f64 Series ops @1M (`bench_probe`) to find a fresh winnable lever. fp WINS most, but
+cumsum/cummax/diff (the f64-array-PRODUCING ops) LOSE — and the cause is the known structural
+`f64-arc-copy-on-produce` floor, not a missing fast path. cumsum/cummax already have typed all-valid f64
+fast paths: they build a `Vec<f64>` prefix/running fold then `Column::from_f64_values(out)`. That
+constructor (a) scans the 8MB output for NaN, then (b) `Arc::from(Vec<f64>)` into `LazyAllValidFloat64`'s
+`data: Arc<[f64]>` — and `Arc<[T]>`'s layout (refcount header + data in ONE allocation) FORCES a full data
+copy; `Arc::from(Vec)` can never reuse the Vec's separate buffer. So fp pays ~3 passes over 8MB (fold-write,
+NaN-scan, Arc-copy) vs pandas' ~2 (read+write) -> ~2.3x. Measured vs pandas 2.2.3, best-of-6 @1M all-valid f64:
+
+| op         | fp       | pandas   | ratio       |
+|------------|----------|----------|-------------|
+| cumsum     | 7.56ms   | 3.34ms   | 0.44x LOSS  |
+| cummax     | 7.73ms   | 3.08ms   | 0.40x LOSS  |
+| diff       | 0.81ms   | 0.35ms   | 0.43x (sub-ms) |
+| pct_change | 1.46ms   | 18.98ms  | 13.0x WIN   |
+| rank       | 32.97ms  | 130.67ms | 3.96x WIN   |
+| nlargest   | 9.95ms   | 20.28ms  | 2.04x WIN   |
+| mode       | 15.46ms  | 32.92ms  | 2.13x WIN   |
+
+BLOCKER (why not fixed here): the fix is an owned-`Vec<f64>` / `Arc<Vec<f64>>` all-valid-Float64
+`ScalarValues` variant that MOVES the output Vec instead of copying it (mirroring the existing
+`LazyNullableFloat64`, which IS Vec-backed and copy-free — but `from_f64_values_with_validity` routes an
+ALL-valid mask straight back to the copying `from_f64_values`). This is genuinely entangled: the current
+`Arc<[f64]>` backing is shared ZERO-COPY with `LazyAllValidFloat64Slice` (take_positions row-range views),
+which an `Arc<Vec<f64>>` cannot provide without re-copying; and a Vec-backed variant trades O(1) `Column::clone`
+for an 8MB deep copy on clone. So it is a structural fp-columnar change with a real trade-off + many match
+sites (peer-contended file), NOT a contained fast-path add — deferred, consistent with the prior
+`f64-arc-copy-on-produce` note. No production code changed; `bench_probe` added as standing evidence.

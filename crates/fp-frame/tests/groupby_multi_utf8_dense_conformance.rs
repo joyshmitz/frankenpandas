@@ -60,6 +60,9 @@ fn run(op: &str, df: &DataFrame) -> DataFrame {
         "sum" => gb.sum().unwrap(),
         "mean" => gb.mean().unwrap(),
         "count" => gb.count().unwrap(),
+        "min" => gb.min().unwrap(),
+        "max" => gb.max().unwrap(),
+        "median" => gb.median().unwrap(),
         _ => unreachable!(),
     }
 }
@@ -70,6 +73,9 @@ fn dense_matches_generic_and_pandas() {
         ("sum", vec![6.0, 3.0, 1.0, 5.0]),
         ("mean", vec![3.0, 3.0, 1.0, 5.0]),
         ("count", vec![2.0, 1.0, 1.0, 1.0]),
+        ("min", vec![2.0, 3.0, 1.0, 5.0]),
+        ("max", vec![4.0, 3.0, 1.0, 5.0]),
+        ("median", vec![3.0, 3.0, 1.0, 5.0]),
     ];
     for (op, want) in expected {
         let dense = run(op, &frame(contig(&K1), contig(&K2))); // contiguous -> my dense path

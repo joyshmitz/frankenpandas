@@ -4112,3 +4112,19 @@ pandas (values + sorted MultiIndex order); existing groupby_nullable_dense/fxhas
 green. FOLLOW-UPS: the same multi_utf8 grouping could extend the 4 OTHER multi_int64_dense_grouping call sites
 (min/max/first/last/prod/median via aggregate_multi_int64_dense; bool reduce; idxmax/min; nunique) + a mixed
 Int64/Utf8 variant. pandas baseline best-of-6.
+
+### 2026-06-25 SlateOtter — multi-Utf8 groupby dense bypass extended to min/max/first/last/prod/median: 1.08x->4.03x @1M (bit-identical)
+Follow-up to 61c71a007: wired multi_utf8_dense_grouping into aggregate_multi_int64_dense (the
+min/max/first/last/prod/median path), so those funcs ALSO skip build_groups for contiguous-Utf8 multi-keys.
+dense_aggregate_emit is grouping-agnostic → reused verbatim; only the Utf8 MultiIndex assembly differs.
+bench_gb2_utf8 1M g=100 contiguous Utf8 keys:
+
+| op     | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|--------|----------|---------|----------|----------------|---------------|---------|
+| min    | 88.41ms  | 24.93ms | 98.36ms  | 1.11x           | 3.95x WIN      | 3.55x   |
+| max    | 91.82ms  | 24.57ms | 98.95ms  | 1.08x           | 4.03x WIN      | 3.74x   |
+| median | 105.35ms | 39.44ms | 114.00ms | 1.08x           | 2.89x WIN      | 2.67x   |
+
+Correctness: groupby_multi_utf8_dense_conformance extended to min/max/median (dense == generic == pandas, +
+sum/mean/count from the prior commit). REMAINING multi_utf8 sites: try_bool_reduce_dense, try_idx_extreme_dense
+(idxmax/idxmin), try_nunique_dense, + a mixed Int64/Utf8 key variant. pandas baseline best-of-6.

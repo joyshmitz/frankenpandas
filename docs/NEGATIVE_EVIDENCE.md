@@ -4309,3 +4309,46 @@ truthiness under pandas sorted group order.
 
 Post-rebase release rebuild confirmation on the final source: `all=27.623ms`, `any=26.951ms` against the same
 pandas 20-run comparator above, strengthening the final ratios to 3.62x and 3.88x vs pandas.
+
+### 2026-06-25 BlackThrush — fp-join RIGHT UTF-8 borrowed-byte position builder: 0.76x LOSS -> 0.34x LOSS (REVERTED)
+Tried the symmetric all-valid UTF-8 right-join position builder: build a left `FxHashMap<&[u8], positions>`,
+walk right keys in right order, and feed `(left_positions, right_positions)` into the existing dense right merge
+materializer. The hypothesis was that right joins were missing the borrowed-byte fast paths already present for
+inner/left/outer UTF-8 joins and were falling through to cloned `JoinKeyComponent::Utf8` keys. It was
+bit-transparent on paper (same all-valid guard, same right-row order, same left bucket order, same unmatched-right
+row emission), but the measured path got worse.
+
+Bench shape: `bench_merge_utf8`, `n=1_000_000`, `card=10_000`, `how=right`, best-of-8, crate-scoped
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo run -p fp-join --example
+bench_merge_utf8 --release -- 1000000 10000 8 right`. Pandas 2.2.3 comparator used the same key generator and
+`left.merge(right, on="key", how="right")`.
+
+| path | timing | ratio |
+|------|--------|-------|
+| pandas | 168.390ms | 1.00x |
+| current fp baseline | 220.872ms | 0.76x vs pandas |
+| UTF-8 right-position candidate | 501.244ms | 0.34x vs pandas; 0.44x vs current fp |
+
+REVERTED. Do not retry this isolated right-position builder. The residual is not solved by wrapping another
+borrowed-byte position vector around `build_single_key_dense_right_merge_output`; it needs deeper output-side work
+or a right-join materializer that avoids optional-position duplication and repeated key/payload gathers.
+
+### 2026-06-25 BlackThrush — Series Int64 Bool-mask direct-compress helper superseded: 1.01-1.03x vs main (REVERTED)
+After `origin/main` landed the broader `Series Bool mask direct typed gather` path above, a narrower
+`Index::take_bool_i64_values` + `Series::filter_int64_by_bool_mask` helper no longer had a credible measured
+edge. It preempted the main path for all-valid Int64 Series, but handled only Int64 payloads while the main path
+also covers Float64 and already emits typed labels plus values in one pass for the benchmark shape.
+
+Same-worker RCH comparison on `hz2`, warmed target dir
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, crate-scoped
+`cargo run -p fp-frame --example bench_loc_bool --release -- 2000000 30`, golden
+`0e95636b5d230bf5` unchanged:
+
+| path | origin/main | candidate | candidate/main |
+|------|-------------|-----------|----------------|
+| `Series::loc_bool(&[bool])` | 2.786ms | 2.713ms | 1.03x |
+| `Series::filter(mask_series)` | 2.804ms | 2.777ms | 1.01x |
+
+REVERTED before landing. Treat this as noise-level/superseded, not a new lever. Keep using the broader main-path
+typed gather unless a future benchmark proves a separate cold lazy-affine or mixed-selected-label case with a
+real same-worker delta and no loss of Float64 coverage.

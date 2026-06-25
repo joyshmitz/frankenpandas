@@ -57,6 +57,15 @@ fn main() {
             "count" => {
                 std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().count().unwrap());
             }
+            "min" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().min().unwrap());
+            }
+            "max" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().max().unwrap());
+            }
+            "median" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().median().unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();

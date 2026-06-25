@@ -3836,6 +3836,40 @@ impl Index {
         if let Some(vals) = self.labels.int64_view() {
             return Self::value_counts_raw_i64(&vals, sort, ascending);
         }
+        // Typed all-Utf8 fast path: tally `&str` keys (ONE `entry` hash per label,
+        // and NO per-label `String` clone — the generic path below clones every
+        // label twice into an `FxHashMap<IndexLabel>` key) — making value_counts a
+        // LOSS vs pandas. Both sides pure Utf8 (no Null), so `dropna` is moot
+        // (total == len). Bit-identical: same first-seen order, same per-label
+        // counts, same `sort_by_key` (stable, so first-seen breaks ties). Allocates
+        // a String only once per DISTINCT label when building the final pairs.
+        if self.labels().iter().all(|l| matches!(l, IndexLabel::Utf8(_))) {
+            let labels = self.labels();
+            let mut seen_order: Vec<&str> = Vec::new();
+            let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
+            for label in labels {
+                if let IndexLabel::Utf8(s) = label {
+                    let e = counts.entry(s.as_str()).or_insert(0);
+                    if *e == 0 {
+                        seen_order.push(s.as_str());
+                    }
+                    *e += 1;
+                }
+            }
+            let total = labels.len();
+            let mut pairs: Vec<(IndexLabel, usize)> = seen_order
+                .into_iter()
+                .map(|s| (IndexLabel::Utf8(s.to_owned()), counts[s]))
+                .collect();
+            if sort {
+                if ascending {
+                    pairs.sort_by_key(|entry| entry.1);
+                } else {
+                    pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+                }
+            }
+            return (pairs, total);
+        }
         let mut seen_order: Vec<IndexLabel> = Vec::new();
         let mut counts: FxHashMap<IndexLabel, usize> = FxHashMap::default();
         let mut total = 0usize;

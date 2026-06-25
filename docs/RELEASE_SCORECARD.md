@@ -1,5 +1,19 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — fp-index Utf8 Index.value_counts loss→win (measured, 0.80×→3.22×)
+
+`Index::value_counts` on Utf8 tallied an `FxHashMap<IndexLabel>` with **cloned keys** — a `String` alloc per
+input label (1M) + redundant `contains_key`. Added a typed `&str` tally (one `entry` per label, clone only
+per distinct label). Bit-identical (5-test `utf8_value_counts_typed_conformance` vs oracle, green).
+`probe_str_dedup` @1M/10k:
+
+| op           | before  | after   | pandas  | ratio          | fp-side |
+|--------------|---------|---------|---------|----------------|---------|
+| value_counts | 66.57ms | 16.55ms | 53.23ms | 0.80→**3.22×** | 4.02×   |
+
+(fp already wins unique 1.62×, nunique 1.53×, duplicated 1.75×, drop_duplicates 1.82×.) Detail in
+`docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — fp-index Utf8 union/difference/symdiff typed sweep (measured)
 
 Follow-up to the Utf8 intersection win. Typed all-Utf8 paths for the other set-ops: difference (one map

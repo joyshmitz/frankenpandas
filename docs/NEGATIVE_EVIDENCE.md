@@ -3738,3 +3738,24 @@ Correctness: new `utf8_setops_typed_conformance` (union/difference/symdiff vs in
 overlap+dup, disjoint, full-overlap self-order, all-dup, empty-self, empty-other, larger shuffled) — all
 green; intersection conformance still green. pandas baseline best-of-4/6. The fp-index Utf8 set-op surface is
 now fully typed (intersection/union/difference/symdiff), all WIN 1.2–5.6x; get_indexer 4.5x, isin 3.0x.
+
+### 2026-06-24 SlateOtter — fp-index Utf8 Index.value_counts: 0.80x LOSS -> 3.22x WIN @1M (4.02x fp-side, bit-identical)
+Probed duplicate-heavy unsorted Utf8 Index dedup/count ops (`probe_str_dedup`, 1M rows / 10k distinct) vs
+pandas 2.2.3. fp WINS unique 1.62x, nunique 1.53x, duplicated 1.75x, drop_duplicates 1.82x — but
+`Index::value_counts` was a LOSS (66.57ms vs pandas 53.23ms = 0.80x). CAUSE: the generic Utf8 path tallied an
+`FxHashMap<IndexLabel, usize>` with CLONED KEYS — `contains_key(label)` THEN `*counts.entry(label.clone())`
+allocates a fresh `String` for EVERY one of the 1M input labels (plus a redundant second hash per label).
+Added a typed all-Utf8 path: tally `&str` keys with a single `entry(s).or_insert(0)` per label, tracking
+first-seen order, and clone a `String` only once per DISTINCT label (10k) when building the final pairs.
+Bit-identical: same first-seen order, same per-label counts, same `sort_by_key` (stable -> first-seen breaks
+ties); the all-Utf8 gate (no Null) makes `dropna` moot (total == len). `probe_str_dedup` @1M/10k, before/after
+(unchanged unique/duplicated read ~22-23ms both = stable load):
+
+| op           | before  | after   | pandas  | before->pandas | after->pandas | fp-side |
+|--------------|---------|---------|---------|----------------|---------------|---------|
+| value_counts | 66.57ms | 16.55ms | 53.23ms | 0.80x LOSS     | 3.22x WIN     | 4.02x   |
+
+Flips LOSS -> WIN. Correctness: new `utf8_value_counts_typed_conformance` (5 tests vs independent oracle:
+counts-descending, first-seen tie-break, single value, empty, larger dup-heavy) — all green. Same probe: fp
+already WINS unique 1.62x, nunique 1.53x, duplicated 1.75x, drop_duplicates 1.82x (those use the lighter
+`FxHashMap<&IndexLabel>` pointer path, not cloned keys). pandas baseline best-of-6.

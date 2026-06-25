@@ -4811,6 +4811,40 @@ impl Index {
             return (indexer, missing);
         }
 
+        // Typed all-Utf8 fast path: key the source position map on `&str` instead
+        // of cloning every source `IndexLabel` (a String alloc per source row).
+        // Gate BOTH sides pure Utf8 (no Null) so every target label is a `&str`
+        // lookup (no skipped emissions). Bit-identical: same per-key source-order
+        // position lists, same target-order indexer, same missing list.
+        let self_labels = self.labels();
+        let target_labels = target.labels();
+        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && target_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
+            let mut positions = FxHashMap::<&str, Vec<usize>>::default();
+            for (position, label) in self_labels.iter().enumerate() {
+                if let IndexLabel::Utf8(s) = label {
+                    positions.entry(s.as_str()).or_default().push(position);
+                }
+            }
+            let mut indexer = Vec::new();
+            let mut missing = Vec::new();
+            for (target_position, label) in target_labels.iter().enumerate() {
+                if let IndexLabel::Utf8(s) = label {
+                    if let Some(source_positions) = positions.get(s.as_str()) {
+                        indexer.extend(
+                            source_positions
+                                .iter()
+                                .map(|position| isize::try_from(*position).unwrap_or(isize::MAX)),
+                        );
+                    } else {
+                        indexer.push(-1);
+                        missing.push(target_position);
+                    }
+                }
+            }
+            return (indexer, missing);
+        }
         let mut positions = FxHashMap::<IndexLabel, Vec<usize>>::default();
         for (position, label) in self.labels.iter().enumerate() {
             positions.entry(label.clone()).or_default().push(position);

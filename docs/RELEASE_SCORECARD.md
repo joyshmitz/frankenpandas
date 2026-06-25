@@ -1,5 +1,18 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — fp-index Utf8 get_indexer_non_unique typed (measured, 3.07×→7.14×)
+
+`Index::get_indexer_non_unique` on Utf8 built its position map with `entry(label.clone())` — a String alloc
+per source row (1M). Already won 3×, but the clones bound it. Typed `&str`-keyed position map (gate both
+sides Utf8). Bit-identical (6-test `utf8_ginu_typed_conformance` vs oracle, green). `probe_str_ginu` @1M/10k:
+
+| op                     | before  | after   | pandas   | ratio          | fp-side |
+|------------------------|---------|---------|----------|----------------|---------|
+| get_indexer_non_unique | 70.74ms | 30.42ms | 217.13ms | 3.07→**7.14×**  | 2.33×   |
+
+Same `entry(k.clone())` String-alloc-per-row smell as the value_counts fix. Detail in
+`docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — fp-index Utf8 Index.value_counts loss→win (measured, 0.80×→3.22×)
 
 `Index::value_counts` on Utf8 tallied an `FxHashMap<IndexLabel>` with **cloned keys** — a `String` alloc per

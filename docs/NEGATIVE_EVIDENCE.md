@@ -3759,3 +3759,23 @@ Flips LOSS -> WIN. Correctness: new `utf8_value_counts_typed_conformance` (5 tes
 counts-descending, first-seen tie-break, single value, empty, larger dup-heavy) — all green. Same probe: fp
 already WINS unique 1.62x, nunique 1.53x, duplicated 1.75x, drop_duplicates 1.82x (those use the lighter
 `FxHashMap<&IndexLabel>` pointer path, not cloned keys). pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — fp-index Utf8 get_indexer_non_unique: 3.07x -> 7.14x @1M (2.33x fp-side, bit-identical)
+Hunting the `entry(label.clone())` String-alloc-per-row smell (same root as the value_counts fix 409340f38),
+found `Index::get_indexer_non_unique` on a Utf8 source built its position map as
+`FxHashMap<IndexLabel, Vec<usize>>` with `entry(label.clone())` — a String alloc for EVERY source row (1M).
+fp already WON (70.74ms vs pandas 217ms = 3.07x, pandas non-unique reindex is slow) but paid the clones. Added
+a typed all-Utf8 path: key the source position map on `&str` (no clone), gated on BOTH source and target pure
+Utf8 (no Null) so every target label is a `&str` lookup (no skipped emissions). Bit-identical: same per-key
+source-order position lists, same target-order indexer, same missing list. `probe_str_ginu` @1M/10k (dup-heavy
+source, target = 2*card distinct):
+
+| op                     | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|------------------------|---------|---------|----------|----------------|---------------|---------|
+| get_indexer_non_unique | 70.74ms | 30.42ms | 217.13ms | 3.07x          | 7.14x         | 2.33x   |
+
+Removing the 1M per-row String allocations is 2.33x fp-side. Correctness: new `utf8_ginu_typed_conformance`
+(6 tests vs independent oracle: duplicates+missing, all-missing, empty target/source, source-order position
+preservation, larger dup-heavy) — all green. SMELL CONFIRMED REUSABLE: `entry(k.clone())` over an
+`FxHashMap<IndexLabel,_>` in a per-row loop = a String alloc per row; the typed `&str` key removes it. pandas
+baseline best-of-6.

@@ -4370,3 +4370,21 @@ per pair). vs pandas 435ms: ~0.53x -> ~0.63x — STILL A LOSS, but the biggest g
 CompositeJoinKey MATERIALIZATION (collect_composite_keys, 1M left) + outer column reindex; a flip needs the
 fuller factorize-join-keys-to-int-codes lever (join/sort/reindex on codes, never materializing CompositeJoinKey)
 — deferred (bigger restructure of the whole composite path).
+
+### 2026-06-25 SlateOtter — GroupBy.first/last Utf8-key dense path: 0.41x LOSS -> 6.98x WIN @1M (bit-identical)
+df.groupby(k_utf8).first()/last() was a big LOSS: try_first_last_dense required an as_i64_slice KEY, so a Utf8
+key bailed to aggregate_named_func's generic build_groups + per-group Scalar gather (materializing the value
+column). Added a contiguous-Utf8 key branch: factorize the key (FxHash &[u8] -> codes + inverse), sort gids by
+key string (sort=True), build the Utf8-labelled named Index — then the EXISTING chosen-row + take_positions
+(zero-copy, value-type-agnostic) gather runs unchanged, so a Utf8 (or any) value column is gathered without
+Scalar materialization. Falls back to the generic path for a non-Int64/Utf8 key or a null-bearing value column.
+bench_gb_first 1M, gcard=100, contiguous Utf8 k + Utf8 v:
+
+| op    | before   | after   | pandas  | before->pandas | after->pandas | fp-side |
+|-------|----------|---------|---------|----------------|---------------|---------|
+| first | 180.75ms | 10.48ms | 73.21ms | 0.41x LOSS      | 6.98x WIN      | 17.2x   |
+| last  | 179.58ms | 11.01ms | 76.94ms | 0.43x LOSS      | 6.99x WIN      | 16.3x   |
+
+Correctness: new gb_first_last_utf8_dense_conformance (contiguous-key dense == scalar-backed generic == pandas,
+first/last row per group, sorted-key index); existing groupby_nullable_dense + multi_utf8_dense conformance
+green (the Int64-key path is preserved — its gate just moved inside the new key-type branch).

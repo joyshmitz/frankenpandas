@@ -34,8 +34,14 @@ fn main() {
     };
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), contig(&|i| format!("g{:04}", sm(i, 0) % g)));
-    cols.insert("k2".to_string(), contig(&|i| format!("h{:04}", sm(i, 1) % g)));
+    cols.insert(
+        "k1".to_string(),
+        contig(&|i| format!("g{:04}", sm(i, 0) % g)),
+    );
+    cols.insert(
+        "k2".to_string(),
+        contig(&|i| format!("h{:04}", sm(i, 1) % g)),
+    );
     let _ = Scalar::Int64(0);
     cols.insert(
         "v".to_string(),
@@ -71,6 +77,12 @@ fn main() {
             }
             "idxmax" => {
                 std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().idxmax().unwrap());
+            }
+            "all" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().all().unwrap());
+            }
+            "any" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().any().unwrap());
             }
             "size" => {
                 std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().size().unwrap());

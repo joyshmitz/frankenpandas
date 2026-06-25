@@ -4284,3 +4284,28 @@ Correctness: new gb_value_counts_span_conformance (span vs Scalar-backed == gene
 desc + first-seen tiebreak). The contiguous-key/span lever (groupby agg+size, dedup, df.value_counts, now
 GroupBy.value_counts) keeps flipping Scalar-materialization losses to ~3-7x wins. RESIDUAL: build_groups by the
 GROUP key (k) is still the Vec<ScalarKey> path — a fuller (k,v) dense factorize could push this higher.
+
+### 2026-06-25 BlackThrush — multi-Utf8 GroupBy all/any mixed dense bypass: 1.03x->3.30x @1M (bit-identical)
+Finished the remaining multi-Utf8/mixed groupby dense-bypass site called out above: `DataFrameGroupBy::all()` /
+`any()` had the single-key and multi-Int64 dense path, but a contiguous-Utf8 or mixed Int64+Utf8 key still fell
+back to `build_groups` before doing the typed truthy fold. The new branch reuses `multi_mixed_dense_grouping()`
+and `multi_dense_index_mixed()`, then runs the existing sequential Bool/Int64/Float64 truthiness reducer over
+`gid_per_row`. Behavior is unchanged: group order is the same sorted mixed key order used by the generic path,
+Bool truthiness is identity, numeric truthiness is `!= 0` / `!= 0.0`, and nullable or non-typed value columns
+still fall back.
+
+BOLD head-to-head on CPU 7, warmed target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`,
+per-crate only (`cargo build --release -p fp-frame --example bench_gb2_utf8`), `bench_gb2_utf8` at 1M rows,
+100x100 contiguous-Utf8 groups, f64 value column, best-of-20 after and pandas:
+
+| op | before fp | after fp | pandas 2.2.3 | before->pandas | after->pandas | fp-side |
+|----|-----------|----------|--------------|----------------|---------------|---------|
+| all | 97.188ms | 30.310ms | 100.110ms | 1.03x WIN | 3.30x WIN | 3.21x |
+| any | 90.795ms | 30.129ms | 104.510ms | 1.15x WIN | 3.47x WIN | 3.01x |
+
+Correctness: `groupby_multi_utf8_dense_conformance::bool_reduce_dense_matches_generic_and_pandas` covers
+contiguous-Utf8 dense vs Scalar-backed generic output for both `all` and `any`, including Bool and Int64
+truthiness under pandas sorted group order.
+
+Post-rebase release rebuild confirmation on the final source: `all=27.623ms`, `any=26.951ms` against the same
+pandas 20-run comparator above, strengthening the final ratios to 3.62x and 3.88x vs pandas.

@@ -3826,3 +3826,23 @@ Both already win; removing the Vec<Scalar::Bool> output boxing is 1.67–2.15x f
 str predicate-with-options op. Correctness: new `str_boolean_typed_conformance` (5 tests: literal, regex,
 anchored, case-insensitive, empty) green. pandas baseline best-of-6. (A contiguous-Utf8 input would skip the
 values() materialization too, for an even bigger win — out of scope for the Scalar-backed bench.)
+
+### 2026-06-24 SlateOtter — Series.str.replace/repeat contiguous output: replace 1.08x->2.41x @1M (2.23x fp-side, bit-identical)
+Series.str.replace / repeat (Utf8-OUTPUT ops) used the slow `apply_str` — boxing a `Vec<Scalar::Utf8>` (32B +
+a heap String per row, 1M) then `from_values`. lower/upper/strip already route through `apply_str_utf8` (writes
+each row's output bytes into ONE rolling buffer -> `from_utf8_contiguous`, no per-row Scalar/String boxing).
+Converted replace + repeat to `apply_str_utf8` too: the write closure appends the row's replaced/repeated
+bytes to the buffer (replace's temp `s.replace` String is dropped immediately; repeat appends the source bytes
+n times — no temp). The fallback keeps the missing/non-Utf8 path. Bit-identical: same per-row output string at
+every slot; missing-bearing input still hits the Scalar fallback (preserves nulls). Bench `bench_str_replace`
+@1M all-valid Utf8:
+
+| op      | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|---------|----------|---------|----------|----------------|---------------|---------|
+| replace | 133.78ms | 59.93ms | 144.20ms | 1.08x (parity) | 2.41x WIN      | 2.23x   |
+| repeat  | 83.71ms  | 28.71ms | 482.00ms | 5.76x          | 16.79x         | 2.92x   |
+
+replace FLIPS ~parity -> a clear win; repeat 5.76x -> 16.79x. Correctness: new
+`str_replace_repeat_typed_conformance` (4 tests: replace/repeat all-valid + missing-fallback for both) green.
+OPEN: other Utf8-output apply_str users (capitalize/title/pad/center/slice option arms) can take the same
+apply_str_utf8 route. pandas baseline best-of-6.

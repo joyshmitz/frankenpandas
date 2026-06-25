@@ -4088,3 +4088,27 @@ multi-key (mirrors the int64 bypass). EST 90ms -> ~40ms (~2.5x). RISK: bit-ident
 build_groups' EXACT sorted group order (composite_key_cmp lexicographic) from the factorize maps + inverse
 code->str tables — intricate, golden-gated, shared hot path; NOT safe to iterate on a saturated fleet. The
 single-Utf8 dense path (64308) and single/multi-Int64 bypasses already exist; this is the multi-Utf8 sibling.
+
+### 2026-06-25 SlateOtter — multi-Utf8-key groupby dense bypass (build_groups skip): 1.06x->3.74x @1M (bit-identical)
+LANDED the lever characterized last commit. Added multi_utf8_dense_grouping (factorize each contiguous-Utf8 key
+to first-seen u32 codes + inverse code->str, mixed-radix gid_table, sorted group order) and wired it into the
+moments engine (agg_typed_pairs_dense_f64_moments) as the Utf8 sibling of the Int64 dense bypass. For >=2
+contiguous-Utf8 keys it SKIPS build_groups (the per-row Vec<ScalarKey> heap-alloc + composite SipHash that
+dominated) and feeds moments_by_pair directly. Bit-identical group order: Vec<String>::cmp == composite_key_cmp
+for all-Utf8 keys (scalar_key_cmp Utf8 == str::cmp); same ", "-joined flat label + per-level Utf8 MultiIndex as
+the generic path. bench_gb2_utf8 1M, g=100 (~10k combos), CONTIGUOUS Utf8 keys (as read_csv/str-ops produce):
+
+| op    | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|-------|---------|---------|----------|----------------|---------------|---------|
+| sum   | 99.38ms | 28.16ms | 105.21ms | 1.06x           | 3.74x WIN      | 3.53x   |
+| mean  | 92.46ms | 28.39ms | 103.41ms | 1.12x           | 3.64x WIN      | 3.26x   |
+| count | 103.77ms| 28.30ms | 105.85ms | 1.02x           | 3.74x WIN      | 3.67x   |
+
+GATE: fires only for CONTIGUOUS Utf8 key columns; a Scalar-backed column (from_values) bails as_utf8_contiguous
+and keeps the generic path (so the earlier 90ms "1.16x" reading was a Scalar-backed bench artifact — real Utf8
+columns from read_csv/str-ops are contiguous and hit the dense path). Correctness: new
+groupby_multi_utf8_dense_conformance proves dense == generic (same data built contiguous-vs-Scalar-backed) ==
+pandas (values + sorted MultiIndex order); existing groupby_nullable_dense/fxhash/sgb conformance (17 tests)
+green. FOLLOW-UPS: the same multi_utf8 grouping could extend the 4 OTHER multi_int64_dense_grouping call sites
+(min/max/first/last/prod/median via aggregate_multi_int64_dense; bool reduce; idxmax/min; nunique) + a mixed
+Int64/Utf8 variant. pandas baseline best-of-6.

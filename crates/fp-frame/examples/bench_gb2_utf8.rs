@@ -19,18 +19,24 @@ fn main() {
     let g: u64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
     let op = a.get(3).map(String::as_str).unwrap_or("sum");
     let it: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(6);
+    // Contiguous Utf8 key columns (as read_csv / str-ops produce) so the dense
+    // factorize path is exercised — from_values(Vec<Scalar::Utf8>) is Scalar-backed
+    // and would bail as_utf8_contiguous.
+    let contig = |f: &dyn Fn(usize) -> String| -> Column {
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0usize);
+        for i in 0..n {
+            bytes.extend_from_slice(f(i).as_bytes());
+            offsets.push(bytes.len());
+        }
+        Column::from_utf8_contiguous(bytes, offsets)
+    };
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert(
-        "k1".to_string(),
-        Column::from_values((0..n).map(|i| Scalar::Utf8(format!("g{:04}", sm(i, 0) % g))).collect())
-            .unwrap(),
-    );
-    cols.insert(
-        "k2".to_string(),
-        Column::from_values((0..n).map(|i| Scalar::Utf8(format!("h{:04}", sm(i, 1) % g))).collect())
-            .unwrap(),
-    );
+    cols.insert("k1".to_string(), contig(&|i| format!("g{:04}", sm(i, 0) % g)));
+    cols.insert("k2".to_string(), contig(&|i| format!("h{:04}", sm(i, 1) % g)));
+    let _ = Scalar::Int64(0);
     cols.insert(
         "v".to_string(),
         Column::from_f64_values((0..n).map(|i| sm(i, 2) as f64).collect()),

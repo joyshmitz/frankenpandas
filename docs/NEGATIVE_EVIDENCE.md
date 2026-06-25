@@ -4128,3 +4128,19 @@ bench_gb2_utf8 1M g=100 contiguous Utf8 keys:
 Correctness: groupby_multi_utf8_dense_conformance extended to min/max/median (dense == generic == pandas, +
 sum/mean/count from the prior commit). REMAINING multi_utf8 sites: try_bool_reduce_dense, try_idx_extreme_dense
 (idxmax/idxmin), try_nunique_dense, + a mixed Int64/Utf8 key variant. pandas baseline best-of-6.
+
+### 2026-06-25 SlateOtter — multi-Utf8 groupby dense bypass extended to idxmax/idxmin + nunique: idxmax 1.01x->3.48x @1M (bit-identical)
+Further follow-up: added a multi_dense_index_utf8 helper and wired multi_utf8_dense_grouping into
+try_idx_extreme_dense (idxmax/idxmin) and try_nunique_dense (the DataFrameGroupBy ones), so they skip
+build_groups for contiguous-Utf8 multi-keys. bench_gb2_utf8 1M g=100 contiguous Utf8 keys, f64 values:
+
+| op     | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|--------|----------|---------|----------|----------------|---------------|---------|
+| idxmax | 104.94ms | 30.39ms | 105.64ms | 1.01x (tied)    | 3.48x WIN      | 3.45x   |
+
+nunique was NOT benchable here (its dense value-bitset needs i64 values; the f64-value bench keeps the generic
+path either way — stays ~115ms/1.54x). Its multi_utf8 grouping branch is wired + conformance-verified for the
+i64-value case (dense == generic == pandas [2,1]). Correctness: groupby_multi_utf8_dense_conformance now also
+covers idxmax (f64, labels [3,2,0,4]) and nunique (i64, [2,1]) dense==generic==pandas; existing
+groupby_nullable_dense/fxhash conformance green. REMAINING multi_utf8 site: try_bool_reduce_dense (any/all) +
+the mixed Int64/Utf8 key variant. pandas baseline best-of-6.

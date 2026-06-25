@@ -63,8 +63,60 @@ fn run(op: &str, df: &DataFrame) -> DataFrame {
         "min" => gb.min().unwrap(),
         "max" => gb.max().unwrap(),
         "median" => gb.median().unwrap(),
+        "idxmax" => gb.idxmax().unwrap(),
+        "nunique" => gb.nunique().unwrap(),
         _ => unreachable!(),
     }
+}
+
+// Reads "v" as display strings — works for Float64 / Int64 / Utf8 (idxmax) results.
+fn cells(df: &DataFrame) -> Vec<String> {
+    df.column("v")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|s| match s {
+            Scalar::Float64(x) => format!("{x}"),
+            Scalar::Int64(x) => format!("{x}"),
+            Scalar::Utf8(x) => x.clone(),
+            Scalar::Null(_) => "NA".to_string(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect()
+}
+
+fn frame_i64(k1: Column, k2: Column, v: &[i64]) -> DataFrame {
+    let index = Index::new((0..v.len() as i64).map(IndexLabel::Int64).collect());
+    let mut cols = std::collections::BTreeMap::new();
+    cols.insert("k1".to_string(), k1);
+    cols.insert("k2".to_string(), k2);
+    cols.insert("v".to_string(), Column::from_i64_values(v.to_vec()));
+    DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()]).unwrap()
+}
+
+// idxmax (f64 values): result is the index label of each group's max row.
+// pandas -> [3,2,0,4]; dense (contiguous keys) must equal generic (scalar keys).
+#[test]
+fn idxmax_dense_matches_generic_and_pandas() {
+    let dense = run("idxmax", &frame(contig(&K1), contig(&K2)));
+    let generic = run("idxmax", &frame(scalar(&K1), scalar(&K2)));
+    assert_eq!(cells(&dense), cells(&generic), "idxmax dense vs generic");
+    assert_eq!(idx_labels(&dense), idx_labels(&generic));
+    assert_eq!(cells(&dense), vec!["3", "2", "0", "4"], "idxmax vs pandas");
+}
+
+// nunique needs i64 values (its dense bitset); pandas -> [2,1].
+#[test]
+fn nunique_i64_dense_matches_generic_and_pandas() {
+    let k1 = ["a", "a", "a", "b"];
+    let k2 = ["x", "x", "x", "x"];
+    let v = [10i64, 20, 10, 30];
+    let dense = run("nunique", &frame_i64(contig(&k1), contig(&k2), &v));
+    let generic = run("nunique", &frame_i64(scalar(&k1), scalar(&k2), &v));
+    assert_eq!(cells(&dense), cells(&generic), "nunique dense vs generic");
+    assert_eq!(idx_labels(&dense), idx_labels(&generic));
+    assert_eq!(cells(&dense), vec!["2", "1"], "nunique vs pandas");
+    assert_eq!(idx_labels(&dense), vec!["a, x", "b, x"]);
 }
 
 #[test]

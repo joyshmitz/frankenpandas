@@ -66,6 +66,12 @@ fn main() {
             "median" => {
                 std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().median().unwrap());
             }
+            "nunique" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().nunique().unwrap());
+            }
+            "idxmax" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().idxmax().unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();

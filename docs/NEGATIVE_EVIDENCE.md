@@ -4411,3 +4411,14 @@ Float64Owned(Arc<Vec<f64>>) variant whose as_f64_slice returns &v[..]. The addit
 (exhaustive ScalarValues matches -> every site is a compile error to fix, no silent bugs) but ~44 arms + golden-
 risky; deferred to a quiet box with fast iteration. in-place (Arc::get_mut) doesn't apply: abs(&self) shares the
 input Arc. REJECTED zero-gain attempts: none tried (structural). This is the standing biggest gap.
+
+### 2026-06-25 SlateOtter — GroupBy.nunique Utf8-value span path: 1.05x->2.29x @1M (bit-identical)
+groupby(k).nunique() over a HIGH-cardinality Utf8 value was only marginally winning (1.05x): the (group,value)
+bitset in try_nunique_dense needs bounded-Int64 values, so a wide-cardinality Utf8 value blew the cell cap and
+the generic path materialized a Vec<Scalar> per group + nannunique. Added try_nunique_str_dense (single Int64/
+Utf8 key factorize): one pass inserts each row's &[u8] value span into a per-gid FxHash set; the set size is the
+group's distinct count — no Scalar materialization, no build_groups. Bit-identical: all-valid (no missing to
+skip), distinct spans == distinct Utf8 values, sorted-key index. bench_gb_first 1M gcard=100 high-card Utf8 v:
+nunique 188.66->86.81ms (1.05x->2.29x vs pandas, 2.17x fp-side; residual = the inherent 1M-distinct-span hashing,
+same as pandas' 198ms). conformance gb_nunique_str_dense (span vs Scalar-backed == generic == pandas); first/last
++ low-card-i64 nunique unaffected.

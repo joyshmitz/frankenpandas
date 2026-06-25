@@ -4422,3 +4422,14 @@ skip), distinct spans == distinct Utf8 values, sorted-key index. bench_gb_first 
 nunique 188.66->86.81ms (1.05x->2.29x vs pandas, 2.17x fp-side; residual = the inherent 1M-distinct-span hashing,
 same as pandas' 198ms). conformance gb_nunique_str_dense (span vs Scalar-backed == generic == pandas); first/last
 + low-card-i64 nunique unaffected.
+
+### 2026-06-25 SlateOtter — SeriesGroupBy max/min Utf8-value dense span: 1.43x->18.6x @1M contiguous (bit-identical)
+v.groupby(by).max()/min() over a CONTIGUOUS-Utf8 value: agg_values_scalar's dense-bucket path still materializes
+every value Scalar and clones it into a per-gid bucket, then utf8_extreme scans each bucket. Added
+try_utf8_extreme_dense: ONE pass tracks each gid's lexicographic max/min &[u8] span directly (no values() Scalar
+Vec, no buckets). Bit-identical: same dense_group_ids first-seen gids/labels agg_values_scalar uses, same str-cmp
+extreme (span byte-cmp == str cmp), same index name. bench_sgb_str 1M gcard=100, CONTROLLED interleaved (min of
+3 pairs, contiguous v): max 185->14.2ms = 13x fp-side, vs pandas 264.68ms 1.43x->18.6x WIN; min similar. (A
+Scalar-backed value from from_values bails -> agg_values_scalar; real Utf8 columns from read_csv/str-ops are
+contiguous.) conformance sgb_utf8_extreme_dense: dense == generic (both first-seen) for all fixtures, == pandas
+for sorted-order data. SeriesGroupBy.first already fast (7x); this completes the SeriesGroupBy Utf8 extreme path.

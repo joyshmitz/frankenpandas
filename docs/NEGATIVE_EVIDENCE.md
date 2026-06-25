@@ -4433,3 +4433,24 @@ extreme (span byte-cmp == str cmp), same index name. bench_sgb_str 1M gcard=100,
 Scalar-backed value from from_values bails -> agg_values_scalar; real Utf8 columns from read_csv/str-ops are
 contiguous.) conformance sgb_utf8_extreme_dense: dense == generic (both first-seen) for all fixtures, == pandas
 for sorted-order data. SeriesGroupBy.first already fast (7x); this completes the SeriesGroupBy Utf8 extreme path.
+
+### 2026-06-25 SlateOtter — multi-key GroupBy.first/last Utf8-value dense: 0.61x LOSS->4.75x WIN @1M (bit-identical)
+try_first_last_dense was single-key only (by.len()==1), so groupby([k1,k2]).first()/last() over a Utf8 value
+bailed to the generic build_groups + per-group Scalar gather — a LOSS. Extended it to >=2 keys via
+multi_int64_dense_grouping / multi_mixed_dense_grouping (+ multi_dense_index[_mixed] for the row-MultiIndex); the
+chosen-row + take_positions (zero-copy, value-agnostic) gather and the value/null gates are unchanged. Bit-
+identical: same sorted-key group order, same first/last chosen row, same flat label + per-level MultiIndex.
+bench_gb2_str 1M gcard=100 contiguous Utf8 k1,k2 + Utf8 v: first 228.76->29.51ms (0.61x->4.75x vs pandas, 7.76x
+fp-side), last similar. (max/min multi-key Utf8 v are already WINS — pandas object max is slow, 2.5-2.8x.)
+conformance gb_first_last_multikey (dense==generic==pandas, sorted MultiIndex); single-key first/last/max/min +
+multi_utf8 agg unaffected.
+
+### 2026-06-25 SlateOtter — REFINED abs/arc-copy blast radius: 44 exhaustive ScalarValues::LazyAllValidFloat64 sites + ~dozens of `_ =>` wildcards (all fp-columnar)
+Measured the additive-Float64Owned-variant blast radius for the standing biggest gap (Series.abs 0.36x arc-copy
+floor). 44 LazyAllValidFloat64 match sites, ALL in crates/fp-columnar/src/lib.rs (contained to one crate — good).
+BUT the file has 203 `_ =>` wildcard arms; a new f64 variant would be compiler-flagged at the 44 exhaustive sites
+(mechanical, mirror LazyAllValidFloat64) yet SILENTLY hit wildcards at many others (correct-but-slow at best,
+mishandled-as-Eager at worst). Confirmed: this needs the 44 edits + an audit of every f64-adjacent wildcard +
+the FULL fp-columnar/fp-frame conformance run to catch silent bugs — a quiet-box task with fast iteration, NOT a
+safe saturated-fleet 60m one-shot (a half-applied variant would leave broken/incorrect f64 handling). Standing
+biggest gap; concrete next lever fully scoped.

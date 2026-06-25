@@ -4020,3 +4020,28 @@ trivial (replace/repeat/pad/case ops) — for char-iteration ops (get) or regex 
 compute dominates and output-boxing removal is ~0-gain. Don't re-attempt typed-output for str.get/extract/
 slice_replace. (The `apply_str_opt_utf8` helper + LazyNullableUtf8 path is sound and available if a trivial-
 compute null-producing str op ever appears.)
+
+### 2026-06-25 BlackThrush — Series nullable-f64 sum/mean packed-validity scan: 0.78x LOSS->5.43x WIN, 0.75x LOSS->5.88x WIN @1M (bit-identical)
+The June 24 surface-dominance checkpoint listed nullable-f64 `Series.sum/mean` as a remaining structural floor:
+`sum` walked `validity.get(i)` for every row and `mean` did `count()` plus `sum()`, two branchy validity scans.
+The lever adds one `f64_valid_sum_count` primitive over `ValidityMask::packed_words_for_scan()`, consuming set bits
+in ascending row order. `sum` uses the returned total; `mean` uses the same one-pass total/count. Bit-identical:
+same valid rows, same row-order `0.0`-seeded f64 additions, same all-missing `sum=0.0` and `mean=NaN` contracts.
+
+Bench: `bench_series_null` at `n=1_000_000`, best-of-8, local warm target
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, crate-scoped `-p fp-frame`. Pandas comparator
+uses the exact same SplitMix data generator and pandas 2.2.3.
+
+| op   | before fp | after fp | pandas  | before speed | after speed | fp-side |
+|------|-----------|----------|---------|--------------|-------------|---------|
+| sum  | 4.223ms   | 0.604ms  | 3.279ms | 0.78x LOSS   | 5.43x WIN   | 6.99x   |
+| mean | 4.625ms   | 0.592ms  | 3.478ms | 0.75x LOSS   | 5.88x WIN   | 7.81x   |
+
+Supplemental remote RCH timings after the edit: `sum=0.559ms` on `vmi1149989`, `mean=0.710ms` on `vmi1227854`.
+Correctness: `cargo test -p fp-frame --test series_nullable_reduction_conformance -- --nocapture` green
+(6 tests: nullable sum/mean/var/std, all-missing, all-valid). `cargo check -p fp-frame --all-targets` green
+with only pre-existing example unused-import warnings. `rustfmt --edition 2024 --check crates/fp-frame/src/lib.rs`
+green. `cargo clippy -p fp-frame --all-targets -- -D warnings` is green after allowing the observed pre-existing
+unrelated lint classes (`unused-imports`, `if_same_then_else`, `doc_lazy_continuation`, `manual_is_multiple_of`,
+`inconsistent_digit_grouping`). Bounded `timeout 180s ubs crates/fp-frame/src/lib.rs` timed out without findings,
+matching the documented known scanner backlog for this file.

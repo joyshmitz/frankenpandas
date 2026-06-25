@@ -38,6 +38,9 @@ fn main() {
             "min" => v.groupby(&by).unwrap().min(),
             "nunique" => v.groupby(&by).unwrap().nunique(),
             "vc" => v.groupby(&by).unwrap().value_counts(),
+            "tfirst" => v.groupby(&by).unwrap().transform("first"),
+            "tmax" => v.groupby(&by).unwrap().transform("max"),
+            "tcount" => v.groupby(&by).unwrap().transform("count"),
             _ => panic!("op"),
         };
         std::hint::black_box(r.unwrap());

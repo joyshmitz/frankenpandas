@@ -4491,3 +4491,15 @@ Dominance confirmation while loss-hunting: DataFrame.sort_values by a contiguous
 1199-1267ms = 11-13x WIN (str MSD-radix dominates pandas object sort); DataFrame.idxmax/idxmin axis=0 over 10 f64
 cols 7.4-7.5ms vs pandas 9.5-11.9ms = 1.28-1.58x WIN; SeriesGroupBy.value_counts high-card Utf8 485ms vs pandas
 1787ms = 3.68x WIN. All WINS — not losses. abs/cumsum arc-copy floor remains the sole standing structural gap.
+
+### 2026-06-25 SlateOtter — GroupBy.transform over Utf8: first 0.19x->1.32x, max 0.66x->5.27x, count 0.25x->5.09x @1M (bit-identical)
+GroupBy.transform(first/last/max/min/count) over a Utf8 value was a big LOSS: try_transform_dense handled only
+f64/i64 value columns (the final arm is `col.as_i64_slice()?` — returns None for Utf8, bailing the whole
+transform to the generic build_groups + per-row Scalar gather). Added a contiguous-Utf8 broadcast arm: count ==
+group SIZE (all-valid); first/last/min/max pick a representative ROW per gid (first/last/argmin/argmax by &[u8]
+span) and broadcast that span to every row — no Scalar materialization. Bit-identical: transform broadcasts per
+row so gid order is irrelevant; count==size for all-valid; span byte-cmp == str cmp. var/std/median/etc. on Utf8
+return None (generic, as before). bench_sgb_str 1M gcard=100 contiguous Utf8 v: first 403.04->58.49ms
+(0.19x->1.32x, 6.89x fp-side), max 410.23->51.09ms (0.66x->5.27x), count 250.03->12.16ms (0.25x->5.09x).
+conformance gb_transform_str (dense==generic==pandas, broadcast); numeric transform unaffected (Utf8 arm only
+fires for as_utf8_contiguous columns). SeriesGroupBy.transform delegates here, so it inherits the fix.

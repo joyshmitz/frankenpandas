@@ -4045,3 +4045,23 @@ green. `cargo clippy -p fp-frame --all-targets -- -D warnings` is green after al
 unrelated lint classes (`unused-imports`, `if_same_then_else`, `doc_lazy_continuation`, `manual_is_multiple_of`,
 `inconsistent_digit_grouping`). Bounded `timeout 180s ubs crates/fp-frame/src/lib.rs` timed out without findings,
 matching the documented known scanner backlog for this file.
+
+### 2026-06-25 SlateOtter — composite (Utf8/multi-key) RIGHT merge small-side probe: 0.90x LOSS -> 1.21x WIN @1M⋈10k (bit-identical)
+The generic composite merge path (non-i64 keys: Utf8, multi-key, datetime — the i64 Right fast paths at ~7408
+don't fire) built a `left_map` over EVERY left row for a Right join (O(left) hash build), then probed it with the
+right rows — so a 1M⋈10k Right merge was ~2.4x slower than the SYMMETRIC Left join (which builds the small
+O(right) map). Fix: build the small `right_map` (as Inner/Left already do) and run ONE left pass that buckets each
+matching left position under its right row (`left_by_right[right_pos].push(left_pos)`), then emit right rows in
+order. Bit-identical (right-row order outer, left-position order inner — verified across duplicate right keys,
+multiple left matches, and unmatched right rows). Dropped the left_map build entirely for Right (Outer still
+builds it). Bench `bench_merge_utf8` 1M fact ⋈ 10k dim, Utf8 key:
+
+| how   | before   | after    | pandas   | before->pandas | after->pandas |
+|-------|----------|----------|----------|----------------|---------------|
+| right | 231.66ms | 173.65ms | 209.54ms | 0.90x LOSS      | 1.21x WIN      |
+
+(inner 5.30x / left 1.49x / outer 1.22x WINs unchanged.) Right was the LAST merge loss in the Utf8 matrix —
+now all four win. Residual: Right (173ms) is still ~1.8x the Left join (97ms) — the per-right bucketing Vecs +
+the row_capacity=right_len under-allocation of the output position Vecs (a pre-existing realloc, present in both
+old and new) are the remaining gap; a 2-pass pre-size is a follow-up. Correctness: all 135 fp-join tests +
+new `utf8_right_merge_smallside_conformance` (2 tests, pandas-verified) green. pandas baseline best-of-6.

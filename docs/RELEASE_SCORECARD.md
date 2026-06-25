@@ -1,5 +1,19 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — fp-index Utf8 Index.intersection loss→win (measured, 0.70×→1.19×)
+
+`Index::intersection` on unsorted Utf8 indexes built `FxHashMap<&IndexLabel>` of other + a separate `seen`
+dedup set — ~2.5M pointer-keyed string-hash probes — measured 0.70× vs pandas. Added a typed all-Utf8 path:
+one `FxHashMap<&str, bool>` with a "matched" flag dedup (no seen-set), `&str` keys (no enum load).
+Bit-identical (6-test `utf8_intersection_typed_conformance` vs oracle, green). `probe_str_setops` @1M:
+
+| op           | before   | after    | pandas   | ratio          | fp-side |
+|--------------|----------|----------|----------|----------------|---------|
+| intersection | 408.35ms | 241.27ms | 286.34ms | 0.70→**1.19×** | 1.69×   |
+
+(fp already wins get_indexer 4.5×, isin 3.0×; pandas object-Index is brutally slow.) Detail in
+`docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — DataFrame std/var/skew axis=1 typed output (measured)
 
 pandas axis=1 is terrible (std 213ms, skew 334ms @1M×8); fp already wins 6-12×. std/var/sem/skew/kurt

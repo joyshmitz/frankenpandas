@@ -2946,6 +2946,42 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
+        // Typed all-Utf8 fast path (Utf8 sibling of membership_filter_i64): both
+        // sides are pure `IndexLabel::Utf8` (no Null), so hash `&str` directly
+        // (skipping the FxHashMap<&IndexLabel> enum load) AND dedup via a "matched"
+        // flag stored IN the other-map, eliminating the separate `seen` set — one
+        // hash map instead of two (~40% fewer string-hash probes). Bit-identical to
+        // the generic path: same self-order, first-occurrence dedup (a self label
+        // present in other emits once, then its map flag suppresses repeats), same
+        // matched labels. The all-Utf8 gate (no Null) is what makes skipping the
+        // `&IndexLabel` keys safe — the generic path would otherwise also match a
+        // Null self label against a Null in other.
+        let self_labels = self.labels();
+        let other_labels = other.labels();
+        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
+            let mut b_matched: FxHashMap<&str, bool> = FxHashMap::default();
+            b_matched.reserve(other_labels.len());
+            for label in other_labels {
+                if let IndexLabel::Utf8(s) = label {
+                    b_matched.entry(s.as_str()).or_insert(false);
+                }
+            }
+            let mut labels: Vec<IndexLabel> = Vec::new();
+            for label in self_labels {
+                if let IndexLabel::Utf8(s) = label
+                    && let Some(matched) = b_matched.get_mut(s.as_str())
+                    && !*matched
+                {
+                    *matched = true;
+                    labels.push(label.clone());
+                }
+            }
+            let mut result = Self::new(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self

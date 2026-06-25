@@ -3689,3 +3689,27 @@ dominates). sem/kurt axis=1 share `reduce_rows_func_f64` so they inherit it too.
 `df_axis1_f64_typed_conformance` (var/std vs independent oracle + zero-variance-row 0.0 guard) + existing
 `row_reduction_conformance` green. Same probe: sum 7.27x, mean 6.41x, max 6.39x already win (typed
 `reduce_rows_f64`). pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — fp-index Utf8 Index.intersection: 0.70x LOSS -> 1.19x WIN @1M (1.69x fp-side, bit-identical)
+Probed unsorted Utf8 Index set-ops (`probe_str_setops`) vs pandas 2.2.3. fp WINS get_indexer 4.5x, isin 3.0x
+(pandas object-Index is brutally slow: intersection 286ms, UNION 1.49s, isin 503ms) — but `Index::intersection`
+was a LOSS: 408ms vs pandas 286ms = 0.70x. CAUSE: the generic path builds `other.position_map_first_ref()`
+(FxHashMap<&IndexLabel> over all of other) AND a SECOND `seen: FxHashMap<&IndexLabel>` dedup set — ~2.5M
+pointer-keyed string-hash probes (each chasing &IndexLabel -> 32B enum -> String -> heap bytes). Added a typed
+all-Utf8 fast path (sibling of the existing int64 `membership_filter_i64`): gate on both sides being pure
+`IndexLabel::Utf8` (no Null), build ONE `FxHashMap<&str, bool>` over other, and dedup via a "matched" flag
+stored IN that map — eliminating the separate seen-set (one hash map instead of two) and hashing `&str`
+directly (skips the enum load). Bit-identical: same self-order, same first-occurrence dedup (a self label in
+other emits once, then its flag suppresses repeats), same matched labels; the all-Utf8 gate (no Null) is what
+makes dropping the `&IndexLabel` keys safe (the generic path would otherwise also match a Null self label
+against a Null in other). `probe_str_setops` @1M, before/after (unchanged get_indexer ~60-68ms = load band):
+
+| op           | before   | after    | pandas   | before->pandas | after->pandas | fp-side |
+|--------------|----------|----------|----------|----------------|---------------|---------|
+| intersection | 408.35ms | 241.27ms | 286.34ms | 0.70x LOSS     | 1.19x WIN     | 1.69x   |
+
+Flips LOSS -> WIN. Correctness: new `utf8_intersection_typed_conformance` (6 tests vs independent oracle:
+overlap+dup, disjoint, full-overlap self-order, all-dup self, empty, larger shuffled) — all green. Same probe:
+get_indexer 4.52x, isin 2.97x already WIN. OPEN: union/difference/symmetric_difference Utf8 share the same
+`FxHashMap<&IndexLabel>` + seen pattern (pandas union is 1.49s — likely fp already wins but the same lever
+applies). pandas baseline best-of-6.

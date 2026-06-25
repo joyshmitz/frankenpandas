@@ -4208,3 +4208,22 @@ golden-gated outer-sort path with NO fallback — distinct from the additive gro
 one-shot on a saturated fleet. FULLER LEVER: factorize join keys to integer codes once (khash-style, like
 multi_mixed_dense_grouping) and run the join + sort + reindex on codes, never materializing CompositeJoinKey —
 helps inner/left too. Both deferred to a quiet box with fast iteration + the merge goldens.
+
+### 2026-06-25 SlateOtter — DataFrame.value_counts dense fast path (Int64/Utf8 contiguous): 0.50x LOSS -> 3.63x WIN @1M (bit-identical)
+df.value_counts() (distinct row-tuple counts) was a LOSS: the generic path built a per-row Vec<ScalarKey> + a
+per-cell `col.values()[i]` Scalar materialization + `value.to_string()` (a String alloc per cell, twice). Added
+an ADDITIVE value_counts_dense_contiguous fast path: when every column is bounded-Int64 or contiguous-Utf8 (all-
+valid) with bounded combined cardinality, factorize each column + dense gid-table count, then emit the same
+`count desc, composite_key_cmp asc` order and `", "`-joined labels. Any other dtype / missing column / wide
+cardinality falls back to the generic path. Bit-identical: MixedKey::cmp == composite_key_cmp and MixedKey
+Display == Scalar Display for Int64/Utf8; all-valid backings ⇒ no missing key class; count ties resolve by the
+same composite key (distinct, so the stable sort's first-seen tiebreak never fires). bench_df_vc 1M, 2
+contiguous-Utf8 cols, card=100:
+
+| op              | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|-----------------|----------|---------|----------|----------------|---------------|---------|
+| df.value_counts | 209.39ms | 28.88ms | 104.85ms | 0.50x LOSS      | 3.63x WIN      | 7.25x   |
+
+Correctness: new df_value_counts_dense_conformance (typed contiguous vs Scalar-backed == generic == pandas,
+count desc + composite-key tiebreak); existing fxhash_dedup green. The contiguous-key factorize lever (groupby +
+dedup + now value_counts) keeps flipping composite-key ops from Scalar-materialization losses to ~3-7x wins.

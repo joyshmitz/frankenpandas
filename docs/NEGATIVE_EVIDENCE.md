@@ -4165,3 +4165,22 @@ All-Utf8 path unchanged (no regression, ~29ms/3.6x — it is now the all-str cas
 Correctness: groupby_multi_utf8_dense_conformance extended with a mixed int+utf8 case (dense == generic ==
 pandas, incl. NUMERIC k1 sort: (1,x)<(2,x)); existing all-utf8/idxmax/nunique + groupby_nullable_dense/fxhash
 conformance green. The multi-Utf8/mixed groupby vein is now complete except try_bool_reduce_dense (any/all).
+
+### 2026-06-25 SlateOtter — multi-column duplicated/drop_duplicates typed raw path (Int64+Utf8): 2.55x->3.75x @1M (bit-identical)
+The multi-column duplicated_mask had a typed raw-digest path only for ALL-Float64 subsets; any Int64/Utf8/mixed
+subset fell to the generic Scalar-digest path (a per-cell `col.values()[row]` materialization — a String alloc
+per Utf8 cell). Generalized typed_cols from f64-only to a TypedDedupCol{F64,I64,Utf8} enum, so any subset of
+Int64 + contiguous-Utf8 + Float64 columns digests/compares straight from the raw backing. Bit-identical: the
+per-type digest mixes match scalar_digest exactly (Int64 mix(2)+value; Utf8 mix(4)+len+bytes_digest; Float64
+mix(3)+bits, same present rule) and equality matches Scalar::semantic_eq (Int64/Utf8 exact, Float64 fuzzy) — so
+digests, bucket assignment, and collision re-verification are unchanged. bench_dropdup_multi 1M, 2 contiguous-
+Utf8 cols, card=100:
+
+| op             | before  | after   | pandas  | before->pandas | after->pandas | fp-side |
+|----------------|---------|---------|---------|----------------|---------------|---------|
+| drop_duplicates| 30.39ms | 20.61ms | 77.36ms | 2.55x           | 3.75x WIN      | 1.47x   |
+| duplicated     | 27.13ms | 17.81ms | 81.19ms | 2.99x           | 4.56x WIN      | 1.52x   |
+
+Already a WIN; this strengthens it by removing the Scalar materialization for Int64/Utf8/mixed subsets.
+Correctness: new duplicated_multicol_typed_conformance (typed contiguous vs Scalar-backed == generic == pandas
+across keep=First/Last/None); existing fxhash_dedup_conformance green.

@@ -27,6 +27,8 @@ fn main() {
         let r = match op {
             "replace" => s.str().replace("item", "ROW"),
             "repeat" => s.str().repeat(2),
+            "capitalize" => s.str().capitalize(),
+            "title" => s.str().title(),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

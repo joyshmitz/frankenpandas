@@ -3846,3 +3846,24 @@ replace FLIPS ~parity -> a clear win; repeat 5.76x -> 16.79x. Correctness: new
 `str_replace_repeat_typed_conformance` (4 tests: replace/repeat all-valid + missing-fallback for both) green.
 OPEN: other Utf8-output apply_str users (capitalize/title/pad/center/slice option arms) can take the same
 apply_str_utf8 route. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str.capitalize 0.49x->13.20x + title 1.18x->1.93x @1M (bit-identical)
+Continued the Utf8-output str sweep. capitalize/title used the slow `apply_str` (Vec<Scalar::Utf8> output).
+Two levers: (1) route both through `apply_str_utf8` (contiguous byte-buffer output, no per-row Scalar/String
+boxing); (2) capitalize was STILL a loss after (1) — its transform did `format!("{upper}{rest}")` + char
+`to_uppercase`/`to_lowercase` iterators PER ROW (Unicode case folding). Added an ASCII byte-ops fast path
+(mirror of str.lower's 2krr0): for an ASCII row, append the bytes then `make_ascii_uppercase` the first byte /
+`make_ascii_lowercase` the rest, IN the output buffer — no temp String, no char iterators, vectorizable.
+Bit-identical: ASCII `to_uppercase`/`to_lowercase` IS the ASCII map (no context-sensitive cases); non-ASCII
+rows keep the Unicode path; missing rows hit the Scalar fallback. Bench `bench_str_replace` @1M ASCII Utf8:
+
+| op         | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|------------|----------|---------|----------|----------------|---------------|---------|
+| capitalize | 275.01ms | 10.25ms | 135.23ms | 0.49x LOSS      | 13.20x WIN     | 26.83x  |
+| title      | 137.96ms | 84.11ms | 162.74ms | 1.18x          | 1.93x WIN      | 1.64x   |
+
+capitalize FLIPS catastrophic loss -> dominant win (the format!+Unicode-iterator was the entire cost); title
+parity -> clear win via the contiguous output. Correctness: new `str_capitalize_title_typed_conformance`
+(5 tests vs pandas-verified: ASCII, Unicode case folding "éXY"->"Éxy", empty/single, missing-fallback) green.
+OPEN: title could take the same ASCII byte-ops path (~8x more); other apply_str arms (pad/center/zfill/
+swapcase/casefold) remain. pandas baseline best-of-6.

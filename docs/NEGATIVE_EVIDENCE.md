@@ -3928,3 +3928,21 @@ Correctness: new `str_pad_zfill_typed_conformance` (4 tests: pad both-split, cen
 passthrough, missing-fallback for pad & zfill — pandas-verified) green. The Series.str Utf8-output surface
 (lower/upper/strip/capitalize/title/casefold/swapcase/replace/repeat/pad/center/ljust/rjust/zfill) is now fully
 on apply_str_utf8. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str is* predicates typed Bool output: isalnum 3.52x->13.75x @1M (bit-identical)
+The str is* predicates (isdigit/isalpha/isalnum/isascii/isspace/islower/isupper/isnumeric/isdecimal/istitle)
+used the slow `apply_str(|s| Scalar::Bool(pred))` — Vec<Scalar::Bool> (32B/elem) output + from_values — rather
+than the typed `apply_str_bool` (contiguous Utf8 input -> Vec<bool> -> from_bool_values, 1B/elem) that the
+contains-with-options fix (1c6844bd2) already used. Mechanical conversion of all 10. Bit-identical: same
+predicate, typed Bool output == from_values over the equivalent Scalar::Bool (rcvpj). Bench `bench_str_replace`
+@1M ASCII:
+
+| op      | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|---------|---------|---------|----------|----------------|---------------|---------|
+| islower | 28.35ms | 11.31ms | 115.83ms | 4.09x           | 10.24x WIN     | 2.51x   |
+| isalnum | 22.18ms | 5.68ms  | 78.08ms  | 3.52x           | 13.75x WIN     | 3.90x   |
+| isdigit | 34.90ms | 19.36ms | 63.34ms  | 1.81x           | 3.27x WIN       | 1.80x   |
+
+All strengthen already-winning predicates (isalnum best, 3.90x fp-side). Correctness: new
+`str_is_predicates_typed_conformance` (6 tests: islower/isalnum/isdigit/isalpha/isupper/istitle vs pandas-
+verified fixture) green. The Series.str bool-output surface is now fully on apply_str_bool. pandas best-of-6.

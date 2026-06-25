@@ -34,6 +34,9 @@ fn main() {
             "pad" => s.str().pad(30, "left", ' '),
             "center" => s.str().center(30, ' '),
             "zfill" => s.str().zfill(30),
+            "islower" => s.str().islower(),
+            "isalnum" => s.str().isalnum(),
+            "isdigit" => s.str().isdigit(),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

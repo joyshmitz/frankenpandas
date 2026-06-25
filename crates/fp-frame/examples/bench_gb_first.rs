@@ -51,6 +51,9 @@ fn main() {
             "nunique" => {
                 black_box(df.groupby(&["k"]).unwrap().nunique().unwrap());
             }
+            "count" => {
+                black_box(df.groupby(&["k"]).unwrap().count().unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();

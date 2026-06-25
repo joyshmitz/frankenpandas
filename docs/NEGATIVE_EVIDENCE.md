@@ -4464,3 +4464,13 @@ spans == distinct Utf8, same dense_group_ids first-seen gids/labels, same name. 
 card contiguous Utf8 v: 224.22->79.06ms (0.92x->2.60x vs pandas, 2.84x fp-side). conformance
 sgb_nunique_str_dense (dense==generic both first-seen; ==pandas for sorted-order); SeriesGroupBy max/min/first
 unaffected.
+
+### 2026-06-25 SlateOtter — GroupBy.count dense (all-valid => group size): 0.36x LOSS->5.77x WIN @1M (bit-identical)
+groupby(k).count() over a Utf8 (or any) value column was a big LOSS: the generic aggregate_named_func("count")
+materializes the value column to Scalars to check is_missing per row. But count is just the non-null tally, and
+an all-valid column has no nulls => count == group SIZE — which needs only the grouping, no value access. Added
+try_count_dense (single Int64/Utf8 or multi-key factorize, sibling of try_first_last_dense): histogram gid_per_row,
+emit the per-group size as the Int64 count for every value column. Bit-identical: same sorted-key order/MultiIndex,
+Int64 counts. Value-type-AGNOSTIC (covers Utf8/Int64/Float64 values); falls back for a null-bearing value column or
+non-dense key. bench_gb_first 1M gcard=100 contiguous Utf8 k+v: count 178.65->11.03ms (0.36x->5.77x vs pandas,
+16.2x fp-side). conformance gb_count_dense (single + multi key, dense==generic==pandas).

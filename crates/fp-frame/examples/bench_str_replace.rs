@@ -31,6 +31,9 @@ fn main() {
             "title" => s.str().title(),
             "casefold" => s.str().casefold(),
             "swapcase" => s.str().swapcase(),
+            "pad" => s.str().pad(30, "left", ' '),
+            "center" => s.str().center(30, ' '),
+            "zfill" => s.str().zfill(30),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

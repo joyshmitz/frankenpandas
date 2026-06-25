@@ -3907,3 +3907,24 @@ turn; it is the identical lever as casefold 442ms->12.4ms (0.20x->7.26x) and cap
 Correctness: new `str_swapcase_typed_conformance` (2 tests: ASCII+Unicode "éÀb"->"ÉàB", missing-fallback —
 pandas-verified) green. The Series.str case-transform surface (lower/upper/strip/capitalize/title/casefold/
 swapcase) is now fully on apply_str_utf8 + ASCII byte-ops. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str.pad/center/ljust/rjust/zfill contiguous output: zfill 1.25x->6.92x @1M (bit-identical)
+Continued the Utf8-output str sweep onto the padding ops. pad/center/ljust/rjust (center/ljust/rjust delegate
+to pad) and zfill used the slow `apply_str` — each built a per-row String + boxed a Vec<Scalar::Utf8> (32B +
+a String per row) + from_values. Already MARGINAL wins (1.25-1.29x) but output-bound. Routed both through
+`apply_str_utf8`: the write closure writes the fill chars + row bytes (or sign+zeros+rest for zfill) STRAIGHT
+into one contiguous buffer — no per-row temp String, no Vec<Scalar::Utf8>. Extracted str_pad/str_zfill for the
+Scalar fallback. Bit-identical: same fill chars / CPython-center both-split / zfill sign-first ordering; missing
+-> fallback. Bench `bench_str_replace` @1M ASCII (width 30):
+
+| op     | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|--------|----------|---------|----------|----------------|---------------|---------|
+| pad    | 110.07ms | 52.53ms | 139.89ms | 1.27x           | 2.66x WIN      | 2.10x   |
+| center | 109.16ms | 48.98ms | 140.86ms | 1.29x           | 2.88x WIN      | 2.23x   |
+| zfill  | 110.77ms | 20.01ms | 138.54ms | 1.25x           | 6.92x WIN      | 5.54x   |
+
+All strengthen marginal -> clear/dominant wins (zfill best — '0' fill via buf.push(b'0'), no char encoding).
+Correctness: new `str_pad_zfill_typed_conformance` (4 tests: pad both-split, center/ljust/rjust, zfill sign+
+passthrough, missing-fallback for pad & zfill — pandas-verified) green. The Series.str Utf8-output surface
+(lower/upper/strip/capitalize/title/casefold/swapcase/replace/repeat/pad/center/ljust/rjust/zfill) is now fully
+on apply_str_utf8. pandas baseline best-of-6.

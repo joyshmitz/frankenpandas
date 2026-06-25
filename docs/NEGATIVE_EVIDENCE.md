@@ -4267,3 +4267,20 @@ index/mask alignment shape.
 Post-rebase release rebuild confirmation on the final source: `loc_bool=2.793ms`, `filter_series=3.149ms`,
 pandas aligned Series bool mask `4.244ms` (pandas 2.2.3), preserving the `filter_series` 1.35x WIN and
 strengthening `loc_bool` to 1.52x on that run.
+
+### 2026-06-25 SlateOtter — GroupBy.value_counts contiguous-Utf8 span tally: 0.72x LOSS -> 3.38x WIN @1M (bit-identical)
+df.groupby(k).value_counts() was a LOSS: the per-group value tally did `col.values()[ri]` PER ROW (materializing
+the value column to Scalars — a String alloc per row) keyed through a ScalarKey-keyed std HashMap (SipHash).
+Added a span fast path: when the value column is contiguous Utf8 (all-valid), tally each group by raw &[u8] span
+with FxHash, rebuilding Scalar::Utf8 once on first sight. Bit-identical: all-valid ⇒ no missing to skip, first-
+seen order = same row iteration, stable count-desc sort unchanged. Falls back to the ScalarKey path for any other
+dtype / missing value column. bench_gb_vc 1M, gcard=100 vcard=100, contiguous Utf8 k+v:
+
+| op               | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|------------------|----------|---------|----------|----------------|---------------|---------|
+| gb.value_counts  | 269.17ms | 56.94ms | 192.45ms | 0.72x LOSS      | 3.38x WIN      | 4.73x   |
+
+Correctness: new gb_value_counts_span_conformance (span vs Scalar-backed == generic == pandas, per-group count
+desc + first-seen tiebreak). The contiguous-key/span lever (groupby agg+size, dedup, df.value_counts, now
+GroupBy.value_counts) keeps flipping Scalar-materialization losses to ~3-7x wins. RESIDUAL: build_groups by the
+GROUP key (k) is still the Vec<ScalarKey> path — a fuller (k,v) dense factorize could push this higher.

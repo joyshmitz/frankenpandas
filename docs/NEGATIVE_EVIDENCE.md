@@ -5000,3 +5000,18 @@ Scalar-digest dedup is dominated by the digest/RowBucket logic, not the per-cell
 typed-temporal input doesn't move the needle; and the op ALREADY WINS — pandas duplicated(subset) 71.4ms /
 drop_duplicates(subset) 108.2ms are slow, so fp is 5.3x / 1.6x FASTER regardless. DON'T re-chase the temporal
 TypedDedupCol idea; multi-col dedup is dominated. bench committed for reproducibility.
+
+### 2026-06-26 BlackThrush — str.extract WINS 1.31x (regex-bound); cumulative-f64 ~0.5x is arc-copy floor, NOT index-clone
+Quiet-box (load ~12) dig over reshaping + transforms. (1) df.melt is fully typed (i64/f64 id-tiling, contiguous-
+Utf8 variable col, f64 value-concat) — dominated, no change. (2) Series.str.extract(regex) @1M contiguous Utf8:
+fp 220.3ms vs pandas 287.79ms = 1.31x WIN. It uses the slow apply_str (Vec<Scalar::Utf8>+from_values) rather than
+apply_str_utf8, BUT it's regex-ENGINE-bound (~200ms in re.captures per row), so the output-path lever would save
+only ~15ms (220->~205ms, 1.31x->1.4x) — marginal, not worth the null-bearing contiguous complexity; already a win.
+(3) Cumulative-f64 (cumsum/cummax/cummin/cumprod ~0.5x, diff 0.67x) RE-MEASURED on the quieter box: still ~8.5ms
+(cumsum) vs pandas 4.2ms. RULED OUT the index-clone hypothesis — a lazy unit-range Int64 index (O(1) clone,
+matching pandas RangeIndex) gives the SAME 8.6ms as a materialized Index::new(Vec) (8.5ms). So it is the documented
+f64 arc-copy-on-produce floor (from_f64_values -> Arc::from(Vec) realloc) PLUS a ~3ms residual the arc-copy alone
+(~1ms) doesn't explain; a direct-Arc<[f64]> build (unsafe new_uninit_slice) saves only the ~1ms copy and won't
+cross 1.0x. The real fix stays the deferred Vec-backed/Arc<Vec<f64>> ScalarValues variant (structural fp-columnar).
+bench_str_extract + bench_stransform (now defaults to a pandas-fair unit-range index; pass "mat" for materialized)
+committed for reproducibility. No source change (the temporal-TypedDedupCol attempt last cycle was zero-gain).

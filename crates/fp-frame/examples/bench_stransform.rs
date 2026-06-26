@@ -13,10 +13,17 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let op = a.get(2).map(String::as_str).unwrap_or("cumsum");
-    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    // Lazy unit-range Int64 index (O(1) clone), matching pandas' default
+    // RangeIndex — a materialized Index::new(Vec<IndexLabel>) would tax every
+    // transform with a 1M-enum index clone pandas never pays.
+    let idx = if a.get(3).map(String::as_str) == Some("mat") {
+        Index::new((0..n as i64).map(IndexLabel::Int64).collect())
+    } else {
+        Index::new_known_unique_int64_unit_range(0, n)
+    };
     let s = Series::new(
         "v",
-        Index::new(labels),
+        idx,
         Column::from_f64_values((0..n).map(|i| (sm(i, 0) % 100_000) as f64 - 50_000.0).collect()),
     )
     .unwrap();

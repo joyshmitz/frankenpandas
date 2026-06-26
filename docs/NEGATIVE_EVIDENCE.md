@@ -4868,3 +4868,25 @@ can't beat pandas' typed datetime64 array without an API change. Correctness: co
 nunique distinct + NaT-bail + duplicated oracle + unique/drop_duplicates first-occurrence oracle) + duplicated/
 drop_duplicates/unique lib (45) green. Completes the Series-over-Datetime64 dedup family except the two output-bound
 ops (value_counts, unique), which need a typed-output path (deferred).
+
+### 2026-06-26 BlackThrush — Series dedup family over a Timedelta64 column: 0.50-0.92x LOSS -> 1.26-1.84x WIN @200k (bit-identical)
+Timedelta64 sibling of the Datetime64 Series dedup wins. Same as_i64_slice Int64-gate left nunique/duplicated/
+drop_duplicates/unique over a Timedelta64 VALUE column on .values()+ScalarKey+SipHash. Extracted the dup-flags
+core to duplicated_flags_over_i64(data, keep) (shared by the datetime + new timedelta helpers) and added
+Timedelta64 branches (as_timedelta64_slice + FxHashSet<i64>, NaT==i64::MIN bails) to nunique/duplicated/
+drop_duplicates/unique. Bit-identical: same first/last/none + first-occurrence rules on the same ns keys; outputs
+carry Timedelta64 dtype. ALL FOUR flip cleanly (unique's milder pre-loss + the typed Column::new backing keep it
+above 1.0x here, unlike the Datetime64 unique partial).
+
+Bench, per-crate only, bench_series_td_dedup n=200000 Timedelta64 ~n/4 distinct, pandas 2.2.3 best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| nunique         | 2.70ms | 1.35ms | 2.48ms | 0.92x -> 1.84x | 2.0x |
+| duplicated      | 4.50ms | 1.40ms | 2.23ms | 0.50x -> 1.59x | 3.2x |
+| drop_duplicates | 3.73ms | 2.44ms | 3.07ms | 0.82x -> 1.26x | 1.5x |
+| unique          | 2.95ms | 1.59ms | 2.58ms | 0.87x -> 1.62x | 1.85x |
+
+Correctness: new conformance series_td_dedup (2: first-occurrence oracle for nunique/duplicated/unique/
+drop_duplicates + NaT-bail) + dedup-family lib (71, incl. unchanged Datetime64 conformance after the shared-core
+refactor) green. Remaining Series-over-temporal loss: value_counts (both dtypes, output-materialization floor —
+deferred).

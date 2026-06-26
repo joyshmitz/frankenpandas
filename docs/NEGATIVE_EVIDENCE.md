@@ -4934,6 +4934,19 @@ directly instead of materializing `Vec<Scalar::Int64>` before `Column::from_valu
 passed (RCH failed open locally, still per-crate). Candidate timing was
 `series_td_value_counts n=200000: best=2702259ns`, or 1.54x pandas but 0.70x versus current main. Source was
 reverted as zero-gain/regression; ledger-only reject.
+
+### 2026-06-26 BlackThrush — REJECT: Timedelta64 Series.value_counts direct count-column is noise/regression vs fresh main
+Independent cod-b BOLD-VERIFY repeated the same direct count-column idea after rebasing over the cod-a reject and
+the fresh `origin/main` median commit. The candidate kept temporal `value_counts` counts in a typed Int64 column
+instead of building `Vec<Scalar::Int64>`, but same-mode local repeats were unstable and failed the keep bar:
+candidate 3.107 ms / 3.524 ms versus fresh-main 3.323 ms / 3.189 ms for
+`bench_series_td_dedup 200000 value_counts` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`. The final paired comparison was candidate
+3.524 ms vs main 3.189 ms = 0.90x FP-side; using cod-a's matching pandas 2.2.3 timing of 4.170 ms, candidate is
+still 1.18x pandas but worse than main's 1.31x in the same pair. RCH selected remote `vmi1264463` for fresh main
+and measured 6.260 ms, but candidate remote admission failed open locally, so cross-mode remote/local numbers are
+routing evidence only, not proof. Source hunk was skipped from the rebase; ledger-only reject.
+
 ### 2026-06-26 BlackThrush — DataFrame.median(axis=1): 1.32x -> 5.17x vs pandas @500k×20 (bit-identical)
 A full axis=1 reduction sweep (500k rows × 20 f64 cols) confirmed the surface is dominated — sum 2.4x, mean 2.8x,
 min/max 2.5x, std 8.8x, var 8.6x, skew 8.3x, count 234x WINS — EXCEPT median, the softest at 1.32x and the lone

@@ -4557,3 +4557,30 @@ skipped live pandas assertions because this detached worktree has no `legacy_pan
 `rustfmt --check crates/fp-join/src/lib.rs` is clean; full `cargo fmt -p fp-join --check` still reports
 pre-existing unrelated formatting diffs in `bench_merge2_utf8.rs` and `utf8_right_merge_smallside_conformance.rs`,
 which were not touched or staged.
+
+### 2026-06-26 BlackThrush — DataFrame.set_index contiguous Utf8: 0.29x LOSS->1089x WIN @100k (bit-identical)
+df.set_index("a", drop=true) over an all-valid contiguous-Utf8 column still allocated one `String` per row and
+built a materialized `IndexLabel::Utf8` vector before returning. Added an ownership-preserving
+`Column::utf8_contiguous_arcs()` bridge and route that case into `Index::from_utf8_contiguous`, reusing the same
+immutable byte/offset backing and deferring label materialization until `Index::labels()` is requested. Bit-
+identical: the column branch is gated on all-valid contiguous Utf8; the lazy index materializes the same
+`IndexLabel::Utf8` strings; index name/drop behavior is unchanged; nullable or scalar-backed Utf8 still uses the
+old fallback; `verify_integrity=true` still calls `has_duplicates()`.
+
+Evidence on current origin/main f31428283 with CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a:
+baseline fp-frame bench_set_index utf8/drop n=100000 iters=30 best 2,034,371ns; candidate best 541ns (3760.4x
+fp-side). pandas 2.2.3 comparator for the same operation/size: best 589,399ns, so ratio vs pandas moved from
+0.29x LOSS to 1089x WIN. `cargo bench -p fp-frame --release --no-run` was attempted per instruction but Cargo
+rejects `--release` for bench; the timed gate used the existing release example bench (`cargo run -p fp-frame
+--example bench_set_index --release -- 100000 30 utf8 drop`).
+
+Validation: `cargo test -p fp-frame dataframe_set_index -- --nocapture` green (10 matching tests, including the
+new contiguous-Utf8 fast-path test); `cargo test -p fp-conformance dataframe_set_index -- --nocapture` green (5
+matching tests, live oracle unavailable paths skipped by harness); `cargo check -p fp-frame --all-targets` green
+with pre-existing example unused-import warnings; `cargo clippy -p fp-columnar --lib -- -D warnings` green;
+`cargo clippy -p fp-frame --lib --tests -- -D warnings` green. Full `cargo clippy -p fp-frame --all-targets
+-- -D warnings` is blocked by pre-existing `bench_gb_bool.rs` manual_is_multiple_of lint outside this change.
+`git diff --check` green; `rustfmt --check crates/fp-columnar/src/lib.rs` green. Full `rustfmt --check
+crates/fp-frame/src/lib.rs` remains blocked by pre-existing unformatted hunks around groupby dense paths, outside
+this set_index change. Bounded `timeout 180s ubs crates/fp-columnar/src/lib.rs crates/fp-frame/src/lib.rs`
+timed out with no reported focused finding before exit 124.

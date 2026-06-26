@@ -2273,7 +2273,7 @@ enum ScalarValues {
 }
 
 type Utf8ArcViewSource = (Arc<[u8]>, Arc<[usize]>, usize);
-type Utf8ArcBuffers = (Arc<[u8]>, Arc<[usize]>);
+pub type Utf8ArcBuffers = (Arc<[u8]>, Arc<[usize]>);
 
 impl ScalarValues {
     fn from_vec(values: Vec<Scalar>) -> Self {
@@ -7375,6 +7375,26 @@ impl Column {
                     prefix, *start, *len, *hex_width, buffers,
                 );
                 Some((bytes.as_ref(), offsets.as_ref()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Share the column's contiguous Utf8 backing as immutable `Arc`s.
+    ///
+    /// This is the ownership-preserving counterpart to
+    /// [`Self::as_utf8_contiguous`]: callers that need to store the same label
+    /// buffer elsewhere can clone the two Arcs instead of allocating
+    /// `String`s per row.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn utf8_contiguous_arcs(&self) -> Option<Utf8ArcBuffers> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Some((Arc::clone(bytes), Arc::clone(offsets)))
             }
             _ => None,
         }

@@ -5217,3 +5217,23 @@ Measured/rejected sub-variant: a `Vec::with_capacity` + `push` fill form timed a
 than both baseline and the kept candidate), so that zero-gain refinement was reverted before landing. Intermediate
 sparse-validity indexed stores timed at 394883ns (0.898x pandas); the final slice-zip loop is the only source variant
 kept.
+
+### 2026-06-26 BlackThrush — Series.idxmax/idxmin Float64 lane reducer: 0.29x -> 0.72x vs pandas (2.5x fp-side WIN); residual pandas gap remains
+Targeted the largest fresh `bench_misc2` loss after confirming no non-main bench-worktree head remained unlanded.
+`Series::idxmax()` / `idxmin()` on an all-valid 1M Float64 Series already avoided Scalar materialization, but the hot
+loop still kept a single dependent best-value/best-index chain. Replaced only the typed Float64 path with an 8-lane
+safe reducer that preserves strict first-occurrence tie semantics by merging equal lane winners on the lower absolute
+index. Utf8, Timedelta64, nullable, all-null, and generic Scalar paths are unchanged.
+
+Bench, per-crate only, `bench_misc2 1000000 12` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker hz2 for FP before/after;
+pandas 2.2.3 local comparator uses the same LCG Float64 generator:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| idxmax | 827934ns | 328073ns | 239173ns | 0.289x -> 0.729x | 2.52x |
+| idxmin | 815854ns | 327762ns | 237269ns | 0.291x -> 0.724x | 2.49x |
+
+Conformance GREEN for touched path: `cargo test -p fp-frame series_idxm --release -- --nocapture` passed 19 focused
+unit tests, including the existing all-`-inf` / all-`+inf`, first-tie, Utf8, NaN-skip, and metamorphic guards. KEEP
+PARTIAL because this is a measured same-worker 2.5x source win and not zero-gain, but the lane remains ~1.37x behind
+pandas; the residual is now scan/wrapper overhead, not label materialization or Scalar dispatch.

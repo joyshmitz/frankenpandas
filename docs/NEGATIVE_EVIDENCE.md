@@ -4783,3 +4783,27 @@ SHUFFLED Datetime64 indexes (splitmix Fisher-Yates), pandas 2.2.3 same data best
 Correctness: new conformance dt_setops_conformance (2) — Datetime64 + Timedelta64 intersection/difference/symdiff
 over UNSORTED cases (reverse-sorted, shuffled, dups) match first-occurrence oracles, dtype preserved; setop/union
 tests (41+7) green. Completes the temporal Index set-op surface (union done prior; sorted already won).
+
+### 2026-06-26 BlackThrush — Datetime64/Timedelta64 Index dedup family (nunique/unique/duplicated/drop_duplicates/value_counts): 0.49-0.69x LOSS -> 1.2-1.6x WIN @200k (bit-identical)
+Continuing the temporal-index pointer-key sweep (set-ops done prior). The dedup family had Int64 fast paths
+(int64_view + nunique_i64 / unique_i64 / duplicated_i64 / value_counts_raw_i64) but no temporal sibling, so a
+Datetime64 index fell to the cloned/pointer-key FxHashMap<IndexLabel>: nunique 0.52x, unique 0.49x, value_counts
+0.58x, duplicated 0.66x, drop_duplicates 0.69x pandas. Added a NaT-gated `temporal_ns_present(datetime)` extractor
+and routed all five through the existing i64 kernels, rebuilding the temporal dtype for the index-returning ops and
+relabeling Int64->Datetime64/Timedelta64 for value_counts. NaT-GATED: each op has distinct NaT semantics
+(dropna-exclude / keep-one / treat-as-value) that the generic fallback already encodes, so any NaT bails there;
+a no-NaT temporal index reuses the kernels where a present timestamp behaves exactly like any i64. Bit-identical.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_idx_dt_dedup n=200000
+Datetime64 index ~n/4 distinct (4x dup) shuffled, pandas 2.2.3 DatetimeIndex same data best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| nunique        | 4.80ms | 1.58ms | 2.48ms | 0.52x -> 1.57x | 3.0x |
+| unique         | 4.80ms | 1.73ms | 2.36ms | 0.49x -> 1.37x | 2.8x |
+| value_counts   | 8.40ms | 3.09ms | 4.86ms | 0.58x -> 1.57x | 2.7x |
+| duplicated     | 3.25ms | 1.76ms | 2.15ms | 0.66x -> 1.22x | 1.85x |
+| drop_duplicates| 3.74ms | 2.15ms | 2.59ms | 0.69x -> 1.21x | 1.74x |
+
+Correctness: new conformance dt_dedup_conformance (3) — Datetime64 + Timedelta64 nunique/unique/duplicated/
+drop_duplicates/value_counts DIFFERENTIAL against the trusted Int64 path over the same ns (agree modulo dtype),
+plus a NaT case proving the bail keeps the one NaT / dropna-excludes it; dedup-family tests (75) green.

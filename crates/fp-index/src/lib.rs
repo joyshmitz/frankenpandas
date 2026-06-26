@@ -2193,6 +2193,32 @@ impl Index {
         Some(out)
     }
 
+    /// Like [`Self::all_temporal_ns`] but returns `None` if ANY label is NaT (the
+    /// temporal missing sentinel). The dedup family (nunique / unique /
+    /// duplicated / drop_duplicates) has per-op NaT semantics (dropna-exclude vs
+    /// keep-one vs treat-as-value) that the generic fallback already encodes, so
+    /// a NaT-bearing temporal index bails to it; a no-NaT index reuses the i64
+    /// kernels, where a present timestamp behaves exactly like any other i64.
+    fn temporal_ns_present(&self, datetime: bool) -> Option<Vec<i64>> {
+        let labels = self.labels();
+        if labels.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(labels.len());
+        for label in labels {
+            match (datetime, label) {
+                (true, IndexLabel::Datetime64(ns)) | (false, IndexLabel::Timedelta64(ns)) => {
+                    if label.is_missing() {
+                        return None;
+                    }
+                    out.push(*ns);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
     fn membership_filter_i64(a: &[i64], b: &[i64], keep_present: bool) -> Vec<i64> {
         let mut out: Vec<i64> = Vec::new();
         if a.is_empty() {
@@ -2939,6 +2965,16 @@ impl Index {
         if let Some(vals) = self.labels.int64_view() {
             return self.propagate_name(Self::from_i64_values(Self::unique_i64(&vals)));
         }
+        // Datetime64 / Timedelta64 (no NaT): inline-i64 first-occurrence dedup via
+        // unique_i64, rebuilt with the temporal dtype (unique over a DatetimeIndex
+        // was 0.49x pandas). NaT bails to the pointer-key path (which keeps the
+        // one NaT). Bit-identical: same first-occurrence ns order and dtype.
+        if let Some(ns) = self.temporal_ns_present(true) {
+            return self.propagate_name(Self::from_datetime64(Self::unique_i64(&ns)));
+        }
+        if let Some(ns) = self.temporal_ns_present(false) {
+            return self.propagate_name(Self::from_timedelta64(Self::unique_i64(&ns)));
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
@@ -2961,6 +2997,16 @@ impl Index {
         // `FxHashMap<&IndexLabel>`. Bit-identical mask per keep mode.
         if let Some(vals) = self.labels.int64_view() {
             return Self::duplicated_i64(&vals, keep);
+        }
+        // Datetime64 / Timedelta64 (no NaT): inline-i64 duplicate mask via
+        // duplicated_i64 instead of the pointer-key FxHashMap (duplicated over a
+        // DatetimeIndex was 0.66x pandas). NaT bails to the per-keep fallback.
+        // Bit-identical: present timestamps mask exactly like any i64.
+        if let Some(ns) = self
+            .temporal_ns_present(true)
+            .or_else(|| self.temporal_ns_present(false))
+        {
+            return Self::duplicated_i64(&ns, keep);
         }
         match keep {
             DuplicateKeep::First => {
@@ -3017,6 +3063,27 @@ impl Index {
                 .filter_map(|(value, is_duplicated)| (!is_duplicated).then_some(value))
                 .collect();
             return self.propagate_name(Self::from_i64_values(labels));
+        }
+        // Datetime64 / Timedelta64 (no NaT): inline-i64 keep-mask filter, rebuilt
+        // with the temporal dtype (drop_duplicates over a DatetimeIndex was 0.69x
+        // pandas). NaT bails to the generic path. Bit-identical: same kept
+        // first/last occurrences in self order.
+        for datetime in [true, false] {
+            if let Some(values) = self.temporal_ns_present(datetime) {
+                let duplicated = Self::duplicated_i64(&values, keep);
+                let labels: Vec<i64> = values
+                    .iter()
+                    .copied()
+                    .zip(duplicated)
+                    .filter_map(|(value, is_duplicated)| (!is_duplicated).then_some(value))
+                    .collect();
+                let result = if datetime {
+                    Self::from_datetime64(labels)
+                } else {
+                    Self::from_timedelta64(labels)
+                };
+                return self.propagate_name(result);
+            }
         }
         let duplicated = self.duplicated(keep);
         let labels = self
@@ -3797,6 +3864,16 @@ impl Index {
         if let Some(values) = self.labels.int64_view() {
             return Self::nunique_i64(&values);
         }
+        // Datetime64 / Timedelta64 (no NaT): reuse nunique_i64 over the ns instead
+        // of the pointer-key FxHashMap (nunique over a DatetimeIndex was 0.52x
+        // pandas). NaT-bearing temporal indexes bail so the dropna fallback below
+        // keeps its missing semantics. Bit-identical: distinct present timestamps.
+        if let Some(ns) = self
+            .temporal_ns_present(true)
+            .or_else(|| self.temporal_ns_present(false))
+        {
+            return Self::nunique_i64(&ns);
+        }
         self.unique()
             .labels
             .iter()
@@ -4054,6 +4131,30 @@ impl Index {
         // are never missing, so `dropna` changes nothing — bit-identical pairs.
         if let Some(vals) = self.labels.int64_view() {
             return Self::value_counts_raw_i64(&vals, sort, ascending);
+        }
+        // Datetime64 / Timedelta64 (no NaT): reuse the i64 histogram and relabel
+        // the Int64 pairs to the temporal dtype instead of the cloned-key
+        // FxHashMap<IndexLabel> (value_counts over a DatetimeIndex was 0.58x
+        // pandas). NaT bails so the dropna fallback keeps its semantics.
+        // Bit-identical: value_counts_raw_i64 yields the same first-seen-then-sort
+        // (value, count) order; only the label variant changes (1:1 with the ns).
+        for datetime in [true, false] {
+            if let Some(ns) = self.temporal_ns_present(datetime) {
+                let (pairs, total) = Self::value_counts_raw_i64(&ns, sort, ascending);
+                let make: fn(i64) -> IndexLabel = if datetime {
+                    IndexLabel::Datetime64
+                } else {
+                    IndexLabel::Timedelta64
+                };
+                let pairs = pairs
+                    .into_iter()
+                    .map(|(label, count)| match label {
+                        IndexLabel::Int64(v) => (make(v), count),
+                        other => (other, count),
+                    })
+                    .collect();
+                return (pairs, total);
+            }
         }
         // Typed all-Utf8 fast path: tally `&str` keys (ONE `entry` hash per label,
         // and NO per-label `String` clone — the generic path below clones every

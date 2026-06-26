@@ -401,6 +401,7 @@ type SharedUtf8PositionLookup = Arc<Utf8PositionLookup>;
 type Int64PositionLookupCache = FxHashMap<u64, SharedInt64PositionLookup>;
 type Utf8PositionLookupCache = FxHashMap<u64, Option<SharedUtf8PositionLookup>>;
 type Datetime64PositionLookupCache = FxHashMap<u64, Option<SharedInt64PositionLookup>>;
+type Timedelta64PositionLookupCache = FxHashMap<u64, Option<SharedInt64PositionLookup>>;
 
 /// First-occurrence `i64 -> position` lookup tables for unsorted unique Int64
 /// indexes, cached by the index's runtime label identity (mirrors
@@ -550,6 +551,60 @@ fn datetime64_position_lookup_cached(
         .lock()
         .expect("index datetime position lookup cache poisoned");
     if guard.len() >= INDEX_DATETIME_POS_LOOKUP_CACHE_MAX {
+        guard.clear();
+    }
+    guard.entry(identity).or_insert(result).clone()
+}
+
+/// Per-lineage first-occurrence ns->position table for a Timedelta64 index.
+/// Exact sibling of `INDEX_DATETIME_POS_LOOKUP_CACHE`: `Timedelta64(i64)` is
+/// also ns-backed, so the same i64->pos table serves `loc[[td]]` on a
+/// TimedeltaIndex (the deferred mirror of the Datetime64 batch resolver).
+static INDEX_TIMEDELTA_POS_LOOKUP_CACHE: OnceLock<Mutex<Timedelta64PositionLookupCache>> =
+    OnceLock::new();
+
+const INDEX_TIMEDELTA_POS_LOOKUP_CACHE_MAX: usize = 64;
+
+/// Build-or-fetch the cached first-occurrence ns->position table for a
+/// Timedelta64 index lineage. Returns `None` (and caches that verdict) when the
+/// index is not entirely Timedelta64. Caller has proven uniqueness, so first ==
+/// only occurrence.
+fn timedelta64_position_lookup_cached(
+    identity: u64,
+    index_labels: &[IndexLabel],
+) -> Option<SharedInt64PositionLookup> {
+    let cache = INDEX_TIMEDELTA_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(existing) = cache
+        .lock()
+        .expect("index timedelta position lookup cache poisoned")
+        .get(&identity)
+        .cloned()
+    {
+        return existing;
+    }
+    let mut map: Int64PositionLookup = FxHashMap::default();
+    map.reserve(index_labels.len());
+    let mut all_timedelta = true;
+    for (pos, label) in index_labels.iter().enumerate() {
+        match label {
+            IndexLabel::Timedelta64(ns) => {
+                map.insert(*ns, pos);
+            }
+            _ => {
+                all_timedelta = false;
+                break;
+            }
+        }
+    }
+    let result = if all_timedelta {
+        Some(Arc::new(map))
+    } else {
+        None
+    };
+    let mut guard = cache
+        .lock()
+        .expect("index timedelta position lookup cache poisoned");
+    if guard.len() >= INDEX_TIMEDELTA_POS_LOOKUP_CACHE_MAX {
         guard.clear();
     }
     guard.entry(identity).or_insert(result).clone()
@@ -2604,6 +2659,9 @@ impl Index {
         if let Some(resolved) = self.unique_datetime64_positions(target.labels()) {
             return resolved;
         }
+        if let Some(resolved) = self.unique_timedelta64_positions(target.labels()) {
+            return resolved;
+        }
         let map = self.position_map_first_ref();
         target
             .labels
@@ -2729,6 +2787,36 @@ impl Index {
                 .iter()
                 .map(|label| match label {
                     IndexLabel::Datetime64(ns) => lookup.get(ns).copied(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolve a list-like selector against a unique all-Timedelta64 index using
+    /// a first-occurrence ns->position hashtable cached by the index's runtime
+    /// label identity — the `loc[[td]]` fast path for a TimedeltaIndex. Exact
+    /// sibling of [`Self::unique_datetime64_positions`] (the deferred mirror of
+    /// the Datetime64 batch resolver). Returns `None` (caller keeps its
+    /// duplicate-aware pointer-key fallback) when the index has duplicates or is
+    /// not entirely Timedelta64; the index is unique here, so each requested
+    /// label yields at most one position and a missing/non-Timedelta64 selector
+    /// maps to `None`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn unique_timedelta64_positions(
+        &self,
+        labels: &[IndexLabel],
+    ) -> Option<Vec<Option<usize>>> {
+        if self.has_duplicates() {
+            return None;
+        }
+        let lookup = timedelta64_position_lookup_cached(self.label_identity, self.labels())?;
+        Some(
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Timedelta64(ns) => lookup.get(ns).copied(),
                     _ => None,
                 })
                 .collect(),

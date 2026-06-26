@@ -4690,3 +4690,29 @@ snaps via snap_datetime_ns (one rem_euclid/elem), and emits from_datetime64_valu
 with pandas' numpy libdivide modulo and is memory-bound, NOT a real loss. NO source change; bench committed for
 reproducibility. LESSON (again): re-confirm any sub-1.0x .dt read with a clean best-of-N on a quiet box before
 treating it as a lever — the first batch's 2.96ms floor was the phantom, not the signal.
+
+### 2026-06-26 BlackThrush — Timedelta64 loc[[labels]] batch resolver (deferred mirror): 0.042x LOSS -> 4.2x WIN @200k⋈20k (bit-identical)
+The identity-cached `loc[[labels]]` batch resolvers existed for Int64 / Utf8 / Datetime64 keys
+(unsorted_unique_int64_positions / unique_utf8_positions / unique_datetime64_positions), but Timedelta64 was the
+documented DEFERRED mirror: a `loc[[td]]` on a unique TimedeltaIndex fell to the duplicate-aware per-call
+`FxHashMap<&IndexLabel, Vec<usize>>` rebuild over the WHOLE index (the pointer-key pathology), so it was 24x
+SLOWER than pandas (which caches its index engine). Added the exact sibling: a process-global
+`INDEX_TIMEDELTA_POS_LOOKUP_CACHE` keyed by the index's runtime `label_identity`,
+`timedelta64_position_lookup_cached` (first-occurrence ns->position table; `Timedelta64(i64)` is ns-backed so it
+reuses the Int64 table type), and `Index::unique_timedelta64_positions`, wired into BOTH loc call sites
+(Series + DataFrame) AND `get_indexer_for` (reindex/align/join core). Bit-identical: the index is unique here so
+first-occurrence == only-occurrence == the pointer-key map's answer; a duplicate or non-Timedelta64 index returns
+None and keeps the unchanged duplicate-aware fallback; missing labels fail closed identically.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_td_loc n=200000 k=20000
+unique Timedelta64 index, pandas 2.2.3 TimedeltaIndex.loc same selection best-of-6:
+| path | timing | ratio vs pandas |
+|------|--------|-----------------|
+| pandas | 0.90ms | 1.00x |
+| fp before (pointer-key rebuild) | 21.45ms | 0.042x LOSS (24x slower) |
+| fp after (identity-cached resolver) | 0.213ms | 4.2x WIN (~100x fp-side) |
+
+Correctness: new conformance td_loc_conformance (4) — unique-TD fast path payload == same selection over an Int64
+index, duplicate-TD index returns all matches ascending (slow path), missing fails closed, warm-cache repeated
+calls stable; fp-frame loc lib tests (96) + fp-index positions/get_indexer (25) green. Mirrors the Datetime64 fix
+(recbe, 1173x->67x) — same pathology, same lever.

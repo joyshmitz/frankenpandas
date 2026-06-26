@@ -4807,3 +4807,24 @@ Datetime64 index ~n/4 distinct (4x dup) shuffled, pandas 2.2.3 DatetimeIndex sam
 Correctness: new conformance dt_dedup_conformance (3) — Datetime64 + Timedelta64 nunique/unique/duplicated/
 drop_duplicates/value_counts DIFFERENTIAL against the trusted Int64 path over the same ns (agree modulo dtype),
 plus a NaT case proving the bail keeps the one NaT / dropna-excludes it; dedup-family tests (75) green.
+
+### 2026-06-26 BlackThrush — UNSORTED Datetime64/Timedelta64 Index argsort/sort_values via argsort_i64: 0.57x LOSS -> 1.45-1.88x WIN @200k (bit-identical)
+Continuing the temporal-index sweep. argsort/sort_values had Int64 fast paths (int64_view + argsort_i64) but no
+temporal sibling, so an UNSORTED Datetime64 index fell to a comparison sort that derefs into the IndexLabel vector
+per compare (argsort 0.57x, sort_values 0.58x pandas). Added Datetime64/Timedelta64 branches that radix/stable-key
+argsort the raw ns via argsort_i64 and (for sort_values) gather + rebuild the temporal dtype. Bit-identical:
+IndexLabel derives Ord so Datetime64/Timedelta64 compare by inner i64 (NaT==i64::MIN sorts FIRST in both paths),
+and both argsort_i64 (sort_by_key) and the fallback (sort_by) are STABLE, so duplicate-timestamp ties keep input
+order identically — NO NaT gate needed (sorting treats a present and a NaT timestamp consistently across paths).
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_idx_dt_sort n=200000
+SHUFFLED Datetime64 index, pandas 2.2.3 same data best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| argsort     | 26.39ms | 8.00ms | 15.03ms | 0.57x -> 1.88x | 3.3x |
+| sort_values | 25.75ms | 10.25ms | 14.84ms | 0.58x -> 1.45x | 2.5x |
+
+Correctness: new conformance dt_sort_conformance (3) — Datetime64 + Timedelta64 argsort/sort_values match a STABLE
+i64-key oracle (= both the old comparison-sort and argsort_i64) over tie-heavy / reverse / negative / NaT cases,
+plus an Int64-path differential; sort/argsort tests (17) green. (factorize 1.22x + get_indexer_non_unique 14.8x over
+datetime already WIN — pandas is slow there — so no change; this completes the temporal Index op surface.)

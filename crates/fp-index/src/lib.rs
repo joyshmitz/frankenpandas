@@ -3556,6 +3556,18 @@ impl Index {
         if let Some(vals) = self.labels.int64_view() {
             return Self::argsort_i64(&vals);
         }
+        // Datetime64 / Timedelta64: radix/stable-key argsort over the raw ns
+        // instead of the comparison sort that derefs into the IndexLabel vector
+        // per compare (argsort over a DatetimeIndex was 0.57x pandas). Bit-
+        // identical: IndexLabel derives Ord so Datetime64/Timedelta64 order by
+        // their inner i64 (NaT == i64::MIN sorts first in BOTH paths), and both
+        // argsort_i64 (sort_by_key) and the fallback (sort_by) are STABLE, so
+        // duplicate-timestamp ties keep input order identically.
+        if let Some(ns) = Self::all_temporal_ns(self.labels(), true)
+            .or_else(|| Self::all_temporal_ns(self.labels(), false))
+        {
+            return Self::argsort_i64(&ns);
+        }
         let mut indices: Vec<usize> = (0..self.labels.len()).collect();
         indices.sort_by(|&a, &b| self.labels[a].cmp(&self.labels[b]));
         indices
@@ -3581,6 +3593,19 @@ impl Index {
             let order = Self::argsort_i64(&vals);
             let sorted = order.iter().map(|&idx| vals[idx]).collect();
             return self.propagate_name(Self::from_i64_values(sorted));
+        }
+        // Datetime64 / Timedelta64: stable i64 argsort + gather, rebuilt with the
+        // temporal dtype (sort_values over a DatetimeIndex was 0.58x pandas).
+        // Bit-identical to the comparison-sort fallback (see argsort).
+        if let Some(ns) = Self::all_temporal_ns(self.labels(), true) {
+            let order = Self::argsort_i64(&ns);
+            let sorted = order.iter().map(|&idx| ns[idx]).collect();
+            return self.propagate_name(Self::from_datetime64(sorted));
+        }
+        if let Some(ns) = Self::all_temporal_ns(self.labels(), false) {
+            let order = Self::argsort_i64(&ns);
+            let sorted = order.iter().map(|&idx| ns[idx]).collect();
+            return self.propagate_name(Self::from_timedelta64(sorted));
         }
         let order = self.argsort();
         self.propagate_name(Self::new(

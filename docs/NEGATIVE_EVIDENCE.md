@@ -4735,3 +4735,28 @@ neither labels() materialization nor the output clone is the cost: it is purely 
 needs a custom open-addressing string table (inline hash + offset, cache-friendly) to beat khash — a large,
 golden-risky change, DEFERRED. Bench committed for reproducibility; no source change landed. DON'T re-chase the
 contiguous-output idea or the labels()-materialization idea — both disproven by measurement.
+
+### 2026-06-26 BlackThrush — Index.union over Datetime64/Timedelta64: 0.58x LOSS -> 1.18x WIN @200k (bit-identical)
+Probed Datetime64 index set-ops (time-series alignment) @200k (new bench_idx_dt_setops): intersection 5.8x WIN +
+difference 6.2x WIN (both use the sorted-merge two-pointer, which already covers AscendingDatetime64) and isin
+1.6x WIN — but union was 0.58x (10.48ms vs pandas 6.10ms). union_with has NO sorted-merge path (its contract is
+self-then-other FIRST-OCCURRENCE order, not pandas' sorted — see utf8_setops oracle_union), and its only typed
+fast paths were int64_view (IndexLabel::Int64 only) and Utf8; Datetime64/Timedelta64 (also ns-backed but a distinct
+label variant) fell to the pointer-key FxHashMap<&IndexLabel> rebuild. Fix: extract the ns when every label is the
+temporal variant and route through the proven union_i64 (dense-bitset / FxHashSet<i64>, first-occurrence dedup),
+then rebuild via from_datetime64 / from_timedelta64. Bit-identical: union_i64 yields the exact self-then-other
+first-occurrence ns sequence the pointer-key path would, just with inline i64 keys instead of enum-pointer probes;
+empty inputs return None so the degenerate empty-union dtype stays the fallback's.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_idx_dt_setops n=200000
+Datetime64 minute-step indexes, pandas 2.2.3 DatetimeIndex.union same data best-of-6:
+| path | timing | ratio vs pandas |
+|------|--------|-----------------|
+| pandas | 6.10ms | 1.00x |
+| fp before (pointer-key rebuild) | 10.48ms | 0.58x LOSS |
+| fp after (i64-keyed union_i64) | 5.17ms | 1.18x WIN (2.03x fp-side) |
+
+Correctness: new conformance dt_union_conformance (4) — Datetime64 + Timedelta64 union match the first-occurrence
+oracle (incl. a reverse-sorted case proving output is NOT globally sorted), empty self/other edges keep the other
+side, output carries the matching temporal dtype; fp-index union/setop tests (31) green. (Datetime/Timedelta
+isin/intersection/difference already WIN — no change; this was the lone union gap.)

@@ -3173,12 +3173,50 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
+        let self_labels = self.labels();
+        let other_labels = other.labels();
+        // Datetime64 / Timedelta64 i64-keyed union: both are ns-backed, but
+        // int64_view() only matches IndexLabel::Int64, so an all-temporal index
+        // fell to the pointer-key FxHashMap<&IndexLabel> fallback (union over a
+        // DatetimeIndex was 0.58x pandas). Extract the ns and reuse the proven
+        // union_i64 (dense-bitset / FxHashSet<i64>, first-occurrence dedup), then
+        // rebuild the matching temporal dtype. Bit-identical: union_i64 yields the
+        // same self-then-other first-occurrence ns sequence the pointer-key path
+        // would, with inline i64 keys instead of enum-pointer probes. Empty inputs
+        // return None so the degenerate empty-union dtype stays the fallback's.
+        let temporal_ns = |labels: &[IndexLabel], datetime: bool| -> Option<Vec<i64>> {
+            if labels.is_empty() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(labels.len());
+            for label in labels {
+                match (datetime, label) {
+                    (true, IndexLabel::Datetime64(ns)) | (false, IndexLabel::Timedelta64(ns)) => {
+                        out.push(*ns);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(out)
+        };
+        if let (Some(a_ns), Some(b_ns)) =
+            (temporal_ns(self_labels, true), temporal_ns(other_labels, true))
+        {
+            let mut result = Self::from_datetime64(Self::union_i64(&a_ns, &b_ns));
+            result.name = self.shared_name(other);
+            return result;
+        }
+        if let (Some(a_ns), Some(b_ns)) =
+            (temporal_ns(self_labels, false), temporal_ns(other_labels, false))
+        {
+            let mut result = Self::from_timedelta64(Self::union_i64(&a_ns, &b_ns));
+            result.name = self.shared_name(other);
+            return result;
+        }
         // Typed all-Utf8 fast path: dedup the self-then-other concatenation with an
         // FxHashSet of `&str` instead of `FxHashMap<&IndexLabel>` — hashes the
         // string bytes directly, skipping the 32-byte enum load per probe.
         // Bit-identical: self-then-other order, first-occurrence dedup.
-        let self_labels = self.labels();
-        let other_labels = other.labels();
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
             && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
         {

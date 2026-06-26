@@ -4828,3 +4828,21 @@ Correctness: new conformance dt_sort_conformance (3) — Datetime64 + Timedelta6
 i64-key oracle (= both the old comparison-sort and argsort_i64) over tie-heavy / reverse / negative / NaT cases,
 plus an Int64-path differential; sort/argsort tests (17) green. (factorize 1.22x + get_indexer_non_unique 14.8x over
 datetime already WIN — pandas is slow there — so no change; this completes the temporal Index op surface.)
+
+### 2026-06-26 BlackThrush — Series.nunique over a Datetime64 column: 0.47x LOSS -> 1.47x WIN @200k (bit-identical); value_counts/unique/dup partial
+Probed Series dedup-family ops over a Datetime64 VALUE column @200k (new bench_series_dt_dedup): as_i64_slice is
+DType::Int64-gated, so a ns-backed Datetime64 column missed every typed fast path and fell to .values()+ScalarKey+
+SipHash — nunique 0.47x, value_counts 0.31x, unique 0.47x, duplicated 0.47x, drop_duplicates 0.60x pandas. LANDED
+nunique: an all-valid no-NaT Datetime64 column counts distinct ns via FxHashSet<i64> (sibling of the sparse Int64
+path), NaT (i64::MIN) / any missing slot bails to the generic dropna fallback. Bit-identical: distinct present ns
+== distinct timestamps. bench_series_dt_dedup nunique 4.31->1.39ms = 0.47x->1.47x WIN (3.1x fp-side). Conformance
+series_dt_dedup (2: distinct-count differential + NaT-bail) + nunique lib (26) green.
+
+REVERTED (not a clean win this pass): value_counts datetime tally got the hash tally to nunique speed (~1.4ms) but
+value_counts stayed 0.47x (13.62->8.80ms, 1.55x fp-side) because it is OUTPUT-materialization-bound — the shared
+post-tally `Index::new(labels)` + `Column::from_values(counts)` over ~50k Scalar pairs dominates, and the tie-order
+of the stable desc sort is subtler than a plain first-seen oracle (the typed tally did not match my oracle, so I
+pulled it rather than land an unverified + still-losing change). A clean fix needs a TYPED Datetime64-index +
+Int64-count output path (bypassing the Scalar materialization) — DEFERRED, golden-risky on the shared output path.
+unique/duplicated/drop_duplicates over Datetime64 remain measured losses (0.47-0.60x), same as_i64_slice gate —
+follow-up (light-output ops like duplicated should flip cleanly like nunique).

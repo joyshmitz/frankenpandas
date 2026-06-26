@@ -54,6 +54,12 @@ fn main() {
             "count" => {
                 black_box(df.groupby(&["k"]).unwrap().count().unwrap());
             }
+            "tflist" => {
+                black_box(df.groupby(&["k"]).unwrap().transform_list(&["first"]).unwrap());
+            }
+            "tflcount" => {
+                black_box(df.groupby(&["k"]).unwrap().transform_list(&["count"]).unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();

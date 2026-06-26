@@ -4503,3 +4503,16 @@ return None (generic, as before). bench_sgb_str 1M gcard=100 contiguous Utf8 v: 
 (0.19x->1.32x, 6.89x fp-side), max 410.23->51.09ms (0.66x->5.27x), count 250.03->12.16ms (0.25x->5.09x).
 conformance gb_transform_str (dense==generic==pandas, broadcast); numeric transform unaffected (Utf8 arm only
 fires for as_utf8_contiguous columns). SeriesGroupBy.transform delegates here, so it inherits the fix.
+
+### 2026-06-25 BlackThrush — GroupBy.transform_list (Utf8): first 0.21x->1.40x, count 0.28x->5.08x @1M (bit-identical)
+transform_list(['first','count',...]) (behind df.groupby(k).transform([...])) still did its OWN build_groups +
+per-group Vec<Scalar> gather + apply_agg_func per (col,func) — so it never reached the dense f64/i64/Utf8 broadcast
+fast paths that the public transform() entry got in 938b7b5e0. Over a Utf8 value it was ~0.2x pandas. Fix: compute
+each DISTINCT func once via self.transform(func) (which fires try_transform_dense), then relabel its columns
+{col} -> {col}_{func} in the same col-major order. Bit-identical by construction: transform() reproduces the exact
+same per-group apply_agg_func broadcast in its fallback arm (and its dense arm is proven == fallback by the
+gb_transform_str / groupby_nullable_dense conformances), and the {col}_{func} column_order is built by the same
+nested loop as before. Distinct funcs are memoized so transform([f,f]) calls transform(f) once. bench_gb_first 1M
+gcard=100 contiguous Utf8 k+v: tflist(first) 363.51->54.27ms (0.21x->1.40x vs pandas 75.76ms, 6.70x fp-side),
+tflcount(count) 214.19->11.83ms (0.28x->5.08x vs pandas 60.04ms, 18.1x fp-side). lib tests transform_list (2) +
+groupby_transform (13) green.

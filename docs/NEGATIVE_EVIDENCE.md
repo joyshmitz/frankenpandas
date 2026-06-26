@@ -5237,3 +5237,27 @@ Conformance GREEN for touched path: `cargo test -p fp-frame series_idxm --releas
 unit tests, including the existing all-`-inf` / all-`+inf`, first-tie, Utf8, NaN-skip, and metamorphic guards. KEEP
 PARTIAL because this is a measured same-worker 2.5x source win and not zero-gain, but the lane remains ~1.37x behind
 pandas; the residual is now scan/wrapper overhead, not label materialization or Scalar dispatch.
+
+### 2026-06-26 BlackThrush — REJECT fractional Series.round bounded half-even scalarizer: 0.364x -> 0.036x vs pandas; source reverted
+No live non-prunable `.scratch`/`.worktrees` head was both unmerged and outside `main`, so this was a dig path against
+the largest fresh `bench_misc2` residual: fractional all-valid Float64 `Series.round(2)`. Tested an
+alien-graveyard-style proof-carrying specialization for the bounded `abs(x * factor) <= 2^52` domain: compute
+half-even rounding with integer parity after a finite-range witness, then build the output with an all-valid finite
+witness to avoid the post-map NaN scan.
+
+Correctness for the candidate passed before benchmarking: `cargo test -p fp-columnar round_nonnegative_decimals
+--release -- --nocapture` on `hz2` passed both the existing edge case and a new oracle check against
+`(x * factor).round_ties_even() / factor`. Performance was a hard loss, so the source and temporary test were removed
+before commit.
+
+Bench, per-crate only, `bench_misc2 1000000 12` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker `hz2` for FP before/after;
+pandas 2.2.3 local comparator uses the same LCG Float64 generator:
+| op | fp before | fp candidate | pandas | ratio before->candidate | decision |
+|----|-----------|--------------|--------|-------------------------|----------|
+| round(2), fractional f64 | 1.529ms | 15.627ms | 0.556ms | 0.364x -> 0.036x | REVERT |
+
+The integer/parity scalarizer is dramatically slower than `f64::round_ties_even` on this workload, likely because
+float-to-`u64` conversion plus branchy tie handling defeats the hardware/libm path despite avoiding one constructor
+scan. Do not re-chase bounded scalar half-even. Remaining viable lever is still real vector rounding / build-target
+math lowering, or a benchmark-specific domain proof that deletes rounding entirely without per-element integer casts.

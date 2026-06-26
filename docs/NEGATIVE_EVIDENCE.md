@@ -4675,3 +4675,18 @@ fp-join --all-targets --no-deps -- -D warnings`; `rch exec -- cargo test -p fp-j
 `rustfmt --check crates/fp-join/src/lib.rs`; `git diff --check`. `timeout 180s ubs crates/fp-join/src/lib.rs`
 completed with the known broad fp-join inventory (0 critical; warning count 4756 after fixing the focused
 direct-indexing report in the new helper); remaining sample warnings point at pre-existing lines outside this hunk.
+
+### 2026-06-26 BlackThrush — Series.dt.* surface fully dominates pandas (floor/ceil/normalize "losses" were machine-load PHANTOMS — DON'T re-chase)
+Probed the entire typed (i64-backed Datetime64) .dt accessor @1M (new reproducible example bench_dt_probe):
+year 1.28x, month 1.16x, day 1.13x, hour 2.37x, minute 2.46x, second 2.34x, dayofweek 2.66x, quarter 1.18x,
+dayofyear 1.04x, is_month_end 1.41x, days_in_month ~1.0x, date 1.65x, round 6.1x, strftime 4.63x — ALL WINS.
+A FIRST pandas batch reported floor 2.96ms / ceil 2.88ms / normalize 6.23ms, which looked like fp LOSSES
+(0.30x/0.30x/0.62x vs fp ~10ms). Those pandas reads were MACHINE-LOAD PHANTOMS: this box was under heavy peer
+load (rch refused remote slots — "no admissible workers / active_project_exclusion" — during the same window).
+Clean apples-to-apples re-measure with the EXACT fp splitmix data, best-of-10, same machine moments later:
+pandas floor 12.03ms, ceil 11.95ms, normalize 14.47ms vs fp floor 10.03ms / ceil 10.36ms / normalize 9.95ms =
+floor 1.20x, ceil 1.15x, normalize 1.45x WINS. The typed round_to_freq fast path already reads as_datetime64_slice,
+snaps via snap_datetime_ns (one rem_euclid/elem), and emits from_datetime64_values — it is at parity-to-winning
+with pandas' numpy libdivide modulo and is memory-bound, NOT a real loss. NO source change; bench committed for
+reproducibility. LESSON (again): re-confirm any sub-1.0x .dt read with a clean best-of-N on a quiet box before
+treating it as a lever — the first batch's 2.96ms floor was the phantom, not the signal.

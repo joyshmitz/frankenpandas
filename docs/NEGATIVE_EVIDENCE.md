@@ -5197,3 +5197,23 @@ The candidate also regressed against the prior measured FP path recorded in this
 work at 200k rows / 50k distinct timestamps, and output still boxes one `Scalar::Datetime64` per distinct value. Source
 was restored to the existing hash path. Next viable lever is a typed unique-return surface or a column/array result path
 that avoids distinct `Scalar` output boxing; another membership-plan variant is unlikely to close the pandas gap.
+
+### 2026-06-26 BlackThrush — Series.diff sparse-validity slice loop: 0.481x -> 1.138x vs pandas (2.37x fp-side WIN)
+Targeted the `Series.diff(1)` Float64 residual in the `bench_stransform` fixture. The previous typed path did one
+branchy predecessor lookup per row and materialized an all-valid bitset before clearing the boundary NaN row. The kept
+lever uses the already-supported sparse invalid-range validity witness for the boundary rows and writes the valid
+region through non-overlapping slice zips, preserving the same `0.0` datum + cleared-bit nullable Float64 convention for
+out-of-range partners. The Int64 typed fast path gets the identical shape, still widening via the same `as f64`
+subtraction as the scalar fallback.
+
+Bench, per-crate only, `bench_stransform 1000000 diff` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker hz2 for FP before/after;
+pandas 2.2.3 local comparator uses the same splitmix Float64 generator:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| diff(1), all-valid f64 | 737585ns | 311581ns | 354430ns | 0.481x -> 1.138x | 2.37x |
+
+Measured/rejected sub-variant: a `Vec::with_capacity` + `push` fill form timed at 871565ns (0.407x pandas, slower
+than both baseline and the kept candidate), so that zero-gain refinement was reverted before landing. Intermediate
+sparse-validity indexed stores timed at 394883ns (0.898x pandas); the final slice-zip loop is the only source variant
+kept.

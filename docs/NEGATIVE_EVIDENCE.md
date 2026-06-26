@@ -4846,3 +4846,25 @@ pulled it rather than land an unverified + still-losing change). A clean fix nee
 Int64-count output path (bypassing the Scalar materialization) — DEFERRED, golden-risky on the shared output path.
 unique/duplicated/drop_duplicates over Datetime64 remain measured losses (0.47-0.60x), same as_i64_slice gate —
 follow-up (light-output ops like duplicated should flip cleanly like nunique).
+
+### 2026-06-26 BlackThrush — Series.duplicated/drop_duplicates over Datetime64 column: 0.47-0.60x LOSS -> 1.35-1.54x WIN @200k (bit-identical); unique partial
+Follow-up to the nunique-Datetime64 win. Same as_i64_slice Int64-gate left duplicated/drop_duplicates/unique over a
+Datetime64 VALUE column on the .values()+ScalarKey+SipHash path. Added duplicated_flags_datetime64_hash(keep) — a
+FxHashSet<i64> hash sibling of the dense duplicated_flags_i64_direct (the ns span is too wide for the dense table) —
+shared by BOTH duplicated() and drop_duplicates_keep(); plus a Datetime64 sparse branch in unique(). All gated
+all-valid + no-NaT (i64::MIN bails to the generic dropna/keep path). Bit-identical: same first/last/none keep rule on
+the same ns keys; drop_duplicates gathers the same kept rows through the typed ns buffer + from_datetime64.
+
+Bench, per-crate only, bench_series_dt_dedup n=200000 Datetime64 ~n/4 distinct, pandas 2.2.3 best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| duplicated      | 4.66ms | 1.44ms | 2.21ms | 0.47x -> 1.54x | 3.2x |
+| drop_duplicates | 5.11ms | 2.27ms | 3.06ms | 0.60x -> 1.35x | 2.3x |
+| unique (partial)| 4.99ms | 3.01ms | 2.37ms | 0.47x -> 0.79x | 1.66x |
+
+unique KEPT as a partial (non-zero-gain, verified): the per-row ScalarKey is gone, but unique() returns Vec<Scalar>
+so ~50k Scalar::Datetime64 output boxes remain — an output floor (same shape as the value_counts output floor); it
+can't beat pandas' typed datetime64 array without an API change. Correctness: conformance series_dt_dedup (4 now:
+nunique distinct + NaT-bail + duplicated oracle + unique/drop_duplicates first-occurrence oracle) + duplicated/
+drop_duplicates/unique lib (45) green. Completes the Series-over-Datetime64 dedup family except the two output-bound
+ops (value_counts, unique), which need a typed-output path (deferred).

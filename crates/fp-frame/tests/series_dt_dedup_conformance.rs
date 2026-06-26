@@ -40,3 +40,64 @@ fn series_datetime_nunique_nat_bails_to_generic_dropna() {
     let dt = Series::new("s", idx(ns.len()), Column::from_datetime64_values(ns)).unwrap();
     assert_eq!(dt.nunique(), 2, "two present distinct timestamps, NaT excluded");
 }
+
+// keep=First first-occurrence oracles (dtype-agnostic over the raw ns).
+fn oracle_duplicated(ns: &[i64]) -> Vec<bool> {
+    let mut seen = std::collections::HashSet::new();
+    ns.iter().map(|&v| !seen.insert(v)).collect()
+}
+fn oracle_unique(ns: &[i64]) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &v in ns {
+        if seen.insert(v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+#[test]
+fn series_datetime_duplicated_matches_oracle() {
+    for ns in cases() {
+        let n = ns.len();
+        let dt = Series::new("s", idx(n), Column::from_datetime64_values(ns.clone())).unwrap();
+        let dup = dt.duplicated().unwrap();
+        let got: Vec<bool> = dup
+            .values()
+            .iter()
+            .map(|s| matches!(s, fp_types::Scalar::Bool(true)))
+            .collect();
+        assert_eq!(got, oracle_duplicated(&ns), "duplicated {n}");
+    }
+}
+
+#[test]
+fn series_datetime_unique_and_drop_duplicates_match_oracle() {
+    for ns in cases() {
+        let n = ns.len();
+        let dt = Series::new("s", idx(n), Column::from_datetime64_values(ns.clone())).unwrap();
+        let want = oracle_unique(&ns);
+        // unique() -> Vec<Scalar::Datetime64> in first-occurrence order.
+        let uniq: Vec<i64> = dt
+            .unique()
+            .iter()
+            .map(|s| match s {
+                fp_types::Scalar::Datetime64(v) => *v,
+                other => panic!("unique dtype {other:?}"),
+            })
+            .collect();
+        assert_eq!(uniq, want, "unique {n}");
+        // drop_duplicates() keeps first-occurrence rows; value column is Datetime64.
+        let dd = dt.drop_duplicates().unwrap();
+        let dd_vals: Vec<i64> = dd
+            .values()
+            .iter()
+            .map(|s| match s {
+                fp_types::Scalar::Datetime64(v) => *v,
+                other => panic!("drop_dup dtype {other:?}"),
+            })
+            .collect();
+        assert_eq!(dd_vals, want, "drop_duplicates {n}");
+    }
+}

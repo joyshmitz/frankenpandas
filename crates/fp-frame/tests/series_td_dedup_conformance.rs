@@ -13,7 +13,11 @@ fn td_series(ns: &[i64]) -> Series {
     Series::new(
         "s",
         Index::new(labels),
-        Column::new(DType::Timedelta64, ns.iter().map(|&v| Scalar::Timedelta64(v)).collect()).unwrap(),
+        Column::new(
+            DType::Timedelta64,
+            ns.iter().map(|&v| Scalar::Timedelta64(v)).collect(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -86,7 +90,13 @@ fn series_timedelta_dedup_family_matches_oracle() {
 #[test]
 fn series_timedelta_nat_bails_to_generic() {
     // Timedelta::NAT == i64::MIN; dropna default excludes it from nunique.
-    let ns = vec![5_000_000_000, i64::MIN, 9_000_000_000, 5_000_000_000, i64::MIN];
+    let ns = vec![
+        5_000_000_000,
+        i64::MIN,
+        9_000_000_000,
+        5_000_000_000,
+        i64::MIN,
+    ];
     let s = td_series(&ns);
     assert_eq!(s.nunique(), 2, "two present distinct timedeltas");
 }

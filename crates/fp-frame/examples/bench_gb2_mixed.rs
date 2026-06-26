@@ -31,7 +31,10 @@ fn main() {
         "k1".to_string(),
         Column::from_i64_values((0..n).map(|i| (sm(i, 0) % g) as i64).collect()),
     );
-    cols.insert("k2".to_string(), Column::from_utf8_contiguous(bytes, offsets));
+    cols.insert(
+        "k2".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
     cols.insert(
         "v".to_string(),
         Column::from_f64_values((0..n).map(|i| sm(i, 2) as f64).collect()),

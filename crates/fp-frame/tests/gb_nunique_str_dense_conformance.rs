@@ -31,7 +31,10 @@ fn frame(v_contig: bool) -> DataFrame {
     let index = Index::new((0..4i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
     cols.insert("k".to_string(), contig(&K));
-    cols.insert("v".to_string(), if v_contig { contig(&V) } else { scalar(&V) });
+    cols.insert(
+        "v".to_string(),
+        if v_contig { contig(&V) } else { scalar(&V) },
+    );
     DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap()
 }
 
@@ -55,5 +58,9 @@ fn span_matches_generic_and_pandas() {
     let span = frame(true).groupby(&["k"]).unwrap().nunique().unwrap();
     let generic = frame(false).groupby(&["k"]).unwrap().nunique().unwrap();
     assert_eq!(pairs(&span), pairs(&generic), "span vs generic");
-    assert_eq!(pairs(&span), vec![("a".to_string(), 2), ("b".to_string(), 1)], "vs pandas");
+    assert_eq!(
+        pairs(&span),
+        vec![("a".to_string(), 2), ("b".to_string(), 1)],
+        "vs pandas"
+    );
 }

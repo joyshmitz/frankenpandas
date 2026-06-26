@@ -21,7 +21,12 @@ fn scalar(v: &[&str]) -> Column {
     Column::from_values(v.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap()
 }
 fn series(name: &str, col: Column, n: usize) -> Series {
-    Series::new(name, Index::new((0..n as i64).map(IndexLabel::Int64).collect()), col).unwrap()
+    Series::new(
+        name,
+        Index::new((0..n as i64).map(IndexLabel::Int64).collect()),
+        col,
+    )
+    .unwrap()
 }
 
 fn run(by: &[&str], v: &[&str], v_contig: bool) -> Vec<(String, i64)> {
@@ -49,7 +54,11 @@ fn dense_matches_generic_and_pandas() {
     let dense = run(&by, &v, true);
     let generic = run(&by, &v, false);
     assert_eq!(dense, generic, "dense vs generic");
-    assert_eq!(dense, vec![("a".to_string(), 2), ("b".to_string(), 1)], "vs pandas");
+    assert_eq!(
+        dense,
+        vec![("a".to_string(), 2), ("b".to_string(), 1)],
+        "vs pandas"
+    );
 }
 
 // first-seen != sorted: dense must still equal generic (bit-identity).

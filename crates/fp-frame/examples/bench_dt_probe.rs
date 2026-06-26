@@ -21,7 +21,12 @@ fn main() {
         .map(|i| base + (sm(i, 0) % 126_000_000) as i64 * 1_000_000_000)
         .collect();
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-    let s = Series::new("s", Index::new(labels), Column::from_datetime64_values(data)).unwrap();
+    let s = Series::new(
+        "s",
+        Index::new(labels),
+        Column::from_datetime64_values(data),
+    )
+    .unwrap();
     let mut best = u128::MAX;
     for _ in 0..8 {
         let t = Instant::now();

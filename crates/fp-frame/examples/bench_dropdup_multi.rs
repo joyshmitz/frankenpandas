@@ -29,8 +29,14 @@ fn main() {
     let op = a.get(3).map(String::as_str).unwrap_or("drop");
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), contig(n, |i| format!("g{:04}", sm(i, 0) % card)));
-    cols.insert("k2".to_string(), contig(n, |i| format!("h{:04}", sm(i, 1) % card)));
+    cols.insert(
+        "k1".to_string(),
+        contig(n, |i| format!("g{:04}", sm(i, 0) % card)),
+    );
+    cols.insert(
+        "k2".to_string(),
+        contig(n, |i| format!("h{:04}", sm(i, 1) % card)),
+    );
     let df = DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into()]).unwrap();
     let subset = vec!["k1".to_string(), "k2".to_string()];
     let mut best = u128::MAX;
@@ -39,7 +45,8 @@ fn main() {
         match op {
             "drop" => {
                 std::hint::black_box(
-                    df.drop_duplicates(Some(&subset), DuplicateKeep::First, false).unwrap(),
+                    df.drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+                        .unwrap(),
                 );
             }
             "dup" => {

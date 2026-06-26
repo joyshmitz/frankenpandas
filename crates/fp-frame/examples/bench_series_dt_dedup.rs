@@ -21,7 +21,12 @@ fn main() {
         .map(|i| base + (sm(i, 0) % card) as i64 * step)
         .collect();
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-    let s = Series::new("s", Index::new(labels), Column::from_datetime64_values(data)).unwrap();
+    let s = Series::new(
+        "s",
+        Index::new(labels),
+        Column::from_datetime64_values(data),
+    )
+    .unwrap();
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();

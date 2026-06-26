@@ -31,7 +31,10 @@ fn frame(v_contig: bool) -> DataFrame {
     let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
     cols.insert("k".to_string(), contig(&K));
-    cols.insert("v".to_string(), if v_contig { contig(&V) } else { scalar(&V) });
+    cols.insert(
+        "v".to_string(),
+        if v_contig { contig(&V) } else { scalar(&V) },
+    );
     DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap()
 }
 
@@ -53,7 +56,11 @@ fn pairs(df: &DataFrame) -> Vec<(String, i64)> {
 #[test]
 fn span_matches_scalar_and_pandas() {
     let span = frame(true).groupby(&["k"]).unwrap().value_counts().unwrap();
-    let scalar_path = frame(false).groupby(&["k"]).unwrap().value_counts().unwrap();
+    let scalar_path = frame(false)
+        .groupby(&["k"])
+        .unwrap()
+        .value_counts()
+        .unwrap();
     assert_eq!(pairs(&span), pairs(&scalar_path), "span vs scalar path");
     assert_eq!(
         pairs(&span),

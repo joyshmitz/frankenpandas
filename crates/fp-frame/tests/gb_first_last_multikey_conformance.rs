@@ -32,10 +32,14 @@ fn scalar(v: &[&str]) -> Column {
 fn frame(k_contig: bool) -> DataFrame {
     let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), if k_contig { contig(&K1) } else { scalar(&K1) });
+    cols.insert(
+        "k1".to_string(),
+        if k_contig { contig(&K1) } else { scalar(&K1) },
+    );
     cols.insert("k2".to_string(), contig(&K2));
     cols.insert("v".to_string(), contig(&V));
-    DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()]).unwrap()
+    DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()])
+        .unwrap()
 }
 
 fn vals(df: &DataFrame) -> Vec<String> {
@@ -58,14 +62,27 @@ fn multikey_dense_matches_generic_and_pandas() {
     ] {
         let run = |df: &DataFrame| -> DataFrame {
             let gb = df.groupby(&["k1", "k2"]).unwrap();
-            if op == "first" { gb.first().unwrap() } else { gb.last().unwrap() }
+            if op == "first" {
+                gb.first().unwrap()
+            } else {
+                gb.last().unwrap()
+            }
         };
         let dense = run(&frame(true));
         let generic = run(&frame(false));
         assert_eq!(vals(&dense), vals(&generic), "{op}: dense vs generic");
         assert_eq!(vals(&dense), want, "{op}: vs pandas");
         // sorted-key flat index label
-        let idx: Vec<String> = dense.index().labels().iter().map(|l| l.to_string()).collect();
-        assert_eq!(idx, vec!["a, x", "b, x", "b, y", "c, x"], "{op}: sorted MultiIndex");
+        let idx: Vec<String> = dense
+            .index()
+            .labels()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            idx,
+            vec!["a, x", "b, x", "b, y", "c, x"],
+            "{op}: sorted MultiIndex"
+        );
     }
 }

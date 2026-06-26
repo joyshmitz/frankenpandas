@@ -28,8 +28,14 @@ fn main() {
     let card: u64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k".to_string(), contig(n, |i| format!("k{:08}", sm(i, 0) % card)));
-    cols.insert("v".to_string(), Column::from_f64_values((0..n).map(|i| i as f64).collect()));
+    cols.insert(
+        "k".to_string(),
+        contig(n, |i| format!("k{:08}", sm(i, 0) % card)),
+    );
+    cols.insert(
+        "v".to_string(),
+        Column::from_f64_values((0..n).map(|i| i as f64).collect()),
+    );
     let df = DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap();
     let mut best = u128::MAX;
     for _ in 0..6 {

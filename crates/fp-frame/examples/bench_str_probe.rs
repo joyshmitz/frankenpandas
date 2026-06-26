@@ -31,7 +31,11 @@ fn main() {
         Index::new(labels),
         contig(n, |i| {
             let w = sm(i, 0) % 26;
-            format!("Word_{:04x}_{:05}", sm(i, 1) % 0xffff, w * 1000 + (i as u64 % 1000))
+            format!(
+                "Word_{:04x}_{:05}",
+                sm(i, 1) % 0xffff,
+                w * 1000 + (i as u64 % 1000)
+            )
         }),
     )
     .unwrap();

@@ -34,10 +34,18 @@ fn frame(typed: bool) -> DataFrame {
     let mut cols = BTreeMap::new();
     // typed: contiguous Utf8 + raw Int64. generic: one scalar-backed Utf8 column
     // (forces typed_cols=None) so the whole mask flows through the Scalar path.
-    cols.insert("k1".to_string(), if typed { contig_utf8(&K1) } else { scalar_utf8(&K1) });
+    cols.insert(
+        "k1".to_string(),
+        if typed {
+            contig_utf8(&K1)
+        } else {
+            scalar_utf8(&K1)
+        },
+    );
     cols.insert("k2".to_string(), contig_utf8(&K2));
     cols.insert("v3".to_string(), Column::from_i64_values(V3.to_vec()));
-    DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v3".into()]).unwrap()
+    DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v3".into()])
+        .unwrap()
 }
 
 fn mask(df: &DataFrame, keep: DuplicateKeep) -> Vec<bool> {

@@ -26,7 +26,10 @@ fn df_with_index(labels: Vec<IndexLabel>, a: Vec<i64>) -> DataFrame {
 fn td_loc_unique_fast_path_matches_int64() {
     let ns = [10_i64, 20, 30, 40, 50];
     let a = vec![100_i64, 200, 300, 400, 500];
-    let td = df_with_index(ns.iter().map(|&v| IndexLabel::Timedelta64(v)).collect(), a.clone());
+    let td = df_with_index(
+        ns.iter().map(|&v| IndexLabel::Timedelta64(v)).collect(),
+        a.clone(),
+    );
     let i64df = df_with_index(ns.iter().map(|&v| IndexLabel::Int64(v)).collect(), a);
 
     let sel_ns = [40_i64, 10, 50, 20];

@@ -29,8 +29,14 @@ fn main() {
     let vc: u64 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k".to_string(), contig(n, |i| format!("g{:04}", sm(i, 0) % gc)));
-    cols.insert("v".to_string(), contig(n, |i| format!("v{:04}", sm(i, 1) % vc)));
+    cols.insert(
+        "k".to_string(),
+        contig(n, |i| format!("g{:04}", sm(i, 0) % gc)),
+    );
+    cols.insert(
+        "v".to_string(),
+        contig(n, |i| format!("v{:04}", sm(i, 1) % vc)),
+    );
     let df = DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap();
     let mut best = u128::MAX;
     for _ in 0..6 {

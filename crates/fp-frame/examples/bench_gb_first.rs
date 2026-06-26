@@ -29,7 +29,10 @@ fn main() {
     let op = a.get(3).map(String::as_str).unwrap_or("first");
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k".to_string(), contig(n, |i| format!("g{:04}", sm(i, 0) % gc)));
+    cols.insert(
+        "k".to_string(),
+        contig(n, |i| format!("g{:04}", sm(i, 0) % gc)),
+    );
     cols.insert("v".to_string(), contig(n, |i| format!("v{:08}", sm(i, 1))));
     let df = DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap();
     let mut best = u128::MAX;
@@ -55,10 +58,20 @@ fn main() {
                 black_box(df.groupby(&["k"]).unwrap().count().unwrap());
             }
             "tflist" => {
-                black_box(df.groupby(&["k"]).unwrap().transform_list(&["first"]).unwrap());
+                black_box(
+                    df.groupby(&["k"])
+                        .unwrap()
+                        .transform_list(&["first"])
+                        .unwrap(),
+                );
             }
             "tflcount" => {
-                black_box(df.groupby(&["k"]).unwrap().transform_list(&["count"]).unwrap());
+                black_box(
+                    df.groupby(&["k"])
+                        .unwrap()
+                        .transform_list(&["count"])
+                        .unwrap(),
+                );
             }
             _ => panic!("op"),
         }

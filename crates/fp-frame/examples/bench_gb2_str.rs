@@ -29,10 +29,18 @@ fn main() {
     let op = a.get(3).map(String::as_str).unwrap_or("first");
     let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), contig(n, |i| format!("g{:04}", sm(i, 0) % gc)));
-    cols.insert("k2".to_string(), contig(n, |i| format!("h{:04}", sm(i, 1) % gc)));
+    cols.insert(
+        "k1".to_string(),
+        contig(n, |i| format!("g{:04}", sm(i, 0) % gc)),
+    );
+    cols.insert(
+        "k2".to_string(),
+        contig(n, |i| format!("h{:04}", sm(i, 1) % gc)),
+    );
     cols.insert("v".to_string(), contig(n, |i| format!("v{:08}", sm(i, 2))));
-    let df = DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()]).unwrap();
+    let df =
+        DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()])
+            .unwrap();
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = Instant::now();

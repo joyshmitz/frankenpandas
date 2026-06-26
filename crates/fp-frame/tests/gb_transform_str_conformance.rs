@@ -25,7 +25,12 @@ fn scalar(v: &[&str]) -> Column {
     Column::from_values(v.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap()
 }
 fn series(name: &str, col: Column, n: usize) -> Series {
-    Series::new(name, Index::new((0..n as i64).map(IndexLabel::Int64).collect()), col).unwrap()
+    Series::new(
+        name,
+        Index::new((0..n as i64).map(IndexLabel::Int64).collect()),
+        col,
+    )
+    .unwrap()
 }
 fn cells(s: &Series) -> Vec<String> {
     s.column()

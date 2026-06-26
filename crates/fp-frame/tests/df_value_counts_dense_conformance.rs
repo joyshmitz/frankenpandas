@@ -31,7 +31,10 @@ fn scalar(v: &[&str]) -> Column {
 fn frame(typed: bool) -> DataFrame {
     let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), if typed { contig(&K1) } else { scalar(&K1) });
+    cols.insert(
+        "k1".to_string(),
+        if typed { contig(&K1) } else { scalar(&K1) },
+    );
     cols.insert("k2".to_string(), contig(&K2));
     DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into()]).unwrap()
 }

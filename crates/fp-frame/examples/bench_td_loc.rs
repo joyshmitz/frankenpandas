@@ -18,7 +18,12 @@ fn main() {
     let k: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000);
     // Unique timedelta ns labels (distinct strictly-increasing-ish via *1000+i).
     let label_ns: Vec<i64> = (0..n).map(|i| (i as i64) * 1000 + 1).collect();
-    let index = Index::new(label_ns.iter().map(|&v| IndexLabel::Timedelta64(v)).collect());
+    let index = Index::new(
+        label_ns
+            .iter()
+            .map(|&v| IndexLabel::Timedelta64(v))
+            .collect(),
+    );
     let mut cols = BTreeMap::new();
     cols.insert(
         "a".to_string(),

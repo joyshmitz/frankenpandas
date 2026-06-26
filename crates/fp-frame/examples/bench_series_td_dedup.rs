@@ -1,4 +1,4 @@
-//! Series nunique/unique/duplicated/drop_duplicates over a Timedelta64 VALUE
+//! Series value_counts/nunique/unique/duplicated/drop_duplicates over a Timedelta64 VALUE
 //! column @200k. Run: bench_series_td_dedup <n> <op>
 use fp_columnar::Column;
 use fp_frame::Series;
@@ -14,7 +14,7 @@ fn sm(i: usize, s: u64) -> u64 {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(200_000);
-    let op = a.get(2).map(String::as_str).unwrap_or("nunique");
+    let op = a.get(2).map(String::as_str).unwrap_or("value_counts");
     let card = (n / 4).max(1) as u64;
     let vals: Vec<Scalar> = (0..n)
         .map(|i| Scalar::Timedelta64((sm(i, 0) % card) as i64 * 1_000_000_000))
@@ -30,6 +30,9 @@ fn main() {
     for _ in 0..6 {
         let t = std::time::Instant::now();
         match op {
+            "value_counts" => {
+                std::hint::black_box(s.value_counts().unwrap());
+            }
             "nunique" => {
                 std::hint::black_box(s.nunique());
             }

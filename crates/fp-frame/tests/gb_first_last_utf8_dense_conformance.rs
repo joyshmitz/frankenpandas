@@ -30,7 +30,10 @@ fn scalar(v: &[&str]) -> Column {
 fn frame(k_contig: bool) -> DataFrame {
     let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
     let mut cols = BTreeMap::new();
-    cols.insert("k".to_string(), if k_contig { contig(&K) } else { scalar(&K) });
+    cols.insert(
+        "k".to_string(),
+        if k_contig { contig(&K) } else { scalar(&K) },
+    );
     cols.insert("v".to_string(), contig(&V));
     DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap()
 }
@@ -72,8 +75,10 @@ fn first_last_dense_matches_generic_and_pandas() {
         let dense = run(&frame(true)); // contiguous key -> factorize dense path
         let generic = run(&frame(false)); // scalar-backed key -> generic aggregate
         assert_eq!(pairs(&dense), pairs(&generic), "{op}: dense vs generic");
-        let want_owned: Vec<(String, String)> =
-            want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let want_owned: Vec<(String, String)> = want
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         assert_eq!(pairs(&dense), want_owned, "{op}: vs pandas");
     }
 }

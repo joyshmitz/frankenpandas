@@ -35,11 +35,21 @@ fn strs(s: &Series) -> Vec<Option<String>> {
 // pandas removeprefix('item_'): ['abc','no_prefix','item_x','']
 #[test]
 fn removeprefix_matches_pandas() {
-    let s = series(vec![u("item_abc"), u("no_prefix"), u("item_item_x"), u("item_")]);
+    let s = series(vec![
+        u("item_abc"),
+        u("no_prefix"),
+        u("item_item_x"),
+        u("item_"),
+    ]);
     let r = s.str().removeprefix("item_").unwrap();
     assert_eq!(
         strs(&r),
-        vec![Some("abc".into()), Some("no_prefix".into()), Some("item_x".into()), Some("".into())]
+        vec![
+            Some("abc".into()),
+            Some("no_prefix".into()),
+            Some("item_x".into()),
+            Some("".into())
+        ]
     );
 }
 
@@ -50,7 +60,12 @@ fn removesuffix_matches_pandas() {
     let r = s.str().removesuffix("_xyz").unwrap();
     assert_eq!(
         strs(&r),
-        vec![Some("a".into()), Some("b".into()), Some("_xyz".into()), Some("".into())]
+        vec![
+            Some("a".into()),
+            Some("b".into()),
+            Some("_xyz".into()),
+            Some("".into())
+        ]
     );
 }
 
@@ -62,5 +77,8 @@ fn removeprefix_suffix_missing_fallback() {
         vec![Some("a".into()), None, Some("b".into())]
     );
     let s2 = series(vec![u("a_xyz"), Scalar::Null(NullKind::NaN)]);
-    assert_eq!(strs(&s2.str().removesuffix("_xyz").unwrap()), vec![Some("a".into()), None]);
+    assert_eq!(
+        strs(&s2.str().removesuffix("_xyz").unwrap()),
+        vec![Some("a".into()), None]
+    );
 }

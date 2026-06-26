@@ -22,7 +22,12 @@ fn scalar(v: &[&str]) -> Column {
     Column::from_values(v.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap()
 }
 fn series(name: &str, col: Column, n: usize) -> Series {
-    Series::new(name, Index::new((0..n as i64).map(IndexLabel::Int64).collect()), col).unwrap()
+    Series::new(
+        name,
+        Index::new((0..n as i64).map(IndexLabel::Int64).collect()),
+        col,
+    )
+    .unwrap()
 }
 
 fn pairs(s: &Series) -> Vec<(String, String)> {
@@ -44,7 +49,11 @@ fn run(by: &[&str], v: &[&str], v_contig: bool, want_max: bool) -> Vec<(String, 
     let byc = series("k", contig(by), n);
     let vc = series("v", if v_contig { contig(v) } else { scalar(v) }, n);
     let gb = vc.groupby(&byc).unwrap();
-    let r = if want_max { gb.max().unwrap() } else { gb.min().unwrap() };
+    let r = if want_max {
+        gb.max().unwrap()
+    } else {
+        gb.min().unwrap()
+    };
     pairs(&r)
 }
 
@@ -60,8 +69,10 @@ fn dense_matches_generic_and_pandas_sorted() {
         let dense = run(&by, &v, true, want_max);
         let generic = run(&by, &v, false, want_max);
         assert_eq!(dense, generic, "dense vs generic (max={want_max})");
-        let want_owned: Vec<(String, String)> =
-            want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let want_owned: Vec<(String, String)> = want
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         assert_eq!(dense, want_owned, "vs pandas (max={want_max})");
     }
 }

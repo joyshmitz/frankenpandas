@@ -42,7 +42,11 @@ fn col_str(df: &DataFrame, name: &str) -> Vec<String> {
 #[test]
 fn agglist_utf8_matches_direct_and_pandas() {
     let df = frame();
-    let r = df.groupby(&["k"]).unwrap().agg_list(&["count", "first", "max"]).unwrap();
+    let r = df
+        .groupby(&["k"])
+        .unwrap()
+        .agg_list(&["count", "first", "max"])
+        .unwrap();
     assert_eq!(col_str(&r, "v_count"), vec!["2", "2", "1"], "count");
     assert_eq!(col_str(&r, "v_first"), vec!["x2", "x1", "x5"], "first");
     assert_eq!(col_str(&r, "v_max"), vec!["x4", "x3", "x5"], "max");

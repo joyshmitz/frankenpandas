@@ -41,7 +41,10 @@ fn single_key_dense_matches_generic_and_pandas() {
         let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
         let mut cols = BTreeMap::new();
         let k = ["b", "a", "b", "a", "c"];
-        cols.insert("k".to_string(), if k_contig { contig(&k) } else { scalar(&k) });
+        cols.insert(
+            "k".to_string(),
+            if k_contig { contig(&k) } else { scalar(&k) },
+        );
         cols.insert("v".to_string(), contig(&["x1", "x2", "x3", "x4", "x5"]));
         DataFrame::new_with_column_order(index, cols, vec!["k".into(), "v".into()]).unwrap()
     };
@@ -57,7 +60,10 @@ fn multi_key_dense_matches_generic_and_pandas() {
         let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
         let mut cols = BTreeMap::new();
         let k1 = ["b", "a", "b", "a", "c"];
-        cols.insert("k1".to_string(), if k_contig { contig(&k1) } else { scalar(&k1) });
+        cols.insert(
+            "k1".to_string(),
+            if k_contig { contig(&k1) } else { scalar(&k1) },
+        );
         cols.insert("k2".to_string(), contig(&["y", "x", "x", "x", "x"]));
         cols.insert("v".to_string(), contig(&["a", "b", "c", "d", "e"]));
         DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()])

@@ -4585,6 +4585,16 @@ crates/fp-frame/src/lib.rs` remains blocked by pre-existing unformatted hunks ar
 this set_index change. Bounded `timeout 180s ubs crates/fp-columnar/src/lib.rs crates/fp-frame/src/lib.rs`
 timed out with no reported focused finding before exit 124.
 
+Additional BlackThrush cod-b verification on the same landed source: with warmed
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`, pandas 2.2.3 best-of-30 was 492,263ns,
+paired fp baseline (`frankenpandas-blackthrush-setindex-baseline-20260626T0001`) was 1,980,834ns, and current fp
+candidate was 390ns. That confirms the ratio as 0.25x LOSS -> 1262x WIN, with a 5079x fp-side improvement on the
+standing `cargo run -p fp-frame --example bench_set_index --release -- 100000 30 utf8 drop` release example.
+Additional gates: `rch exec -- cargo bench -p fp-frame --no-run`; `rch exec -- cargo test -p fp-frame
+dataframe_set_index -- --nocapture`; `rch exec -- cargo test -p fp-conformance dataframe_set_index --
+--nocapture`; `rch exec -- cargo check -p fp-frame --all-targets`; focused `cargo clippy -p fp-frame --lib
+--tests --no-deps -- -D warnings`.
+
 ### 2026-06-26 BlackThrush — SeriesGroupBy sem/skew/kurt over Utf8 key: sem 0.69x->2.31x, skew 0.84x->2.73x, kurt 1.45x->5.34x @1M (bit-identical)
 SeriesGroupBy std/var already had a Utf8-key dense path (dense_group_var_std uses dense_group_ids, which handles
 Int64 + contiguous-Utf8 + scalar-backed-Utf8 keys), but sem/skew/kurt routed through group_moment_dense whose key

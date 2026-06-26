@@ -1882,6 +1882,18 @@ enum ScalarValues {
         all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Move-not-copy sibling of `LazyAllValidFloat64`: stores the owned `Vec<f64>`
+    /// inside an `Arc` (one tiny `Arc::new` box, no element copy) instead of
+    /// `Arc<[f64]>` (which `Arc::from(Vec)` builds by allocating a fresh n*8+16
+    /// buffer and memcpy-ing — a cold-page-fault-bound ~5.7ms/1M, the dominant
+    /// cost of every f64-producing op: abs/cumsum/cummax/cummin/cumprod/diff/clip).
+    /// Semantically identical to `LazyAllValidFloat64` (all-valid, no missing);
+    /// consumers read the slice via `&data[..]`.
+    LazyAllValidFloat64Vec {
+        data: Arc<Vec<f64>>,
+        all_finite: OnceLock<bool>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64Chunks {
         chunks: Arc<[Float64Chunk]>,
         len: usize,
@@ -2335,6 +2347,22 @@ impl ScalarValues {
                 Self::lazy_all_valid_float64_arc_with_finite(data, Some(all_finite))
             }
             None => Self::lazy_all_valid_float64_arc(data),
+        }
+    }
+
+    /// MOVE an owned `Vec<f64>` into the all-valid Float64 backing without the
+    /// `Arc::from(Vec)` realloc-copy (a cold-page-fault-bound ~5.7ms/1M). For
+    /// op OUTPUTS that produce a fresh owned Vec (cumsum/cummax/cummin/cumprod)
+    /// where the buffer is hot from the just-completed write — so reusing it
+    /// (Arc::new, one tiny box) instead of allocating+copying a cold Arc<[f64]>
+    /// is a 6-8x op-side win. General `from_f64_values` stays on `Arc<[f64]>` so
+    /// the take_positions/binary/witness zero-copy fast paths (which key on that
+    /// variant) are unaffected.
+    fn lazy_all_valid_float64_owned(data: Vec<f64>) -> Self {
+        Self::LazyAllValidFloat64Vec {
+            data: Arc::new(data),
+            all_finite: OnceLock::new(),
+            values: OnceLock::new(),
         }
     }
 
@@ -3701,6 +3729,9 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
+            Self::LazyAllValidFloat64Vec { data, values, .. } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
+                .as_slice(),
             Self::LazyAllValidFloat64Chunks { chunks, values, .. } => values
                 .get_or_init(|| {
                     chunks
@@ -4357,6 +4388,7 @@ impl ScalarValues {
             Self::LazyAllValidInt64Chunks { len, .. } => *len,
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
+            Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
@@ -4569,6 +4601,13 @@ impl Clone for ScalarValues {
                 Arc::clone(data),
                 all_finite.get().copied(),
             ),
+            Self::LazyAllValidFloat64Vec {
+                data, all_finite, ..
+            } => Self::LazyAllValidFloat64Vec {
+                data: Arc::clone(data),
+                all_finite: Self::bool_once_lock(all_finite.get().copied()),
+                values: OnceLock::new(),
+            },
             Self::LazyAllValidFloat64Chunks {
                 chunks,
                 len,
@@ -6721,6 +6760,30 @@ impl Column {
         Self::from_f64_values_with_finite_witness(data, has_nan, all_finite)
     }
 
+    /// Like `from_f64_values` but, for the all-valid (no-NaN) case, MOVES the
+    /// owned `Vec<f64>` into the backing (`Arc::new`, one tiny box) instead of
+    /// `Arc::from(Vec)`'s cold-buffer realloc-copy (~5.7ms/1M, page-fault-bound).
+    /// For op OUTPUTS that just wrote a hot Vec (cumsum/cummax/cummin/cumprod)
+    /// this is a 6-8x op-side win. Bit-identical: the single NaN scan is the same
+    /// one `from_f64_values` runs, and a NaN-bearing output routes to the
+    /// identical `from_f64_values` (NaN-as-missing) path. The resulting
+    /// `LazyAllValidFloat64Vec` backing is semantically identical to
+    /// `LazyAllValidFloat64` (it just isn't keyed by the Arc<[f64]>-specific
+    /// take_positions/binary zero-copy fast paths — fine for terminal outputs).
+    #[must_use]
+    pub fn from_f64_values_owned(data: Vec<f64>) -> Self {
+        if data.iter().any(|v| v.is_nan()) {
+            return Self::from_f64_values(data);
+        }
+        let len = data.len();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_owned(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     fn from_f64_values_with_finite_witness(
         data: Vec<f64>,
         has_nan: bool,
@@ -7144,6 +7207,9 @@ impl Column {
             }
             if let ScalarValues::LazyAllValidFloat64 { data, .. } = &self.values {
                 return Some(data.as_ref());
+            }
+            if let ScalarValues::LazyAllValidFloat64Vec { data, .. } = &self.values {
+                return Some(&data[..]);
             }
             if let ScalarValues::LazyAllValidFloat64Slice {
                 data, start, len, ..

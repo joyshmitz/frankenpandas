@@ -5037,3 +5037,24 @@ a variant there in a 60-min shared-checkout window risks rebase conflicts + a mi
 conformance surface. Needs a DEDICATED, non-contended fp-columnar pass (or the fp-columnar owner). Isolation bench
 committed (bench_stransform rawscan/rawscan_arc) so the win can be re-confirmed and the variant landed surgically.
 No source change this cycle (the prefix-scan itself is already optimal at 0.71ms).
+
+### 2026-06-26 BlackThrush — LANDED the f64 arc-copy lever: cumsum/cummax/cummin 0.5x -> 4.8-7.3x WIN @1M (bit-identical, conformance GREEN)
+Executed the move-not-copy lever spec'd last cycle (Arc::from(Vec) = ~5.7ms cold-fault-bound copy). Added
+ScalarValues::LazyAllValidFloat64Vec { Arc<Vec<f64>> } (semantically identical to LazyAllValidFloat64, all-valid)
++ Column::from_f64_values_owned (MOVES the hot output Vec via Arc::new — no realloc/copy/faults; NaN-bearing output
+routes to the unchanged from_f64_values Arc path, since NaN must mark missing). Routed cumsum/cummax/cummin/cumprod
+outputs through it. Surgically scoped: general from_f64_values stays Arc<[f64]> so the take_positions/binary/finite-
+witness zero-copy fast paths (which key on that variant) are UNAFFECTED — the 4 ScalarValues exhaustive matches
+(as_slice/len/clone) + as_f64_slice got the new arm.
+
+Bench, per-crate only, bench_stransform 1M f64, quiet box (load ~7), pandas 2.2.3 best-of-8:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| cumsum | 8.05ms | 0.95ms | 4.60ms | 0.52x -> 4.84x | 8.5x |
+| cummax | 8.35ms | 0.56ms | 4.10ms | 0.48x -> 7.32x | 14.9x |
+| cummin | 8.07ms | 0.61ms | 3.48ms | 0.49x -> 5.70x | 13.2x |
+(cumprod stays Arc/0.38x on adversarial overflow->NaN data — correct & unchanged; non-overflow cumprod wins.)
+Isolation probe confirmed: rawscan_arc (Arc::from copy) 8.08ms vs rawscan (Vec only) 0.71ms — the ~5.7ms was the
+copy, now eliminated. Conformance GREEN: fp-columnar 436, fp-frame lib 3103, 49 fp-frame conformance binaries, 0
+failed. FOLLOW-UP (infra now landed, each a 1-line from_f64_values->from_f64_values_owned): abs (0.35x, the worst),
+clip, diff, and other all-valid-f64-producing ops.

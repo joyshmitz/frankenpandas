@@ -4989,3 +4989,14 @@ Series with the same index/name. Candidate timing:
 any 7.93x faster than pandas and 7.31x FP-side faster. Focused guards:
 `cargo test -p fp-frame all_axis1 -- --nocapture` and `cargo test -p fp-frame any_axis1 -- --nocapture` green
 (RCH failed open locally, still per-crate).
+### 2026-06-26 BlackThrush — REJECT/zero-gain: multi-col df.duplicated/drop_duplicates with a Datetime64 subset is ALREADY a WIN
+Suspected a loss: duplicated_mask's TypedDedupCol (the typed multi-col dedup digest) covers F64/I64/Utf8 but NOT
+Datetime64/Timedelta64 (as_i64_slice is Int64-gated), so a temporal column in the subset falls to the generic
+per-cell Scalar digest. Added Datetime64/Timedelta64 TypedDedupCol variants (digest tag 5/6 + ns, exact i64
+equality, gated all-valid no-NaT — bit-identical to scalar_digest). MEASURED before/after under the SAME (loaded)
+box via stash toggle, bench_dedup_dtsubset n=1M subset=[id i64, ts Datetime64]: duplicated 13.5ms BEFORE vs 16.3ms
+AFTER (within noise, NOT faster); drop_duplicates 66.4 vs 67.8ms. ZERO-GAIN — REVERTED. Why: fp's generic
+Scalar-digest dedup is dominated by the digest/RowBucket logic, not the per-cell Scalar materialization, so the
+typed-temporal input doesn't move the needle; and the op ALREADY WINS — pandas duplicated(subset) 71.4ms /
+drop_duplicates(subset) 108.2ms are slow, so fp is 5.3x / 1.6x FASTER regardless. DON'T re-chase the temporal
+TypedDedupCol idea; multi-col dedup is dominated. bench committed for reproducibility.

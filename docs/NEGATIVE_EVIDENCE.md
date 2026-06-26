@@ -5160,3 +5160,21 @@ Conformance GREEN for touched path: `cargo test -p fp-columnar sqrt -- --nocaptu
 KEEP PARTIAL because this is a measured same-worker materialization win, but the residual remains ~5.6x behind pandas:
 the hot loop is now scalar `sqrt` plus Series wrapper cost, not NaN materialization. Closing the remaining gap needs
 the previously identified target-feature/SIMD sqrt lever, not another nullable-output rewrite.
+
+### 2026-06-26 BlackThrush — log nullable Float64 owned-validity output: 0.410x -> 0.883x vs pandas (2.15x fp-side WIN); residual scalar ln/SVML-bound
+Targeted the sibling mixed-sign math-unary residual left after the sqrt nullable-output keep: `Series.log()` on the
+1M `bench_stransform` Float64 fixture. The old typed path wrote the output Vec, scanned for NaN, fell back to
+`from_f64_values`, scanned/built the validity mask again, and copied into `Arc<[f64]>` because negative inputs produce
+NaNs. Routed `log` through the existing fused nullable-owned Float64 output primitive, which writes values, builds the
+NaN-as-missing validity words, records the finite witness, and moves the Vec into the lazy Float64 backing. Scope is one
+call site; the scalar fallback and all-valid/non-NaN semantics are unchanged.
+
+Bench, per-crate only, `bench_stransform 1000000 log` via `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker hz2:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| log(mixed-sign f64) | 20.451ms | 9.497ms | 8.385ms | 0.410x -> 0.883x | 2.15x |
+
+Conformance GREEN for touched path: `cargo test -p fp-columnar log_nullable_owned_preserves_nan_missing_semantics_blackthrush -- --nocapture`
+passed. KEEP PARTIAL because this is a measured same-worker materialization win and almost closes the pandas gap, but
+the residual remains ~1.13x behind pandas: the hot loop is now scalar `ln`/Series wrapper cost, not NaN materialization.
+Closing the rest needs the previously identified target-feature/SVML-style log lever, not another output-constructor rewrite.

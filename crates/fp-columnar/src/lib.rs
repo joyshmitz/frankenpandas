@@ -15453,7 +15453,7 @@ impl Column {
 
     /// Natural logarithm of numeric values. Matches numpy's log ufunc.
     pub fn log(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::ln) {
+        if let Some(out) = self.typed_float_unary_nullable_owned(f64::ln) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -22166,6 +22166,34 @@ mod tests {
             assert_eq!(ints_out.values()[0], Scalar::Float64(3.0));
             assert!(ints_out.values()[1].is_missing());
             assert!(!ints_out.validity().get(1));
+        }
+
+        #[test]
+        fn log_nullable_owned_preserves_nan_missing_semantics_blackthrush()
+        -> Result<(), ColumnError> {
+            let input = Column::from_f64_values(vec![1.0, -1.0, 0.0, f64::INFINITY]);
+            let output = input.log()?;
+            assert_eq!(output.dtype(), DType::Float64);
+            assert_eq!(output.values().len(), 4);
+            assert!(
+                output.as_f64_slice().is_none(),
+                "NaN output must be nullable"
+            );
+            assert!(output.validity().get(0));
+            assert!(!output.validity().get(1));
+            assert!(output.validity().get(2));
+            assert!(output.validity().get(3));
+            assert_eq!(output.values()[0], Scalar::Float64(0.0));
+            assert!(output.values()[1].is_missing());
+            assert_eq!(output.values()[2], Scalar::Float64(f64::NEG_INFINITY));
+            assert_eq!(output.values()[3], Scalar::Float64(f64::INFINITY));
+
+            let ints = Column::from_i64_values(vec![1, -1]);
+            let ints_out = ints.log()?;
+            assert_eq!(ints_out.values()[0], Scalar::Float64(0.0));
+            assert!(ints_out.values()[1].is_missing());
+            assert!(!ints_out.validity().get(1));
+            Ok(())
         }
 
         #[test]

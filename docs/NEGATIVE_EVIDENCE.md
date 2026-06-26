@@ -4907,3 +4907,15 @@ Measured Timedelta64 sibling is NOT a pandas win and should not be claimed close
 `bench_series_td_dedup 200000 value_counts` measured 10.811 ms versus pandas 3.999 ms (0.37x) on `vmi1264463`.
 Do not spend another wrapper pass here; the remaining Timedelta64 value_counts gap is still output/index
 materialization and needs a deeper TimedeltaIndex/Series output primitive.
+
+### 2026-06-26 BlackThrush — groupby(Datetime64/Timedelta64 key) generic-path index labels now TYPED (correctness fix)
+The groupby-by-temporal-key PERF win (0.23x->~5x via temporal_sparse_grouping/aggregate_temporal_sparse + a typed
+value_counts) was landed by a peer in addcab6af — I independently reached the same lever this cycle, so only my
+unique delta remains. That delta: `group_key_label` (the GENERIC build_groups label builder, used by the funcs the
+peer's dense temporal path does NOT cover — nunique/sem/skew/kurt/idxmax/size/... per group) mapped a Datetime64/
+Timedelta64 key to `Utf8(format!("{:?}"))` = a stringified "Datetime64(..)" index label instead of pandas' typed
+DatetimeIndex. Added typed `IndexLabel::Datetime64(v)`/`Timedelta64(v)` arms (5 lines). Now ALL single-key
+datetime/timedelta groupby funcs (dense + generic) carry a typed temporal index, matching pandas. No existing
+test/golden locked the old Utf8-debug labels. New conformance gb_dtkey (3): Datetime64/Timedelta64-key groupby
+(incl. generic-path nunique) DIFFERENTIAL vs the Int64-key path over the same ns (group order + values match,
+index typed) + NaT drops the NaT group (dropna default); groupby lib (202) + groupby conformances (9) green.

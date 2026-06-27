@@ -6144,13 +6144,16 @@ enum JCol<'a> {
     I(&'a [i64]),
     F(&'a [f64]),
     B(&'a [bool]),
+    /// Datetime64 ns: serialized as epoch-MILLISECOND integers (`v / 1_000_000`),
+    /// `NaT` (i64::MIN) → `null` — matching `scalar_to_json`.
+    DtMs(&'a [i64]),
 }
 
 /// Extract every column as an all-valid typed slice plus its pre-serialized,
 /// escaped, colon-terminated JSON key (column order = `preserve_order`
 /// insertion order). Returns `None` — caller falls back to the serde tree — on
-/// any column that is not all-valid `Int64`/`Float64`/`Bool`, would take the
-/// int→float promotion branch, or on a row-multiindex frame.
+/// any column that is not all-valid `Int64`/`Float64`/`Bool`/`Datetime64`,
+/// would take the int→float promotion branch, or on a row-multiindex frame.
 fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<String>)> {
     if frame.row_multiindex().is_some() {
         return None;
@@ -6170,6 +6173,17 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
             (s.len() == n).then_some(JCol::F(s))?
         } else if let Some(s) = column.as_bool_slice() {
             (s.len() == n).then_some(JCol::B(s))?
+        } else if let Some(s) = column.as_datetime64_slice() {
+            // The slice exposes the raw ns including any NaT sentinel; a
+            // validity-mask null (data slot ≠ NaT) would diverge from
+            // `value()`'s `Scalar::Null`, so require no mask-nulls. An all-valid
+            // `from_datetime64_values` backing keeps NaT AS DATA (validity stays
+            // all-valid), and `append_typed_json_value` maps that sentinel → null
+            // exactly like `scalar_to_json(Datetime64(NaT))`.
+            if column.has_nulls() {
+                return None;
+            }
+            (s.len() == n).then_some(JCol::DtMs(s))?
         } else {
             return None;
         };
@@ -6203,6 +6217,15 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
             }
         }
         JCol::B(s) => out.push_str(if s[r] { "true" } else { "false" }),
+        JCol::DtMs(s) => {
+            let v = s[r];
+            // i64::MIN is the Datetime64 NaT sentinel.
+            if v == i64::MIN {
+                out.push_str("null");
+            } else {
+                append_i64_decimal(out, v / 1_000_000);
+            }
+        }
     }
 }
 
@@ -30789,6 +30812,21 @@ mod merge_simple_numeric_csv_chunks_tests {
         cols.insert("a".to_string(), Column::from_i64_values(ints));
         cols.insert("b".to_string(), Column::from_f64_values(floats));
         cols.insert("c".to_string(), Column::from_bool_values(bools));
+        // Datetime64 column (epoch-ms ints in JSON), incl. a NaT (→ null) and a
+        // pre-epoch negative ns (truncating /1_000_000 toward zero, matching serde).
+        let dts = vec![
+            0i64,
+            946_684_800_000_000_000,
+            i64::MIN, // NaT
+            -1_500_000_000,
+            1_000,
+            1_500_000,
+            -86_400_000_000_000,
+            999_999,
+            123_456_789,
+            -999_999,
+        ];
+        cols.insert("dt".to_string(), Column::from_datetime64_values(dts));
         // A column name that requires JSON escaping, to exercise pre-serialized keys.
         cols.insert(
             "we\"ird\tkey".to_string(),

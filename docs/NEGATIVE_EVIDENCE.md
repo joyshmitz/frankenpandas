@@ -6000,3 +6000,25 @@ Bit-identical: the json differential now also asserts Index vs a from-scratch se
 every frame; fp-io 48 json tests green. ALL FIVE to_json orients (records/columns/index/values/split) + jsonl now WIN
 vs pandas — the to_json surface is fully un-lost (records 5.35x, columns 4.66x, index 8.53x, values 1.78x, split
 2.13x, jsonl 5.53x). The serde `Value`-tree was the universal culprit; the typed streaming writers retire it.
+
+### 2026-06-27 TealOsprey — to_json typed writers extended to Datetime64 columns: 0.72x LOSS -> 6.38x WIN vs pandas (8.9x fp-side)
+After the records/columns/index/jsonl typed writers landed, ANY Datetime64 column still forced the WHOLE frame onto
+the serde-tree fallback (the typed extractor only knew Int64/Float64/Bool), so a realistic frame with a timestamp
+column re-lost pandas. Added a `JCol::DtMs` arm: a Datetime64 column with no validity-mask nulls is emitted as
+epoch-MILLISECOND integers (`v / 1_000_000`, truncating toward zero) with the `NaT` sentinel (i64::MIN) → `null` —
+byte-identical to `scalar_to_json(Datetime64)` (pandas default `date_format='epoch', date_unit='ms'`). Gated on
+`!has_nulls()`: `from_datetime64_values` keeps NaT AS DATA with an all-valid mask (handled inline), while a
+genuine validity-null column bails to serde. (Timedelta64 left to the serde path — its `from_values` backing marks
+NaT as a validity-null, an untested combination; Datetime64 is the common case.)
+
+Same-box best-of-3, 1M rows × {Int64, Datetime64} (`fp-io/examples/bench_to_json_dt`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde fallback) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(records)` +dt 1M | 480.0ms | 54.1ms | 8.87x | 0.72x -> 6.38x (pandas 344.8ms) |
+
+Bit-identical: the json differential's main frame now carries a Datetime64 column with a NaT + pre-epoch negative ns
+(records/jsonl/columns/index all asserted vs serde); fp-io 48 json tests green. The typed JSON writers now cover the
+four common column dtypes (i64/f64/bool/datetime) across all five orients + jsonl — a stray timestamp column no longer
+silently reverts the frame to the slow path. Confirmed reads are NOT a gap: read_csv 37ms vs pandas 176ms (4.76x),
+read_json 473ms vs pandas 1030ms (2.18x) — both already WIN, no action taken.

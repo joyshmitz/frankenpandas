@@ -5939,3 +5939,21 @@ the serde reference over an edge-laden frame (i64::MIN/MAX, signed-zero, integer
 JSON-escaped column name), a -Inf frame, an empty frame, a Utf8-forces-fallback frame, and a 2000-row LCG sweep —
 all byte-for-byte equal; fp-io 48 json tests green. The serde-tree allocation was ~87% of to_json's wall time.
 RESIDUAL: Columns/Index/Split/Values orients still build the serde tree (Records is the pandas default + most common).
+
+### 2026-06-27 TealOsprey — to_jsonl typed streaming writer: 1.02x parity -> 5.5x WIN vs pandas (5.44x fp-side)
+Direct sibling of the to_json(records) win: `write_jsonl_string` (`to_json(orient='records', lines=True)`) had the
+identical serde-tree antipattern — a `serde_json::Map` per row, `name.clone()` key per cell, per-cell `Scalar`+`Value`,
+and `serde_json::to_string` PER ROW — joined by `\n`. Generalized `try_write_json_records_typed` with an `as_jsonl`
+flag: same streaming body, but rows are `\n`-joined with no enclosing `[ ]`. Bit-identical to the prior serde output
+(same pre-serialized keys, `append_i64_decimal` ints, serde `CompactFormatter::write_f64` floats, non-finite -> null).
+
+Same-box best-of-3, 1M rows × {Int64, Float64} (`fp-io/examples/bench_to_jsonl`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde tree) | patched (streaming) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_jsonl` 1M | 359.2ms | 66.0ms | 5.44x | 1.02x -> 5.53x (pandas 365.1ms) |
+
+Bit-identical: the `to_json_records_typed_fast_path_bit_identical_to_serde` differential now also asserts JSONL vs a
+serde Map-per-row reference over every frame (edge floats incl ±Inf, escaped key, empty, Utf8 fallback, 2000-row LCG
+sweep); fp-io 48 json tests green. Records + JSONL (the two pandas `records`/`lines` spellings) now share one typed
+writer. RESIDUAL unchanged: Columns/Index/Split/Values orients still build the serde tree.

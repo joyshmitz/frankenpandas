@@ -10,6 +10,10 @@ fn main() {
     for _ in 0..6 {
         let t = std::time::Instant::now();
         let rows = match kind {
+            "jsonl" => {
+                let df = fp_io::read_jsonl_str(&input).unwrap();
+                df.index().len()
+            }
             "json" => {
                 let df = fp_io::read_json_str(&input, JsonOrient::Records).unwrap();
                 df.index().len()

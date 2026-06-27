@@ -6129,3 +6129,23 @@ existing `fp-columnar` lint; `cargo clippy -p fp-frame --lib --no-deps -- -D war
 `fp-frame` lint backlog after removing the one local `unstack` loop warning. `cargo fmt -p fp-frame --check` is blocked
 by pre-existing formatting drift in examples/tests and unrelated old `lib.rs` hunks. Bounded UBS
 `timeout 180s ubs crates/fp-frame/src/lib.rs` timed out without a focused finding, matching the known broad inventory.
+
+### 2026-06-27 BlackThrush - dt.isocalendar day-run fill: 0.54x -> 1.18x WIN vs pandas (2.17x fp-side vs ORIG)
+The typed `dt.isocalendar` path still spent scalar work per timestamp even when the 1M hourly fixture only changes
+ISO output once per epoch day. Applied the self-adjusting/day-run lever: compute the ISO tuple once for a contiguous
+same-day run, fill the year/week/day slices for that run, and allocate the validity bitmap lazily only when a NaT is
+actually observed. This preserves the existing NaT semantics and the ordinal ISO formula while removing repeated
+weekday/week-year arithmetic and the all-valid bitmap write from the no-null common path.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`; ORIG is current-main worktree
+state `19af82367` before the lever, command
+`rch exec -- cargo run --release -p fp-frame --example bench_dtacc -- 1000000 isocalendar`; pandas 2.2.3 comparator
+uses the identical 1M hourly timestamp fixture:
+| workload | ORIG best | patched best | pandas best | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dt.isocalendar` 1M | 44.715ms | 20.627ms | 24.314ms | 0.54x -> 1.18x | 2.17x |
+
+Validation: focused `fp-frame dt_isocalendar` release tests green; full `fp-conformance` release crate green; valid
+per-crate `cargo bench -p fp-frame` green. The literal requested `cargo bench --release -p fp-frame` form was also
+run and rejected by Cargo because `bench` has no `--release` argument, so the valid per-crate bench command above is
+the landed gate.

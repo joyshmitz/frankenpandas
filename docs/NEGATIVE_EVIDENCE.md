@@ -5672,3 +5672,26 @@ missing the same `Null(NaN)`; all-valid `from_f64_values_owned` == `from_values`
 test `df_pivot_int64_typed_matches_generic_pvtdk` proves the typed path's per-column value matrix == the generic
 Scalar path on a SPARSE int64/f64 pivot (covers both the all-present and the missing-cell branch). Conformance GREEN:
 fp-frame 40 pivot tests + full lib suite pass. Utf8/mixed-dtype or NaN-bearing pivots keep the generic path unchanged.
+
+### 2026-06-27 AmberLynx — Series.unstack typed Float64 value path: 0.43x -> 0.48x vs pandas (~1.15x fp-side)
+After the df.pivot typed lever, df_unstack was the next dataframe_ops loss: fp 57-61ms vs pandas 24.4ms = ~0.43x @1M
+(Series with composite Utf8 "r, c" index, r=i/10 x c=i%10 -> 100k x 10). `Series::unstack` already had the dense
+col-major grid, but still materialized the values column with `.values()` (1M Scalars) and cloned 1M Scalars into the
+output. Applied the same typed lever as pivot (br-frankenpandas-unstk): when the source column is all-valid no-NaN
+Float64 (`as_f64_slice`), read cell values off the typed slice (no input Scalar materialization) and MOVE a typed
+`Vec<f64>` into each all-present output column via `from_f64_values_owned` (Scalar `Null(NaN)` only for gap columns);
+the `.values()` call is now deferred into the non-typed fallback branch.
+
+Same-box back-to-back best-of-5, fp-bench df_unstack @1M, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| workload | origin/main best | patched best | fp-side | vs pandas 2.2.3 (24.37ms) |
+| --- | ---: | ---: | ---: | ---: |
+| df_unstack 1M (Utf8 "r,c" index, f64 vals) | 57.18ms | 50.95ms | ~1.12-1.17x | 0.43x -> 0.48x |
+
+Bit-identical: present cells carry `Scalar::Float64(slice[pos])` (== the original), missing the same `Null(NaN)`,
+all-valid `from_f64_values_owned` == `from_values` for no-NaN Float64; the grid/first-wins parse is unchanged. New
+test `series_unstack_typed_f64_branches_unstk` covers both the all-present (`from_f64_values_owned`) and gap
+(`Null(NaN)`) branches (the existing golden uses Int64 values; `series_unstack_missing` carries a source NaN — neither
+reaches the all-valid-Float64 path). Conformance GREEN: fp-frame 8 unstack tests + full lib suite.
+RESIDUAL (still <1.0x vs pandas): the cost is now dominated by parsing 1M composite "r, c" Utf8 labels (split_once +
+trim + 2x `FxHashMap<String>` probes) — pandas operates on a real 2-level MultiIndex with no string parsing. Closing
+needs a native MultiIndex row-label representation (cross-surface), analogous to the to_period i64-PeriodIndex floor.

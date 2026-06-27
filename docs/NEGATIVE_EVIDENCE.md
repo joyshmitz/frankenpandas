@@ -5757,3 +5757,27 @@ The genuine 10k residual is fixed Scalar/radix/frame-construction overhead, and 
 amortized across the bench's repeated sorts (so an as_f64_slice input lever is bench-invisible, like the to_records
 case). Not a point fix; absolute gap is ~127us on the smallest size while sort wins at 100k/1M. Surface remains
 dominated; do NOT re-chase the reorder par-floor for small-size sort.
+
+### 2026-06-27 AmberLynx — to_period hand-rolled ASCII label formatting: 1.37-2.27x fp-side (M 0.36x->0.62x vs pandas)
+to_period (the biggest measured gap) emits Utf8 period labels; after the contiguous-Utf8 index + numeric-civil work,
+the dominant per-label cost was the `write!(buf, "{y:04}-{m:02}")` machinery — `core::fmt` Formatter dispatch +
+`pad_integral` (width/fill/sign branches) paid 1M× per to_period. Replaced every `write!` arm in
+`period_label_numeric_into` with hand-rolled ASCII digit pushes (`push_4d`/`push_2d` for `{:04}`/`{:02}`, `push_uint`
+for Quarterly's UNPADDED `{}` year, literal digit for the quarter) — bit-identical bytes, no fmt dispatch.
+
+Same-box back-to-back best-of-6, 1M Datetime64 row index (`examples/bench_toperiod`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| freq | baseline (write!) | patched (hand-rolled) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| M | 63.43ms | 36.35ms | 1.75x | 0.36x -> 0.62x (pandas 22.69ms) |
+| D | 79.52ms | 34.97ms | 2.27x | — |
+| Y | 44.35ms | 32.27ms | 1.37x | — |
+| Q | 59.91ms | 33.61ms | 1.78x | — |
+| W | 161.07ms | 71.76ms | 2.24x | 0.16x -> 0.36x (pandas 25.75ms) |
+
+The `core::fmt` overhead was ~HALF of to_period's wall time. Bit-identical: differential
+`to_period_numeric_conformance` (numeric path == chrono path over a decade incl. boundaries) green; fp-frame 9
+to_period lib tests + full suite green. RESIDUAL (still <1.0x vs pandas, unchanged): the labels are still Utf8 bytes,
+not an i64 PeriodIndex — closing fully needs a Period index-label type. GENERALIZES: any hot loop formatting fixed-
+shape integers (strftime, astype_str, csv/json numeric serialization) pays the same `pad_integral` tax — hand-rolled
+ASCII digit writers are a reusable lever.

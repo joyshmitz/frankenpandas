@@ -6424,6 +6424,37 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
     Some(out)
 }
 
+/// Streaming typed fast path for `to_json(orient="values")` — `[[v, v], ...]`,
+/// row-major arrays with no keys (the simplest orient). Bit-identical to the
+/// serde `Values` arm: each row is the column values in column order, formatted
+/// by `append_typed_json_value`. Bails (→ serde) on any non-typed column.
+fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, _keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(16),
+    );
+    out.push('[');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for r in 0..n {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push(']');
+    }
+    out.push(']');
+    Some(out)
+}
+
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
     if frame.row_multiindex().is_some() && orient != JsonOrient::Values {
         let materialized = materialize_synthetic_row_multiindex_columns(frame)?;
@@ -6548,6 +6579,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
         }
         JsonOrient::Values => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_values_typed(frame) {
+                return Ok(s);
+            }
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
@@ -30826,6 +30861,31 @@ mod merge_simple_numeric_csv_chunks_tests {
                 index_serde_ref(frame),
             );
         }
+        // Values orient: from-scratch serde array-of-arrays reference.
+        fn values_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut data = Vec::with_capacity(frame.index().len());
+            for row_idx in 0..frame.index().len() {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name.as_str())
+                            .and_then(|c| c.value(row_idx))
+                            .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+            serde_json::to_string(&serde_json::Value::Array(data)).unwrap()
+        }
+        fn assert_values_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Values).expect("values"),
+                values_serde_ref(frame),
+            );
+        }
         fn idx(n: usize) -> Index {
             Index::new_known_unique_int64_unit_range(0, n)
         }
@@ -30869,6 +30929,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert!(super::try_write_json_records_typed(&frame, true).is_some());
         assert!(super::try_write_json_columns_typed(&frame).is_some());
         assert!(super::try_write_json_index_typed(&frame).is_some());
+        assert!(super::try_write_json_values_typed(&frame).is_some());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("json"),
             serde_ref(&frame),
@@ -30876,6 +30937,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&frame);
         assert_columns_matches(&frame);
         assert_index_matches(&frame);
+        assert_values_matches(&frame);
 
         // -Inf in isolation.
         let mut c2: BTreeMap<String, Column> = BTreeMap::new();
@@ -30888,6 +30950,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&f2);
         assert_columns_matches(&f2);
         assert_index_matches(&f2);
+        assert_values_matches(&f2);
 
         // Empty frame (0 rows) and a single-column int frame.
         let mut c3: BTreeMap<String, Column> = BTreeMap::new();
@@ -30900,6 +30963,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&f3);
         assert_columns_matches(&f3);
         assert_index_matches(&f3);
+        assert_values_matches(&f3);
 
         // A Utf8 column forces the serde fallback; equality must still hold
         // (trivially, since the fast path declines).
@@ -30919,6 +30983,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&f4);
         assert_columns_matches(&f4);
         assert_index_matches(&f4);
+        assert_values_matches(&f4);
 
         // Contiguous Utf8 column (the read-path backing the typed Utf8 arm
         // accepts), with strings spanning the no-escape fast path and every
@@ -30954,6 +31019,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&f5);
         assert_columns_matches(&f5);
         assert_index_matches(&f5);
+        assert_values_matches(&f5);
 
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;
@@ -30982,5 +31048,6 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&rframe);
         assert_columns_matches(&rframe);
         assert_index_matches(&rframe);
+        assert_values_matches(&rframe);
     }
 }

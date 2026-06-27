@@ -6064,3 +6064,22 @@ Bit-equivalence guard: before landing, the ordinal formula was checked against t
 400k-day contiguous range plus 5M randomized epoch days. Focused fp-frame isocalendar tests and the full
 fp-conformance crate were run in release mode. Residual remains output/DataFrame construction plus pandas' vectorized
 datetime core; another same-formula scalar tweak is unlikely to close the remaining gap.
+
+### 2026-06-27 TealOsprey — to_json(values) typed streaming writer: 1.78x -> 11.3x WIN vs pandas (6.36x fp-side)
+The fifth and last to_json orient still on the serde tree. `Values` is `[[v,v],...]` (row-major arrays, no keys) — the
+simplest orient — but still built a `Vec<serde_json::Value>` per row + a per-cell `Scalar`/`Value`. Added
+`try_write_json_values_typed` reusing `extract_typed_value_columns` (i64/f64/bool/datetime/utf8) + the shared
+`append_typed_json_value`, emitting `[` + comma-joined cell values + `]` per row. Bails to serde on any non-typed
+column. Bit-identical to the serde `Values` arm (column-order values, same per-dtype spellings).
+
+Same-box best-of-3, 1M rows × {Int64, Float64} (`fp-io/examples/bench_to_json 1000000 values`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde tree) | patched (streaming) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(values)` 1M | 344.1ms | 54.0ms | 6.36x | 1.78x -> 11.3x (pandas 613.4ms) |
+
+Bit-identical: the json differential now also asserts Values vs a from-scratch serde array-of-arrays reference over
+every test frame (numeric edges, datetime+NaT, contiguous-Utf8 escape cases, empty, fallback, LCG sweep); fp-io 48
+json tests green. ALL FIVE to_json orients (records/columns/index/values/split) + jsonl now use typed streaming
+writers across every common column dtype. Split still builds its `data` arrays via serde (its columns/index header
+arrays are tiny); the dominant `data` section is the same row-major shape as Values and is the remaining follow-up.

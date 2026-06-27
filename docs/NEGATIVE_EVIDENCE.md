@@ -5738,3 +5738,22 @@ contract ops (to_records/to_dict — output is the cost), (b) parse-bound ops (u
 MultiIndex), or (c) bench-amortized input materialization (OnceLock-cached `.values()`). Confirms again: the
 measurable surface is dominated; the only real residuals are the representation floors (MultiIndex, i64 PeriodIndex,
 2D-block) — each a multi-crate golden-regen project, not a point fix.
+
+### 2026-06-27 AmberLynx — sort_values_single small-size: 10k 0.76x is fixed overhead, NOT the parallel gather (par-floor ~0-gain, reverted)
+Swept the matrix at 10k (small-size fixed-overhead is the one dimension unexplored after 5 cycles of 1M sweeps). The
+ONLY sub-1.0x non-floored op found: `sort_values_single` @10k — fp 530us vs pandas 403us = **0.76x**. It WINS at the
+larger sizes: 100k fp 3641us vs pandas 4076us = **1.12x**, and 1M (well-established). Everything else at 10k WINS
+(drop_dups 65x, melt 10.7x, gb_sum 11.5x, stack 2.7x, cumsum 2.6x, value_counts 2.2x, sort_multi 3.6x; unstack 1.04x
+≈ parity).
+
+HYPOTHESIS (rejected): the 0.6x came from `reorder_rows_by_positions_unchecked` spawning a `thread::scope` for the
+10-column gather via the default 16K-cell `par_map_columns` floor — a pure-bandwidth gather that is L2/L3-resident at
+10k/100k, where thread-spawn should be loss (cf `DataFrame::abs`'s 4M floor). Raised the reorder floor to 4M (10k/100k
+serial, 1M still threaded). MEASURED same-box back-to-back best-of-4: baseline 10k 530us / 100k 3641us vs patched 10k
+531us / 100k 3742us — **~0-gain** (best identical at 10k; baseline slightly FASTER at 100k). The thread-spawn overhead
+is already negligible; the earlier ~986us "baseline" was a LOAD-NOISE phantom on a busy box. REVERTED.
+
+The genuine 10k residual is fixed Scalar/radix/frame-construction overhead, and `sort_column.values()` is OnceLock-
+amortized across the bench's repeated sorts (so an as_f64_slice input lever is bench-invisible, like the to_records
+case). Not a point fix; absolute gap is ~127us on the smallest size while sort wins at 100k/1M. Surface remains
+dominated; do NOT re-chase the reorder par-floor for small-size sort.

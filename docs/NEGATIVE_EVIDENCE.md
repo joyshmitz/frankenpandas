@@ -5405,3 +5405,16 @@ to_numpy NaN; conformance-equivalent.
 bench_gb_xform 1M g=1000: cumprod 12.49->4.03ms = 0.31x->0.95x (pandas 3.84); cumsum/cummax/cummin unchanged ~2.3ms.
 Conformance GREEN: 62 cum* tests + fp-frame lib (3 acosh fails are the pre-existing peer math-unary regression, not
 this change). Realistic (non-overflow) cumprod was already fast via the owned move; this fixes the overflow case.
+
+### 2026-06-26 BlackThrush — PROBE (no big gap): DataFrameGroupBy agg + multi-key groupby DOMINATED
+Dug for a new lever across two surfaces; both are won, no flippable gap. Benches added (bench_gb_agg,
+bench_gb_multikey), pandas 2.2.3, 1M, g=1000 (×g2=100 for multi-key), load ~10.
+- df.groupby(k) agg: median 15.0ms=1.33x, quantile 17.8ms=1.31x, nunique 71.0ms=1.53x, first 2.50ms=1.11x,
+  last 2.51ms=1.00x — WIN/parity. Small NEAR-PARITY losses (moment-fusion residual, ~1ms, NOT lever-worthy):
+  sem 4.67 vs 3.45ms (0.74x), std 3.99 vs 3.46 (0.87x), skew 5.00 vs 4.59 (0.92x) — already on the typed dense
+  moment path (try_moment_dense / agg_typed_pairs_dense_f64_moments); residual is fp's per-moment passes vs pandas'
+  fused Cython, same shape as the grouped shift/diff residual.
+- df.groupby([k1,k2]) MULTI-KEY (memory's "open vein" — now CLOSED): sum 43.97 vs 76.29ms=1.74x, mean 43.24 vs
+  79.78=1.84x, count 34.17 vs 74.82=2.19x, max 35.87 vs 75.47=2.10x — all WIN.
+NET: the GroupBy surface (single+multi key, reductions/transforms/moments) is dominated. The only sub-1.0x reads are
+near-parity moment-fusion (sem/std/skew) and the documented grouped shift/diff. No new radical lever found this dig.

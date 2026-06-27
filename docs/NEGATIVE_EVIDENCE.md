@@ -5848,3 +5848,29 @@ astype tests (incl. `series_astype_string_golden_basic`, `df_astype_all_columns_
 a third time: any hot loop using `write!` into a `Vec<u8>` via `io::Write` to format fixed-shape integers pays the
 `write_fmt` tax — hand-rolled ASCII writers are the fix. RESIDUAL: the Float64->Utf8 astype path still calls
 `fp_types::float_to_string_for_astype` (shortest round-trip — genuinely hard to hand-roll, left as-is).
+
+### 2026-06-27 Codex cod-b - to_period day-run label cache: M 0.62x -> 1.17x, W 0.36x -> 1.11x vs pandas
+Follow-up to the live `Series.to_period` string-floor gap after the shared contiguous-index Series path and hand-rolled
+ASCII formatter landed.
+The remaining hot cost was not another Series/DataFrame wrapper: hourly Datetime64 indexes repeatedly emitted the
+same period label for every row in the same calendar day, so `period_index_from_datetime_like_index` still reran the
+Hinnant civil conversion plus fixed-width ASCII digit pushes for 24 adjacent rows with identical M/D/W output. Added
+a tiny day-run label cache inside the contiguous Utf8 index builder for date-level frequencies (`Y`, `Q`, `M`, `W`,
+`D`, `B`). The cache stores only the just-emitted label for the current Datetime64 day; Utf8 labels and hour/min/sec
+frequencies stay on the original direct append path. Output remains byte-identical because cache misses call the same
+`append_period_label` helper, and cache hits copy the exact bytes it just appended.
+
+Same-worktree proof, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`, `rch exec` fell open
+locally because no worker slots were admissible. Workload: `cargo run --release -p fp-frame --example
+bench_toperiod -- 1000000 <freq>` over a 1M hourly Datetime64 index.
+
+| workload | current main | patched | pandas 2.2.3 comparator | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Series.to_period("M") | 36.35ms | 19.423ms | 22.69ms | 0.62x -> 1.17x | 1.87x |
+| Series.to_period("W") | 71.76ms | 23.102ms | 25.75ms | 0.36x -> 1.11x | 3.11x |
+| Series.to_period("D") | 34.97ms | 14.693ms | not rerun in this cycle | - | 2.38x |
+
+Conformance target: same semantics as the existing contiguous label path; validation in this commit runs focused
+to_period tests plus full `fp-conformance --release`. Residual: W is still below pandas because FP stores period
+labels as Utf8 bytes rather than pandas' compact PeriodIndex ordinals. M now reaches parity on this measured shape;
+the next deeper lever remains a real Period index-label type, not more string formatting.

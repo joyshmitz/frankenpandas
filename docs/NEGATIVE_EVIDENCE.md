@@ -5649,3 +5649,26 @@ also returned **67.284ms**, but the local before/after pair is the comparison pr
 Semantics are shared, not duplicated: `DataFrame::to_period` calls the same helper, so anchored `W-*`, `Y-*`, and
 `Q-*` aliases plus unsupported-frequency errors follow one code path. The focused Series guard now asserts the Series
 name, index name, and values survive the direct route.
+
+### 2026-06-27 AmberLynx — df.pivot Int64-keys/Float64-values typed fast path: 0.57x -> 1.98x vs pandas (3.0x fp-side)
+df.pivot was the biggest non-structural MEASURED loss in the dataframe_ops matrix: fp 66ms vs pandas 43.6ms = 0.57x
+@1M (100k distinct rows x 10 cols, unique (r,c) pairs). CAUSE: `DataFrame::pivot` called `.values()` on the index,
+columns AND values columns — each materializing a 1M-element `Vec<Scalar>` (3M boxed scalars), then hashed a
+`ScalarKey` per row for the row/col position maps + the cell scatter (2M ScalarKey probes). The classic Scalar-
+materialization tax. LEVER (`pivot_int64_keys_f64_values`, br-frankenpandas-pvtdk): when index+columns are all-valid
+Int64 (`as_i64_slice`) and values all-valid no-NaN Float64 (`as_f64_slice`), read every key/value straight off the
+typed slice, dedup+sort unique keys as raw i64, probe position maps with `FxHashMap<i64,u32>` (no ScalarKey), scatter
+into the same dense col-major grid, and MOVE a typed `Vec<f64>` into each all-present output column via
+`from_f64_values_owned` (Scalar `Null(NaN)` path only for columns with gaps).
+
+Same-box back-to-back best-of-5, fp-bench df_pivot @1M, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| workload | origin/main best | patched best | fp-side | vs pandas 2.2.3 (43.62ms) |
+| --- | ---: | ---: | ---: | ---: |
+| df_pivot 1M (Int64 keys, f64 vals, dense) | 66.11ms | 22.06ms | 3.0x | 0.57x -> 1.98x (WIN) |
+
+Bit-identical: first-seen unique i64 sorted ascending == `scalar_key_cmp` on Int64; row labels `IndexLabel::Int64(k)`,
+column labels the decimal string the generic `format!("{v:?}")`+strip produced; present cells `Scalar::Float64(slice[pos])`,
+missing the same `Null(NaN)`; all-valid `from_f64_values_owned` == `from_values` for no-NaN Float64. New differential
+test `df_pivot_int64_typed_matches_generic_pvtdk` proves the typed path's per-column value matrix == the generic
+Scalar path on a SPARSE int64/f64 pivot (covers both the all-present and the missing-cell branch). Conformance GREEN:
+fp-frame 40 pivot tests + full lib suite pass. Utf8/mixed-dtype or NaN-bearing pivots keep the generic path unchanged.

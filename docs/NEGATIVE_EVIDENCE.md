@@ -641,6 +641,56 @@ new helper plus `aligned_binary_f64_same_positions_matches_general_path_for_all_
 `series_add_aligns_on_union_index` all passed. `perf stat` was attempted for hardware
 counters but blocked by `perf_event_paranoid=4`, so this row uses timing proof only.
 
+### Kept: Series add/mul same-index owned hot Float64 output (cod-b 2026-06-27)
+
+Target: same public row as above, `Series::add` / `Series::mul`, 2M all-valid
+Float64 values on equal Int64 indexes, measured with `bench_binop_cc` best-of-50/80
+on pinned CPU 7. Route: the biggest remaining documented arithmetic gap was no
+longer the arithmetic sweep itself, but the materialization boundary after the
+same-index Float64 kernel. The no-output-NaN branch already proves the output is
+all-valid; it was still feeding the hot result `Vec<f64>` through the Arc-slice
+constructor. The new lever stamps that exact proven all-valid buffer through the
+owned lazy Float64 backing (`LazyAllValidFloat64Vec`), matching the existing unary
+hot-output pattern and avoiding the cold `Arc<[f64]>` conversion copy. This came
+from the graveyard/vectorized-execution evidence: keep cache-hot vector outputs
+inside a vectorized/morsel pipeline instead of re-materializing at a boundary.
+
+Isomorphism proof: the arithmetic sweep, input-NaN gate, output-NaN gate, and
+fallbacks are unchanged. The new constructor is reached only when
+`!input_nan && !output_nan`; therefore every output slot is valid and contains the
+same `f64` bit pattern that the old all-valid constructor received. The storage
+variant changes from Arc-slice lazy all-valid to owned-Vec lazy all-valid, both
+surface through the same `as_f64_slice`/`values()` contracts and defer scalar
+materialization. A focused guard now asserts the same-index all-valid route keeps
+the owned lazy buffer without populating scalar values.
+
+Same-worktree FP baseline before the lever, `rch exec -- cargo build --release
+-p fp-frame --example bench_binop_cc` (local fallback, same target dir) then
+`taskset -c 7`: best-of-50 samples **add 6.912 / 6.346 / 6.640 ms**, **mul
+6.378 / 6.369 / 6.403 ms**, **gt 2.431 / 2.549 / 2.482 ms**. Candidate
+best-of-50 samples after the lever: **add 3.637 / 4.617 / 4.139 ms**, **mul
+3.175 / 4.080 / 4.423 ms**, **gt 1.987 / 2.618 / 2.469 ms**. Candidate
+best-of-80 confirmation: **add 3.517 ms, mul 3.710 ms, gt 1.915 ms**. Fresh
+pandas 2.2.3 best-of-80 on the same pinned CPU: **add 4.582 ms, mul 4.610 ms,
+gt 3.514 ms**. Head-to-head ratio (pandas / FP): **add 1.30x**, **mul 1.24x**,
+**gt 1.83x**. FP-side delta from the median best-of-50 baseline to the best-of-80
+confirmation: **1.89x faster add**, **1.72x faster mul**. KEEP.
+
+Verification: `cargo fmt -p fp-columnar --check` passed; full workspace
+`cargo fmt --check` is still red on unrelated pre-existing formatting drift in
+`fp-frame`/`fp-index`/`fp-join`, so this pass did not format peer-owned files.
+`rch exec -- cargo check -p fp-columnar --all-targets` and `rch exec -- cargo
+clippy -p fp-columnar --all-targets -- -D warnings` passed on `hz2`.
+Focused guards passed: `fp-columnar aligned_binary_f64_same_positions --release`,
+`fp-columnar apply_f64_slices_parallel_matches_serial_nan_tracking --release`,
+`fp-frame series_add_emits_alignment_semantic_witness_tn6qb3 --release`, and
+`fp-frame series_add_aligns_on_union_index --release`. The requested spelling
+`rch exec -- cargo bench --release -p fp-columnar --no-run` was tried and Cargo
+rejected `--release` for `bench`; the valid per-crate bench profile commands
+`rch exec -- cargo bench -p fp-columnar --no-run` and `rch exec -- cargo bench
+-p fp-columnar` both completed successfully. `rch exec -- cargo test -p
+fp-conformance --release` passed (1596 unit tests plus integration/doc tests).
+
 ### Win: max/min 8-lane chunked accumulator (simdmx) — gap 5×→1.7×
 **FIXED (mostly).** `Series.max/min` Int64 now use an 8-lane chunked accumulator
 (`i64_slice_max_simd`/`i64_slice_min_simd`): process 8 independent `max`/`min` lanes per

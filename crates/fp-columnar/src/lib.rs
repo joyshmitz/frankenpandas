@@ -9784,7 +9784,7 @@ impl Column {
                 if output_nan {
                     return Ok(Self::from_f64_values(data));
                 }
-                return Ok(Self::from_f64_values_all_valid_unchecked(data));
+                return Ok(Self::from_f64_all_valid_with_finite_opt(data, None));
             }
         }
 
@@ -19501,6 +19501,25 @@ mod tests {
         for idx in 0..actual.len() {
             assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
         }
+    }
+
+    #[test]
+    fn aligned_binary_f64_same_positions_keeps_hot_owned_buffer_all_valid() {
+        let left = Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0]);
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0, 40.0]);
+
+        let actual = left
+            .aligned_binary_f64_same_positions(&right, ArithmeticOp::Add)
+            .expect("same-position add");
+
+        assert_eq!(
+            actual.as_f64_slice().expect("all-valid typed output"),
+            &[11.0, 22.0, 33.0, 44.0]
+        );
+        assert!(matches!(
+            &actual.values,
+            ScalarValues::LazyAllValidFloat64Vec { values, .. } if values.get().is_none()
+        ));
     }
 
     #[test]

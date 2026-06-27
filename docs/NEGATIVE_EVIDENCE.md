@@ -5418,3 +5418,15 @@ bench_gb_multikey), pandas 2.2.3, 1M, g=1000 (×g2=100 for multi-key), load ~10.
   79.78=1.84x, count 34.17 vs 74.82=2.19x, max 35.87 vs 75.47=2.10x — all WIN.
 NET: the GroupBy surface (single+multi key, reductions/transforms/moments) is dominated. The only sub-1.0x reads are
 near-parity moment-fusion (sem/std/skew) and the documented grouped shift/diff. No new radical lever found this dig.
+
+### 2026-06-26 BlackThrush — PROBE (no big gap): df merge inner — Utf8 key 5x WIN, Int64 near-parity
+Dug the join surface (memory flagged Utf8/multi-key as open). bench_merge (fp-join example), 1M left x 100K right
+unique, inner, pandas 2.2.3, load ~11:
+- Utf8 key: fp 73.94ms vs pandas 370.29ms = 5.01x WIN (the "open" Utf8-key vein is CLOSED — fp contiguous-Utf8
+  factorize crushes pandas' object-key hash join).
+- Int64 key: fp 66.51ms vs pandas 59.24ms = 0.89x near-parity (hash-join vs hash-join; ~7ms residual, not lever-
+  worthy, and fp-join is peer-contended).
+NET: join surface dominated (Utf8) / near-parity (i64). No new lever. Combined with this session's groupby/ewm/
+rolling/expanding/str/pivot/sort probes, the fp-frame+fp-join op surface is comprehensively at-or-above pandas; the
+only sub-1.0x reads are near-parity moment-fusion (grouped sem/std/skew, shift/diff) and structural/build-gated
+(math-unary AVX target-block, round libcall, to_numpy/transpose 2D-block) — all already documented.

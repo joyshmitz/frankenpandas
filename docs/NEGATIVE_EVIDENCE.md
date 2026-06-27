@@ -5430,3 +5430,18 @@ NET: join surface dominated (Utf8) / near-parity (i64). No new lever. Combined w
 rolling/expanding/str/pivot/sort probes, the fp-frame+fp-join op surface is comprehensively at-or-above pandas; the
 only sub-1.0x reads are near-parity moment-fusion (grouped sem/std/skew, shift/diff) and structural/build-gated
 (math-unary AVX target-block, round libcall, to_numpy/transpose 2D-block) — all already documented.
+
+### 2026-06-27 BlackThrush — dt.isocalendar 0.048x -> 0.59x (12.2x fp-side): biggest gap of the session
+Probed the Series.dt accessor (bench_dtacc): strftime 4.40x, day_name 8.45x, month_name 4.88x WIN; normalize 0.66x
+minor; but dt.isocalendar was 504.95ms vs pandas 24.29ms = 0.048x (20x SLOWER) — the biggest gap found in many
+cycles. THREE stacked costs, all fixed via a typed Datetime64 fast path: (1) DataFrame::from_series computed an O(n)
+UNION over three identical 1M-label indexes (super-linear, cache-cold — the DOMINANT cost) -> build directly via
+new_with_column_order on the shared input index; (2) Timestamp::year()/month()/day() EACH re-ran the full Hinnant
+civil algorithm (3x redundant) -> compute civil ONCE over the raw as_datetime64_slice &[i64]; (3) iso_year_week_day
+rebuilt two [i64;12] arrays + iter-summed per call -> inlined with const CUM/Sakamoto tables. Output via typed
+from_i64_values_with_validity (NaT -> validity-missing) instead of 3x Vec<Scalar>.
+bench_dtacc 1M (load ~12): isocalendar 504.95 -> 41.4ms = 0.048x -> 0.59x (pandas 24.29ms; 12.2x fp-side, eliminates
+the 20x-slowness; residual is numpy's vectorized civil). Conformance GREEN: fp-frame lib 3103 + new differential
+isocalendar_typed_conformance (typed Datetime64 path == Utf8 parse path bit-for-bit over a decade of daily dates +
+ISO-week 52/53 boundaries + leap years + NaT). LESSON: DataFrame::from_series' multi-index union is a hidden O(n)
+tax on any multi-column dt/derived output — check other 3-column dt returns (e.g. similar accessors).

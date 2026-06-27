@@ -5804,3 +5804,26 @@ Notes: the old ledger's sub-1.0x pandas ratios for this surface are stale under 
 but the fp-side delta is large and same-worktree. Bit contract is the existing per-group row-order reference:
 `shift(1)` emits the previous in-group value; `diff(1)` emits current minus previous; first row per group remains
 missing via the same `from_f64_values_with_validity` path.
+
+### 2026-06-27 TealOsprey — strftime hand-rolled ASCII digit writers: 2.05-2.2x fp-side (9.8-10.5x vs pandas)
+Direct follow-up to AmberLynx's to_period lever (the prior entry literally named `strftime` as the next loop paying
+the same tax). `DatetimeAccessor::strftime`'s clean typed path (all-valid `datetime64[ns]`, no NaT) emitted each `%Y`
+/`%m`/`%d`/`%H`/`%M`/`%S` directive via `write!(bytes, "{y:04}")` etc — `core::fmt` Formatter dispatch + `pad_integral`
+(width/fill/sign branches) paid per directive per row, 1M× and more for multi-directive formats. Replaced every
+`write!` arm with hand-rolled ASCII digit pushes into the `Vec<u8>` byte buffer (`push_4d_bytes`/`push_2d_bytes`,
+new siblings of `push_4d`/`push_2d`). Bit-identical: a `datetime64[ns]` year is always in [1677, 2262] (the i64-ns
+representable range) so `%Y` is exactly 4 digits like `{:04}`, and m/d/H/M/S are exactly 2 like `{:02}` — the manual
+writers produce byte-identical output, no fmt dispatch.
+
+Same-box back-to-back best-of-3, 1M `datetime64[ns]` series (`examples/bench_strftime`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| format | baseline (write!) | patched (hand-rolled) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `%Y-%m-%d` | 91.47ms | 44.54ms | 2.05x | 4.76x -> 9.80x (pandas 436.0ms) |
+| `%Y-%m-%d %H:%M:%S` | 180.34ms | 81.88ms | 2.20x | 4.77x -> 10.50x (pandas 859.2ms) |
+
+The `core::fmt` overhead was ~HALF of strftime's wall time, same as to_period. Already WON vs pandas before; now wins
+by ~2x more. Bit-identical: conformance packets FP-P2D-239 (basic strict) + FP-P2D-310 (null hardened) both green
+(`--require-green` exit 0); fp-frame suite green. CONFIRMS the AmberLynx generalization: hand-rolled ASCII digit
+writers are a reusable lever for any hot loop formatting fixed-shape integers (next candidates: astype_str, csv/json
+numeric serialization).

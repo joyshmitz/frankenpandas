@@ -5585,3 +5585,22 @@ joined to 100k sorted unique right Utf8 keys; pandas 2.2.3 equivalent `left.merg
 | workload | current main | patched | pandas 2.2.3 | ratio vs pandas | fp-side |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | sorted duplicate-run Utf8 inner merge | 82.124ms | 71.649ms | 226.015ms | 2.75x -> 3.15x | 1.15x |
+
+### 2026-06-27 Codex cod-a — NO-SHIP: Series.to_period direct Series bypass is dominated after numeric-label main
+Started from the stale pre-numeric-label gap where `Series.to_period("M")` measured 267.302ms locally versus pandas
+2.2.3 best 20.678ms. A direct Series path that bypassed `to_frame -> DataFrame::to_period -> squeeze` initially
+looked like a 1.68x fp-side win against that old baseline (158.790ms), with conformance GREEN. During verification,
+`origin/main` advanced with the numeric civil/weekly `to_period` commits (`471910b4f`, `f5e092a43`) plus the sorted
+Utf8 merge land (`f082728e6`), so the candidate had to be retested against current main.
+
+Current-main recheck, same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, `rch exec`
+fell open locally due no admissible workers:
+
+| workload | current main | direct Series bypass | pandas 2.2.3 best/median | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Series.to_period("M"), 1M Datetime64 index | 97.661ms | 188.073ms | 20.678ms / 21.068ms | 0.212x -> 0.110x | 0.52x REGRESSION |
+
+Action: aborted the cherry-pick and landed no code. Lesson: after numeric label formatting, the DataFrame round trip is
+not the dominant cost and may preserve hotter codegen/layout than the extracted helper. Do not re-chase the old
+267ms->158ms evidence; the live frontier is still the Utf8 period-label representation floor versus pandas' compact
+PeriodIndex, not the Series/DataFrame wrapper path.

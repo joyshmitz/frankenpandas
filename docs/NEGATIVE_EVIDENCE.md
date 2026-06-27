@@ -5874,3 +5874,22 @@ Conformance target: same semantics as the existing contiguous label path; valida
 to_period tests plus full `fp-conformance --release`. Residual: W is still below pandas because FP stores period
 labels as Utf8 bytes rather than pandas' compact PeriodIndex ordinals. M now reaches parity on this measured shape;
 the next deeper lever remains a real Period index-label type, not more string formatting.
+
+### 2026-06-27 BlackThrush — dt.isocalendar weekday-from-epoch: 0.49x -> 0.62x vs pandas (20% fp-side)
+Follow-up dig on the largest remaining measured gap after the typed `dt.isocalendar` fast path. First probe was the
+obvious all-valid validity-mask shortcut (build columns with `from_i64_values` when no NaT appears): same-box local
+baseline 49.381ms vs patched 88.986ms @1M, REVERTED. The allocation it removes is not the bottleneck, and the extra
+invalid-position bookkeeping made the hot all-valid case worse.
+
+Kept lever: typed `isocalendar` already has `dse = ns.div_euclid(NANOS_PER_DAY)`, so ISO weekday can be derived as
+`(dse + 3).rem_euclid(7) + 1` because 1970-01-01 was Thursday. This removes the per-row Sakamoto weekday formula
+(`y_adj + y_adj/4 - y_adj/100 + y_adj/400 + table + day`) and the month-offset table from the hot loop, while leaving
+the civil-date and ISO-week boundary logic unchanged.
+
+Evidence: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo run --release -p
+fp-frame --example bench_dtacc -- 1000000 isocalendar` fell open locally because workers were saturated, so the
+comparison uses the immediately preceding same-target local baseline. Current main baseline 49.381ms; patched hot
+runs 41.678ms and 39.353ms. Using the established same-workload pandas 2.2.3 comparator from the prior entry
+(24.29ms), ratio improves from 0.49x to 0.62x vs pandas; fp-side speedup 1.25x. Residual remains vectorized
+date-to-civil arithmetic plus three-column materialization; the cheaper validity construction was negative evidence,
+not a keeper.

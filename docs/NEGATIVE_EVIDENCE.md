@@ -5459,3 +5459,16 @@ resample_week_numeric_conformance (numeric == chrono Sunday-ord over 80yr incl. 
 REMAINING (logged, not lever-worthy yet): 'h' 0.27x (29 vs 7.9ms) — the fixed-duration path already bins numerically
 + dense-scatters, but materializes a Vec<Vec<usize>> over 16667 bins (thousands of small allocs + scattered gather);
 a CSR (counting-sort, one flat Vec) layout or a single-pass sum/count accumulator for sum/mean would close it.
+
+### 2026-06-27 BlackThrush — resample sub-daily ('h') single-pass fusion: 0.27x -> 0.78x (2.9x fp-side)
+Follow-up to the 'W' win. 'h' (29 vs 7.9ms) already used subdaily_reduce_single_pass (sum/count per bin, no
+Vec<Vec>) — but it first materialized TWO 16MB Vec<Option<i64>> temps (ns_ords + bins) and scanned them for
+min/max. Since origin == min ns, every bin is >= 0 (bmin == 0), so fused to: one pass for min/max ns, then accumulate
+sum[bin]/count[bin] directly via resample_label_to_ns inline — NO temp Vecs. bench_resample 1M: h mean 29->10.1ms =
+0.27x->0.78x (pandas 7.9; sum same); D/W no regression. Bit-identical (same origin/bins/bound/row-order accum):
+fp-frame lib 3103 + 51 resample tests, 0 failed.
+SEPARATE pre-existing pathology (NOT this change, golden-locked): resample('min') 261ms / ('s') 3142ms over
+minute-spaced data — these produce ~1M / ~60M bins (near-identity / mostly-empty) and format that many Utf8 STRING
+labels (fast civil format! for 'min'; chrono dt.format for 's' via the build_groups fallback). pandas returns an i64
+DatetimeIndex (no string formatting). Closing them needs the resample output index to be Datetime64 labels instead
+of Utf8 strings — a golden-regen + label-dtype change across the whole resample surface, deferred.

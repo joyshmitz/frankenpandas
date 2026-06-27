@@ -5781,3 +5781,26 @@ to_period lib tests + full suite green. RESIDUAL (still <1.0x vs pandas, unchang
 not an i64 PeriodIndex — closing fully needs a Period index-label type. GENERALIZES: any hot loop formatting fixed-
 shape integers (strftime, astype_str, csv/json numeric serialization) pays the same `pad_integral` tax — hand-rolled
 ASCII digit writers are a reusable lever.
+
+### 2026-06-27 Codex cod-a - SeriesGroupBy shift/diff periods=1 fast path: 2.8x/2.35x fp-side
+Dig path after the measured to_period contiguous-Utf8 win was already on `origin/main`. The biggest old source-
+addressable residual still worth testing was SeriesGroupBy shift/diff over dense Int64 keys. Current main had already
+landed the key-offset path, but `periods=1` still paid the general ring-buffer cost: per row it did `cnt`, modulo,
+`off * periods + slot`, and a usize count update even though the common pandas default only needs one previous value
+per group. Added a narrow `periods == 1` branch in the Int64-key direct kernels: `last[off]`, `seen[off]`, one validity
+bit, and no ring math. `periods > 1` stays on the existing implementation.
+
+Bench evidence, same checkout and target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`,
+`rch exec` fell open locally because no workers were admissible. Workload: `bench_gb_cum 1000000 1000 {shift,diff}
+6` (1M all-valid Float64 values, dense Int64 grouping key, periods=1). Same-box pandas 2.2.3 comparator used the
+same generated splitmix-style key/value arrays.
+
+| workload | current main | patched | pandas 2.2.3 | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SeriesGroupBy.shift(1) | 9.967ms | 3.527ms | 28.490ms | 2.86x -> 8.08x | 2.83x |
+| SeriesGroupBy.diff(1) | 8.431ms | 3.589ms | 29.100ms | 3.45x -> 8.11x | 2.35x |
+
+Notes: the old ledger's sub-1.0x pandas ratios for this surface are stale under today's same-box pandas comparator,
+but the fp-side delta is large and same-worktree. Bit contract is the existing per-group row-order reference:
+`shift(1)` emits the previous in-group value; `diff(1)` emits current minus previous; first row per group remains
+missing via the same `from_f64_values_with_validity` path.

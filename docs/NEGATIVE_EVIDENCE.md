@@ -5544,3 +5544,15 @@ Conformance GREEN: `cargo test -p fp-columnar --release` passed 441/441 (5 ignor
 `(x * factor).round_ties_even() / factor` by exact bits across infinities, signed zero, 2^52 boundaries, large finite
 values, and 20k generated normals for decimals -6, -2, 0, 2, 6, 12. Remaining gap is memory/write + scalar path
 overhead; true SIMD roundpd/SVML lowering is still the deeper lever.
+### 2026-06-27 BlackThrush — to_period numeric civil label (M/D/Y/Q/H/min/s): ~150->94ms M (1.6x fp-side, 0.15x->0.24x)
+Probed Series.dt -> to_period (converts the Datetime64 ROW INDEX to period labels; fp uses Utf8 string labels):
+ALL freqs lose — M 0.15x (150 vs 22.7ms), D 0.14x, Y 0.19x, W 0.064x (402ms). period_index_label converted each ns
+-> chrono NaiveDateTime (DateTime::from_timestamp) -> dt.format per row (1M chrono ops). Added period_label_numeric:
+inline Hinnant civil (y,m,d) + time-of-day from div_euclid over the raw ns, format! directly, gated 4-digit years
+(chrono %Y zero-pads to 4 == {:04}); Weekly/Business return None -> keep the chrono path (need week/business bounds).
+bench_toperiod 1M (load-matched toggle): M 150->94ms (1.6x fp-side, pandas 22.69 -> 0.15x->0.24x), D 198->155ms.
+Bit-identical: fp-frame lib 3103 + 35 to_period tests, 0 failed. CAUTION (process note): an early stash-toggle was
+load-CONFOUNDED (without=load61, with=load114) and falsely read ~0-gain; a same-load re-toggle showed the real 1.6x.
+RESIDUAL FLOOR (still <1.0x, NOT chrono): 1M IndexLabel::Utf8 String allocs + Index::new over them — pandas returns
+an i64 PeriodIndex (no strings). Closing needs a Period/i64 index label type (golden-regen, big). 'W'/'B' still
+chrono (anchored bounds). PROBED & WON (don't re-chase): df.melt 100Kx10/x20 = 1.8x/1.6x WIN (typed tiling).

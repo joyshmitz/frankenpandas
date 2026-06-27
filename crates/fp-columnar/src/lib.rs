@@ -4503,6 +4503,46 @@ fn push_fixed_width_lower_hex(bytes: &mut Vec<u8>, value: u64, width: usize) {
     }
 }
 
+/// Append the plain decimal spelling of `v` (sign + digits, no leading zeros,
+/// `0` for zero) straight into a byte buffer — bit-identical to `write!(buf,
+/// "{v}")` but without routing through `io::Write::write_fmt`'s Formatter +
+/// error-path dispatch (the hot tax in Int64->Utf8 astype). Two-digit lookup
+/// table halves the divide/mul count vs a per-digit loop. `unsigned_abs`
+/// handles `i64::MIN` without overflow.
+#[inline]
+fn push_i64_decimal(buf: &mut Vec<u8>, v: i64) {
+    const LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
+20212223242526272829303132333435363738394041424344454647484950515253545556575859\
+60616263646566676869707172737475767778798081828384858687888990919293949596979899";
+    let mut n: u64 = if v < 0 {
+        buf.push(b'-');
+        (v as i64).unsigned_abs()
+    } else {
+        v as u64
+    };
+    // Emit digit PAIRS from least-significant into a 20-byte temp, then copy the
+    // written suffix in order (max u64 is 20 digits).
+    let mut tmp = [0u8; 20];
+    let mut i = 20usize;
+    while n >= 100 {
+        let r = (n % 100) as usize * 2;
+        n /= 100;
+        i -= 2;
+        tmp[i] = LUT[r];
+        tmp[i + 1] = LUT[r + 1];
+    }
+    if n >= 10 {
+        let r = n as usize * 2;
+        i -= 2;
+        tmp[i] = LUT[r];
+        tmp[i + 1] = LUT[r + 1];
+    } else {
+        i -= 1;
+        tmp[i] = b'0' + n as u8;
+    }
+    buf.extend_from_slice(&tmp[i..]);
+}
+
 fn increment_fixed_width_lower_hex(digits: &mut [u8]) {
     for byte in digits.iter_mut().rev() {
         match *byte {
@@ -14413,22 +14453,22 @@ impl Column {
             let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
             return Ok(Self::from_i64_values(out));
         }
-        // Int64 -> Utf8: `write!` each integer's decimal form straight into a
-        // contiguous byte buffer. cast_scalar(Int64(v), Utf8) is exactly
-        // `v.to_string()` (pandas spells ints plainly — unlike floats "1.0" and
-        // bools "True"/"False", which this path deliberately does NOT take), so
-        // this is bit-identical to the Scalar map below while skipping the
-        // Vec<Scalar::Utf8> + per-row String allocation. as_i64_slice is all-valid
-        // (no null spelling needed).
+        // Int64 -> Utf8: hand-rolled decimal itoa straight into a contiguous
+        // byte buffer (br-frankenpandas-itoa). cast_scalar(Int64(v), Utf8) is
+        // exactly `v.to_string()` (pandas spells ints plainly — unlike floats
+        // "1.0" and bools "True"/"False", which this path deliberately does NOT
+        // take), so `push_i64_decimal` is bit-identical to the Scalar map below
+        // while skipping the Vec<Scalar::Utf8> + per-row String AND the
+        // `write!`/`io::Write::write_fmt` Formatter dispatch the prior path paid
+        // per row. as_i64_slice is all-valid (no null spelling needed).
         if target == DType::Utf8
             && let Some(data) = self.as_i64_slice()
         {
-            use std::io::Write as _;
             let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 4);
             let mut offsets: Vec<usize> = Vec::with_capacity(data.len() + 1);
             offsets.push(0);
             for &v in data {
-                let _ = write!(bytes, "{v}");
+                push_i64_decimal(&mut bytes, v);
                 offsets.push(bytes.len());
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));

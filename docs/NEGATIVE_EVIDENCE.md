@@ -5827,3 +5827,24 @@ by ~2x more. Bit-identical: conformance packets FP-P2D-239 (basic strict) + FP-P
 (`--require-green` exit 0); fp-frame suite green. CONFIRMS the AmberLynx generalization: hand-rolled ASCII digit
 writers are a reusable lever for any hot loop formatting fixed-shape integers (next candidates: astype_str, csv/json
 numeric serialization).
+
+### 2026-06-27 TealOsprey — astype(Int64->Utf8) hand-rolled decimal itoa: 2.32x fp-side (10.6x vs pandas)
+The third op carrying the AmberLynx/strftime `core::fmt` tax (the strftime entry named `astype_str` as a next
+candidate). `Column::astype(Utf8)`'s Int64 fast path wrote each value via `use std::io::Write; write!(bytes, "{v}")`
+into a contiguous byte buffer — `io::Write::write_fmt` routes through Formatter construction + the io error path per
+row, far heavier than `fmt::Write`. Replaced with `push_i64_decimal`: a two-digit-LUT itoa emitting digit pairs LSB-
+first into a 20-byte temp then copying the suffix, `unsigned_abs` for `i64::MIN`. Bit-identical to `v.to_string()`
+(what `cast_scalar(Int64, Utf8)` does — pandas spells ints plainly).
+
+Same-box back-to-back best-of-3, 1M Int64 column (`fp-columnar/examples/bench_astype_str`, mixed-magnitude signed
+splitmix values), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (write!/io::Write) | patched (itoa) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `astype(str)` Int64 1M | 38.53ms | 16.57ms | 2.32x | 4.57x -> 10.6x (pandas 175.9ms) |
+
+Bit-identical: standalone differential `push_i64_decimal` vs `i64::to_string()` over 5M random + all i64 edge cases
+(0, ±1, ±99/±100, i64::MIN, i64::MIN+1, i64::MAX) = 0 mismatches; fp-columnar 7 astype unit tests + fp-frame 30
+astype tests (incl. `series_astype_string_golden_basic`, `df_astype_all_columns_to_utf8`) green. CONFIRMS the lever
+a third time: any hot loop using `write!` into a `Vec<u8>` via `io::Write` to format fixed-shape integers pays the
+`write_fmt` tax — hand-rolled ASCII writers are the fix. RESIDUAL: the Float64->Utf8 astype path still calls
+`fp_types::float_to_string_for_astype` (shortest round-trip — genuinely hard to hand-roll, left as-is).

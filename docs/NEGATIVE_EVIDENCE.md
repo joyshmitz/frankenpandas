@@ -6615,3 +6615,15 @@ broken positional order), fp-frame sort/nlargest/nsmallest/mode 101 passed, nlar
 Datetime64 nlargest/nsmallest == `sort_values±+take` (now exact) over date-spaced data. NOTE: this is a correctness
 improvement (output CHANGES to value-order = pandas-correct), not bit-identical to the prior broken behavior — but no
 test relied on the bug. Period columns gain correct ordering too (perf path Datetime-only for now).
+
+### 2026-06-27 TealOsprey — Datetime64 sort_values radix path: REVERTED (1.24x fp-side but still 0.85x vs pandas, gather-bound)
+After the Datetime64 comparator correctness fix, `Column::sort_values` on a Datetime64 column uses the generic
+exact-comparator sort (526ms, 0.66x vs pandas 349ms). Tried a typed radix path (i64_radix_key over the ns +
+`radix_argsort_u64`, gated no-NaT, re-wrap Datetime64) — bit-identical to the generic sort (differential
+`datetime64_sort_values_matches_scalar_reference` green, both directions + ties + NaT→end). MEASURED 5M Datetime64:
+526ms -> ~410ms = 1.24x fp-side, but still **0.85x vs pandas** (349ms). The residual is the cache-random
+`reorder_by_positions` gather (5M random `data[perm[i]]`), exactly the documented "i64 sort radix REJECTED
+(gather-bound, ~0-gain)" pattern — the radix removes the Scalar-comparison cost but the gather dominates and pandas'
+C radix still wins. REVERTED the radix path per the don't-re-chase-rejected-levers discipline; KEPT the comparator
+correctness fix and the differential test (it now guards the generic datetime sort). To actually beat pandas here
+needs a faster gather (the rejected `reorder_by_positions` problem), not another radix.

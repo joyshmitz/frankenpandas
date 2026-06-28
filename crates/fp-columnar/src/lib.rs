@@ -15416,6 +15416,9 @@ impl Column {
             let sorted: Vec<f64> = perm.iter().map(|&i| data[i]).collect();
             return Ok(Self::from_f64_values(sorted));
         }
+        // (Datetime64 radix sort path tried and REVERTED — see NEGATIVE_EVIDENCE:
+        // 1.24x fp-side but still 0.85x vs pandas, gather-bound like the rejected
+        // i64 radix sort. Datetime64 uses the generic exact-comparator sort below.)
         // All-valid Utf8: gather by the stable MSD radix permutation. The
         // fallback below sorts (idx, &Scalar) pairs stably with the same
         // ordering, so cloning in permutation order yields the identical
@@ -23415,6 +23418,37 @@ mod tests {
             let mut indexed: Vec<(usize, &Scalar)> = values.iter().enumerate().collect();
             indexed.sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
             indexed.into_iter().map(|(_, v)| v.clone()).collect()
+        }
+
+        #[test]
+        fn datetime64_sort_values_matches_scalar_reference() {
+            // Datetime64 sort_values: the no-NaT radix path AND the NaT-bearing
+            // fallback must both equal the stable scalar comparator reference
+            // (exact ns order, first-seen ties, NaT→end), both directions.
+            let mut state: u64 = 0x5151_2626_3737_4848;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 400) as usize + 1;
+                let ns: Vec<i64> = (0..n)
+                    .map(|_| match next() % 9 {
+                        0 => i64::MIN, // NaT (only some trials → exercises fallback)
+                        1 => (next() % 5) as i64, // ties
+                        _ => (next() % 1_000_000) as i64 * 1_000_000,
+                    })
+                    .collect();
+                let col = Column::from_datetime64_values(ns.clone());
+                let scalars: Vec<Scalar> = ns.iter().map(|&v| Scalar::Datetime64(v)).collect();
+                for asc in [true, false] {
+                    let got = col.sort_values(asc).expect("sort").values().to_vec();
+                    let expected = scalar_sort_reference(&scalars, asc);
+                    assert_eq!(got, expected, "trial {trial} asc={asc}");
+                }
+            }
         }
 
         #[test]

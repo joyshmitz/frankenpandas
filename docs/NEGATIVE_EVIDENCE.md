@@ -6434,3 +6434,25 @@ Biggest single flip of the session (8x loss → win). Bit-identical: new
 `mode_wide_i64_open_addressing_matches_reference` (winners == HashMap max-count ref, ascending, over full-range pool
 incl. i64::MIN/MAX with engineered ties, 150 LCG trials) + fp-columnar 5 mode + fp-frame 41 mode tests green. The
 open-addressing i64 table now serves nunique/unique/factorize/duplicated/mode (Int64 + Datetime64 where applicable).
+### 2026-06-28 BlackThrush - resample('s') sparse sub-daily run reducer: 0.97x -> 195x vs pandas (189x fp-side vs ORIG)
+After the `resample('min')` label fix, the remaining sub-daily pathology was the sparse second-bin path: the 1M
+minute-spaced fixture resampled to seconds spans ~60M possible bins, so the dense single-pass reducer bailed back to
+`build_groups`. That fallback formatted and hashed one timestamp string per observed row, even though the data are
+already ordered by bin and sub-daily semantics skip empty bins. Applied a guarded run reducer for sparse-but-bin-
+monotone sub-daily inputs: accumulate sum/count for the current observed bin, flush a `Datetime64` bin-start label
+when the bin changes, and fall back if bins ever decrease. This preserves row-order summation, skips empty second bins
+as before, and avoids the String-key HashMap path entirely.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`; ORIG is current `origin/main`
+at `b3a4545e5`. ORIG `rch exec` fell open locally because no worker slot was admissible; patched `rch exec` ran on
+worker `vmi1264463`. Command:
+`rch exec -- cargo run -p fp-frame --example bench_resample --release -- 1000000 s mean`; pandas 2.2.3 comparator
+uses the identical 1M minute-spaced timestamp fixture:
+| workload | ORIG best | patched best | pandas best | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `resample('s').mean()` 1M | 4549.421ms | 24.042ms | 4684.060ms | 1.03x -> 194.83x | 189.23x |
+
+Sibling `sum` sanity on the same patched tree: `resample('s').sum()` 1M best 13.961ms. Validation: focused
+`series_resample_sparse_subdaily_typed_path_skips_empty_bins` release test green; conformance and valid per-crate
+bench gates are recorded in the landing commit. The literal requested `cargo bench --release -p fp-frame` form remains
+invalid Cargo syntax, so the valid per-crate bench command is `cargo bench -p fp-frame`.

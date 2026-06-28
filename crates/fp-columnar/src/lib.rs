@@ -5288,6 +5288,76 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
     count + i64::from(has_sentinel)
 }
 
+/// `mode` (most-frequent value(s), ascending) for an all-valid `i64` slice too
+/// wide for the dense histogram, via an open-addressing `i64 -> count` map
+/// (linear probing, inline keys + parallel `u32` counts, ~0.67 load, Fibonacci
+/// hash) over the raw slice — no `Scalar` materialization, no `FxHashMap`
+/// overhead (the wide-i64 khash-floor lever; `mode` is tally+argmax, so unlike
+/// `value_counts` it has no large sorted output and is purely hash-bound).
+/// `i64::MIN` is the empty sentinel, its count tracked separately. Winners are
+/// returned ascending (matching the generic path's `compare_scalars_na_last`).
+fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
+    const EMPTY: i64 = i64::MIN;
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    if cap == 0 || data.len() > u32::MAX as usize {
+        let mut counts: FxHashMap<i64, u64> = FxHashMap::default();
+        for &v in data {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        let max_c = counts.values().copied().max().unwrap_or(0);
+        let mut winners: Vec<i64> = counts
+            .iter()
+            .filter_map(|(&k, &c)| (c == max_c).then_some(k))
+            .collect();
+        winners.sort_unstable();
+        return winners;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut cnt = vec![0u32; cap];
+    let mut sentinel_cnt: u64 = 0;
+    for &v in data {
+        if v == EMPTY {
+            sentinel_cnt += 1;
+            continue;
+        }
+        let mut p = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            if keys[p] == EMPTY {
+                keys[p] = v;
+                cnt[p] = 1;
+                break;
+            }
+            if keys[p] == v {
+                cnt[p] += 1;
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    let mut max_c: u64 = sentinel_cnt;
+    for p in 0..cap {
+        if keys[p] != EMPTY {
+            max_c = max_c.max(u64::from(cnt[p]));
+        }
+    }
+    let mut winners: Vec<i64> = Vec::new();
+    if sentinel_cnt > 0 && sentinel_cnt == max_c {
+        winners.push(EMPTY);
+    }
+    for p in 0..cap {
+        if keys[p] != EMPTY && u64::from(cnt[p]) == max_c {
+            winners.push(keys[p]);
+        }
+    }
+    winners.sort_unstable();
+    winners
+}
+
 /// `duplicated(keep="first")` flags for an all-valid `i64` slice too wide for
 /// the dense direct-address path, via the same open-addressing set as
 /// [`count_distinct_i64_wide`]: flag is `false` on a value's first occurrence
@@ -13594,21 +13664,29 @@ impl Column {
         // (matching `key_of`'s `None`-on-missing), and an empty column makes
         // `i64_direct_address_range` return `None` → the `HashMap` path returns
         // the empty same-dtype column exactly as before.
-        if let Some(data) = self.as_i64_slice()
-            && let Some((min, range)) = i64_direct_address_range(data)
-        {
-            let mut count = vec![0i64; range];
-            for &v in data {
-                count[(v as i128 - min as i128) as usize] += 1;
-            }
-            let max_count = count.iter().copied().max().unwrap_or(0);
-            let mut winners = Vec::new();
-            for (s, &c) in count.iter().enumerate() {
-                if c == max_count {
-                    winners.push(Scalar::Int64(min + s as i64));
+        if let Some(data) = self.as_i64_slice() {
+            if let Some((min, range)) = i64_direct_address_range(data) {
+                let mut count = vec![0i64; range];
+                for &v in data {
+                    count[(v as i128 - min as i128) as usize] += 1;
                 }
+                let max_count = count.iter().copied().max().unwrap_or(0);
+                let mut winners = Vec::new();
+                for (s, &c) in count.iter().enumerate() {
+                    if c == max_count {
+                        winners.push(Scalar::Int64(min + s as i64));
+                    }
+                }
+                return Self::new(self.dtype, winners);
             }
-            return Self::new(self.dtype, winners);
+            // Wide/sparse all-valid Int64: out of dense-histogram range, but the
+            // raw &[i64] avoids Scalar materialization — tally+argmax via the
+            // open-addressing map (breaks the FxHashMap khash floor; mode is
+            // hash-bound with a tiny output). Bit-identical: winners are the
+            // max-count values, ascending, same as the generic path.
+            if !data.is_empty() {
+                return Ok(Self::from_i64_values(mode_i64_wide(data)));
+            }
         }
 
         #[derive(Hash, PartialEq, Eq)]
@@ -24484,6 +24562,62 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Float64(1.0)]).expect("col");
             assert!(col.quantile(1.5).is_missing());
             assert!(col.quantile(-0.1).is_missing());
+        }
+
+        #[test]
+        fn mode_wide_i64_open_addressing_matches_reference() {
+            // Wide/sparse all-valid Int64 uses mode_i64_wide (open-addressing
+            // tally). Winners (max-count values, ascending) must equal a HashMap
+            // reference across full-range data incl. i64::MIN, with engineered ties.
+            use std::collections::HashMap;
+            let pool: [i64; 6] = [
+                i64::MIN,
+                i64::MAX,
+                4_000_000_000_000_000_000,
+                -4_000_000_000_000_000_000,
+                11,
+                -11,
+            ];
+            let mut state: u64 = 0x9988_7766_5544_3322;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 400) as usize + 2;
+                let mut data: Vec<i64> =
+                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                data[0] = i64::MIN;
+                data[1] = i64::MAX;
+                assert!(
+                    crate::i64_direct_address_range(&data).is_none(),
+                    "trial {trial}: expected wide data"
+                );
+                let mut counts: HashMap<i64, u64> = HashMap::new();
+                for &v in &data {
+                    *counts.entry(v).or_insert(0) += 1;
+                }
+                let max_c = counts.values().copied().max().unwrap();
+                let mut expected: Vec<i64> = counts
+                    .iter()
+                    .filter_map(|(&k, &c)| (c == max_c).then_some(k))
+                    .collect();
+                expected.sort_unstable();
+                let col = Column::from_i64_values(data);
+                let got: Vec<i64> = col
+                    .mode()
+                    .expect("mode")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("not int: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, expected, "trial {trial}");
+            }
         }
 
         #[test]

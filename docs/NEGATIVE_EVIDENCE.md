@@ -6416,3 +6416,21 @@ Bit-identical: the raw-i64 ascending sort equals `compare_scalars_na_last` for a
 existing `factorize_wide_i64_*` and `factorize_datetime64_*` differentials (BOTH sort modes vs O(n²)/reference) +
 fp-columnar 10 factorize tests green. The wide-i64 hash frontier (nunique/unique/factorize/duplicated, Int64+Datetime64)
 is now fully on typed open-addressing with typed I/O.
+
+### 2026-06-27 TealOsprey — mode wide/sparse Int64 open-addressing tally: 0.12x LOSS -> 1.23x WIN vs pandas (9.9x fp-side)
+The WORST khash-floor gap found: `mode` had a dense histogram for bounded i64 but fell to `FxHashMap<Key, (count,
+&Scalar)>` + Scalar materialization for SPARSE wide i64 — 8x SLOWER than pandas. Unlike value_counts, mode is
+tally+argmax with a TINY output (just the most-frequent value(s)), so it is purely hash-bound — the open-addressing
+lever applies cleanly. Added `mode_i64_wide`: open-addressing `i64 -> u32 count` over the raw `&[i64]`, then one pass
+to find max-count + collect ascending winners. i64::MIN empty-sentinel counted separately.
+
+Same-box best-of-3, 5M sparse i64 ~5M distinct (`fp-columnar/examples/bench_hashops 5000000 mode wide`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashMap+Scalar) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `mode` wide-i64 5M | 2546.4ms | 258.1ms | 9.86x | 0.12x -> 1.23x (pandas 318.8ms) |
+
+Biggest single flip of the session (8x loss → win). Bit-identical: new
+`mode_wide_i64_open_addressing_matches_reference` (winners == HashMap max-count ref, ascending, over full-range pool
+incl. i64::MIN/MAX with engineered ties, 150 LCG trials) + fp-columnar 5 mode + fp-frame 41 mode tests green. The
+open-addressing i64 table now serves nunique/unique/factorize/duplicated/mode (Int64 + Datetime64 where applicable).

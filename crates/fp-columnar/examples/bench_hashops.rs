@@ -22,6 +22,10 @@ fn main() {
     for _ in 0..6 {
         let t = std::time::Instant::now();
         match op {
+            "mode" => {
+                let r = col.mode().unwrap();
+                std::hint::black_box(r.len());
+            }
             "unique" => {
                 let r = col.unique().unwrap();
                 std::hint::black_box(r.len());

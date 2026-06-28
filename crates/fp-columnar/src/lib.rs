@@ -5392,13 +5392,14 @@ fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
 /// probing, inline keys + parallel `u32` codes, ~0.67 load, Fibonacci hash) over
 /// the raw slice — no `Scalar` materialization, no `FxHashMap` overhead (the
 /// wide-i64 khash-floor lever, shared shape with [`count_distinct_i64_wide`]).
-/// Returns `(codes, uniques)` in first-seen order, byte-identical to the
-/// `FxHashMap` path's assignment. `i64::MIN` is the empty sentinel and is
-/// tracked separately so a real `i64::MIN` value factorizes correctly.
-fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
+/// Returns `(codes, uniques)` in first-seen order (raw i64 uniques), byte-
+/// identical to the `FxHashMap` path's assignment. `i64::MIN` is the empty
+/// sentinel and is tracked separately so a real `i64::MIN` value factorizes
+/// correctly.
+fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
     const EMPTY: i64 = i64::MIN;
     let mut codes: Vec<i64> = Vec::with_capacity(data.len());
-    let mut uniques: Vec<Scalar> = Vec::new();
+    let mut uniques: Vec<i64> = Vec::new();
     // ~0.67 load: capacity = next power of two ≥ 1.5·n.
     let cap = data
         .len()
@@ -5414,7 +5415,7 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
                 None => {
                     let c = uniques.len() as i64;
                     map.insert(v, c);
-                    uniques.push(Scalar::Int64(v));
+                    uniques.push(v);
                     codes.push(c);
                 }
             }
@@ -5430,7 +5431,7 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
             if min_code < 0 {
                 let c = uniques.len() as i64;
                 min_code = c;
-                uniques.push(Scalar::Int64(EMPTY));
+                uniques.push(EMPTY);
                 codes.push(c);
             } else {
                 codes.push(min_code);
@@ -5444,7 +5445,7 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
                 let c = uniques.len() as i64;
                 keys[idx] = v;
                 code_at[idx] = c as u32;
-                uniques.push(Scalar::Int64(v));
+                uniques.push(v);
                 codes.push(c);
                 break;
             }
@@ -5454,6 +5455,59 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
             }
             idx = (idx + 1) & mask;
         }
+    }
+    (codes, uniques)
+}
+
+/// Fully-typed factorize of an all-valid `i64` slice: first-seen `(codes,
+/// uniques)` as raw `Vec<i64>` (dense direct-address when the value span is
+/// bounded, else the open-addressing map), with the optional ascending `sort`
+/// remap done on the raw i64 uniques (cheaper than `Scalar` comparison and
+/// bit-identical to `compare_scalars_na_last` for all-valid Int64/Datetime64 ns).
+/// No `Scalar` boxing on input OR output — the caller wraps via
+/// `from_i64_values` / `from_datetime64_values`.
+fn factorize_i64_typed(data: &[i64], sort: bool) -> (Vec<i64>, Vec<i64>) {
+    let (mut codes, mut uniques) =
+        if let Some((min, range)) = i64_direct_address_range(data) {
+            let mut code_table = vec![-1i64; range];
+            let mut uniques: Vec<i64> = Vec::new();
+            let mut codes: Vec<i64> = Vec::with_capacity(data.len());
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                let existing = code_table[slot];
+                if existing < 0 {
+                    let code = uniques.len() as i64;
+                    code_table[slot] = code;
+                    uniques.push(v);
+                    codes.push(code);
+                } else {
+                    codes.push(existing);
+                }
+            }
+            (codes, uniques)
+        } else {
+            factorize_i64_wide(data)
+        };
+
+    if sort && !uniques.is_empty() {
+        let mut ordering: Vec<usize> = (0..uniques.len()).collect();
+        ordering.sort_by(|&a, &b| uniques[a].cmp(&uniques[b]));
+        let mut remap = vec![0i64; uniques.len()];
+        let sorted: Vec<i64> = ordering
+            .into_iter()
+            .enumerate()
+            .map(|(sorted_pos, orig)| {
+                remap[orig] = sorted_pos as i64;
+                uniques[orig]
+            })
+            .collect();
+        for c in &mut codes {
+            // All-valid typed input ⇒ no -1 sentinel, but keep the guard.
+            if *c >= 0 {
+                *c = remap[*c as usize];
+            }
+        }
+        uniques = sorted;
     }
     (codes, uniques)
 }
@@ -15446,63 +15500,33 @@ impl Column {
             }
         }
 
-        // `codes` is a typed `Vec<i64>` (factorize codes are always plain Int64,
-        // -1 for NA) — built directly and emitted via `from_i64_values`, skipping
-        // the n × 32 B `Scalar::Int64` output boxing the old path paid.
-        let (mut codes, mut uniques): (Vec<i64>, Vec<Scalar>) = if let Some(data) =
-            self.as_i64_slice()
-        {
-            if let Some((min, range)) = i64_direct_address_range(data) {
-                // Hash-free direct-address factorize for a bounded-range all-valid
-                // Int64 column: a dense code table indexed by (v-min) assigns
-                // first-seen codes in O(n) with no hashing. All-valid ⇒ no
-                // missing/sentinel handling, so this is bit-identical to the
-                // HashMap path's first-seen code assignment.
-                let mut code_table = vec![-1i64; range];
-                let mut uniques: Vec<Scalar> = Vec::new();
-                let mut codes: Vec<i64> = Vec::with_capacity(data.len());
-                for &v in data {
-                    let slot = (v as i128 - min as i128) as usize;
-                    let existing = code_table[slot];
-                    if existing < 0 {
-                        let code = uniques.len() as i64;
-                        code_table[slot] = code;
-                        uniques.push(Scalar::Int64(v));
-                        codes.push(code);
-                    } else {
-                        codes.push(existing);
-                    }
-                }
-                (codes, uniques)
-            } else {
-                // Wide/sparse all-valid Int64: out of dense-bitset range, but the
-                // raw &[i64] avoids Scalar materialization — first-seen factorize
-                // via the open-addressing i64→code map (breaks the FxHashMap khash
-                // floor). Bit-identical to the HashMap path's first-seen order.
-                factorize_i64_wide(data)
-            }
-        } else if !self.has_nulls()
+        // Fully-typed fast paths emit BOTH codes and uniques as typed columns
+        // (no Scalar boxing on input or output, raw-i64 sort) and return early —
+        // bypassing the Scalar `uniques` Vec + the Scalar sort below.
+        //   * all-valid Int64 → codes + uniques as Int64.
+        if let Some(data) = self.as_i64_slice() {
+            let (codes, uniques) = factorize_i64_typed(data, sort);
+            return Ok((Self::from_i64_values(codes), Self::from_i64_values(uniques)));
+        }
+        //   * all-valid Datetime64 with NO NaT (i64::MIN) → codes as Int64,
+        //     uniques re-wrapped as Datetime64. The generic path codes NaT as
+        //     -1 / a first-seen bucket (use_na_sentinel-dependent), so any NaT
+        //     (validity-null or an i64::MIN datum) falls through to the Scalar arm.
+        if !self.has_nulls()
             && let Some(data) = self.as_datetime64_slice()
             && !data.contains(&i64::MIN)
         {
-            // Datetime64 is i64-ns-backed: an all-valid column with NO NaT
-            // (i64::MIN) reuses the open-addressing factorize over the raw ns,
-            // then re-tags the unique ns as Datetime64 — avoids materializing 5M
-            // Datetime64 Scalars + the FxHashMap. The generic path codes NaT as
-            // -1 / a first-seen bucket (use_na_sentinel-dependent), so any NaT
-            // falls through below. Bit-identical: a non-NaT Datetime64's factorize
-            // key is its ns value, identical first-seen codes; uniques carry the
-            // same ns, only the Scalar tag differs (Int64 → Datetime64).
-            let (codes, uniques_ns) = factorize_i64_wide(data);
-            let uniques = uniques_ns
-                .into_iter()
-                .map(|s| match s {
-                    Scalar::Int64(ns) => Scalar::Datetime64(ns),
-                    other => other,
-                })
-                .collect();
-            (codes, uniques)
-        } else {
+            let (codes, uniques) = factorize_i64_typed(data, sort);
+            return Ok((
+                Self::from_i64_values(codes),
+                Self::from_datetime64_values(uniques),
+            ));
+        }
+
+        // `codes` is a typed `Vec<i64>` (factorize codes are always plain Int64,
+        // -1 for NA) — built directly and emitted via `from_i64_values`, skipping
+        // the n × 32 B `Scalar::Int64` output boxing the old path paid.
+        let (mut codes, mut uniques): (Vec<i64>, Vec<Scalar>) = {
             let mut uniques: Vec<Scalar> = Vec::new();
             let mut idx_map: FxHashMap<LocalKey<'_>, i64> = FxHashMap::default();
             let mut missing_position: Option<i64> = None;

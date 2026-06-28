@@ -6395,3 +6395,24 @@ full-range pool incl. i64::MIN/MAX, 120 LCG trials) + fp-columnar 28 duplicated 
 tests green. The open-addressing i64 table now serves nunique, unique, factorize, AND duplicated — confirming it as a
 general replacement for FxHashSet/FxHashMap on high-cardinality wide-i64 keys (the khash floor). drop_duplicates (which
 calls duplicated) inherits this win for free.
+
+### 2026-06-27 TealOsprey — factorize typed uniques output + raw-i64 sort: 1.27x further fp-side (wide 1.66x -> 2.18x vs pandas)
+The last factorize residual: `uniques` was still a `Vec<Scalar>` (n × 32 B for high-card) on the typed paths, and the
+shared sort compared `Scalar`s. Added `factorize_i64_typed(data, sort)` — dense-or-open-addr producing raw `Vec<i64>`
+codes AND uniques, with the optional ascending sort remap done on raw i64 — and made the all-valid Int64 and no-NaT
+Datetime64 cases RETURN EARLY, emitting uniques via `from_i64_values` / `from_datetime64_values` (no Scalar boxing on
+input or output; the Scalar `uniques` Vec + Scalar sort are now reached only by Float/Bool/Utf8/NaT columns).
+
+Same-box back-to-back best-of, 5M ~5M-distinct (`fp-columnar/examples/bench_hashops 5000000 factorize <mode>`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | Scalar uniques (prev) | typed uniques | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `factorize` wide-i64 5M | ~440ms | ~347ms | 1.27x | 1.72x -> 2.18x (pandas 756.6ms) |
+| `factorize` Datetime64 5M | ~550ms | ~355ms | 1.55x | 1.20x -> 1.86x (pandas 661.3ms) |
+| `factorize` dense-i64 5M | ~135ms | ~107ms | 1.26x | — |
+
+Cumulative wide-i64 factorize this session: 1327ms (pre-open-addr) -> 347ms = 3.8x fp-side, 0.57x LOSS -> 2.18x WIN.
+Bit-identical: the raw-i64 ascending sort equals `compare_scalars_na_last` for all-valid Int64/Datetime64 ns; the
+existing `factorize_wide_i64_*` and `factorize_datetime64_*` differentials (BOTH sort modes vs O(n²)/reference) +
+fp-columnar 10 factorize tests green. The wide-i64 hash frontier (nunique/unique/factorize/duplicated, Int64+Datetime64)
+is now fully on typed open-addressing with typed I/O.

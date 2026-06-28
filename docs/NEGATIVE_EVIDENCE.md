@@ -6627,3 +6627,25 @@ exact-comparator sort (526ms, 0.66x vs pandas 349ms). Tried a typed radix path (
 C radix still wins. REVERTED the radix path per the don't-re-chase-rejected-levers discipline; KEPT the comparator
 correctness fix and the differential test (it now guards the generic datetime sort). To actually beat pandas here
 needs a faster gather (the rejected `reorder_by_positions` problem), not another radix.
+
+### 2026-06-27 TealOsprey — Column::sort_values direct VALUE radix (no gather): i64 2.4x, datetime 0.66x->1.86x WIN vs pandas
+SUPERSEDES the datetime-sort-radix revert above. Insight: `Column::sort_values` returns only sorted VALUES (the row
+permutation, when a caller needs it, comes from `argsort_with`), so it never needs the `data[perm[i]]` cache-random
+GATHER that made the argsort path gather-bound. Replaced the i64 path's `radix_argsort + gather` with a direct value
+radix (`radix_sort_i64_values`: 8-pass LSD over order-preserving keys in ping-pong buffers, sequential reads, no
+gather), and re-added the Datetime64 no-NaT path on the same helper. Bit-identical: equal i64 values are
+indistinguishable so tie order is irrelevant; descending = ascending reversed (ties identical). Float64 stays on
+argsort+gather (its radix key canonicalizes ±0.0, so a value radix would corrupt −0.0 → +0.0 in the output).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_sort_i64`, `bench_sort_dt`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (argsort+gather) | patched (value radix) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sort_values` i64 5M | 396ms | 166ms | 2.39x | 0.47x vs np.sort core (78ms); pandas Series.sort_values 656ms |
+| `sort_values` datetime 5M | 526ms | 188ms | 2.80x | 0.66x -> 1.86x (pandas 349ms) |
+
+datetime flips LOSS->WIN. i64 is a 2.4x fp-side improvement that removes the gather but still trails numpy's tuned
+introsort core (78ms) for the values-only sort — a further radix-tuning (11-bit digits / high-zero-byte skip) could
+close it. Benefits all 17 in-crate `Column::sort_values` callers (nlargest/unique fallbacks etc.). Validation: FULL
+fp-columnar suite 455 passed / 0 failed; `datetime64_sort_values_matches_scalar_reference` + `radix_sort_matches_
+scalar_reference_i64_and_f64` differentials green.

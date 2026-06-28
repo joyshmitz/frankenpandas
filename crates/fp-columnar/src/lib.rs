@@ -5935,6 +5935,49 @@ fn f64_radix_key(value: f64) -> u64 {
 /// counting sort). Returns the permutation `perm` such that
 /// `keys[perm[0]] <= keys[perm[1]] <= ...`, with equal keys keeping their
 /// original relative order (stability == the comparator path's tie behavior).
+/// Sort an `i64` slice's VALUES directly (no argsort permutation, no final
+/// gather) via an 8-pass LSD radix over order-preserving keys in ping-pong
+/// buffers. `Column::sort_values` only needs the sorted values (the row
+/// permutation, when needed, comes from `argsort_with`), so skipping the
+/// `data[perm[i]]` cache-random gather — the bottleneck of the argsort path —
+/// is bit-identical: equal i64 values are indistinguishable, so tie order in the
+/// output is irrelevant. Descending = ascending reversed (ties are identical
+/// values, so the reverse is exact).
+fn radix_sort_i64_values(data: &[i64], ascending: bool) -> Vec<i64> {
+    let n = data.len();
+    if n < 2 {
+        return data.to_vec();
+    }
+    let mut buf: Vec<u64> = data.iter().map(|&v| i64_radix_key(v)).collect();
+    let mut scratch: Vec<u64> = vec![0u64; n];
+    for shift in (0..64).step_by(8) {
+        let mut count = [0usize; 256];
+        for &k in &buf {
+            count[((k >> shift) & 0xff) as usize] += 1;
+        }
+        if count.contains(&n) {
+            continue; // byte constant across column — skip the pass
+        }
+        let mut running = 0usize;
+        for slot in &mut count {
+            let c = *slot;
+            *slot = running;
+            running += c;
+        }
+        for &k in &buf {
+            let b = ((k >> shift) & 0xff) as usize;
+            scratch[count[b]] = k;
+            count[b] += 1;
+        }
+        std::mem::swap(&mut buf, &mut scratch);
+    }
+    let mut out: Vec<i64> = buf.iter().map(|&k| (k ^ (1u64 << 63)) as i64).collect();
+    if !ascending {
+        out.reverse();
+    }
+    out
+}
+
 /// O(n) per pass, comparison-free — replaces the O(n log n) `Scalar`-enum
 /// comparator for all-valid numeric columns.
 fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
@@ -15403,11 +15446,9 @@ impl Column {
         // contiguous buffer comparison-free, then re-ingest typed (no 32B
         // Scalar clone or enum-match per comparison).
         if let Some(data) = self.as_i64_slice() {
-            let perm = self
-                .typed_radix_perm(ascending)
-                .expect("i64 slice yields perm");
-            let sorted: Vec<i64> = perm.iter().map(|&i| data[i]).collect();
-            return Ok(Self::from_i64_values(sorted));
+            // Direct VALUE radix (no perm, no gather) — bit-identical sorted
+            // values, far faster than argsort+gather for sort_values.
+            return Ok(Self::from_i64_values(radix_sort_i64_values(data, ascending)));
         }
         if let Some(data) = self.as_f64_slice() {
             let perm = self
@@ -15416,9 +15457,16 @@ impl Column {
             let sorted: Vec<f64> = perm.iter().map(|&i| data[i]).collect();
             return Ok(Self::from_f64_values(sorted));
         }
-        // (Datetime64 radix sort path tried and REVERTED — see NEGATIVE_EVIDENCE:
-        // 1.24x fp-side but still 0.85x vs pandas, gather-bound like the rejected
-        // i64 radix sort. Datetime64 uses the generic exact-comparator sort below.)
+        // Datetime64 with NO NaT (i64::MIN): direct VALUE radix over the ns (no
+        // gather — the prior argsort+gather attempt was gather-bound). Bit-identical
+        // to the generic exact-Datetime64-comparator sort (equal ns indistinguishable).
+        // NaT is missing → must sort to the END, so NaT-bearing columns fall through.
+        if !self.has_nulls()
+            && let Some(data) = self.as_datetime64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            return Ok(Self::from_datetime64_values(radix_sort_i64_values(data, ascending)));
+        }
         // All-valid Utf8: gather by the stable MSD radix permutation. The
         // fallback below sorts (idx, &Scalar) pairs stably with the same
         // ordering, so cloning in permutation order yields the identical

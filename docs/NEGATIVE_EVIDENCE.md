@@ -6357,3 +6357,23 @@ re-wrapped Datetime64; NaT datum proven to fall through and be DROPPED, not emit
 fp-frame 73 unique tests green. RESIDUAL: factorize Datetime64 (0.57x, 1167ms) still loses — its NaT handling depends
 on use_na_sentinel (NaT → -1 or a first-seen bucket), so it needs an NaT-aware open-addressing variant, not the plain
 no-NaT shortcut; that's the next follow-up. (nunique Datetime64 already wins ~1.2x via a different path.)
+
+### 2026-06-27 TealOsprey — factorize Datetime64 reuses open-addressing ns map: 0.54x LOSS -> 1.2x WIN vs pandas (2.2x fp-side)
+The last khash-floor follow-up (unique-Datetime64 entry's residual). factorize Datetime64 fell to FxHashMap + 5M
+Datetime64 Scalar materialization (typed paths are `as_i64_slice` Int64-only). Added a Datetime64 branch: when
+`!has_nulls()` AND the raw `as_datetime64_slice` ns has no NaT (`i64::MIN`), reuse `factorize_i64_wide(ns)` and
+re-tag the unique ns `Scalar::Int64 → Scalar::Datetime64`. NaT-bearing columns fall through to the generic arm (its
+NaT→-1 / first-seen-bucket logic is use_na_sentinel-dependent, not reproduced by the no-NaT shortcut).
+
+Same-box back-to-back best-of (4 runs × best-of-6), 5M sparse Datetime64 (`fp-columnar/examples/bench_hashops
+5000000 factorize dt`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashMap+Scalar) | patched (open-addr ns) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `factorize` Datetime64 5M | ~1210ms | ~550ms | 2.20x | 0.54x -> 1.20x (pandas 661.3ms) |
+
+Bit-identical: new `factorize_datetime64_open_addressing_and_nat_fallthrough` (no-NaT codes+uniques exact; NaT datum
+proven to fall through → coded -1 under use_na_sentinel, not a unique) + fp-columnar 10 factorize + fp-frame 12
+factorize tests green. KHASH FLOOR CLOSED across Int64 AND Datetime64 for nunique/unique/factorize. RESIDUAL: uniques
+output for high-card factorize is still `Vec<Scalar>` (the ~550ms vs Int64's 456ms gap = the 5M-unique re-tag pass);
+a typed uniques column (from_datetime64_values/from_i64_values, bypassing the shared Scalar sort for sort=false) is the
+remaining structural lever, shared by all factorize paths.

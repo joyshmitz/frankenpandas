@@ -15428,6 +15428,27 @@ impl Column {
                 // floor). Bit-identical to the HashMap path's first-seen order.
                 factorize_i64_wide(data)
             }
+        } else if !self.has_nulls()
+            && let Some(data) = self.as_datetime64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            // Datetime64 is i64-ns-backed: an all-valid column with NO NaT
+            // (i64::MIN) reuses the open-addressing factorize over the raw ns,
+            // then re-tags the unique ns as Datetime64 — avoids materializing 5M
+            // Datetime64 Scalars + the FxHashMap. The generic path codes NaT as
+            // -1 / a first-seen bucket (use_na_sentinel-dependent), so any NaT
+            // falls through below. Bit-identical: a non-NaT Datetime64's factorize
+            // key is its ns value, identical first-seen codes; uniques carry the
+            // same ns, only the Scalar tag differs (Int64 → Datetime64).
+            let (codes, uniques_ns) = factorize_i64_wide(data);
+            let uniques = uniques_ns
+                .into_iter()
+                .map(|s| match s {
+                    Scalar::Int64(ns) => Scalar::Datetime64(ns),
+                    other => other,
+                })
+                .collect();
+            (codes, uniques)
         } else {
             let mut uniques: Vec<Scalar> = Vec::new();
             let mut idx_map: FxHashMap<LocalKey<'_>, i64> = FxHashMap::default();
@@ -23349,6 +23370,49 @@ mod tests {
                     assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
                 }
             }
+        }
+
+        #[test]
+        fn factorize_datetime64_open_addressing_and_nat_fallthrough() {
+            // All-valid, no-NaT Datetime64 takes the open-addressing ns factorize,
+            // re-tagging uniques as Datetime64. Codes = first-seen; uniques carry
+            // the ns. (default factorize: sort=false, use_na_sentinel=true.)
+            let ns = vec![100i64, 100, 7_000_000_000_000_000_000, 5, 7_000_000_000_000_000_000, 5];
+            let col = Column::from_datetime64_values(ns);
+            let (codes, uniques) = col.factorize().expect("factorize");
+            let got_codes: Vec<i64> = codes
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(c) => *c,
+                    o => panic!("code not int: {o:?}"),
+                })
+                .collect();
+            assert_eq!(got_codes, vec![0, 0, 1, 2, 1, 2]);
+            let got_uniques: Vec<i64> = uniques
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Datetime64(x) => *x,
+                    o => panic!("unique not datetime: {o:?}"),
+                })
+                .collect();
+            assert_eq!(got_uniques, vec![100, 7_000_000_000_000_000_000, 5]);
+
+            // NaT (i64::MIN) datum must fall through to the generic path, which
+            // codes NaT as -1 under use_na_sentinel=true (NOT a real unique).
+            let with_nat = Column::from_datetime64_values(vec![i64::MIN, 5, 5, i64::MIN, 7]);
+            let (codes2, uniques2) = with_nat.factorize().expect("factorize nat");
+            let got_codes2: Vec<i64> = codes2
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(c) => *c,
+                    o => panic!("code not int: {o:?}"),
+                })
+                .collect();
+            assert_eq!(got_codes2, vec![-1, 0, 0, -1, 1], "NaT -> -1 sentinel");
+            assert_eq!(uniques2.len(), 2, "NaT must not become a unique");
         }
 
         #[test]

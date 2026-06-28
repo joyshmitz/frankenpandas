@@ -6,8 +6,16 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
     let m: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
-    let col = Column::from_i64_values((0..n as i64).map(|i| i * 3).collect());
-    let needles: Vec<Scalar> = (0..m as i64).map(|i| Scalar::Int64(i * 7)).collect();
+    let dt = a.get(3).map(String::as_str).unwrap_or("dt") == "dt";
+    let vals: Vec<i64> = (0..n as i64).map(|i| i * 3).collect();
+    let col = if dt {
+        Column::from_datetime64_values(vals)
+    } else {
+        Column::from_i64_values(vals)
+    };
+    let needles: Vec<Scalar> = (0..m as i64)
+        .map(|i| if dt { Scalar::Datetime64(i * 7) } else { Scalar::Int64(i * 7) })
+        .collect();
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();

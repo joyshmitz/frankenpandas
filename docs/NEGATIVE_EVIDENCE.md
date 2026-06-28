@@ -6667,3 +6667,21 @@ Lifts a 6x catastrophic loss to near-parity (the residual ~10% is the random `da
 binary search, tight in pandas' C). Bit-identical: new `searchsorted_values_typed_i64_matches_scalar_path` (typed vs
 Scalar-backed generic over random sorted data + dup runs / out-of-range / exact-hit needles, both sides) +
 fp-columnar 22 searchsorted + fp-frame 15 searchsorted tests green.
+
+### 2026-06-27 TealOsprey — searchsorted_values typed Datetime64 partition_point: 0.13x LOSS -> 0.68x vs pandas (5.2x fp-side)
+Extends the i64 searchsorted typed path to Datetime64 (merge_asof / time-bucketing). Datetime64 searchsorted ran the
+per-needle Scalar binary search (~196ms, 0.13x). Added: all-valid no-NaT sorted ns + all-(non-NaT)-Datetime64 needles
+→ `partition_point` over the raw ns (the Datetime64 comparator is now exact, so bit-identical). NaT in self/needle
+falls through (missing → generic handles).
+
+Same-box best-of-3, 5M sorted Datetime64 / 1M Datetime64 needles (`fp-columnar/examples/bench_searchsorted ... dt`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar binsearch) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `searchsorted` datetime 5M/1M | 196ms | 38ms | 5.2x | 0.13x -> 0.68x (pandas 25.7ms) |
+
+5.2x fp-side, lifts the 7.6x catastrophe to ~1.5x-slower (the residual is the random `data[mid]` binary-search cache
+pattern, same as the i64 case). NOTE: f64 searchsorted was measured and is NOT a gap — pandas float searchsorted with
+random needles is slow (938ms) and fp's Scalar path already beats it, so f64 was left as-is. Bit-identical: new
+`searchsorted_values_typed_datetime_matches_scalar_path` (typed vs Scalar generic, both sides, dup/oob/exact) +
+fp-columnar 23 searchsorted + fp-frame 15 searchsorted tests green.

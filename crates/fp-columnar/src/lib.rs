@@ -14858,6 +14858,36 @@ impl Column {
                 .collect();
             return Ok(Self::from_i64_values(out));
         }
+        // Datetime64 analogue: all-valid no-NaT sorted ns + all-(non-NaT)-Datetime64
+        // needles → partition_point over the raw ns. The generic comparator is now
+        // exact for Datetime64 (a.cmp(b)), so this is bit-identical. NaT (i64::MIN)
+        // in self or a needle falls through (NaT is missing → generic errors/handles).
+        if (side == "left" || side == "right")
+            && !self.has_nulls()
+            && let Some(data) = self.as_datetime64_slice()
+            && !data.contains(&i64::MIN)
+            && needles
+                .iter()
+                .all(|n| matches!(n, Scalar::Datetime64(v) if *v != i64::MIN))
+        {
+            let left = side == "left";
+            let out: Vec<i64> = needles
+                .iter()
+                .map(|n| {
+                    let nv = match n {
+                        Scalar::Datetime64(v) => *v,
+                        _ => unreachable!("guarded all-Datetime64 above"),
+                    };
+                    let pos = if left {
+                        data.partition_point(|&v| v < nv)
+                    } else {
+                        data.partition_point(|&v| v <= nv)
+                    };
+                    pos as i64
+                })
+                .collect();
+            return Ok(Self::from_i64_values(out));
+        }
         let positions: Vec<Scalar> = needles
             .iter()
             .map(|needle| self.searchsorted_position(needle, side, None))
@@ -28111,6 +28141,39 @@ mod tests {
                 let m = (next() % 50) as usize + 1;
                 let needles: Vec<Scalar> =
                     (0..m).map(|_| Scalar::Int64((next() % 45) as i64 - 22)).collect();
+                for side in ["left", "right"] {
+                    let typed = col.searchsorted_values(&needles, side).expect("typed");
+                    let generic =
+                        scalar_col.searchsorted_values(&needles, side).expect("generic");
+                    assert_eq!(typed.values(), generic.values(), "side={side}");
+                }
+            }
+        }
+
+        #[test]
+        fn searchsorted_values_typed_datetime_matches_scalar_path() {
+            // Typed Datetime64 partition_point path == generic Scalar binary search
+            // (exact Datetime64 comparator), both sides, dup/oob/exact needles.
+            let mut state: u64 = 0xDA7E_7100_9911_2233;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let mut vals: Vec<i64> =
+                    (0..n).map(|_| (next() % 50) as i64 * 1_000_000).collect();
+                vals.sort_unstable();
+                let col = Column::from_datetime64_values(vals.clone());
+                let scalar_col =
+                    Column::from_values(vals.iter().map(|&v| Scalar::Datetime64(v)).collect())
+                        .expect("scalar col");
+                let m = (next() % 40) as usize + 1;
+                let needles: Vec<Scalar> = (0..m)
+                    .map(|_| Scalar::Datetime64((next() % 55) as i64 * 1_000_000))
+                    .collect();
                 for side in ["left", "right"] {
                     let typed = col.searchsorted_values(&needles, side).expect("typed");
                     let generic =

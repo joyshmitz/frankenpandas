@@ -1869,6 +1869,17 @@ enum ScalarValues {
         dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Move-not-copy sibling of `LazyAllValidInt64`: stores the owned `Vec<i64>`
+    /// inside an `Arc` (one tiny `Arc::new`, no element copy) instead of
+    /// `Arc<[i64]>` (which `Arc::from(Vec)` builds via a fresh alloc + memcpy —
+    /// the ~28ms/5M cost of every all-valid-Int64-producing op:
+    /// replace/fillna/bfill/dropna i64). Semantically identical to
+    /// `LazyAllValidInt64` (all-valid, no missing); consumers read `&data[..]`.
+    /// (No `dense_cycle` cache — a downstream groupby just recomputes its witness.)
+    LazyAllValidInt64Vec {
+        data: Arc<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// All-valid Datetime64 (nanosecond epoch) backing — the typed counterpart
     /// of `LazyAllValidInt64` for `DType::Datetime64`, so a datetime-producing op
     /// (e.g. `to_datetime`) can ingest a `Vec<i64>` of nanos without boxing a
@@ -2294,6 +2305,15 @@ impl ScalarValues {
 
     fn lazy_all_valid_int64(data: Vec<i64>) -> Self {
         Self::lazy_all_valid_int64_arc(Arc::from(data))
+    }
+
+    /// Move-not-copy: box the owned `Vec<i64>` in an `Arc` (no element copy),
+    /// the i64 sibling of `lazy_all_valid_float64_owned`.
+    fn lazy_all_valid_int64_owned(data: Vec<i64>) -> Self {
+        Self::LazyAllValidInt64Vec {
+            data: Arc::new(data),
+            values: OnceLock::new(),
+        }
     }
 
     /// Share an existing `Arc` i64 buffer in O(1) (used by `Clone`).
@@ -3720,6 +3740,9 @@ impl ScalarValues {
             Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
                 .as_slice(),
+            Self::LazyAllValidInt64Vec { data, values, .. } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
+                .as_slice(),
             Self::LazyAllValidInt64Chunks { chunks, values, .. } => values
                 .get_or_init(|| {
                     chunks
@@ -4392,6 +4415,7 @@ impl ScalarValues {
         match self {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
+            Self::LazyAllValidInt64Vec { data, .. } => data.len(),
             Self::LazyAllValidInt64Chunks { len, .. } => *len,
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
@@ -4622,6 +4646,10 @@ impl Clone for ScalarValues {
             Self::LazyAllValidInt64 { data, .. } => {
                 Self::lazy_all_valid_int64_arc(Arc::clone(data))
             }
+            Self::LazyAllValidInt64Vec { data, .. } => Self::LazyAllValidInt64Vec {
+                data: Arc::clone(data),
+                values: OnceLock::new(),
+            },
             Self::LazyAllValidInt64Chunks {
                 chunks,
                 len,
@@ -6879,6 +6907,20 @@ impl Column {
         }
     }
 
+    /// Like [`from_i64_values`] but MOVES the `Vec<i64>` into the backing (one
+    /// `Arc::new`) instead of `Arc::from(Vec)`'s alloc+memcpy (~28ms/5M). The i64
+    /// sibling of [`from_f64_values_owned`]; all-valid (i64 has no NaN sentinel).
+    #[must_use]
+    pub fn from_i64_values_owned(data: Vec<i64>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64_owned(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid Int64 column from immutable chunks that are already
     /// in output row order. Semantically identical to concatenating the chunks
     /// into one `Vec<i64>` and calling [`Self::from_i64_values`], but defers
@@ -7689,7 +7731,7 @@ impl Column {
     pub fn from_i64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
         debug_assert_eq!(data.len(), validity.len());
         if validity.all() {
-            return Self::from_i64_values(data);
+            return Self::from_i64_values_owned(data);
         }
         Self {
             dtype: DType::Int64,
@@ -7934,6 +7976,7 @@ impl Column {
         }
         let data: &[i64] = match &self.values {
             ScalarValues::LazyAllValidInt64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyAllValidInt64Vec { data, .. } => data.as_slice(),
             ScalarValues::LazyNullableInt64 { data, .. } => data.as_slice(),
             _ => match &self.data {
                 Some(ColumnData::Int64(data)) => data.as_ref(),
@@ -8032,6 +8075,9 @@ impl Column {
             }
             if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
                 return Some(data.as_ref());
+            }
+            if let ScalarValues::LazyAllValidInt64Vec { data, .. } = &self.values {
+                return Some(data.as_slice());
             }
             if let Some(data) = self.values.chunks_i64_data() {
                 return Some(data);
@@ -11980,7 +12026,7 @@ impl Column {
             for (i, &d) in data.iter().enumerate() {
                 out.push(if validity.get(i) { d } else { *fv });
             }
-            return Ok(Self::from_i64_values(out));
+            return Ok(Self::from_i64_values_owned(out));
         }
 
         // Typed Int64 fast path (br-frankenpandas-3llep): as_i64_slice returns
@@ -12039,7 +12085,7 @@ impl Column {
                     out.push(d);
                 }
             }
-            return Ok(Self::from_i64_values(out));
+            return Ok(Self::from_i64_values_owned(out));
         }
         let values = self
             .values
@@ -14854,7 +14900,7 @@ impl Column {
                     x
                 })
                 .collect();
-            return Ok(Self::from_i64_values(out));
+            return Ok(Self::from_i64_values_owned(out));
         }
         let out: Vec<Scalar> = self
             .values

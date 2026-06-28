@@ -6950,3 +6950,24 @@ realloc (~28ms) + the scan; even moved it reaches only ~parity (compute-bound vs
 owned-Int64 variant buys parity not wins for the all-valid-i64-output family (replace/fillna/bfill i64), so it stays
 DEFERRED. Bit-identical: new `replace_typed_i64_matches_oracle` (multi/duplicate targets, independent first-match oracle)
 + fp-columnar 9 replace tests green.
+
+### 2026-06-27 TealOsprey — STRUCTURAL: owned-Int64 backing (LazyAllValidInt64Vec) — flips replace/fillna/bfill i64 to WINS
+The previously-DEFERRED owned-Int64 ScalarValues variant, now LANDED (the directive's "different primitive" call was
+right — and my earlier "parity not wins" estimate was wrong: the from_i64_values Arc::from realloc was ~40ms at 5M, not
+~28ms). Added `LazyAllValidInt64Vec { data: Arc<Vec<i64>>, values }` (move-not-copy sibling of LazyAllValidInt64; no
+dense_cycle cache — a downstream groupby just recomputes), `from_i64_values_owned`, and arms in
+materialization/len/clone/as_i64_slice/as_i64_slice_with_validity. Rewired the all-valid-Int64-output ops to it:
+from_i64_values_with_validity all() branch (→ ffill/bfill i64), replace/fillna/dropna i64.
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_{replace,fillna,ffill,dropna}`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned move) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `replace` i64 5M | 63.0ms | 25.1ms | 0.60x -> 1.51x (pandas 38.0ms) |
+| `fillna` i64 5M | 67.7ms | 26.0ms | 0.56x -> 1.45x (pandas 37.6ms) |
+| `bfill` i64 5M | 67.7ms | 29.6ms | 0.49x -> 1.12x (pandas 33.2ms) |
+| `dropna` i64 5M | 23.3ms | 20.6ms | 2.29x -> 2.59x (pandas 53.3ms) |
+
+Cumulative this session: replace i64 272->25ms, fillna i64 244->26ms, bfill i64 417->30ms, dropna i64 176->21ms — all
+now WIN. Closes the last structural residual of the typed-slice sweep. Bit-identical: FULL fp-columnar suite 466
+passed / 0 failed + fp-frame 135 (fillna/dropna/replace/ffill/bfill) green.

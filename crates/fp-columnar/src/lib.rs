@@ -5288,6 +5288,54 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
     count + i64::from(has_sentinel)
 }
 
+/// `duplicated(keep="first")` flags for an all-valid `i64` slice too wide for
+/// the dense direct-address path, via the same open-addressing set as
+/// [`count_distinct_i64_wide`]: flag is `false` on a value's first occurrence
+/// (a fresh insert) and `true` on every repeat — bit-identical to
+/// [`duplicated_flags_typed`] with `DupPolicy::First`, but beats its
+/// `FxHashSet<i64>` on high-cardinality wide keys. `i64::MIN` is the empty
+/// sentinel, its duplicate-state tracked via a flag.
+fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
+    const EMPTY: i64 = i64::MIN;
+    let n = data.len();
+    let mut flags = vec![false; n];
+    let cap = n
+        .saturating_add(n / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    if cap == 0 {
+        let mut seen: FxHashSet<i64> = FxHashSet::with_capacity_and_hasher(n, Default::default());
+        for (idx, &v) in data.iter().enumerate() {
+            flags[idx] = !seen.insert(v);
+        }
+        return flags;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut seen_sentinel = false;
+    for (idx, &v) in data.iter().enumerate() {
+        if v == EMPTY {
+            flags[idx] = seen_sentinel;
+            seen_sentinel = true;
+            continue;
+        }
+        let mut p = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            let k = keys[p];
+            if k == EMPTY {
+                keys[p] = v;
+                break; // first occurrence → flag stays false
+            }
+            if k == v {
+                flags[idx] = true;
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    flags
+}
+
 /// First-seen distinct values of an all-valid `i64` slice too wide for the
 /// dense direct-address path, via the same open-addressing set as
 /// [`count_distinct_i64_wide`] but COLLECTING each value the first time it is
@@ -15209,6 +15257,11 @@ impl Column {
                     data, min, range, policy,
                 )));
             }
+            // Wide/sparse: the default "first" policy uses the open-addressing set
+            // (beats FxHashSet on high-card wide i64); last/none keep FxHashSet.
+            if matches!(policy, DupPolicy::First) {
+                return Ok(Self::from_bool_values(duplicated_first_i64_wide(data)));
+            }
             return Ok(Self::from_bool_values(duplicated_flags_typed(data, policy)));
         }
         if let Some(data) = self.as_f64_slice() {
@@ -23796,6 +23849,54 @@ mod tests {
             assert!(d.values()[0].is_missing());
             assert!(d.values()[1].is_missing()); // NaT current → NaT
             assert!(d.values()[2].is_missing()); // NaT previous → NaT
+        }
+
+        #[test]
+        fn duplicated_wide_i64_first_open_addressing_matches_reference() {
+            // Wide/sparse all-valid Int64 "first" policy uses
+            // duplicated_first_i64_wide (open-addressing). Flags must equal a
+            // HashSet-insert reference across full-range data incl. i64::MIN.
+            use std::collections::HashSet;
+            let pool: [i64; 6] = [
+                i64::MIN,
+                i64::MAX,
+                3_000_000_000_000_000_000,
+                -3_000_000_000_000_000_000,
+                9,
+                -9,
+            ];
+            let mut state: u64 = 0x2468_ACE0_1357_9BDF;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 400) as usize + 2;
+                let mut data: Vec<i64> =
+                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                data[0] = i64::MIN;
+                data[1] = i64::MAX;
+                assert!(
+                    crate::i64_direct_address_range(&data).is_none(),
+                    "trial {trial}: expected wide data"
+                );
+                let mut seen = HashSet::new();
+                let expected: Vec<bool> = data.iter().map(|&v| !seen.insert(v)).collect();
+                let col = Column::from_i64_values(data);
+                let got: Vec<bool> = col
+                    .duplicated()
+                    .expect("duplicated")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Bool(b) => *b,
+                        o => panic!("not bool: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, expected, "trial {trial}");
+            }
         }
 
         #[test]

@@ -6377,3 +6377,21 @@ factorize tests green. KHASH FLOOR CLOSED across Int64 AND Datetime64 for nuniqu
 output for high-card factorize is still `Vec<Scalar>` (the ~550ms vs Int64's 456ms gap = the 5M-unique re-tag pass);
 a typed uniques column (from_datetime64_values/from_i64_values, bypassing the shared Scalar sort for sort=false) is the
 remaining structural lever, shared by all factorize paths.
+
+### 2026-06-27 TealOsprey — duplicated(keep="first") wide-i64 open-addressing: 1.75x further fp-side (3.4x -> 6.0x vs pandas)
+`duplicated` wide-i64 already avoided Scalar materialization (typed `&[i64]` + `duplicated_flags_typed`), so it won
+2.6-3.4x — but its `FxHashSet<i64>` was still the residual on high-card wide keys. Added `duplicated_first_i64_wide`:
+the open-addressing set, flagging `false` on first insert / `true` on repeat (default "first" policy only; last/none
+keep FxHashSet). i64::MIN sentinel duplicate-state via a flag.
+
+Same-box back-to-back best-of (4 × best-of-6), 5M sparse i64 ~5M distinct (`fp-columnar/examples/bench_hashops
+5000000 duplicated wide`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashSet) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `duplicated(first)` wide-i64 5M | ~147ms | ~84ms | 1.75x | 3.43x -> 6.00x (pandas 504.7ms) |
+
+Bit-identical: new `duplicated_wide_i64_first_open_addressing_matches_reference` (flags vs HashSet-insert ref over
+full-range pool incl. i64::MIN/MAX, 120 LCG trials) + fp-columnar 28 duplicated + fp-frame 37 duplicated/drop_duplicates
+tests green. The open-addressing i64 table now serves nunique, unique, factorize, AND duplicated — confirming it as a
+general replacement for FxHashSet/FxHashMap on high-cardinality wide-i64 keys (the khash floor). drop_duplicates (which
+calls duplicated) inherits this win for free.

@@ -7069,3 +7069,21 @@ perf change I cannot validate against conformance. MEASURED while it was applied
 IMPROVED by the realloc removal but remain LOSSES — they are calendar-civil-conversion compute-bound, not realloc-bound,
 so owned alone won't flip them (a faster ns->civil algorithm is the real lever). RE-LAND the dt owned-move + pursue the
 civil-conversion speedup once the peer's Period refactor restores the fp-frame test build.
+
+### 2026-06-27 TealOsprey — RE-LANDED: Series.dt component owned-move (peer Period refactor fixed → fp-frame tests run)
+The fp-frame test build is restored (peer finished the Period refactor), so the deferred dt owned-move is re-landed and
+VALIDATED. Switched the 5 typed_datetime_*_all_valid component outputs (year/dayofyear/weekofyear/civil[month,day]/
+nanos[hour,min,sec,…,dayofweek]) from Column::from_i64_values (Arc::from realloc) to from_i64_values_owned (move).
+Bit-identical (all-valid i64 component output).
+
+Same-box best-of-3, 5M hourly datetimes (`fp-frame/examples/bench_dt2`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dt.dayofweek` 5M | 73.5ms | 31.9ms | 2.30x | 1.17x -> 2.70x (pandas 86.2ms) |
+| `dt.year` 5M | 110.1ms | 73.1ms | 1.51x | 0.57x -> 0.86x (pandas 62.5ms) |
+| `dt.month` 5M | 126.4ms | 89.2ms | 1.42x | 0.48x -> 0.68x (pandas 60.8ms) |
+
+dayofweek WIN; year/month improved 1.4-1.5x fp-side but remain LOSSES — calendar civil-conversion (ns->y/m/d) is the
+bottleneck, not the realloc (the next lever is a faster ns->civil algorithm, e.g. Howard Hinnant's days_from_civil
+inverse). Bit-identical: fp-frame 17 dt component tests green (fp-frame test build now compiles).

@@ -6902,3 +6902,17 @@ Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_dropna`),
 
 Both flip LOSS->WIN. Bit-identical: new `dropna_typed_matches_oracle` (i64 & f64, random validity, independent
 order-preserving oracle) + fp-columnar 6 dropna + fp-frame 40 dropna tests green.
+
+### 2026-06-27 TealOsprey — clip f64/i64 owned-move output: 1.2-1.4x WIN -> 3.2-3.9x WIN vs pandas
+clip's typed f64/i64 paths already beat pandas but emitted via from_f64_values (Arc::from realloc-copy). The clamp of a
+finite/inf input is never NaN (bounds are NaN-filtered) → output all-valid → switched to from_f64_values_owned (MOVE).
+Bit-identical (owned falls back on any stray NaN; output values unchanged).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_clip`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | from_f64_values | owned | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `clip` f64 5M | 59.9ms | 21.3ms | 2.81x | 1.38x -> 3.88x (pandas 82.7ms) |
+| `clip` i64 5M | 60.8ms | 22.3ms | 2.73x | 1.18x -> 3.23x (pandas 72.0ms) |
+
+Bit-identical: fp-columnar 27 clip tests green.

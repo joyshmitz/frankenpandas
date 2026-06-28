@@ -18400,11 +18400,13 @@ impl Column {
         };
         if let Some(data) = self.as_f64_slice() {
             let out: Vec<f64> = data.iter().map(|&x| clamp(x)).collect();
-            return Ok(Self::from_f64_values(out));
+            // clamp of a finite/inf input is never NaN (bounds are NaN-filtered),
+            // so the output is all-valid → MOVE the Vec (no Arc::from realloc).
+            return Ok(Self::from_f64_values_owned(out));
         }
         if let Some(data) = self.as_i64_slice() {
             let out: Vec<f64> = data.iter().map(|&x| clamp(x as f64)).collect();
-            return Ok(Self::from_f64_values(out));
+            return Ok(Self::from_f64_values_owned(out));
         }
 
         let mut out = Vec::with_capacity(self.values.len());

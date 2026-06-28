@@ -12790,6 +12790,62 @@ impl Column {
     /// until the first non-missing value is seen. `limit=None` means
     /// unbounded; `limit=Some(k)` caps each missing run to `k` fills.
     pub fn ffill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        // Typed fast paths: carry the last present value forward over the raw
+        // buffer + validity, no Scalar materialization. A still-missing slot (no
+        // prior value, or limit exceeded) stays missing via the validity mask,
+        // which materializes the SAME null the Scalar path pushes via v.clone():
+        // Float64 → Null(NaN), Int64 → Null(Null) (= missing_for_dtype). Bit-identical.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut out = vec![0.0_f64; len];
+            let mut vmask = ValidityMask::all_valid(len);
+            let mut last: Option<f64> = None;
+            let mut run = 0usize;
+            for i in 0..len {
+                if validity.get(i) && !data[i].is_nan() {
+                    out[i] = data[i];
+                    last = Some(data[i]);
+                    run = 0;
+                } else {
+                    match (last, limit) {
+                        (Some(p), None) => out[i] = p,
+                        (Some(p), Some(cap)) if run < cap => {
+                            out[i] = p;
+                            run += 1;
+                        }
+                        _ => vmask.set(i, false),
+                    }
+                }
+            }
+            return Ok(Self::from_f64_values_with_validity(out, vmask));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut out = vec![0_i64; len];
+            let mut vmask = ValidityMask::all_valid(len);
+            let mut last: Option<i64> = None;
+            let mut run = 0usize;
+            for i in 0..len {
+                if validity.get(i) {
+                    out[i] = data[i];
+                    last = Some(data[i]);
+                    run = 0;
+                } else {
+                    match (last, limit) {
+                        (Some(p), None) => out[i] = p,
+                        (Some(p), Some(cap)) if run < cap => {
+                            out[i] = p;
+                            run += 1;
+                        }
+                        _ => vmask.set(i, false),
+                    }
+                }
+            }
+            return Ok(Self::from_i64_values_with_validity(out, vmask));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         let mut last: Option<Scalar> = None;
         let mut run = 0usize;
@@ -12823,6 +12879,62 @@ impl Column {
     /// Matches `pd.Series.bfill(limit=None)`. Trailing nulls stay null
     /// if no subsequent non-missing value is observed.
     pub fn bfill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        // Typed fast paths: carry the next present value backward over the raw
+        // buffer + validity (the Scalar loop's `Null(NaN)` init is dead — every
+        // slot is overwritten, missing ones via `v.clone()`), so a still-missing
+        // slot materializes the SAME null from the validity mask: Float64 →
+        // Null(NaN), Int64 → Null(Null). Bit-identical, no Scalar materialization.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut out = vec![0.0_f64; len];
+            let mut vmask = ValidityMask::all_valid(len);
+            let mut next: Option<f64> = None;
+            let mut run = 0usize;
+            for i in (0..len).rev() {
+                if validity.get(i) && !data[i].is_nan() {
+                    out[i] = data[i];
+                    next = Some(data[i]);
+                    run = 0;
+                } else {
+                    match (next, limit) {
+                        (Some(p), None) => out[i] = p,
+                        (Some(p), Some(cap)) if run < cap => {
+                            out[i] = p;
+                            run += 1;
+                        }
+                        _ => vmask.set(i, false),
+                    }
+                }
+            }
+            return Ok(Self::from_f64_values_with_validity(out, vmask));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut out = vec![0_i64; len];
+            let mut vmask = ValidityMask::all_valid(len);
+            let mut next: Option<i64> = None;
+            let mut run = 0usize;
+            for i in (0..len).rev() {
+                if validity.get(i) {
+                    out[i] = data[i];
+                    next = Some(data[i]);
+                    run = 0;
+                } else {
+                    match (next, limit) {
+                        (Some(p), None) => out[i] = p,
+                        (Some(p), Some(cap)) if run < cap => {
+                            out[i] = p;
+                            run += 1;
+                        }
+                        _ => vmask.set(i, false),
+                    }
+                }
+            }
+            return Ok(Self::from_i64_values_with_validity(out, vmask));
+        }
         let mut out = vec![Scalar::Null(NullKind::NaN); self.values.len()];
         let mut next: Option<Scalar> = None;
         let mut run = 0usize;
@@ -26616,6 +26728,80 @@ mod tests {
                 err,
                 crate::ColumnError::Type(fp_types::TypeError::NonNumericValue { .. })
             ));
+        }
+
+        #[test]
+        fn ffill_bfill_typed_match_independent_oracle() {
+            // Typed nullable i64/f64 ffill+bfill (limit None & Some) == an
+            // independent oracle. Built via from_*_values_with_validity to drive
+            // the typed paths. i64 missing → Null(Null), f64 missing → Null(NaN).
+            let mut state: u64 = 0x9F1D_0E2A_57C4_BB36;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 120) as usize + 1;
+                let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64).collect();
+                let fvals: Vec<f64> = ivals.iter().map(|&v| v as f64 + 0.5).collect();
+                let mut vmask = ValidityMask::all_valid(n);
+                let mut present = vec![true; n];
+                for (i, p) in present.iter_mut().enumerate() {
+                    if next() % 3 == 0 {
+                        vmask.set(i, false);
+                        *p = false;
+                    }
+                }
+                let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
+                let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                for limit in [None, Some(1usize), Some(2)] {
+                    // ffill oracle
+                    let oracle = |fwd: bool| -> Vec<Option<usize>> {
+                        let mut src: Vec<Option<usize>> = vec![None; n];
+                        let mut anchor: Option<usize> = None;
+                        let mut run = 0usize;
+                        let idxs: Vec<usize> =
+                            if fwd { (0..n).collect() } else { (0..n).rev().collect() };
+                        for &i in &idxs {
+                            if present[i] {
+                                src[i] = Some(i);
+                                anchor = Some(i);
+                                run = 0;
+                            } else {
+                                match (anchor, limit) {
+                                    (Some(a), None) => src[i] = Some(a),
+                                    (Some(a), Some(cap)) if run < cap => {
+                                        src[i] = Some(a);
+                                        run += 1;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        src
+                    };
+                    for (fwd, got_i, got_f) in [
+                        (true, icol.ffill(limit).unwrap(), fcol.ffill(limit).unwrap()),
+                        (false, icol.bfill(limit).unwrap(), fcol.bfill(limit).unwrap()),
+                    ] {
+                        let src = oracle(fwd);
+                        for i in 0..n {
+                            match src[i] {
+                                Some(a) => {
+                                    assert_eq!(got_i.values()[i], Scalar::Int64(ivals[a]));
+                                    assert_eq!(got_f.values()[i], Scalar::Float64(fvals[a]));
+                                }
+                                None => {
+                                    assert!(got_i.values()[i].is_missing());
+                                    assert!(got_f.values()[i].is_missing());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         #[test]

@@ -6846,3 +6846,23 @@ Same-box best-of-3, 5M nullable f64 (1/4 NA) (`fp-columnar/examples/bench_interp
 
 Bit-identical: new `interpolate_typed_f64_backing_matches_expected` (drives the LazyNullableFloat64 entry; leading-null
 + interior-gap + trailing-ffill) + fp-columnar 6 interpolate + fp-frame 19 interpolate tests green.
+
+### 2026-06-27 TealOsprey — ffill/bfill typed f64+i64: ffill 0.08x->1.1x WIN, bfill 0.08x->0.42x (5-14x fp-side)
+ffill/bfill were fully Scalar (looped self.values, cloning Scalars from the lazy column) — ~410-418ms, 0.08x vs
+pandas. Added typed paths: carry last/next present value over the raw buffer + validity, a still-missing slot stays
+missing via the validity mask. Bit-identical: a no-fill slot materializes the SAME null the Scalar path produced via
+`v.clone()` — Float64 → Null(NaN), Int64 → Null(Null) (the bfill `Null(NaN)` init is dead, every slot is overwritten).
+
+Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_ffill`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `ffill` f64 5M | 418.2ms | 29.8ms | 14.0x | 0.08x -> 1.09x (pandas 32.5ms) |
+| `ffill` i64 5M | 408.8ms | 28.6ms | 14.3x | 0.08x -> 1.14x |
+| `bfill` f64 5M | 417.0ms | 81.9ms | 5.1x | 0.08x -> 0.41x (pandas 33.2ms) |
+| `bfill` i64 5M | 275.1ms | 77.7ms | 3.5x | -> 0.43x |
+
+ffill flips LOSS->WIN. bfill is a 3.5-5x improvement but stays ~0.42x — its reverse iteration (`(0..len).rev()`) is
+cache-hostile (~2.7x the forward ffill cost) on the backward data/out/validity streams; a reverse-ffill-reverse rewrite
+could recover it (follow-up). Bit-identical: new `ffill_bfill_typed_match_independent_oracle` (i64 & f64, random
+validity, limit None/Some(1)/Some(2), independent oracle) + fp-columnar 8 ffill/bfill + fp-frame 34 ffill/bfill green.

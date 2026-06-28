@@ -6258,3 +6258,25 @@ LCG sparse values + forced dups + i64::MIN sentinel + i64::MAX) + fp-columnar 5 
 GENERALIZES to the other khash-floor ops over wide i64 — `duplicated` (already 1.47x, would widen), `factorize`
 (0.32x, the big one), `value_counts`, `unique` — all of which can reuse this open-addressing table. nunique landed
 first as the clean single-output case; factorize/value_counts are the high-value follow-ups.
+
+### 2026-06-27 TealOsprey — factorize wide/sparse Int64 open-addressing map: 0.57x LOSS -> 1.25x WIN vs pandas (2.2x fp-side)
+The big khash-floor op (memory: factorize wide-i64 0.32x — the worst). Same lever as the nunique win, extended to a
+value→code MAP. `factorize` had a dense direct-address code table for bounded ranges but fell to `FxHashMap` +
+`Scalar` materialization for SPARSE wide i64. Added `factorize_i64_wide`: open-addressing `i64 -> u32 code` map
+(linear probing, inline keys + parallel u32 codes, ~0.67 load, Fibonacci hash, i64::MIN empty-sentinel tracked
+separately) over the raw `&[i64]`, assigning first-seen codes — no Scalar input boxing, no FxHashMap overhead. Wired
+into `factorize_with_options`' typed branch (dense table kept for bounded ranges; new map for wide); the shared
+`sort` step and Scalar code/unique output are unchanged.
+
+Same-box back-to-back best-of-3, 5M Int64 ~5M distinct sparse full-range (`fp-columnar/examples/bench_hashops
+5000000 factorize wide`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashMap+Scalar) | patched (open-addr map) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `factorize` wide-i64 5M | 1327.1ms | 603.4ms | 2.20x | 0.57x -> 1.25x (pandas 756.6ms) |
+
+Bit-identical: new `factorize_wide_i64_open_addressing_matches_reference` (codes AND uniques vs an O(n²) first-seen
+reference over 120 LCG trials from a full-range value pool incl. i64::MIN/MAX, BOTH sort modes) + fp-columnar 9
+factorize tests green. RESIDUAL: factorize's `codes` output is still a `Vec<Scalar::Int64>` (5M × 32 B) — the hashing
+floor is gone, the remaining cost is output Scalar boxing (a typed Int64 codes column via `from_i64_values` is the
+next lever, and applies to the dense path too). The open-addressing table has now broken the khash floor for both
+nunique and factorize; value_counts is the remaining wide-i64 consumer.

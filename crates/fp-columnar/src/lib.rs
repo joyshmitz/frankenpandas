@@ -5288,6 +5288,77 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
     count + i64::from(has_sentinel)
 }
 
+/// First-seen factorize of an all-valid `i64` slice too wide for the dense
+/// direct-address path, via an open-addressing `i64 -> code` map (linear
+/// probing, inline keys + parallel `u32` codes, ~0.67 load, Fibonacci hash) over
+/// the raw slice — no `Scalar` materialization, no `FxHashMap` overhead (the
+/// wide-i64 khash-floor lever, shared shape with [`count_distinct_i64_wide`]).
+/// Returns `(codes, uniques)` in first-seen order, byte-identical to the
+/// `FxHashMap` path's assignment. `i64::MIN` is the empty sentinel and is
+/// tracked separately so a real `i64::MIN` value factorizes correctly.
+fn factorize_i64_wide(data: &[i64]) -> (Vec<Scalar>, Vec<Scalar>) {
+    const EMPTY: i64 = i64::MIN;
+    let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
+    let mut uniques: Vec<Scalar> = Vec::new();
+    // ~0.67 load: capacity = next power of two ≥ 1.5·n.
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    // `code_at` stores codes as u32; only valid when distinct (≤ n) fits u32.
+    if cap == 0 || data.len() > u32::MAX as usize {
+        let mut map: FxHashMap<i64, i64> = FxHashMap::default();
+        for &v in data {
+            match map.get(&v) {
+                Some(&c) => codes.push(Scalar::Int64(c)),
+                None => {
+                    let c = uniques.len() as i64;
+                    map.insert(v, c);
+                    uniques.push(Scalar::Int64(v));
+                    codes.push(Scalar::Int64(c));
+                }
+            }
+        }
+        return (codes, uniques);
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut code_at = vec![0u32; cap];
+    let mut min_code: i64 = -1; // code of the i64::MIN sentinel value; -1 = unseen
+    for &v in data {
+        if v == EMPTY {
+            if min_code < 0 {
+                let c = uniques.len() as i64;
+                min_code = c;
+                uniques.push(Scalar::Int64(EMPTY));
+                codes.push(Scalar::Int64(c));
+            } else {
+                codes.push(Scalar::Int64(min_code));
+            }
+            continue;
+        }
+        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            let k = keys[idx];
+            if k == EMPTY {
+                let c = uniques.len() as i64;
+                keys[idx] = v;
+                code_at[idx] = c as u32;
+                uniques.push(Scalar::Int64(v));
+                codes.push(Scalar::Int64(c));
+                break;
+            }
+            if k == v {
+                codes.push(Scalar::Int64(i64::from(code_at[idx])));
+                break;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+    (codes, uniques)
+}
+
 /// Hash-free duplicate flags for a bounded-range `i64` slice via a dense
 /// direct-address table (no per-element hashing or `Scalar` enum). Identical
 /// semantics to [`duplicated_flags_typed`]. `min`/`range` come from
@@ -15271,31 +15342,38 @@ impl Column {
             }
         }
 
-        let (mut codes, mut uniques): (Vec<Scalar>, Vec<Scalar>) = if let Some((data, min, range)) =
+        let (mut codes, mut uniques): (Vec<Scalar>, Vec<Scalar>) = if let Some(data) =
             self.as_i64_slice()
-                .and_then(|d| i64_direct_address_range(d).map(|(m, r)| (d, m, r)))
         {
-            // Hash-free direct-address factorize for a bounded-range all-valid
-            // Int64 column: a dense code table indexed by (v-min) assigns
-            // first-seen codes in O(n) with no hashing. All-valid ⇒ no
-            // missing/sentinel handling, so this is bit-identical to the
-            // HashMap path's first-seen code assignment.
-            let mut code_table = vec![-1i64; range];
-            let mut uniques: Vec<Scalar> = Vec::new();
-            let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
-            for &v in data {
-                let slot = (v as i128 - min as i128) as usize;
-                let existing = code_table[slot];
-                if existing < 0 {
-                    let code = uniques.len() as i64;
-                    code_table[slot] = code;
-                    uniques.push(Scalar::Int64(v));
-                    codes.push(Scalar::Int64(code));
-                } else {
-                    codes.push(Scalar::Int64(existing));
+            if let Some((min, range)) = i64_direct_address_range(data) {
+                // Hash-free direct-address factorize for a bounded-range all-valid
+                // Int64 column: a dense code table indexed by (v-min) assigns
+                // first-seen codes in O(n) with no hashing. All-valid ⇒ no
+                // missing/sentinel handling, so this is bit-identical to the
+                // HashMap path's first-seen code assignment.
+                let mut code_table = vec![-1i64; range];
+                let mut uniques: Vec<Scalar> = Vec::new();
+                let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
+                for &v in data {
+                    let slot = (v as i128 - min as i128) as usize;
+                    let existing = code_table[slot];
+                    if existing < 0 {
+                        let code = uniques.len() as i64;
+                        code_table[slot] = code;
+                        uniques.push(Scalar::Int64(v));
+                        codes.push(Scalar::Int64(code));
+                    } else {
+                        codes.push(Scalar::Int64(existing));
+                    }
                 }
+                (codes, uniques)
+            } else {
+                // Wide/sparse all-valid Int64: out of dense-bitset range, but the
+                // raw &[i64] avoids Scalar materialization — first-seen factorize
+                // via the open-addressing i64→code map (breaks the FxHashMap khash
+                // floor). Bit-identical to the HashMap path's first-seen order.
+                factorize_i64_wide(data)
             }
-            (codes, uniques)
         } else {
             let mut uniques: Vec<Scalar> = Vec::new();
             let mut idx_map: FxHashMap<LocalKey<'_>, i64> = FxHashMap::default();
@@ -23098,6 +23176,97 @@ mod tests {
                         .collect();
                     assert_eq!(got_codes.len(), code_col.len(), "non-int code");
                     assert_eq!(got_uniques.len(), uniq_col.len(), "non-int unique");
+                    assert_eq!(got_codes, codes, "trial {trial} sort={sort} codes");
+                    assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
+                }
+            }
+        }
+
+        #[test]
+        fn factorize_wide_i64_open_addressing_matches_reference() {
+            // Force the wide/sparse open-addressing path (range >> n*16, so
+            // i64_direct_address_range declines) and check codes + uniques vs the
+            // O(n^2) first-seen reference, both sort modes, with the i64::MIN
+            // empty-sentinel value present and duplicated.
+            let pool: [i64; 7] = [
+                i64::MIN,
+                i64::MAX,
+                5_000_000_000_000_000_000,
+                -5_000_000_000_000_000_000,
+                0,
+                1,
+                -1,
+            ];
+            let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 250) as usize + 2;
+                let mut data: Vec<i64> =
+                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                // Guarantee a full-range span so i64_direct_address_range declines
+                // and the wide open-addressing path always runs.
+                data[0] = i64::MIN;
+                data[1] = i64::MAX;
+                // Confirm the wide path is actually exercised (not dense).
+                let col = Column::from_i64_values(data.clone());
+                assert!(
+                    crate::i64_direct_address_range(col.as_i64_slice().unwrap()).is_none(),
+                    "trial {trial}: expected wide (non-direct-address) data"
+                );
+
+                for sort in [false, true] {
+                    let mut uniques: Vec<i64> = Vec::new();
+                    let mut codes: Vec<i64> = Vec::with_capacity(n);
+                    for &v in &data {
+                        match uniques.iter().position(|&u| u == v) {
+                            Some(p) => codes.push(p as i64),
+                            None => {
+                                codes.push(uniques.len() as i64);
+                                uniques.push(v);
+                            }
+                        }
+                    }
+                    if sort {
+                        let mut order: Vec<usize> = (0..uniques.len()).collect();
+                        order.sort_by(|&a, &b| uniques[a].cmp(&uniques[b]));
+                        let mut remap = vec![0i64; uniques.len()];
+                        let sorted: Vec<i64> = order
+                            .iter()
+                            .enumerate()
+                            .map(|(new_pos, &orig)| {
+                                remap[orig] = new_pos as i64;
+                                uniques[orig]
+                            })
+                            .collect();
+                        for c in &mut codes {
+                            *c = remap[*c as usize];
+                        }
+                        uniques = sorted;
+                    }
+
+                    let (code_col, uniq_col) =
+                        col.factorize_with_options(sort, true).expect("factorize");
+                    let got_codes: Vec<i64> = code_col
+                        .values()
+                        .iter()
+                        .filter_map(|v| match v {
+                            Scalar::Int64(c) => Some(*c),
+                            _ => None,
+                        })
+                        .collect();
+                    let got_uniques: Vec<i64> = uniq_col
+                        .values()
+                        .iter()
+                        .filter_map(|v| match v {
+                            Scalar::Int64(c) => Some(*c),
+                            _ => None,
+                        })
+                        .collect();
                     assert_eq!(got_codes, codes, "trial {trial} sort={sort} codes");
                     assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
                 }

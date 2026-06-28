@@ -6649,3 +6649,21 @@ introsort core (78ms) for the values-only sort — a further radix-tuning (11-bi
 close it. Benefits all 17 in-crate `Column::sort_values` callers (nlargest/unique fallbacks etc.). Validation: FULL
 fp-columnar suite 455 passed / 0 failed; `datetime64_sort_values_matches_scalar_reference` + `radix_sort_matches_
 scalar_reference_i64_and_f64` differentials green.
+
+### 2026-06-27 TealOsprey — searchsorted_values typed i64 partition_point: 0.17x LOSS -> 0.90x near-parity vs pandas (5.4x fp-side)
+`Column::searchsorted_values` ran a per-needle binary search that accessed `self.values[mid]` (Scalar) and called
+`compare_scalars_na_last` per comparison — for 1M needles × ~23 steps that's ~23M Scalar-enum accesses (6x slower than
+pandas' C binary search). Added a typed path: all-valid (sorted) Int64 self + all-Int64 needles run
+`data.partition_point` over the raw `&[i64]` — `side="left"` → first `v >= needle` (`v < needle` partition),
+`"right"` → first `v > needle` (`v <= needle` partition). Bit-identical to the generic binary search.
+
+Same-box best-of-3, 5M sorted i64 / 1M i64 needles (`fp-columnar/examples/bench_searchsorted`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar binsearch) | patched (typed partition_point) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `searchsorted` 5M/1M | 196.3ms | 36.2ms | 5.42x | 0.17x -> 0.90x (pandas 32.5ms) |
+
+Lifts a 6x catastrophic loss to near-parity (the residual ~10% is the random `data[mid]` cache pattern inherent to
+binary search, tight in pandas' C). Bit-identical: new `searchsorted_values_typed_i64_matches_scalar_path` (typed vs
+Scalar-backed generic over random sorted data + dup runs / out-of-range / exact-hit needles, both sides) +
+fp-columnar 22 searchsorted + fp-frame 15 searchsorted tests green.

@@ -14828,6 +14828,36 @@ impl Column {
     /// inputs. Returns an `Int64` column of insertion positions.
     /// Missing needles are rejected with the same error as the scalar path.
     pub fn searchsorted_values(&self, needles: &[Scalar], side: &str) -> Result<Self, ColumnError> {
+        // Typed fast path: an all-valid (sorted) Int64 column with all-Int64
+        // needles runs `partition_point` over the raw `&[i64]` — no per-comparison
+        // `Scalar` access or `compare_scalars_na_last` dispatch. Bit-identical to
+        // the binary search below: side="left" inserts before equals
+        // (first v >= needle = `v < needle` partition), "right" after equals
+        // (first v > needle = `v <= needle` partition). Output is the same Int64
+        // position column. Any non-Int64 needle (incl. missing) or other side
+        // falls through to the generic path (which errors on missing/bad side).
+        if (side == "left" || side == "right")
+            && let Some(data) = self.as_i64_slice()
+            && needles.iter().all(|n| matches!(n, Scalar::Int64(_)))
+        {
+            let left = side == "left";
+            let out: Vec<i64> = needles
+                .iter()
+                .map(|n| {
+                    let nv = match n {
+                        Scalar::Int64(v) => *v,
+                        _ => unreachable!("guarded all-Int64 above"),
+                    };
+                    let pos = if left {
+                        data.partition_point(|&v| v < nv)
+                    } else {
+                        data.partition_point(|&v| v <= nv)
+                    };
+                    pos as i64
+                })
+                .collect();
+            return Ok(Self::from_i64_values(out));
+        }
         let positions: Vec<Scalar> = needles
             .iter()
             .map(|needle| self.searchsorted_position(needle, side, None))
@@ -28053,6 +28083,41 @@ mod tests {
             .expect("col");
             // needle=3 should land at position 2 (before trailing null).
             assert_eq!(col.searchsorted(&Scalar::Int64(3), "left").unwrap(), 2);
+        }
+
+        #[test]
+        fn searchsorted_values_typed_i64_matches_scalar_path() {
+            // The typed i64 partition_point path must equal the generic Scalar
+            // binary search over random sorted data + needles incl. dup runs,
+            // out-of-range, and exact hits, both sides.
+            let mut state: u64 = 0x6E54_3210_FEDC_BA98;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let mut vals: Vec<i64> =
+                    (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+                vals.sort_unstable(); // searchsorted requires sorted input
+                let col = Column::from_i64_values(vals.clone());
+                // Scalar-backed twin forces the generic path (Vec<Scalar> has no
+                // as_i64_slice typed view).
+                let scalar_col =
+                    Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect())
+                        .expect("scalar col");
+                let m = (next() % 50) as usize + 1;
+                let needles: Vec<Scalar> =
+                    (0..m).map(|_| Scalar::Int64((next() % 45) as i64 - 22)).collect();
+                for side in ["left", "right"] {
+                    let typed = col.searchsorted_values(&needles, side).expect("typed");
+                    let generic =
+                        scalar_col.searchsorted_values(&needles, side).expect("generic");
+                    assert_eq!(typed.values(), generic.values(), "side={side}");
+                }
+            }
         }
 
         #[test]

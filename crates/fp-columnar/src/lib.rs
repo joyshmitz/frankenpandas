@@ -5288,6 +5288,57 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
     count + i64::from(has_sentinel)
 }
 
+/// First-seen distinct values of an all-valid `i64` slice too wide for the
+/// dense direct-address path, via the same open-addressing set as
+/// [`count_distinct_i64_wide`] but COLLECTING each value the first time it is
+/// inserted — no `Scalar` materialization, no `FxHashSet` overhead. Output is in
+/// first-seen order (bit-identical to the generic `unique` path). `i64::MIN` is
+/// the empty sentinel, emitted at its first-seen position via a separate flag.
+fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
+    const EMPTY: i64 = i64::MIN;
+    let mut out: Vec<i64> = Vec::new();
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    if cap == 0 {
+        let mut set: FxHashSet<i64> = FxHashSet::default();
+        for &v in data {
+            if set.insert(v) {
+                out.push(v);
+            }
+        }
+        return out;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut seen_sentinel = false;
+    for &v in data {
+        if v == EMPTY {
+            if !seen_sentinel {
+                seen_sentinel = true;
+                out.push(EMPTY);
+            }
+            continue;
+        }
+        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            let k = keys[idx];
+            if k == EMPTY {
+                keys[idx] = v;
+                out.push(v);
+                break;
+            }
+            if k == v {
+                break;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+    out
+}
+
 /// First-seen factorize of an all-valid `i64` slice too wide for the dense
 /// direct-address path, via an open-addressing `i64 -> code` map (linear
 /// probing, inline keys + parallel `u32` codes, ~0.67 load, Fibonacci hash) over
@@ -17534,19 +17585,24 @@ impl Column {
         // the HashSet path below (all-valid ⇒ nothing missing to skip; output is
         // the same first-seen distinct Int64 values). Same gate as isin/dense
         // duplicated (`i64_direct_address_range`).
-        if let Some(data) = self.as_i64_slice()
-            && let Some((min, range)) = i64_direct_address_range(data)
-        {
-            let mut seen = vec![false; range];
-            let mut out: Vec<i64> = Vec::new();
-            for &v in data {
-                let slot = (v as i128 - min as i128) as usize;
-                if !seen[slot] {
-                    seen[slot] = true;
-                    out.push(v);
+        if let Some(data) = self.as_i64_slice() {
+            if let Some((min, range)) = i64_direct_address_range(data) {
+                let mut seen = vec![false; range];
+                let mut out: Vec<i64> = Vec::new();
+                for &v in data {
+                    let slot = (v as i128 - min as i128) as usize;
+                    if !seen[slot] {
+                        seen[slot] = true;
+                        out.push(v);
+                    }
                 }
+                return Ok(Self::from_i64_values(out));
             }
-            return Ok(Self::from_i64_values(out));
+            // Wide/sparse all-valid Int64: out of dense-bitset range, but the raw
+            // &[i64] avoids Scalar materialization — first-seen dedup via the
+            // open-addressing set (breaks the FxHashSet khash floor). Bit-identical
+            // to the generic path's first-seen distinct Int64 values.
+            return Ok(Self::from_i64_values(unique_i64_wide(data)));
         }
 
         #[derive(Hash, PartialEq, Eq)]
@@ -22018,6 +22074,60 @@ mod tests {
             assert_eq!(u.values()[0], Scalar::Int64(3));
             assert_eq!(u.values()[1], Scalar::Int64(1));
             assert_eq!(u.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn unique_wide_i64_open_addressing_matches_reference() {
+            // Wide/sparse all-valid Int64 uses unique_i64_wide (open-addressing
+            // set). First-seen distinct must equal an insertion-ordered reference
+            // across full-range data incl. the i64::MIN empty-sentinel.
+            use std::collections::HashSet;
+            let pool: [i64; 6] = [
+                i64::MIN,
+                i64::MAX,
+                7_000_000_000_000_000_000,
+                -7_000_000_000_000_000_000,
+                42,
+                -42,
+            ];
+            let mut state: u64 = 0xC0FF_EE00_1122_3344;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 400) as usize + 2;
+                let mut data: Vec<i64> =
+                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                data[0] = i64::MIN;
+                data[1] = i64::MAX;
+                assert!(
+                    crate::i64_direct_address_range(&data).is_none(),
+                    "trial {trial}: expected wide data"
+                );
+                // First-seen reference.
+                let mut seen = HashSet::new();
+                let mut expected: Vec<i64> = Vec::new();
+                for &v in &data {
+                    if seen.insert(v) {
+                        expected.push(v);
+                    }
+                }
+                let col = Column::from_i64_values(data);
+                let got: Vec<i64> = col
+                    .unique()
+                    .expect("unique")
+                    .values()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Scalar::Int64(x) => Some(*x),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(got, expected, "trial {trial}");
+            }
         }
 
         #[test]

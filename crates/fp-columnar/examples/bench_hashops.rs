@@ -18,6 +18,10 @@ fn main() {
     for _ in 0..6 {
         let t = std::time::Instant::now();
         match op {
+            "unique" => {
+                let r = col.unique().unwrap();
+                std::hint::black_box(r.len());
+            }
             "factorize" => {
                 let (c, u) = col.factorize().unwrap();
                 std::hint::black_box((c.len(), u.len()));

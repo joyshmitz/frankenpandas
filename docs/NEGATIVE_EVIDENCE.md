@@ -6318,3 +6318,22 @@ Applies to ALL factorize paths (dense benefits too). Cumulative wide-i64 factori
 backing is now lazy-int64 instead of Scalar — fp-columnar 60 factorize/unique/value_counts tests + fp-frame 12
 factorize tests green. RESIDUAL: `uniques` for high-card i64 is still `Vec<Scalar::Int64>` (could be from_i64_values
 when self.dtype==Int64), a smaller follow-up (uniques ≤ distinct, often < n).
+
+### 2026-06-27 TealOsprey — unique wide/sparse Int64 open-addressing dedup: 0.74x LOSS -> 3.8x WIN vs pandas (5.1x fp-side)
+Third khash-floor consumer (after nunique + factorize). `unique` had a dense direct-address dedup for bounded ranges
+but fell to `FxHashSet<Key>` + `Scalar` materialization for SPARSE wide i64. Added `unique_i64_wide`: the same
+open-addressing set as `count_distinct_i64_wide` but COLLECTING each value's first-seen occurrence into a `Vec<i64>`
+(emitted via `from_i64_values`) — no Scalar boxing on input OR output, no FxHashSet overhead. i64::MIN empty-sentinel
+emitted at its first-seen position via a flag.
+
+Same-box back-to-back best-of-3, 5M sparse i64 ~5M distinct (`fp-columnar/examples/bench_hashops 5000000 unique
+wide`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashSet+Scalar) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `unique` wide-i64 5M | 830.9ms | 162.7ms | 5.11x | 0.74x -> 3.78x (pandas 614.4ms) |
+
+Bit-identical: new `unique_wide_i64_open_addressing_matches_reference` (first-seen distinct vs insertion-ordered std
+HashSet ref over full-range pool incl. i64::MIN/MAX, 120 LCG trials) + fp-columnar 22 unique tests green. KHASH FLOOR
+NOW BROKEN ACROSS nunique (6.0x), factorize (1.66x), unique (3.8x) — all three wide-i64 hash ops flipped from
+parity/loss to multi-x wins by the open-addressing i64 table. value_counts is the only wide-i64 hash op left on the
+generic path, and it's correctly NOT a hash problem (sort/output-bound, documented REVERT above).

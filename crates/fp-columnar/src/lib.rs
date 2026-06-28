@@ -7666,7 +7666,11 @@ impl Column {
     pub fn from_f64_values_with_validity(data: Vec<f64>, validity: ValidityMask) -> Self {
         debug_assert_eq!(data.len(), validity.len());
         if validity.all() {
-            return Self::from_f64_values(data);
+            // All-valid → MOVE the Vec into the backing (from_f64_values_owned)
+            // rather than from_f64_values' Arc::from realloc-copy. Bit-identical:
+            // _owned falls back to from_f64_values on any stray NaN. Benefits every
+            // caller whose output happens to carry no missing (bfill/interpolate/…).
+            return Self::from_f64_values_owned(data);
         }
         Self {
             dtype: DType::Float64,

@@ -6866,3 +6866,23 @@ ffill flips LOSS->WIN. bfill is a 3.5-5x improvement but stays ~0.42x — its re
 cache-hostile (~2.7x the forward ffill cost) on the backward data/out/validity streams; a reverse-ffill-reverse rewrite
 could recover it (follow-up). Bit-identical: new `ffill_bfill_typed_match_independent_oracle` (i64 & f64, random
 validity, limit None/Some(1)/Some(2), independent oracle) + fp-columnar 8 ffill/bfill + fp-frame 34 ffill/bfill green.
+
+### 2026-06-27 TealOsprey — from_f64_values_with_validity all-valid branch: MOVE not realloc — bfill f64 0.41x->1.18x WIN
+ROOT-CAUSE refinement: `from_f64_values_with_validity`'s `validity.all()` branch returned `from_f64_values(data)`
+(Arc::from realloc-copy). Changed it to `from_f64_values_owned(data)` (MOVES the Vec; falls back to from_f64_values on
+any stray NaN → bit-identical). This is the constructor every recent typed missing-bearing op funnels through, so any
+caller whose output happens to carry NO missing now skips the ~28ms (5M) realloc. The bfill bench (no trailing nulls →
+fully back-filled → all-valid) was the visible victim: its 82ms was the realloc, NOT the reverse-iteration cache cost I
+suspected.
+
+Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_ffill`):
+| op | before (realloc) | after (move) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `bfill` f64 5M | 81.9ms | 28.2ms | 0.41x -> 1.18x (pandas 33.2ms) |
+| `ffill` f64 5M | 29.8ms | 25.9ms | -> 1.25x (pandas 32.5ms) |
+| `ffill` i64 5M | 28.6ms | 25.3ms | -> 1.28x |
+| `bfill` i64 5M | 77.7ms | 67.7ms | -> 0.49x (still Arc::from — no owned Int64 ctor) |
+
+bfill f64 flips LOSS->WIN. i64 bfill still reallocs (from_i64_values_with_validity all() → from_i64_values; the owned
+Int64 sibling remains the one deferred structural gap). FULL fp-columnar suite 464 passed / 0 failed (the shared
+constructor change is bit-identical across diff/shift/pct_change/interpolate/fillna/ffill/bfill).

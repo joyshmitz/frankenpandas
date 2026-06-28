@@ -6280,3 +6280,21 @@ factorize tests green. RESIDUAL: factorize's `codes` output is still a `Vec<Scal
 floor is gone, the remaining cost is output Scalar boxing (a typed Int64 codes column via `from_i64_values` is the
 next lever, and applies to the dense path too). The open-addressing table has now broken the khash floor for both
 nunique and factorize; value_counts is the remaining wide-i64 consumer.
+
+### 2026-06-27 TealOsprey — value_counts wide-i64 open-addressing tally: REVERTED (~0-gain; sort/output-bound, NOT hash-bound)
+After the nunique (6.0x) and factorize (1.25x) open-addressing wins, value_counts looked like the third wide-i64
+khash-floor consumer. Built `value_counts_i64_wide` (open-addressing `i64 -> tally-index` map, same shape as
+`factorize_i64_wide`) and wired it into `value_counts_with_options`' typed path. MEASURED same-box back-to-back,
+best-of-3, 5M sparse i64 (~5M distinct), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | ORIG (FxHashMap) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `value_counts` wide-i64 5M | 682-704ms | 706-735ms | ~0.97x (REGRESSION) | ~1.35x both (pandas 949.7ms) |
+
+The patched tally was consistently EQUAL-OR-SLOWER than the FxHashMap path. UNLIKE nunique/factorize, value_counts on
+high-cardinality data is NOT hash-bound: with ~5M distinct it must (1) stable-sort 5M `(Scalar, usize)` pairs by count
+and (2) materialize 5M-element value+count output columns — those dominate, and the hash tally is a small fraction, so
+a faster tally is invisible (and the extra 64-bit-key table init adds a touch of overhead). 32 value_counts tests
+stayed green, but the change was REVERTED per the ~0-gain rule. LESSON: the open-addressing lever pays off only when
+the hash probe is the bottleneck (nunique: scalar count, no sort/large-output; factorize: codes output but hash-heavy).
+value_counts high-card is dominated by sort + dual-column output — a different lever (typed Int64 value output +
+radix/count-based top-k instead of full sort) would be needed, not a faster hash.

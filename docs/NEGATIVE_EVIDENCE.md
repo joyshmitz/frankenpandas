@@ -7106,3 +7106,24 @@ Both flip LOSS->strong WIN (~5x core scaling). Confirms the compute-bound-parall
 bandwidth-bound ops (add/abs) where threads only contend. NEXT: the nanos-component (dayofweek/hour/min/sec) and
 dayofyear/weekofyear paths are also compute-bound and would win more via the same helper (they already win via owned;
 dayofweek 2.70x). Bit-identical: fp-frame 17 dt component tests green.
+
+### 2026-06-27 TealOsprey — PARALLEL transcendental unary math (exp/log/sin/cos/…): ~1.0x parity -> 3.4-4.5x WIN vs pandas
+Extends the compute-bound-parallelism lever (from dt civil-conversion) to the libm transcendental unary ops. They were
+already ~parity serially (scalar libm == numpy's default scalar libm: exp 1.02x, sin 1.08x), but each f(x) is ~10-30ns
+of COMPUTE (the load hides behind the math), so chunked scoped threads scale near-linearly. Added `typed_float_unary_par`
++ free `par_map_vec_f64` (available_parallelism().min(8), n>=200k gate, serial fallback) and routed 18 transcendentals
+through it (exp/log10/log2/sin/cos/tan/asin/acos/atan/sinh/cosh/tanh/asinh/acosh/atanh/exp_m1/ln_1p/cbrt). The CHEAP
+maps (reciprocal/to_degrees/to_radians/round) stay on the serial `typed_float_unary` (bandwidth-bound — threads would
+only contend). Bit-identical (same f, order-preserving chunks, same from_f64_values_owned).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_trig`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `exp` 5M | 38.1ms | 11.3ms | 1.02x -> 3.44x (pandas 38.9ms) |
+| `sin` 5M | 55.2ms | 13.3ms | 1.08x -> 4.50x (pandas 59.7ms) |
+
+(All 18 transcendentals get the same ~3-5x core scaling.) NOTE: `log`/`log1p` use the NULLABLE unary helper
+(typed_float_unary_nullable_owned, ln of negatives → NaN→missing) which isn't parallelized yet — a parallel nullable
+variant (per-chunk validity) is the follow-up; they're at ~0.95x parity so lower priority. FULL fp-columnar suite 467
+passed / 0 failed.

@@ -5963,6 +5963,38 @@ fn f64_radix_key(value: f64) -> u64 {
 /// counting sort). Returns the permutation `perm` such that
 /// `keys[perm[0]] <= keys[perm[1]] <= ...`, with equal keys keeping their
 /// original relative order (stability == the comparator path's tie behavior).
+/// Build a `Vec<f64>` of length `n` where slot `i` is `g(i)`, evaluated across
+/// scoped threads for COMPUTE-bound `g` (libm transcendentals). Serial below
+/// `PAR_MIN` or on single-core hosts. Order-preserving (chunk writes a
+/// contiguous global range) → bit-identical to the serial map.
+fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
+    const PAR_MIN: usize = 200_000;
+    let mut out = vec![0.0_f64; n];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+    if workers <= 1 || n < PAR_MIN {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = g(i);
+        }
+        return out;
+    }
+    let chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (ci, out_c) in out.chunks_mut(chunk).enumerate() {
+            let g = &g;
+            let base = ci * chunk;
+            scope.spawn(move || {
+                for (j, o) in out_c.iter_mut().enumerate() {
+                    *o = g(base + j);
+                }
+            });
+        }
+    });
+    out
+}
+
 /// Sort an `i64` slice's VALUES directly (no argsort permutation, no final
 /// gather) via an 8-pass LSD radix over order-preserving keys in ping-pong
 /// buffers. `Column::sort_values` only needs the sorted values (the row
@@ -16794,7 +16826,7 @@ impl Column {
 
     /// Exponential (e^x) of numeric values. Matches numpy's exp ufunc.
     pub fn exp(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::exp) {
+        if let Some(out) = self.typed_float_unary_par(f64::exp) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16844,7 +16876,7 @@ impl Column {
 
     /// Base-10 logarithm of numeric values. Matches numpy's log10 ufunc.
     pub fn log10(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::log10) {
+        if let Some(out) = self.typed_float_unary_par(f64::log10) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16869,7 +16901,7 @@ impl Column {
 
     /// Base-2 logarithm of numeric values. Matches numpy's log2 ufunc.
     pub fn log2(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::log2) {
+        if let Some(out) = self.typed_float_unary_par(f64::log2) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16894,7 +16926,7 @@ impl Column {
 
     /// Compute element-wise sine.
     pub fn sin(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::sin) {
+        if let Some(out) = self.typed_float_unary_par(f64::sin) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16919,7 +16951,7 @@ impl Column {
 
     /// Compute element-wise cosine.
     pub fn cos(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::cos) {
+        if let Some(out) = self.typed_float_unary_par(f64::cos) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16944,7 +16976,7 @@ impl Column {
 
     /// Compute element-wise tangent.
     pub fn tan(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::tan) {
+        if let Some(out) = self.typed_float_unary_par(f64::tan) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16969,7 +17001,7 @@ impl Column {
 
     /// Compute element-wise arcsine.
     pub fn asin(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::asin) {
+        if let Some(out) = self.typed_float_unary_par(f64::asin) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16994,7 +17026,7 @@ impl Column {
 
     /// Compute element-wise arccosine.
     pub fn acos(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::acos) {
+        if let Some(out) = self.typed_float_unary_par(f64::acos) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17019,7 +17051,7 @@ impl Column {
 
     /// Compute element-wise arctangent.
     pub fn atan(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::atan) {
+        if let Some(out) = self.typed_float_unary_par(f64::atan) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17044,7 +17076,7 @@ impl Column {
 
     /// Compute element-wise hyperbolic sine.
     pub fn sinh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::sinh) {
+        if let Some(out) = self.typed_float_unary_par(f64::sinh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17069,7 +17101,7 @@ impl Column {
 
     /// Compute element-wise hyperbolic cosine.
     pub fn cosh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::cosh) {
+        if let Some(out) = self.typed_float_unary_par(f64::cosh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17094,7 +17126,7 @@ impl Column {
 
     /// Compute element-wise hyperbolic tangent.
     pub fn tanh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::tanh) {
+        if let Some(out) = self.typed_float_unary_par(f64::tanh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17119,7 +17151,7 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic sine.
     pub fn asinh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::asinh) {
+        if let Some(out) = self.typed_float_unary_par(f64::asinh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17144,7 +17176,7 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic cosine.
     pub fn acosh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::acosh) {
+        if let Some(out) = self.typed_float_unary_par(f64::acosh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17169,7 +17201,7 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic tangent.
     pub fn atanh(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::atanh) {
+        if let Some(out) = self.typed_float_unary_par(f64::atanh) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17268,6 +17300,26 @@ impl Column {
             return Some(Self::from_f64_values_owned(
                 data.iter().map(|&x| f(x as f64)).collect(),
             ));
+        }
+        None
+    }
+
+    /// Parallel sibling of [`typed_float_unary`] for COMPUTE-bound element maps
+    /// (libm transcendentals: exp/log/sin/cos/tan/…). Each `f(x)` is ~10-30ns of
+    /// scalar libm, so the math dominates the load and chunked scoped threads
+    /// scale near-linearly (unlike the bandwidth-bound cheap maps — reciprocal,
+    /// to_degrees — which keep the serial path). Bit-identical: same `f`, same
+    /// order (chunk base+j → global index), same from_f64_values_owned output.
+    fn typed_float_unary_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
+        if let Some(data) = self.as_f64_slice() {
+            return Some(Self::from_f64_values_owned(par_map_vec_f64(data.len(), |i| {
+                f(data[i])
+            })));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return Some(Self::from_f64_values_owned(par_map_vec_f64(data.len(), |i| {
+                f(data[i] as f64)
+            })));
         }
         None
     }
@@ -17792,7 +17844,7 @@ impl Column {
 
     /// Compute exp(x) - 1 with improved precision for small x.
     pub fn expm1(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::exp_m1) {
+        if let Some(out) = self.typed_float_unary_par(f64::exp_m1) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17817,7 +17869,7 @@ impl Column {
 
     /// Compute ln(1 + x) with improved precision for small x.
     pub fn log1p(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::ln_1p) {
+        if let Some(out) = self.typed_float_unary_par(f64::ln_1p) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17842,7 +17894,7 @@ impl Column {
 
     /// Compute element-wise cube root.
     pub fn cbrt(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::cbrt) {
+        if let Some(out) = self.typed_float_unary_par(f64::cbrt) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());

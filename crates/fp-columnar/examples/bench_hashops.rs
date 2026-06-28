@@ -48,6 +48,12 @@ fn main() {
                 let r = col.duplicated().unwrap();
                 std::hint::black_box(r.len());
             }
+            "value_counts" => {
+                let Ok((v, c)) = col.value_counts() else {
+                    std::process::abort();
+                };
+                std::hint::black_box((v.len(), c.len()));
+            }
             _ => {
                 let r = col.nunique();
                 std::hint::black_box(&r);

@@ -5692,6 +5692,92 @@ fn factorize_i64_typed(data: &[i64], sort: bool) -> (Vec<i64>, Vec<i64>) {
     (codes, uniques)
 }
 
+/// Fully-typed `value_counts` for all-valid Int64 columns. This keeps the
+/// tally, optional count-order permutation, values output, and count output in
+/// primitive buffers instead of boxing high-cardinality outputs as `Scalar`s.
+/// Stable count sorting preserves first-seen order for ties, matching the
+/// generic path's pandas-facing contract.
+fn value_counts_i64_typed(
+    data: &[i64],
+    normalize: bool,
+    sort: bool,
+    ascending: bool,
+) -> (Column, Column) {
+    if data.is_empty() {
+        let values = Column::from_i64_values(Vec::new());
+        let counts = if normalize {
+            Column::from_f64_values(Vec::new())
+        } else {
+            Column::from_i64_values(Vec::new())
+        };
+        return (values, counts);
+    }
+
+    let (mut values, mut counts) = if let Some((min, range)) = i64_direct_address_range(data) {
+        let mut dense = vec![0usize; range];
+        let mut first_seen = Vec::new();
+        for &value in data {
+            let slot = (value as i128 - min as i128) as usize;
+            if dense[slot] == 0 {
+                first_seen.push(value);
+            }
+            dense[slot] += 1;
+        }
+        let counts: Vec<usize> = first_seen
+            .iter()
+            .map(|&value| dense[(value as i128 - min as i128) as usize])
+            .collect();
+        (first_seen, counts)
+    } else {
+        let mut index: FxHashMap<i64, usize> = FxHashMap::default();
+        let mut values = Vec::new();
+        let mut counts = Vec::new();
+        for &value in data {
+            if let Some(&slot) = index.get(&value) {
+                counts[slot] += 1;
+            } else {
+                index.insert(value, values.len());
+                values.push(value);
+                counts.push(1);
+            }
+        }
+        (values, counts)
+    };
+
+    if sort && counts.len() > 1 {
+        let first = counts[0];
+        if counts.iter().any(|&count| count != first) {
+            let mut order: Vec<usize> = (0..counts.len()).collect();
+            if ascending {
+                order.sort_by_key(|&idx| counts[idx]);
+            } else {
+                order.sort_by_key(|&idx| std::cmp::Reverse(counts[idx]));
+            }
+            values = order.iter().map(|&idx| values[idx]).collect();
+            counts = order.into_iter().map(|idx| counts[idx]).collect();
+        }
+    }
+
+    let values = Column::from_i64_values(values);
+    let counts = if normalize {
+        let total = data.len() as f64;
+        Column::from_f64_values(
+            counts
+                .into_iter()
+                .map(|count| count as f64 / total)
+                .collect(),
+        )
+    } else {
+        Column::from_i64_values(
+            counts
+                .into_iter()
+                .map(|count| i64::try_from(count).unwrap_or(i64::MAX))
+                .collect(),
+        )
+    };
+    (values, counts)
+}
+
 /// Hash-free duplicate flags for a bounded-range `i64` slice via a dense
 /// direct-address table (no per-element hashing or `Scalar` enum). Identical
 /// semantics to [`duplicated_flags_typed`]. `min`/`range` come from
@@ -18102,6 +18188,10 @@ impl Column {
         ascending: bool,
         dropna: bool,
     ) -> Result<(Self, Self), ColumnError> {
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(value_counts_i64_typed(data, normalize, sort, ascending));
+        }
+
         // O(N) tally: a `set_member_key`-keyed hash map gives O(1) lookup
         // instead of the old O(distinct) linear `counts.iter().find(semantic_eq)`
         // per value (O(N·distinct), quadratic for high-cardinality data). The
@@ -27849,6 +27939,24 @@ mod tests {
             assert_eq!(
                 counts.values(),
                 &[Scalar::Float64(2.0 / 3.0), Scalar::Float64(1.0 / 3.0)]
+            );
+        }
+
+        #[test]
+        fn value_counts_all_valid_int64_keeps_typed_outputs() {
+            let col = Column::from_i64_values(vec![10, -3, 10, 7, -3, 10]);
+
+            let (values, counts) = col.value_counts().expect("value_counts");
+            assert_eq!(values.as_i64_slice(), Some(&[10, -3, 7][..]));
+            assert_eq!(counts.as_i64_slice(), Some(&[3, 2, 1][..]));
+
+            let (values, counts) = col
+                .value_counts_with_options(true, true, false, true)
+                .expect("normalized value_counts");
+            assert_eq!(values.as_i64_slice(), Some(&[10, -3, 7][..]));
+            assert_eq!(
+                counts.as_f64_slice(),
+                Some(&[3.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0][..])
             );
         }
 

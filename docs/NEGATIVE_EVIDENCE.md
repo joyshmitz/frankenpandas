@@ -6513,3 +6513,25 @@ Bit-identical: new `mode_f64_open_addressing_matches_reference` (-0.0-first mode
 FxHashMap first-seen/max-count ref, total_cmp order, ±0.0/Inf/repeats, 150 LCG trials) + fp-columnar 6 mode +
 fp-frame 41 mode tests green. The open-addressing table now spans Int64/Datetime64/Float64 across nunique/unique/
 factorize/duplicated/mode — the wide high-cardinality hash frontier is closed for all three core dtypes.
+
+### 2026-06-28 BlackThrush - value_counts wide Int64 typed outputs: 2.91x vs ORIG
+Dig follow-up on the documented wide-Int64 `value_counts` residual after the open-addressing tally no-ship. The prior
+ledger showed the tally itself was not hash-bound; the floor was sorting plus dual-column output. Added a narrow
+all-valid Int64 path that keeps tally values as raw `i64`, emits the values column through `Column::from_i64_values`,
+emits non-normalized counts through `Column::from_i64_values`, and skips count sorting when every count is tied. Null
+and non-Int64 inputs keep the generic Scalar path, so pandas missing-bucket behavior is unchanged.
+
+Same-worker proof on `hz2`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`. ORIG is current
+`origin/main` at `30745b5d` plus the benchmark-only `bench_hashops value_counts` arm; patched is this typed-output
+path. Command:
+`rch exec -- cargo run -p fp-columnar --example bench_hashops --release -- 5000000 value_counts wide`.
+
+| workload | ORIG best | patched best | ratio vs ORIG |
+| --- | ---: | ---: | ---: |
+| `value_counts` wide-i64 5M | 1312.778554ms | 451.640651ms | 2.91x |
+
+Validation: focused `fp-columnar --release value_counts` passed before the timing proof. After rebasing onto the
+Float64 hash keeps now on main, the patched tree rechecked at 504.737670ms via the same command when `rch exec` fell
+open locally. Final landing gates passed: `fp-conformance --release` green and valid per-crate
+`cargo bench -p fp-columnar` green. The literal requested `cargo bench --release -p fp-columnar` form is still a Cargo
+CLI error (`--release` is not accepted by `cargo bench`).

@@ -6726,3 +6726,24 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_diff`),
 f64 buffer + from_f64_values NaN scan) trails pandas' tighter in-place vectorized subtraction. Bit-identical: new
 `diff_typed_matches_scalar_path` (NaN-bit-aware vs Scalar generic, periods {1,2,-1,3}, f64 incl. ±inf to exercise the
 fallback) + fp-columnar 36 diff + fp-frame 29 diff tests green.
+
+### 2026-06-27 TealOsprey — cum*/cumprod output via from_f64_values_owned (move, no realloc): cumsum 0.37x -> 0.66x vs pandas
+Refinement of the cum* typed commit: the typed paths emitted via `from_f64_values` which does `Arc::from(Vec)` =
+a cold realloc-copy (~5.7ms/1M ≈ 28ms at 5M). Switched the 7 cum{sum,prod,max,min} typed outputs to
+`from_f64_values_owned`, which MOVES the Vec into the backing when NaN-free and falls back to `from_f64_values` (the
+NaN→missing path) otherwise — bit-identical (NaN-free cum output is all-valid either way; NaN from f64 overflow routes
+to the identical fallback).
+
+Same-box best-of-3, 5M Int64 (`fp-columnar/examples/bench_cum_i64`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | typed (from_f64_values) | typed_owned | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `cumsum` i64 5M | 63.4ms | 35.4ms | 0.37x -> 0.66x (pandas 23.2ms) |
+| `cummax` i64 5M | 76.9ms | 44.2ms | -> ~0.52x |
+| `cummin` i64 5M | 71.4ms | 43.9ms | -> ~0.52x |
+
+Cumulative cumsum i64 this session: 362ms -> 35ms = 10.3x fp-side, 0.06x -> 0.66x vs pandas (the residual is now just
+the i64→f64 convert + the f64-vs-i64 output dtype). The f64 cum* paths inherit the same realloc savings. Bit-identical:
+fp-columnar 15 cum tests green (incl. the NaN-bit-aware typed-vs-Scalar differential). NOTE: diff was left on
+from_f64_values — its boundary NaN forces the _owned fallback anyway (a from_f64_values_owned_with_validity rewrite
+could skip it; follow-up).

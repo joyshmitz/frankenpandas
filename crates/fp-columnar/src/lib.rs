@@ -12290,7 +12290,7 @@ impl Column {
                     running
                 })
                 .collect();
-            return Ok(Self::from_f64_values(out));
+            return Ok(Self::from_f64_values_owned(out));
         }
         // Typed all-valid Int64: fold as f64 (matching nancumsum's `to_f64`),
         // emit Float64 — bit-identical to the nancumsum path, no Scalar
@@ -12304,7 +12304,7 @@ impl Column {
                     running
                 })
                 .collect();
-            return Ok(Self::from_f64_values(out));
+            return Ok(Self::from_f64_values_owned(out));
         }
         let out = nancumsum(&self.values);
         Self::new(DType::Float64, out)
@@ -12322,7 +12322,7 @@ impl Column {
                     running
                 })
                 .collect();
-            return Ok(Self::from_f64_values(out));
+            return Ok(Self::from_f64_values_owned(out));
         }
         // NB: no typed i64 fast path — an i64 product can overflow the f64 to
         // ±inf→NaN, where from_f64_values (NaN→missing) diverges from nancumprod's
@@ -12345,7 +12345,7 @@ impl Column {
                     running = running.max(x);
                     out.push(running);
                 }
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }
@@ -12358,7 +12358,7 @@ impl Column {
                     running = running.max(x as f64);
                     out.push(running);
                 }
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }
@@ -12378,7 +12378,7 @@ impl Column {
                     running = running.min(x);
                     out.push(running);
                 }
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }
@@ -12391,7 +12391,7 @@ impl Column {
                     running = running.min(x as f64);
                     out.push(running);
                 }
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }

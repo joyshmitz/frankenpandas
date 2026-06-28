@@ -5412,6 +5412,52 @@ fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
 /// inserted — no `Scalar` materialization, no `FxHashSet` overhead. Output is in
 /// first-seen order (bit-identical to the generic `unique` path). `i64::MIN` is
 /// the empty sentinel, emitted at its first-seen position via a separate flag.
+/// First-seen distinct values of an all-valid (NaN-free) `f64` slice, via an
+/// open-addressing set keyed by NORMALIZED float bits (−0.0 → +0.0, exactly as
+/// the generic `Key::FloatBits` path) while collecting the ORIGINAL first-seen
+/// `f64` for output — so a `-0.0`-first column keeps `-0.0` as its representative,
+/// bit-identical to the generic `unique`. The empty sentinel `i64::MIN` is the
+/// `-0.0` bit pattern, which no normalized key can equal (−0.0 normalizes to
+/// +0.0), so it never collides.
+fn unique_f64_wide(data: &[f64]) -> Vec<f64> {
+    const EMPTY: i64 = i64::MIN;
+    let mut out: Vec<f64> = Vec::new();
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    if cap == 0 {
+        let mut seen: FxHashSet<u64> = FxHashSet::default();
+        for &f in data {
+            let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+            if seen.insert(kb) {
+                out.push(f);
+            }
+        }
+        return out;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    for &f in data {
+        let kb = (if f == 0.0 { 0.0 } else { f }).to_bits() as i64;
+        let mut p = ((kb as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            let k = keys[p];
+            if k == EMPTY {
+                keys[p] = kb;
+                out.push(f);
+                break;
+            }
+            if k == kb {
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    out
+}
+
 fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
     const EMPTY: i64 = i64::MIN;
     let mut out: Vec<i64> = Vec::new();
@@ -17794,6 +17840,13 @@ impl Column {
             return Ok(Self::from_datetime64_values(unique_i64_wide(data)));
         }
 
+        // All-valid (NaN-free) Float64: open-addressing over normalized float
+        // bits, collecting first-seen originals (preserves -0.0). Avoids the
+        // FxHashSet<FloatBits> + 5M-Scalar materialization of the generic path.
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(unique_f64_wide(data)));
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -22263,6 +22316,74 @@ mod tests {
             assert_eq!(u.values()[0], Scalar::Int64(3));
             assert_eq!(u.values()[1], Scalar::Int64(1));
             assert_eq!(u.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn unique_f64_open_addressing_matches_reference_and_signed_zero() {
+            // Float64 wide path keys on NORMALIZED bits (−0.0 == +0.0) but keeps
+            // the first-seen original — so -0.0-first stays -0.0.
+            let col = Column::from_f64_values(vec![-0.0, 1.5, 0.0, 1.5, f64::INFINITY, -0.0]);
+            let u = col.unique().expect("unique");
+            let got: Vec<f64> = u
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) => *x,
+                    o => panic!("not f64: {o:?}"),
+                })
+                .collect();
+            assert_eq!(got.len(), 3);
+            assert!(got[0] == 0.0 && got[0].is_sign_negative(), "first unique is -0.0");
+            assert_eq!(got[1], 1.5);
+            assert_eq!(got[2], f64::INFINITY);
+
+            // Differential vs a first-seen HashSet<u64 normalized-bits> reference.
+            use std::collections::HashSet;
+            let mut state: u64 = 0x0F1E_2D3C_4B5A_6978;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..120 {
+                let n = (next() % 400) as usize + 1;
+                let data: Vec<f64> = (0..n)
+                    .map(|_| {
+                        // mix of a few repeated buckets to force duplicates
+                        let pick = next() % 7;
+                        match pick {
+                            0 => -0.0,
+                            1 => 0.0,
+                            2 => 1.0,
+                            3 => -2.5,
+                            4 => f64::INFINITY,
+                            5 => (next() % 50) as f64,
+                            _ => (next() >> 11) as f64 / (1u64 << 53) as f64,
+                        }
+                    })
+                    .collect();
+                let mut seen = HashSet::new();
+                let expected: Vec<u64> = data
+                    .iter()
+                    .filter_map(|&f| {
+                        let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+                        seen.insert(kb).then_some(f.to_bits())
+                    })
+                    .collect();
+                let col = Column::from_f64_values(data);
+                let got: Vec<u64> = col
+                    .unique()
+                    .expect("unique")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => x.to_bits(),
+                        o => panic!("not f64: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, expected);
+            }
         }
 
         #[test]

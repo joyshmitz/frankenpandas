@@ -15,6 +15,16 @@ fn main() {
     };
     let col = if mode == "dt" {
         Column::from_datetime64_values(data)
+    } else if mode == "f64" {
+        // Distinct-ish floats from a splitmix-style mix (~5M distinct).
+        let f: Vec<f64> = (0..n as u64)
+            .map(|i| {
+                let mut z = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                (z >> 11) as f64 / (1u64 << 53) as f64
+            })
+            .collect();
+        Column::from_f64_values(f)
     } else {
         Column::from_i64_values(data)
     };

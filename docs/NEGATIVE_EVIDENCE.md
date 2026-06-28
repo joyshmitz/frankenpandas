@@ -6476,3 +6476,22 @@ Validation: focused `series_resample_subdaily_typed_fast_path_emits_datetime64_l
 `fp-conformance` release crate green; valid per-crate `cargo bench -p fp-frame` green on remote `hz2`. The literal
 requested `cargo bench --release -p fp-frame` form was also run per-crate on remote `vmi1264463` and rejected by Cargo
 because `bench` has no `--release` argument.
+
+### 2026-06-27 TealOsprey — unique Float64 open-addressing (normalized-bits key, original-value output): 0.81x LOSS -> 2.97x WIN vs pandas (3.67x fp-side)
+The open-addressing lever extended to Float64. `unique` had no float fast path → `FxHashSet<Key::FloatBits>` + 5M
+Scalar materialization (0.81x vs pandas). Added `unique_f64_wide`: open-addressing set keyed by NORMALIZED float bits
+(−0.0 → +0.0, as the generic Key does) while COLLECTING the original first-seen f64 — so a `-0.0`-first column keeps
+`-0.0`. KEY TRICK: the empty sentinel `i64::MIN` IS the `-0.0` bit pattern, and no normalized key can equal it (−0.0
+normalizes to +0.0 bits = 0), so the sentinel never collides with a real key. Gated on `as_f64_slice` (all-valid,
+NaN-free → NaN columns fall through to the generic skip-NaN path).
+
+Same-box best-of-3, 5M ~5M-distinct f64 (`fp-columnar/examples/bench_hashops 5000000 unique f64`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashSet+Scalar) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `unique` Float64 5M | 1012.4ms | 276.5ms | 3.66x | 0.81x -> 2.97x (pandas 820.1ms) |
+
+Bit-identical: new `unique_f64_open_addressing_matches_reference_and_signed_zero` (explicit -0.0-first preservation +
+differential vs first-seen normalized-bits HashSet over 120 LCG trials with ±0.0/Inf/repeats) + fp-columnar 24 unique
++ fp-frame 73 unique tests green. The open-addressing table now spans Int64/Datetime64/Float64. RESIDUAL: mode Float64
+(measured ~2327ms, a big loss) — same normalized-bits key + first-seen-value-with-count; next follow-up.

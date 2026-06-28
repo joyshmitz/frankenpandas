@@ -6562,3 +6562,16 @@ k ∈ {1,3,10,len−1}) + `nlargest_keep_f64_bounded_scan_matches_partial_cmp_re
 ref incl. ±0.0/±Inf) + fp-columnar 11 + fp-frame 31 nlargest/nsmallest tests green. GOTCHA: rch caches example
 binaries by source hash — `touch` the example to force relink against a changed lib (3 stale-binary phantom reads
 before this was caught).
+
+### 2026-06-27 TealOsprey — nlargest/nsmallest Float64 bounded scan: REVERTED (fast ~8ms but NOT bit-identical to sort_values radix)
+Follow-up to the i64 nlargest win: tried `nkeep_typed_f64_total` (bounded top-k scan keyed by `total_cmp` + position)
+for `nlargest()`/`nsmallest()` Float64, reasoning total_cmp (−0.0 < +0.0, bit order) would match `sort_values`' typed
+radix. MEASURED FAST (5M f64 k=10: 634ms -> ~8ms, ~79x), BUT the differential
+`nlargest_nsmallest_i64_bounded_scan_matches_sort_take` (extended to f64 vs `sort_values(±)+take` over ±0.0/±Inf
+data) FAILED at k=375: `total_cmp` order does NOT equal the typed Float64 radix permutation order for some
+signed-zero/boundary case. Since `nlargest()` rides `sort_values` (radix), the fast path MUST reproduce that exact
+order to be bit-identical — and total_cmp doesn't. REVERTED per the bit-identity rule (a fast-but-wrong path is not
+shippable). NOTE: f64 `nlargest_keep(.,"first")` (the `_keep` variant via `nkeep_impl`, `partial_cmp`) is already
+fast + bit-identical (different reference: `compare_scalars_na_last`, not radix) and stays landed. The remaining f64
+`nlargest()` lever needs a bounded scan keyed by the EXACT float→sortable-bits transform `typed_radix_perm` uses, not
+total_cmp — deferred. i64 nlargest/nsmallest (2.14x WIN) is unaffected and remains landed.

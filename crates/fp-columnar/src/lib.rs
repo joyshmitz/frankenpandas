@@ -12292,6 +12292,20 @@ impl Column {
                 .collect();
             return Ok(Self::from_f64_values(out));
         }
+        // Typed all-valid Int64: fold as f64 (matching nancumsum's `to_f64`),
+        // emit Float64 — bit-identical to the nancumsum path, no Scalar
+        // materialization of the lazy i64 column.
+        if let Some(data) = self.as_i64_slice() {
+            let mut running = 0.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&x| {
+                    running += x as f64;
+                    running
+                })
+                .collect();
+            return Ok(Self::from_f64_values(out));
+        }
         let out = nancumsum(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -12310,6 +12324,9 @@ impl Column {
                 .collect();
             return Ok(Self::from_f64_values(out));
         }
+        // NB: no typed i64 fast path — an i64 product can overflow the f64 to
+        // ±inf→NaN, where from_f64_values (NaN→missing) diverges from nancumprod's
+        // Scalar::Float64(NaN); kept on the exact nancumprod path for bit-identity.
         let out = nancumprod(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -12332,6 +12349,19 @@ impl Column {
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }
+        if let Some(data) = self.as_i64_slice() {
+            if let Some((&first, rest)) = data.split_first() {
+                let mut running = first as f64;
+                let mut out = Vec::with_capacity(data.len());
+                out.push(running);
+                for &x in rest {
+                    running = running.max(x as f64);
+                    out.push(running);
+                }
+                return Ok(Self::from_f64_values(out));
+            }
+            return Ok(Self::from_f64_values(Vec::new()));
+        }
         let out = nancummax(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -12346,6 +12376,19 @@ impl Column {
                 out.push(running);
                 for &x in rest {
                     running = running.min(x);
+                    out.push(running);
+                }
+                return Ok(Self::from_f64_values(out));
+            }
+            return Ok(Self::from_f64_values(Vec::new()));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            if let Some((&first, rest)) = data.split_first() {
+                let mut running = first as f64;
+                let mut out = Vec::with_capacity(data.len());
+                out.push(running);
+                for &x in rest {
+                    running = running.min(x as f64);
                     out.push(running);
                 }
                 return Ok(Self::from_f64_values(out));
@@ -22656,6 +22699,46 @@ mod tests {
             assert_eq!(col.tail(10).expect("tail").len(), 1);
             assert_eq!(col.head(-10).expect("head").len(), 0);
             assert_eq!(col.tail(-10).expect("tail").len(), 0);
+        }
+
+        #[test]
+        fn cum_typed_i64_matches_scalar_path() {
+            // Typed all-valid i64 cum{sum,prod,max,min} == the Scalar/nan* path
+            // (fold as f64 -> Float64), incl. negatives and large magnitudes.
+            let mut state: u64 = 0x33CC_55AA_77EE_99BB;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                let vals: Vec<i64> = (0..n)
+                    .map(|_| match next() % 5 {
+                        0 => (next() % 7) as i64 - 3,
+                        1 => next() as i64, // wide
+                        _ => (next() % 100) as i64,
+                    })
+                    .collect();
+                let typed = Column::from_i64_values(vals.clone());
+                let scalar = Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect())
+                    .expect("scalar col");
+                // NaN-bit-aware equality: cumprod can overflow to NaN, and
+                // NaN != NaN would fail a plain assert_eq even when identical;
+                // compare Float64 by bits while still catching Null-vs-NaN drift.
+                let vals_eq = |a: &[Scalar], b: &[Scalar]| -> bool {
+                    a.len() == b.len()
+                        && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                            (Scalar::Float64(p), Scalar::Float64(q)) => p.to_bits() == q.to_bits(),
+                            _ => x == y,
+                        })
+                };
+                assert!(vals_eq(typed.cumsum().unwrap().values(), scalar.cumsum().unwrap().values()));
+                assert!(vals_eq(typed.cumprod().unwrap().values(), scalar.cumprod().unwrap().values()));
+                assert!(vals_eq(typed.cummax().unwrap().values(), scalar.cummax().unwrap().values()));
+                assert!(vals_eq(typed.cummin().unwrap().values(), scalar.cummin().unwrap().values()));
+            }
         }
 
         #[test]

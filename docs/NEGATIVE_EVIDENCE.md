@@ -6685,3 +6685,24 @@ pattern, same as the i64 case). NOTE: f64 searchsorted was measured and is NOT a
 random needles is slow (938ms) and fp's Scalar path already beats it, so f64 was left as-is. Bit-identical: new
 `searchsorted_values_typed_datetime_matches_scalar_path` (typed vs Scalar generic, both sides, dup/oob/exact) +
 fp-columnar 23 searchsorted + fp-frame 15 searchsorted tests green.
+
+### 2026-06-27 TealOsprey — cumsum/cummax/cummin typed Int64 path: 5x fp-side (0.06x -> 0.35x vs pandas); cumprod left on nan* (overflow NaN)
+fp `cum{sum,max,min}` had typed Float64 fast paths but i64 columns fell to the `nan*` Scalar path
+(`nancumsum(&self.values)` materializes 5M Scalars from the lazy i64 column) — ~360ms, 0.06x vs pandas (15x slower).
+Added typed i64 branches: read `as_i64_slice`, fold as f64 (`running += x as f64` etc.), emit Float64 — bit-identical
+to the nan* path (same `to_f64` fold, same Float64 output), no Scalar materialization.
+
+Same-box best-of-3, 5M Int64 (`fp-columnar/examples/bench_cum_i64`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (nan* Scalar) | patched (typed i64) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `cumsum` i64 5M | 362.8ms | 63.4ms | 5.72x | 0.06x -> 0.37x (pandas 23.2ms) |
+| `cummax` i64 5M | 377.0ms | 76.9ms | 4.90x | ~0.32x |
+| `cummin` i64 5M | ~360ms | 71.4ms | ~5x | ~0.33x |
+
+5x fp-side, lifts a 15x catastrophe to ~3x-slower. RESIDUAL: fp cum* on Int64 emits Float64 (i64→f64 convert + f64
+buffer), while pandas keeps Int64 (pure bandwidth) — closing fully needs an Int64-output cumsum (a dtype change vs
+fp's current always-Float64 contract, separate from this perf fix). cumprod REVERTED: an i64 product overflows the
+f64 to ±inf→NaN where `from_f64_values` (NaN→missing) diverges from `nancumprod`'s `Scalar::Float64(NaN)` — kept on
+the exact nan* path for bit-identity. Bit-identical: new `cum_typed_i64_matches_scalar_path` (NaN-bit-aware vs the
+Scalar/nan* path over negatives/wide values, all four ops) + fp-columnar 15 cum tests green.

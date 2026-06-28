@@ -15641,7 +15641,8 @@ impl Column {
                 .all(|&v| v >= i64::MIN as f64 && v < 9_223_372_036_854_775_808.0)
         {
             let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
-            return Ok(Self::from_i64_values(out));
+            // all-valid output → MOVE (no Arc::from realloc).
+            return Ok(Self::from_i64_values_owned(out));
         }
         // Int64 -> Utf8: hand-rolled decimal itoa straight into a contiguous
         // byte buffer (br-frankenpandas-itoa). cast_scalar(Int64(v), Utf8) is
@@ -15947,7 +15948,7 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             // Direct VALUE radix (no perm, no gather) — bit-identical sorted
             // values, far faster than argsort+gather for sort_values.
-            return Ok(Self::from_i64_values(radix_sort_i64_values(data, ascending)));
+            return Ok(Self::from_i64_values_owned(radix_sort_i64_values(data, ascending)));
         }
         if let Some(data) = self.as_f64_slice() {
             let perm = self
@@ -18362,7 +18363,7 @@ impl Column {
         // (`x * x`, same overflow behavior as the scalar loop); Float64 squares
         // over the f64 buffer. Bit-identical.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values(data.iter().map(|&x| x * x).collect()));
+            return Ok(Self::from_i64_values_owned(data.iter().map(|&x| x * x).collect()));
         }
         if let Some(data) = self.as_f64_slice() {
             return Ok(Self::from_f64_values(data.iter().map(|&x| x * x).collect()));

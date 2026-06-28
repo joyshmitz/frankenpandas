@@ -6971,3 +6971,19 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_{replace,fillna,ffill,dropna
 Cumulative this session: replace i64 272->25ms, fillna i64 244->26ms, bfill i64 417->30ms, dropna i64 176->21ms — all
 now WIN. Closes the last structural residual of the typed-slice sweep. Bit-identical: FULL fp-columnar suite 466
 passed / 0 failed + fp-frame 135 (fillna/dropna/replace/ffill/bfill) green.
+
+### 2026-06-27 TealOsprey — more i64-output ops on owned backing: astype f64->i64 0.42x->1.18x WIN; sort i64 1.26x fp-side
+With LazyAllValidInt64Vec landed, switched three more all-valid-Int64-output sites from from_i64_values (Arc::from
+~35-40ms/5M realloc) to from_i64_values_owned (move): astype Float64->Int64, sort_values i64 (radix value sort), and
+Int64 square (x*x). Bit-identical (i64 has no NaN; owned always moves).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_i64ops`, `bench_sort_i64`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `astype` f64->i64 5M | 65.7ms | 23.2ms | 0.42x -> 1.18x (pandas 27.5ms) |
+| `sort_values` i64 5M | 171.2ms | 135.8ms | vs np.sort 78ms 0.46x->0.57x; pandas Series.sort_values 656ms = 4.8x |
+
+astype flips LOSS->WIN. sort i64 gains 1.26x fp-side (the value-sort realloc removed) but stays <np.sort's tuned
+introsort core (gather-bound, documented). Bit-identical: fp-columnar 12 astype/sort tests green (full suite already
+466 green with the variant).
